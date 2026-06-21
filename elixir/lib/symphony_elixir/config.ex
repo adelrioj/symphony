@@ -61,6 +61,26 @@ defmodule SymphonyElixir.Config do
 
   def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
 
+  @spec agent_backend_for_state(term()) ::
+          {:ok, String.t()} | {:error, {:invalid_agent_backend, String.t(), String.t()}}
+  def agent_backend_for_state(state_name) when is_binary(state_name) do
+    config = settings!()
+
+    value =
+      Map.get(
+        config.agent.backend_by_state,
+        Schema.normalize_issue_state(state_name),
+        config.agent.backend
+      )
+
+    case value do
+      backend when backend in ["codex", "claude"] -> {:ok, backend}
+      other -> {:error, {:invalid_agent_backend, state_name, to_string(other)}}
+    end
+  end
+
+  def agent_backend_for_state(_state_name), do: {:ok, settings!().agent.backend}
+
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
     case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do
