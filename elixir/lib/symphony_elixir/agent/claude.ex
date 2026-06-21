@@ -10,7 +10,7 @@ defmodule SymphonyElixir.Agent.Claude do
 
   alias SymphonyElixir.Agent.Claude.Stream
   alias SymphonyElixir.Agent.{Event, Result}
-  alias SymphonyElixir.{Config, Workflow}
+  alias SymphonyElixir.{Config, SSH, Workflow}
 
   @approval_tool "mcp__symphony__approval_prompt"
   @default_allowed_tools [
@@ -69,26 +69,51 @@ defmodule SymphonyElixir.Agent.Claude do
     :ok
   end
 
+  @doc false
+  @spec remote_command(String.t(), String.t()) :: String.t()
+  def remote_command(workspace, _prompt) when is_binary(workspace) do
+    [
+      "cd #{shell_escape(workspace)}",
+      "umask 077",
+      remote_mktemp_function(),
+      "cleanup() { rm -f \"${symphony_prompt_file:-}\" \"${symphony_mcp_config_file:-}\"; }",
+      "trap cleanup EXIT HUP INT TERM",
+      "symphony_prompt_file=$(symphony_mktemp symphony-claude-prompt)",
+      "symphony_mcp_config_file=$(symphony_mktemp symphony-claude-mcp)",
+      "[ -n \"$symphony_prompt_file\" ]",
+      "[ -n \"$symphony_mcp_config_file\" ]",
+      "IFS= read -r symphony_prompt_bytes",
+      "case \"$symphony_prompt_bytes\" in ''|*[!0-9]*) exit 64;; esac",
+      "head -c \"$symphony_prompt_bytes\" > \"$symphony_prompt_file\"",
+      "chmod 600 \"$symphony_prompt_file\"",
+      "printf %s #{shell_escape(Jason.encode!(mcp_config()))} > \"$symphony_mcp_config_file\"",
+      "chmod 600 \"$symphony_mcp_config_file\"",
+      remote_claude_invocation()
+    ]
+    |> Enum.join(" && ")
+  end
+
   defp write_mcp_config(workspace) do
-    claude = Config.settings!().claude
-    workflow_path = Workflow.current_path()
-
-    config = %{
-      "mcpServers" => %{
-        "symphony" => %{
-          "command" => claude.linear_mcp_command || default_mcp_command(),
-          "args" => claude.linear_mcp_args ++ ["--linear-mcp", "--workflow", workflow_path]
-        }
-      }
-    }
-
     with {:ok, dir} <- mcp_config_dir(workspace),
          :ok <- File.mkdir_p(dir),
          path = Path.join(dir, "symphony-claude-mcp-#{System.unique_integer([:positive])}.json"),
-         :ok <- File.write(path, Jason.encode!(config), [:write, :exclusive]),
+         :ok <- File.write(path, Jason.encode!(mcp_config()), [:write, :exclusive]),
          :ok <- File.chmod(path, 0o600) do
       {:ok, path}
     end
+  end
+
+  defp mcp_config do
+    claude = Config.settings!().claude
+
+    %{
+      "mcpServers" => %{
+        "symphony" => %{
+          "command" => claude.linear_mcp_command || default_mcp_command(),
+          "args" => claude.linear_mcp_args ++ ["--linear-mcp", "--workflow", Workflow.current_path()]
+        }
+      }
+    }
   end
 
   defp mcp_config_dir(workspace) do
@@ -129,8 +154,8 @@ defmodule SymphonyElixir.Agent.Claude do
     end
   end
 
-  defp run_claude(%{worker_host: worker_host}, _workspace, _prompt, _on_message) when is_binary(worker_host) do
-    {:error, {:claude_ssh_not_implemented, worker_host}}
+  defp run_claude(%{worker_host: worker_host}, workspace, prompt, on_message) when is_binary(worker_host) do
+    drive_ssh(worker_host, workspace, prompt, on_message)
   end
 
   defp claude_executable(command) when is_binary(command) do
@@ -185,11 +210,63 @@ defmodule SymphonyElixir.Agent.Claude do
         line: @port_line_bytes
       ])
 
+    collect_port_stream(port, on_message)
+  rescue
+    error -> {:error, {:claude_port, error}}
+  end
+
+  defp drive_ssh(host, workspace, prompt, on_message) do
+    with {:ok, port} <- SSH.start_port(host, remote_command(workspace, prompt), line: @port_line_bytes),
+         :ok <- SSH.write_stdin(port, ssh_prompt_payload(prompt)) do
+      collect_port_stream(port, on_message)
+    end
+  rescue
+    error -> {:error, {:claude_ssh_port, error}}
+  end
+
+  defp collect_port_stream(port, on_message) do
     settings = Config.settings!().codex
     deadline = monotonic_ms() + settings.turn_timeout_ms
     collect_stream(port, on_message, [], "", nil, deadline, settings.stall_timeout_ms)
-  rescue
-    error -> {:error, {:claude_port, error}}
+  end
+
+  defp ssh_prompt_payload(prompt) when is_binary(prompt), do: [Integer.to_string(byte_size(prompt)), "\n", prompt]
+
+  defp remote_mktemp_function do
+    [
+      "symphony_mktemp() {",
+      "symphony_prefix=$1;",
+      "symphony_dir=${TMPDIR:-/tmp};",
+      "case \"$symphony_dir\" in \"$PWD\"|\"$PWD\"/*) symphony_dir=$(dirname \"$PWD\");; esac;",
+      "mktemp \"$symphony_dir/$symphony_prefix.XXXXXX\" 2>/dev/null || mktemp \"/tmp/$symphony_prefix.XXXXXX\";",
+      "}"
+    ]
+    |> Enum.join(" ")
+  end
+
+  defp remote_claude_invocation do
+    claude = Config.settings!().claude
+    allowed_tools = claude.allowed_tools || @default_allowed_tools
+
+    args =
+      Enum.map(claude.args, &shell_escape/1) ++
+        [
+          "-p",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--mcp-config",
+          "\"$symphony_mcp_config_file\"",
+          "--strict-mcp-config",
+          "--allowedTools",
+          shell_escape(Enum.join(allowed_tools, ","))
+        ]
+
+    Enum.join([shell_escape(claude.command) | args], " ") <> " < \"$symphony_prompt_file\""
+  end
+
+  defp shell_escape(value) do
+    "'" <> String.replace(to_string(value), "'", "'\"'\"'") <> "'"
   end
 
   defp collect_stream(port, on_message, events, pending_line, session_id, deadline, stall_timeout_ms) do
