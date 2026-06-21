@@ -7,6 +7,32 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   alias SymphonyElixir.Linear.Issue
 
+  @calls_key {__MODULE__, :calls}
+  @failures_key {__MODULE__, :failures}
+
+  @type operation :: :create_comment | :update_issue_state
+
+  @spec calls() :: [tuple()]
+  def calls do
+    @calls_key
+    |> Process.get([])
+    |> Enum.reverse()
+  end
+
+  @spec reset() :: :ok
+  def reset do
+    Process.delete(@calls_key)
+    Process.delete(@failures_key)
+    :ok
+  end
+
+  @spec fail(operation()) :: :ok
+  def fail(operation) when operation in [:create_comment, :update_issue_state] do
+    failures = Process.get(@failures_key, MapSet.new())
+    Process.put(@failures_key, MapSet.put(failures, operation))
+    :ok
+  end
+
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
     {:ok, issue_entries()}
@@ -37,14 +63,26 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) do
-    send_event({:memory_tracker_comment, issue_id, body})
-    :ok
+    record_call({:create_comment, issue_id})
+
+    if failed?(:create_comment) do
+      {:error, {:memory_tracker_failed, :create_comment}}
+    else
+      send_event({:memory_tracker_comment, issue_id, body})
+      :ok
+    end
   end
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
-    send_event({:memory_tracker_state_update, issue_id, state_name})
-    :ok
+    record_call({:update_issue_state, issue_id, state_name})
+
+    if failed?(:update_issue_state) do
+      {:error, {:memory_tracker_failed, :update_issue_state}}
+    else
+      send_event({:memory_tracker_state_update, issue_id, state_name})
+      :ok
+    end
   end
 
   defp configured_issues do
@@ -53,6 +91,18 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   defp issue_entries do
     Enum.filter(configured_issues(), &match?(%Issue{}, &1))
+  end
+
+  defp record_call(call) do
+    calls = Process.get(@calls_key, [])
+    Process.put(@calls_key, [call | calls])
+    :ok
+  end
+
+  defp failed?(operation) do
+    @failures_key
+    |> Process.get(MapSet.new())
+    |> MapSet.member?(operation)
   end
 
   defp send_event(message) do

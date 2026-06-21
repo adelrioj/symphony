@@ -8,6 +8,7 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
+  @blocked_comment_detail_limit 4_000
 
   @doc false
   @spec continue_with_issue_for_test(Issue.t(), ([String.t()] -> term())) ::
@@ -45,9 +46,12 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
-          end
+          outcome =
+            with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+              run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+            end
+
+          handle_run_outcome(outcome, issue)
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
         end
@@ -55,6 +59,45 @@ defmodule SymphonyElixir.AgentRunner do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp handle_run_outcome({:blocked, result}, issue), do: post_blocked_state(issue, result)
+  defp handle_run_outcome(other, _issue), do: other
+
+  defp post_blocked_state(%Issue{} = issue, result) do
+    body = blocked_comment_body(issue, result)
+
+    case Tracker.create_comment(issue.id, body) do
+      :ok ->
+        blocked_state = Config.settings!().agent.blocked_state
+
+        case Tracker.update_issue_state(issue.id, blocked_state) do
+          :ok ->
+            Logger.info("Parked blocked issue #{issue_context(issue)} state=#{blocked_state}")
+
+          {:error, reason} ->
+            Logger.error("Blocked state update failed for #{issue_context(issue)}: #{inspect(reason)} (comment posted; will retry on next poll)")
+        end
+
+      {:error, reason} ->
+        Logger.error("Blocked comment failed for #{issue_context(issue)}: #{inspect(reason)} (state NOT changed; will retry on next poll)")
+    end
+
+    :ok
+  end
+
+  defp blocked_comment_body(%Issue{} = _issue, result) do
+    detail = result.blocked_action || result.summary || "No blocked action detail was provided."
+    truncated = String.slice(detail, 0, @blocked_comment_detail_limit)
+    suffix = if String.length(detail) > @blocked_comment_detail_limit, do: "\n... (truncated)", else: ""
+
+    """
+    **Symphony: blocked**
+
+    session_id: #{result.session_id || "unknown"}
+
+    #{truncated}#{suffix}
+    """
   end
 
   defp agent_message_handler(recipient, issue) do
