@@ -34,6 +34,10 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
     assert action =~ "write outside workspace"
   end
 
+  test "successful result with a nonzero exit is a stream error" do
+    assert {:error, {:claude_stream, "nonzero exit after successful result"}} = Stream.fold(load("success.jsonl"), 1)
+  end
+
   test "truncated stream with no result and nonzero exit is a stream error" do
     assert {:error, {:claude_stream, _}} = Stream.fold([%{"type" => "system", "subtype" => "init", "session_id" => "sess-4"}], 1)
   end

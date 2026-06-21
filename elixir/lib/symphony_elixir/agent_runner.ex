@@ -227,7 +227,8 @@ defmodule SymphonyElixir.AgentRunner do
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue) do
+        if same_issue_state?(issue.state, refreshed_issue.state) and active_issue_state?(refreshed_issue.state) and
+             issue_routable?(refreshed_issue) do
           {:continue, refreshed_issue}
         else
           {:done, refreshed_issue}
@@ -251,6 +252,12 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp active_issue_state?(_state_name), do: false
+
+  defp same_issue_state?(current_state, refreshed_state) when is_binary(current_state) and is_binary(refreshed_state) do
+    normalize_issue_state(current_state) == normalize_issue_state(refreshed_state)
+  end
+
+  defp same_issue_state?(_current_state, _refreshed_state), do: false
 
   defp issue_routable?(%Issue{} = issue) do
     Issue.routable?(issue, Config.settings!().tracker.required_labels)

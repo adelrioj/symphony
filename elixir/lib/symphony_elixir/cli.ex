@@ -23,6 +23,7 @@ defmodule SymphonyElixir.CLI do
           required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
           required(:ensure_all_started) => (-> ensure_started_result()),
           optional(:ensure_linear_mcp_started) => (-> ensure_started_result()),
+          optional(:configure_linear_mcp_logger) => (-> :ok),
           optional(:serve_linear_mcp) => (-> :ok)
         }
 
@@ -103,6 +104,7 @@ defmodule SymphonyElixir.CLI do
       set_server_port_override: &set_server_port_override/1,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end,
       ensure_linear_mcp_started: fn -> Application.ensure_all_started(:req) end,
+      configure_linear_mcp_logger: &configure_linear_mcp_logger/0,
       serve_linear_mcp: &serve_linear_mcp/0
     }
   end
@@ -136,6 +138,7 @@ defmodule SymphonyElixir.CLI do
 
         case ensure_linear_mcp_started(deps) do
           {:ok, _started_apps} ->
+            :ok = configure_linear_mcp_logger(deps)
             serve_linear_mcp = Map.get(deps, :serve_linear_mcp, &serve_linear_mcp/0)
             serve_linear_mcp.()
 
@@ -154,6 +157,20 @@ defmodule SymphonyElixir.CLI do
     deps
     |> Map.get(:ensure_linear_mcp_started, fn -> {:ok, []} end)
     |> then(& &1.())
+  end
+
+  defp configure_linear_mcp_logger(deps) do
+    deps
+    |> Map.get(:configure_linear_mcp_logger, &configure_linear_mcp_logger/0)
+    |> then(& &1.())
+  end
+
+  defp configure_linear_mcp_logger do
+    case :logger.remove_handler(:default) do
+      :ok -> :ok
+      {:error, {:not_found, :default}} -> :ok
+      {:error, _reason} -> :ok
+    end
   end
 
   defp maybe_set_logs_root(opts, deps) do

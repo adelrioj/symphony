@@ -1,9 +1,21 @@
 defmodule SymphonyElixir.CLITest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
+
+  require Logger
 
   alias SymphonyElixir.CLI
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
+
+  setup do
+    default_logger_handler = :logger.get_handler_config(:default)
+
+    on_exit(fn ->
+      restore_default_logger_handler(default_logger_handler)
+    end)
+
+    :ok
+  end
 
   test "returns the guardrails acknowledgement banner when the flag is missing" do
     parent = self()
@@ -165,6 +177,36 @@ defmodule SymphonyElixir.CLITest do
     assert_received :served
   end
 
+  test "evaluate/2 with --linear-mcp keeps logger output off protocol stdout" do
+    test_pid = self()
+    response = Jason.encode!(%{"jsonrpc" => "2.0", "id" => 1, "result" => %{"isError" => true}})
+    protocol_output = IO.iodata_to_binary(["Content-Length: ", Integer.to_string(byte_size(response)), "\r\n\r\n", response])
+
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, []} end,
+      ensure_linear_mcp_started: fn -> {:ok, [:req]} end,
+      serve_linear_mcp: fn ->
+        send(test_pid, {:default_logger_handler, :logger.get_handler_config(:default)})
+        Logger.error("Linear GraphQL request failed: :timeout")
+        IO.write(protocol_output)
+        :ok
+      end
+    }
+
+    stdout =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok = CLI.evaluate(["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"], deps)
+        Logger.flush()
+      end)
+
+    assert stdout == protocol_output
+    assert_received {:default_logger_handler, {:error, {:not_found, :default}}}
+  end
+
   test "evaluate/2 with --linear-mcp returns startup errors before serving" do
     test_pid = self()
 
@@ -232,5 +274,16 @@ defmodule SymphonyElixir.CLITest do
 
     assert response["id"] == 2
     assert response["result"]["isError"] == true
+  end
+
+  defp restore_default_logger_handler({:ok, config}) do
+    :logger.remove_handler(:default)
+    :logger.add_handler(:default, config.module, Map.drop(config, [:id, :module]))
+    :ok
+  end
+
+  defp restore_default_logger_handler({:error, {:not_found, :default}}) do
+    :logger.remove_handler(:default)
+    :ok
   end
 end

@@ -113,7 +113,7 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
      )}
   end
 
-  def finalize(%__MODULE__{saw_result: true, result_status: :done} = acc, _exit_status) do
+  def finalize(%__MODULE__{saw_result: true, result_status: :done} = acc, exit_status) when exit_status in [0, nil] do
     {:ok,
      Result.new(
        status: :done,
@@ -122,6 +122,10 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
        seconds_running: acc.seconds_running,
        summary: acc.summary
      )}
+  end
+
+  def finalize(%__MODULE__{saw_result: true, result_status: :done}, _exit_status) do
+    {:error, {:claude_stream, "nonzero exit after successful result"}}
   end
 
   def finalize(%__MODULE__{saw_result: true, result_status: {:error, subtype}}, _exit_status) do

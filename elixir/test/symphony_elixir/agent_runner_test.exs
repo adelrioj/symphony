@@ -145,6 +145,22 @@ defmodule SymphonyElixir.AgentRunnerTest do
     assert_received :stub_session_stopped
   end
 
+  test "continuation stops when the issue moves to a different active state" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Implemented", "In Review"]
+    )
+
+    issue = build_issue(state: "Implemented")
+    refreshed_issue = %{issue | state: "In Review"}
+
+    assert {:done, ^refreshed_issue} =
+             AgentRunner.continue_with_issue_for_test(issue, fn [issue_id] ->
+               assert issue_id == issue.id
+               {:ok, [refreshed_issue]}
+             end)
+  end
+
   test "blocked result posts a comment then sets the blocked state, in order" do
     issue = build_issue(state: "Implemented")
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
