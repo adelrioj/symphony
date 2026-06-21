@@ -31,7 +31,7 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
 
   @type worker_update :: %{
           event: atom(),
-          timestamp: integer(),
+          timestamp: DateTime.t(),
           session_id: String.t() | nil,
           usage: %{input_tokens: non_neg_integer(), output_tokens: non_neg_integer(), total_tokens: non_neg_integer()}
         }
@@ -180,7 +180,7 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   defp worker_update(kind, acc) do
     %{
       event: kind,
-      timestamp: System.monotonic_time(:millisecond),
+      timestamp: DateTime.utc_now(),
       session_id: acc.session_id,
       usage: %{
         input_tokens: Map.get(acc.tokens, :input, 0),

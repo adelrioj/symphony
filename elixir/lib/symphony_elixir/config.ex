@@ -132,6 +132,12 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_semantics(settings) do
+    with :ok <- validate_tracker_semantics(settings) do
+      validate_backend_commands(settings)
+    end
+  end
+
+  defp validate_tracker_semantics(settings) do
     cond do
       is_nil(settings.tracker.kind) ->
         {:error, :missing_tracker_kind}
@@ -149,6 +155,21 @@ defmodule SymphonyElixir.Config do
         :ok
     end
   end
+
+  defp validate_backend_commands(settings) do
+    if selected_backend?(settings, "claude") and blank_string?(settings.claude.command) do
+      {:error, {:invalid_workflow_config, "claude.command can't be blank"}}
+    else
+      :ok
+    end
+  end
+
+  defp selected_backend?(settings, backend_name) do
+    [settings.agent.backend | Map.values(settings.agent.backend_by_state)]
+    |> Enum.any?(&(to_string(&1) == backend_name))
+  end
+
+  defp blank_string?(value), do: not is_binary(value) or String.trim(value) == ""
 
   defp validate_agent_backend(value, state_name) do
     backend = to_string(value)

@@ -345,9 +345,13 @@ defmodule SymphonyElixir.Agent.Claude do
     _error -> :ok
   end
 
-  defp maybe_emit(nil, _event), do: :ok
-  defp maybe_emit(_on_message, nil), do: :ok
-  defp maybe_emit(on_message, event) when is_function(on_message, 1) and is_map(event), do: on_message.(event)
+  defp maybe_emit(on_message, event) do
+    if is_function(on_message, 1) and is_map(event) do
+      on_message.(event)
+    else
+      :ok
+    end
+  end
 
   defp remote_mcp_command do
     Config.settings!().claude.linear_mcp_command || "symphony"

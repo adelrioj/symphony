@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.Agent.Result
+  alias SymphonyElixir.Agent.{Event, Result}
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
@@ -102,9 +102,12 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp agent_message_handler(recipient, issue) do
     fn message ->
-      send_codex_update(recipient, issue, message)
+      send_codex_update(recipient, issue, normalize_agent_message(message))
     end
   end
+
+  defp normalize_agent_message(%Event{} = event), do: Event.to_worker_update(event)
+  defp normalize_agent_message(message), do: message
 
   defp send_codex_update(recipient, %Issue{id: issue_id}, message)
        when is_binary(issue_id) and is_pid(recipient) do
@@ -158,7 +161,7 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp do_run_agent_turns(%{issue: issue, opts: opts, max_turns: max_turns} = context, turn_number) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    prompt = build_turn_prompt(issue, opts, turn_number, max_turns, context.backend)
 
     turn_opts = Keyword.put(opts, :on_message, agent_message_handler(context.recipient, issue))
 
@@ -191,9 +194,25 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp handle_turn_result(_context, %Result{status: :blocked} = result, _turn_number), do: {:blocked, result}
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_turn_prompt(issue, opts, 1, _max_turns, _backend), do: PromptBuilder.build_prompt(issue, opts)
 
-  defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
+  defp build_turn_prompt(issue, opts, turn_number, max_turns, SymphonyElixir.Agent.Claude) do
+    original_prompt = PromptBuilder.build_prompt(issue, opts)
+
+    """
+    #{original_prompt}
+
+    Continuation guidance:
+
+    - The previous Claude turn completed normally, but the Linear issue is still in an active state.
+    - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
+    - Resume from the current workspace and workpad state instead of restarting from scratch.
+    - The full issue instructions are included above because Claude runs each turn in a fresh process.
+    - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
+    """
+  end
+
+  defp build_turn_prompt(_issue, _opts, turn_number, max_turns, _backend) do
     """
     Continuation guidance:
 

@@ -21,7 +21,7 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
   end
 
   test "step/1 initializes a stream accumulator and emits a worker update" do
-    assert {%Stream{session_id: "sess-step"}, %{event: :session_started, session_id: "sess-step"}} =
+    assert {%Stream{session_id: "sess-step"}, %{event: :session_started, session_id: "sess-step", timestamp: %DateTime{}}} =
              Stream.step(%{"type" => "system", "subtype" => "init", "session_id" => "sess-step"})
   end
 

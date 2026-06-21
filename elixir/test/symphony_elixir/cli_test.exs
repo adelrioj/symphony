@@ -149,6 +149,10 @@ defmodule SymphonyElixir.CLITest do
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, []} end,
+      ensure_linear_mcp_started: fn ->
+        send(test_pid, :mcp_started)
+        {:ok, [:req]}
+      end,
       serve_linear_mcp: fn ->
         send(test_pid, :served)
         :ok
@@ -157,7 +161,30 @@ defmodule SymphonyElixir.CLITest do
 
     assert :ok = CLI.evaluate(["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"], deps)
     assert_received {:workflow, "/abs/WORKFLOW.md"}
+    assert_received :mcp_started
     assert_received :served
+  end
+
+  test "evaluate/2 with --linear-mcp returns startup errors before serving" do
+    test_pid = self()
+
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, []} end,
+      ensure_linear_mcp_started: fn -> {:error, :req_failed} end,
+      serve_linear_mcp: fn ->
+        send(test_pid, :served)
+        :ok
+      end
+    }
+
+    assert {:error, message} = CLI.evaluate(["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"], deps)
+    assert message =~ "Failed to start Symphony linear MCP runtime"
+    assert message =~ ":req_failed"
+    refute_received :served
   end
 
   test "serve_linear_mcp_loop/2 handles Content-Length framed requests and responses" do

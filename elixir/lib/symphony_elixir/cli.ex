@@ -22,6 +22,7 @@ defmodule SymphonyElixir.CLI do
           required(:set_logs_root) => (String.t() -> :ok | {:error, term()}),
           required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
           required(:ensure_all_started) => (-> ensure_started_result()),
+          optional(:ensure_linear_mcp_started) => (-> ensure_started_result()),
           optional(:serve_linear_mcp) => (-> :ok)
         }
 
@@ -101,6 +102,7 @@ defmodule SymphonyElixir.CLI do
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end,
+      ensure_linear_mcp_started: fn -> Application.ensure_all_started(:req) end,
       serve_linear_mcp: &serve_linear_mcp/0
     }
   end
@@ -129,9 +131,17 @@ defmodule SymphonyElixir.CLI do
   defp evaluate_linear_mcp(opts, [], deps) do
     case Keyword.get(opts, :workflow) do
       workflow when is_binary(workflow) and workflow != "" ->
-        :ok = deps.set_workflow_file_path.(Path.expand(workflow))
-        serve_linear_mcp = Map.get(deps, :serve_linear_mcp, &serve_linear_mcp/0)
-        serve_linear_mcp.()
+        expanded_workflow = Path.expand(workflow)
+        :ok = deps.set_workflow_file_path.(expanded_workflow)
+
+        case ensure_linear_mcp_started(deps) do
+          {:ok, _started_apps} ->
+            serve_linear_mcp = Map.get(deps, :serve_linear_mcp, &serve_linear_mcp/0)
+            serve_linear_mcp.()
+
+          {:error, reason} ->
+            {:error, "Failed to start Symphony linear MCP runtime with workflow #{expanded_workflow}: #{inspect(reason)}"}
+        end
 
       _missing ->
         {:error, usage_message()}
@@ -139,6 +149,12 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp evaluate_linear_mcp(_opts, _positional, _deps), do: {:error, usage_message()}
+
+  defp ensure_linear_mcp_started(deps) do
+    deps
+    |> Map.get(:ensure_linear_mcp_started, fn -> {:ok, []} end)
+    |> then(& &1.())
+  end
 
   defp maybe_set_logs_root(opts, deps) do
     case Keyword.get_values(opts, :logs_root) do

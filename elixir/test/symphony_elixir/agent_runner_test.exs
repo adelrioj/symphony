@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.AgentRunnerStubBackend do
   @behaviour SymphonyElixir.Agent
 
+  alias SymphonyElixir.Agent.Event
   alias SymphonyElixir.Agent.Result
 
   @impl true
@@ -18,12 +19,14 @@ defmodule SymphonyElixir.AgentRunnerStubBackend do
     if pid = opts[:test_pid], do: send(pid, :stub_turn_ran)
 
     if on_message = opts[:on_message] do
-      on_message.(%{
-        event: :usage_updated,
-        timestamp: System.monotonic_time(:millisecond),
-        session_id: "stub-1",
-        usage: %{input_tokens: 1, output_tokens: 2, total_tokens: 3}
-      })
+      message =
+        Keyword.get(opts, :test_message, %Event{
+          kind: :usage_updated,
+          session_id: "stub-1",
+          tokens: %{input: 1, output: 2, total: 3}
+        })
+
+      on_message.(message)
     end
 
     if pid = opts[:test_pid], do: send(pid, {:stub_backend, :prompt, prompt})
@@ -97,9 +100,29 @@ defmodule SymphonyElixir.AgentRunnerTest do
     assert_received {:codex_worker_update, "issue-stub-backend",
                      %{
                        event: :usage_updated,
+                       timestamp: %DateTime{},
                        session_id: "stub-1",
                        usage: %{input_tokens: 1, output_tokens: 2, total_tokens: 3}
                      }}
+  end
+
+  test "run/3 still forwards native worker update maps unchanged" do
+    native_update = %{
+      event: :usage_updated,
+      timestamp: DateTime.utc_now(),
+      session_id: "native-1",
+      usage: %{input_tokens: 4, output_tokens: 5, total_tokens: 9}
+    }
+
+    issue = build_issue(state: "Done")
+
+    assert :ok =
+             run_stub!(issue,
+               test_pid: self(),
+               test_message: native_update
+             )
+
+    assert_received {:codex_worker_update, "issue-blocked", ^native_update}
   end
 
   test "run/3 reports start_session errors without calling stop_session" do
@@ -203,6 +226,83 @@ defmodule SymphonyElixir.AgentRunnerTest do
            ]
 
     assert log =~ "Blocked state update failed"
+  end
+
+  test "Claude continuation turns include the rendered issue prompt" do
+    tmp = Path.join(System.tmp_dir!(), "symphony-elixir-agent-runner-claude-continuation-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(tmp, "workspaces")
+    fake_claude = Path.join(tmp, "fake_claude")
+    prompt_capture = Path.join(tmp, "prompts.txt")
+
+    File.mkdir_p!(tmp)
+    File.mkdir_p!(workspace_root)
+
+    File.write!(fake_claude, """
+    #!/bin/sh
+    last_arg=""
+    for arg in "$@"; do
+      last_arg="$arg"
+    done
+    printf '%s\\n---SYMPHONY-PROMPT---\\n' "$last_arg" >> "#{prompt_capture}"
+    printf '%s\\n' '{"type":"system","subtype":"init","session_id":"claude-cont"}'
+    printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"result":"done"}'
+    """)
+
+    File.chmod!(fake_claude, 0o700)
+
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf(tmp) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Implemented"],
+      workspace_root: workspace_root,
+      max_turns: 2,
+      agent_backend: "claude",
+      claude_command: fake_claude,
+      claude_allowed_tools: nil,
+      prompt: "Ticket {{ issue.identifier }}: {{ issue.description }}"
+    )
+
+    issue =
+      build_issue(
+        id: "issue-claude-continuation",
+        identifier: "CLAUDE-2",
+        description: "Preserve the original issue instructions",
+        state: "Implemented"
+      )
+
+    parent = self()
+
+    state_fetcher = fn [_issue_id] ->
+      count = Process.get(:claude_continuation_fetch_count, 0) + 1
+      Process.put(:claude_continuation_fetch_count, count)
+      send(parent, {:issue_state_fetch, count})
+
+      state = if count == 1, do: "Implemented", else: "Done"
+      {:ok, [%{issue | state: state}]}
+    end
+
+    assert :ok =
+             AgentRunner.run(issue, nil,
+               backend_module: SymphonyElixir.Agent.Claude,
+               worker_host: nil,
+               issue_state_fetcher: state_fetcher
+             )
+
+    assert_receive {:issue_state_fetch, 1}
+    assert_receive {:issue_state_fetch, 2}
+
+    prompts =
+      prompt_capture
+      |> File.read!()
+      |> String.split("\n---SYMPHONY-PROMPT---\n", trim: true)
+
+    assert length(prompts) == 2
+    assert Enum.at(prompts, 0) =~ "Ticket CLAUDE-2: Preserve the original issue instructions"
+    assert Enum.at(prompts, 1) =~ "Ticket CLAUDE-2: Preserve the original issue instructions"
+    assert Enum.at(prompts, 1) =~ "Continuation guidance:"
+    assert Enum.at(prompts, 1) =~ "fresh process"
+    refute Enum.at(prompts, 1) =~ "prior turn context"
   end
 
   defp build_issue(overrides) do

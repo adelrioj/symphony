@@ -63,6 +63,52 @@ defmodule SymphonyElixir.ConfigTest do
     assert Schema.normalize_state_backends(nil) == %{}
   end
 
+  describe "selected backend command validation" do
+    test "rejects blank claude.command when global backend selects Claude" do
+      write_workflow!("""
+      ---
+      tracker: {kind: memory}
+      agent: {backend: claude}
+      claude: {command: ""}
+      ---
+      body
+      """)
+
+      assert {:error, {:invalid_workflow_config, message}} = SymphonyElixir.Config.validate!()
+      assert message =~ "claude.command"
+      assert message =~ "can't be blank"
+    end
+
+    test "rejects blank claude.command when a state override selects Claude" do
+      write_workflow!("""
+      ---
+      tracker: {kind: memory}
+      agent:
+        backend: codex
+        backend_by_state: {"implemented": claude}
+      claude: {command: ""}
+      ---
+      body
+      """)
+
+      assert {:error, {:invalid_workflow_config, message}} = SymphonyElixir.Config.validate!()
+      assert message =~ "claude.command"
+    end
+
+    test "allows blank claude.command when Claude cannot be selected" do
+      write_workflow!("""
+      ---
+      tracker: {kind: memory}
+      agent: {backend: codex, backend_by_state: {}}
+      claude: {command: ""}
+      ---
+      body
+      """)
+
+      assert :ok = SymphonyElixir.Config.validate!()
+    end
+  end
+
   defp write_workflow!(content) do
     File.write!(Workflow.workflow_file_path(), content)
 
