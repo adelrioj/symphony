@@ -139,53 +139,43 @@ defmodule SymphonyElixir.AgentRunner do
     backend = Keyword.get(opts, :backend_module, SymphonyElixir.Agent.Codex)
 
     with {:ok, session} <- backend.start_session(workspace, worker_host: worker_host) do
+      turn_context = %{
+        backend: backend,
+        session: session,
+        workspace: workspace,
+        issue: issue,
+        recipient: codex_update_recipient,
+        opts: opts,
+        issue_state_fetcher: issue_state_fetcher,
+        max_turns: max_turns
+      }
+
       try do
-        do_run_agent_turns(backend, session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_agent_turns(turn_context, 1)
       after
         backend.stop_session(session)
       end
     end
   end
 
-  defp do_run_agent_turns(backend, session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_agent_turns(%{issue: issue, opts: opts, max_turns: max_turns} = context, turn_number) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
-    turn_opts = Keyword.put(opts, :on_message, agent_message_handler(codex_update_recipient, issue))
+    turn_opts = Keyword.put(opts, :on_message, agent_message_handler(context.recipient, issue))
 
-    with {:ok, %Result{} = result} <- backend.run_turn(session, prompt, issue, turn_opts) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{result.session_id} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+    with {:ok, %Result{} = result} <- context.backend.run_turn(context.session, prompt, issue, turn_opts) do
+      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{result.session_id} workspace=#{context.workspace} turn=#{turn_number}/#{max_turns}")
 
-      handle_turn_result(
-        backend,
-        session,
-        result,
-        workspace,
-        issue,
-        codex_update_recipient,
-        opts,
-        issue_state_fetcher,
-        turn_number,
-        max_turns
-      )
+      handle_turn_result(context, result, turn_number)
     end
   end
 
-  defp handle_turn_result(backend, session, %Result{status: :done}, workspace, issue, recipient, opts, fetcher, turn_number, max_turns) do
+  defp handle_turn_result(%{issue: issue, issue_state_fetcher: fetcher, max_turns: max_turns} = context, %Result{status: :done}, turn_number) do
     case continue_with_issue?(issue, fetcher) do
       {:continue, refreshed_issue} when turn_number < max_turns ->
         Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
-        do_run_agent_turns(
-          backend,
-          session,
-          workspace,
-          refreshed_issue,
-          recipient,
-          opts,
-          fetcher,
-          turn_number + 1,
-          max_turns
-        )
+        do_run_agent_turns(%{context | issue: refreshed_issue}, turn_number + 1)
 
       {:continue, refreshed_issue} ->
         Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
@@ -200,20 +190,7 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp handle_turn_result(
-         _backend,
-         _session,
-         %Result{status: :blocked} = result,
-         _workspace,
-         _issue,
-         _recipient,
-         _opts,
-         _fetcher,
-         _turn_number,
-         _max_turns
-       ) do
-    {:blocked, result}
-  end
+  defp handle_turn_result(_context, %Result{status: :blocked} = result, _turn_number), do: {:blocked, result}
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
 

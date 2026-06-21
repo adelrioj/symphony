@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.ConfigTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Config.Schema
+
   describe "agent_backend_for_state/1" do
     test "returns the global default when no per-state override" do
       write_workflow!("""
@@ -42,6 +44,10 @@ defmodule SymphonyElixir.ConfigTest do
       assert SymphonyElixir.Config.agent_backend_for_state("Implemented") ==
                {:error, {:invalid_agent_backend, "Implemented", "gemini"}}
     end
+  end
+
+  test "normalize_state_backends/1 handles nil" do
+    assert Schema.normalize_state_backends(nil) == %{}
   end
 
   defp write_workflow!(content) do

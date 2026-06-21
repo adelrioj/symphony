@@ -36,17 +36,13 @@ defmodule SymphonyElixir.Agent.Claude do
   def start_session(workspace, opts) when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)
 
-    case write_mcp_config(expanded_workspace) do
-      {:ok, mcp_config_path} ->
-        {:ok,
-         %{
-           workspace: expanded_workspace,
-           worker_host: Keyword.get(opts, :worker_host),
-           mcp_config_path: mcp_config_path
-         }}
-
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, mcp_config_path} <- write_mcp_config(expanded_workspace) do
+      {:ok,
+       %{
+         workspace: expanded_workspace,
+         worker_host: Keyword.get(opts, :worker_host),
+         mcp_config_path: mcp_config_path
+       }}
     end
   end
 
@@ -116,7 +112,9 @@ defmodule SymphonyElixir.Agent.Claude do
     }
   end
 
-  defp mcp_config_dir(workspace) do
+  @doc false
+  @spec mcp_config_dir(term()) :: {:ok, Path.t()} | {:error, {:mcp_config_dir, term()}}
+  def mcp_config_dir(workspace) do
     tmp_dir = Path.join(System.tmp_dir!(), "symphony-claude-mcp")
 
     dir =
@@ -138,8 +136,10 @@ defmodule SymphonyElixir.Agent.Claude do
     expanded_path == expanded_root or String.starts_with?(expanded_path, expanded_root <> "/")
   end
 
-  defp default_mcp_command do
-    case :escript.script_name() do
+  @doc false
+  @spec default_mcp_command(charlist() | term()) :: String.t()
+  def default_mcp_command(script_name \\ :escript.script_name()) do
+    case script_name do
       script_name when is_list(script_name) and script_name != [] ->
         List.to_string(script_name)
 
@@ -199,7 +199,10 @@ defmodule SymphonyElixir.Agent.Claude do
       ]
   end
 
-  defp drive_port(executable, argv, workspace, on_message) do
+  @doc false
+  @spec drive_port(binary(), [String.t()], Path.t(), (map() -> any()) | nil) ::
+          {:ok, [map()], non_neg_integer()} | {:error, term()}
+  def drive_port(executable, argv, workspace, on_message) do
     port =
       Port.open({:spawn_executable, String.to_charlist(executable)}, [
         :binary,
@@ -277,7 +280,15 @@ defmodule SymphonyElixir.Agent.Claude do
         collect_stream(port, on_message, updated_events, "", updated_session_id, deadline, stall_timeout_ms)
 
       {^port, {:data, {:noeol, chunk}}} ->
-        collect_stream(port, on_message, events, pending_line <> to_string(chunk), session_id, deadline, stall_timeout_ms)
+        collect_stream(
+          port,
+          on_message,
+          events,
+          pending_line <> to_string(chunk),
+          session_id,
+          deadline,
+          stall_timeout_ms
+        )
 
       {^port, {:exit_status, status}} ->
         {:ok, Enum.reverse(events), status}
@@ -316,12 +327,13 @@ defmodule SymphonyElixir.Agent.Claude do
     if monotonic_ms() >= deadline, do: :turn_timeout, else: :stall_timeout
   end
 
-  defp close_port(port) when is_port(port) do
+  @doc false
+  @spec close_port(port()) :: :ok
+  def close_port(port) when is_port(port) do
     Port.close(port)
+    :ok
   rescue
     _error -> :ok
-  catch
-    :exit, _reason -> :ok
   end
 
   defp maybe_emit(nil, _event), do: :ok
@@ -331,7 +343,11 @@ defmodule SymphonyElixir.Agent.Claude do
   end
 
   defp event_to_agent_event(%{"type" => "system", "subtype" => "init"} = event, session_id) do
-    %Event{kind: :session_started, session_id: event_session_id(event) || session_id, detail: %{}}
+    %Event{
+      kind: :session_started,
+      session_id: event_session_id(event) || session_id,
+      detail: %{}
+    }
   end
 
   defp event_to_agent_event(%{"type" => "result"} = event, session_id) do
@@ -349,10 +365,20 @@ defmodule SymphonyElixir.Agent.Claude do
   defp event_to_agent_event(%{"message" => %{"content" => content}} = event, session_id) do
     case blocked_action(content) do
       nil ->
-        %Event{kind: :usage_updated, session_id: session_id, tokens: tokens_from(get_in(event, ["message", "usage"])), detail: %{}}
+        %Event{
+          kind: :usage_updated,
+          session_id: session_id,
+          tokens: tokens_from(get_in(event, ["message", "usage"])),
+          detail: %{}
+        }
 
       action ->
-        %Event{kind: :blocked, session_id: session_id, tokens: tokens_from(get_in(event, ["message", "usage"])), detail: %{"action" => action}}
+        %Event{
+          kind: :blocked,
+          session_id: session_id,
+          tokens: tokens_from(get_in(event, ["message", "usage"])),
+          detail: %{"action" => action}
+        }
     end
   end
 

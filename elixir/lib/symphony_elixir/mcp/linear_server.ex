@@ -64,11 +64,11 @@ defmodule SymphonyElixir.MCP.LinearServer do
   end
 
   def handle_request(%{"method" => "tools/call", "id" => id, "params" => %{"name" => name}}) do
-    error(id, -32601, "Unknown tool: #{name}")
+    error(id, -32_601, "Unknown tool: #{name}")
   end
 
   def handle_request(%{"id" => id}) do
-    error(id, -32600, "Unsupported MCP request")
+    error(id, -32_600, "Unsupported MCP request")
   end
 
   def handle_request(_request), do: nil

@@ -48,9 +48,10 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
 
     prompt = "please keep ; rm -rf / && $(touch #{hacked}) `id`\nsecond line"
     parent = self()
+    on_message = fn message -> send(parent, {:claude_update, message}) end
 
     assert {:ok, %Result{} = result} =
-             Claude.run_turn(session, prompt, %{}, on_message: fn message -> send(parent, {:claude_update, message}) end)
+             Claude.run_turn(session, prompt, %{}, on_message: on_message)
 
     assert result.status == :done
     assert result.session_id == "ssh-run"
@@ -77,7 +78,13 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     refute prompt in args
 
     assert_received {:claude_update, %{event: :session_started, session_id: "ssh-run"}}
-    assert_received {:claude_update, %{event: :completed, session_id: "ssh-run", usage: %{input_tokens: 2, output_tokens: 3, total_tokens: 5}}}
+
+    assert_received {:claude_update,
+                     %{
+                       event: :completed,
+                       session_id: "ssh-run",
+                       usage: %{input_tokens: 2, output_tokens: 3, total_tokens: 5}
+                     }}
   end
 
   defp write_fake_ssh!(test_root, trace_file) do

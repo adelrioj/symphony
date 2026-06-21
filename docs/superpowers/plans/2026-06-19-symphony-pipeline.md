@@ -170,6 +170,10 @@ git commit -m "feat: add plan-to-dex pipeline stage with PR creation"
 ### Task 6: Stage — review-pr (`Implemented` → `Human Review` / `Blocked`)
 
 > Uses `claude -p /review-pr`. If the spike found Symphony codex-only, substitute the recorded fallback here.
+>
+> Superseded by the per-stage agent backend work: `review-pr` should now run by setting
+> `agent.backend_by_state: {implemented: claude}` so Symphony launches the Claude backend directly,
+> rather than having Codex shell out to `claude -p`.
 
 - [ ] **Step 1: Add the stage**
 

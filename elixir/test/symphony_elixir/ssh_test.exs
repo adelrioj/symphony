@@ -157,6 +157,22 @@ defmodule SymphonyElixir.SSHTest do
     assert trace =~ "-T -p 2222 localhost bash -lc"
   end
 
+  test "write_stdin/2 writes to live ports and reports closed ports" do
+    live_port = Port.open({:spawn, "cat >/dev/null"}, [:binary])
+    assert :ok = SSH.write_stdin(live_port, "hello")
+    Port.close(live_port)
+
+    closed_port = Port.open({:spawn, "true"}, [:exit_status])
+
+    receive do
+      {^closed_port, {:exit_status, 0}} -> :ok
+    after
+      500 -> flunk("expected fake port to exit")
+    end
+
+    assert SSH.write_stdin(closed_port, "hello") == {:error, :closed}
+  end
+
   test "remote_shell_command/1 escapes embedded single quotes" do
     assert SSH.remote_shell_command("printf 'hello'") ==
              "bash -lc 'printf '\"'\"'hello'\"'\"''"

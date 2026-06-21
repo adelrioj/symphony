@@ -32,4 +32,55 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
   test "truncated stream with no result and nonzero exit is a stream error" do
     assert {:error, {:claude_stream, _}} = Stream.fold([%{"type" => "system", "subtype" => "init", "session_id" => "sess-4"}], 1)
   end
+
+  test "fallback branches preserve useful stream state" do
+    events = [
+      %{"type" => "unknown"},
+      %{
+        "type" => "assistant",
+        "message" => %{
+          "usage" => "not usage",
+          "content" => [
+            %{"type" => "text", "text" => "first "},
+            %{"type" => "ignored"},
+            %{"type" => "text", "text" => "second"}
+          ]
+        }
+      },
+      %{"type" => "user", "message" => %{"content" => "not content"}},
+      %{"type" => "result", "duration_ms" => 2_000, "usage" => "not usage"}
+    ]
+
+    assert {:ok, %Result{} = result} = Stream.fold(events, 0)
+    assert result.status == :done
+    assert result.summary == "first second"
+    assert result.seconds_running == 2
+    assert result.tokens == %{input: 0, output: 0, total: 0}
+  end
+
+  test "result error without subtype maps to generic claude error" do
+    assert {:error, {:claude_error, "error"}} =
+             Stream.fold([%{"type" => "result", "is_error" => true}], 1)
+  end
+
+  test "approval input without action is stringified and wins" do
+    events = [
+      %{
+        "type" => "assistant",
+        "message" => %{
+          "content" => [
+            %{"type" => "tool_use", "name" => "mcp__symphony__approval_prompt", "input" => "approve me"}
+          ]
+        }
+      },
+      %{"type" => "result", "subtype" => "success", "is_error" => false}
+    ]
+
+    assert {:ok, %Result{status: :blocked, blocked_action: "approve me"}} = Stream.fold(events, 0)
+  end
+
+  test "empty successful stream still reports a stream error" do
+    assert {:error, {:claude_stream, "stream ended without a result event"}} = Stream.fold([], 0)
+    assert {:error, {:claude_stream, "stream ended without a result event"}} = Stream.fold([], nil)
+  end
 end

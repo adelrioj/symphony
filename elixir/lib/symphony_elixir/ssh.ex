@@ -28,7 +28,10 @@ defmodule SymphonyElixir.SSH do
 
   @spec write_stdin(port(), iodata()) :: :ok | {:error, :closed}
   def write_stdin(port, data) when is_port(port) do
-    if Port.command(port, data), do: :ok, else: {:error, :closed}
+    Port.command(port, data)
+    :ok
+  rescue
+    ArgumentError -> {:error, :closed}
   end
 
   @spec remote_shell_command(String.t()) :: String.t()

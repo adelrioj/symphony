@@ -29,6 +29,10 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  backend: codex
+  backend_by_state:
+    implemented: claude
+  blocked_state: "Blocked / Needs Attention"
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never
@@ -36,6 +40,10 @@ codex:
   turn_sandbox_policy:
     type: workspaceWrite
     networkAccess: true
+claude:
+  command: claude
+  args: []
+  linear_mcp_args: []
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

@@ -15,21 +15,25 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 1. Polls Linear for candidate work
 2. Creates a workspace per issue
-3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
-   workspace
-4. Sends a workflow prompt to Codex
-5. Keeps Codex working on the issue until the work is done
+3. Launches the configured agent backend inside the workspace
+4. Sends a workflow prompt to the agent
+5. Keeps the agent working on the issue until the work is done
 
-During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
-skills can make raw Linear GraphQL calls.
+The default backend is Codex in
+[App Server mode](https://developers.openai.com/codex/app-server/). Symphony also has an optional
+Claude backend that runs `claude -p --output-format stream-json`.
+
+During Codex app-server sessions, Symphony serves a client-side `linear_graphql` tool so that repo
+skills can make raw Linear GraphQL calls. The Claude backend gets the same Linear capability through
+Symphony's standalone MCP mode.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
-If Codex reports that operator input, approval, or MCP elicitation is required, Symphony keeps the
-issue claimed and exposes it as blocked in the runtime state, JSON API, and dashboard. Blocked
-entries are in memory only; restarting the orchestrator clears that blocked map, so any still-active
-Linear issue can become a dispatch candidate again after restart.
+If the active backend reports a normalized blocked result, Symphony posts a deterministic Linear
+comment and moves the issue to the configured blocked state. Codex app-server approval/input/MCP
+elicitation events keep the existing behavior: the issue stays claimed and appears blocked in the
+runtime state, JSON API, and dashboard until the orchestrator restarts or the run is stopped.
 
 ## How to use it
 
@@ -39,8 +43,8 @@ Linear issue can become a dispatch candidate again after restart.
    set it as the `LINEAR_API_KEY` environment variable.
 3. Copy this directory's `WORKFLOW.md` to your repo.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
-   - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
-     operations such as comment editing or upload flows.
+   - The `linear` skill expects Symphony's `linear_graphql` tool for raw Linear GraphQL operations
+     such as comment editing or upload flows.
 5. Customize the copied `WORKFLOW.md` file for your project.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
      URL.
@@ -86,7 +90,7 @@ Optional flags:
 - `--port` also starts the Phoenix observability service (default: disabled)
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-Codex session prompt.
+agent session prompt.
 
 Minimal example:
 
@@ -130,7 +134,7 @@ Notes:
 - Workflows that run package managers or other commands that resolve external hosts should set
   `networkAccess: true` in `codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
   by the Codex turn sandbox.
-- `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
+- `agent.max_turns` caps how many back-to-back agent turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
@@ -161,6 +165,50 @@ codex:
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+
+### Agent backends
+
+`agent.backend` selects the default backend. Supported values are `codex` and `claude`; the default
+is `codex`. `agent.backend_by_state` overrides the backend for a Linear state after trimming and
+lowercasing the state key. `agent.blocked_state` is where Symphony parks a blocked backend result
+after posting the blocked comment.
+
+```yaml
+agent:
+  backend: codex
+  backend_by_state:
+    implemented: claude
+  blocked_state: "Blocked / Needs Attention"
+```
+
+The Claude backend is optional. Install and authenticate the `claude` CLI on the orchestrator host
+and on any SSH worker that may run Claude-routed issues. Claude-specific settings live under the
+top-level `claude:` block:
+
+```yaml
+claude:
+  command: claude
+  args: []
+  linear_mcp_command: /absolute/path/to/symphony
+  linear_mcp_args: []
+  allowed_tools:
+    - mcp__symphony__linear_graphql
+    - mcp__symphony__approval_prompt
+    - Read
+    - Grep
+    - Glob
+    - Bash
+    - Edit
+    - Write
+```
+
+`linear_mcp_command` is an executable path only. Symphony appends the required
+`--linear-mcp --workflow <absolute WORKFLOW.md>` flags itself. The helper mode can also be run
+directly when debugging MCP wiring:
+
+```bash
+./bin/symphony --linear-mcp --workflow /absolute/path/to/WORKFLOW.md
+```
 
 ## Web dashboard
 

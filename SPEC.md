@@ -90,6 +90,7 @@ Important boundary:
    - Owns the poll tick.
    - Owns the in-memory runtime state.
    - Decides which issues to dispatch, retry, stop, or release.
+   - Resolves the configured agent backend for an issue state before claiming the issue.
    - Tracks session metrics and retry queue state.
 
 5. `Workspace Manager`
@@ -101,8 +102,8 @@ Important boundary:
 6. `Agent Runner`
    - Creates workspace.
    - Builds prompt from issue + workflow template.
-   - Launches the coding agent app-server client.
-   - Streams agent updates back to the orchestrator.
+   - Launches the selected coding-agent backend.
+   - Streams normalized agent updates back to the orchestrator.
 
 7. `Status Surface` (OPTIONAL)
    - Presents human-readable runtime status (for example terminal output, dashboard, or other
@@ -140,8 +141,9 @@ Symphony is easiest to port when kept in these layers:
 - Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
 - Local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
-- Coding-agent executable that supports the targeted Codex app-server mode.
-- Host environment authentication for the issue tracker and coding agent.
+- Coding-agent executable(s) for the configured backend(s), such as Codex app-server mode for
+  `agent.backend: codex` and the Claude Code CLI for `agent.backend: claude`.
+- Host environment authentication for the issue tracker and configured coding agent.
 
 ## 4. Core Domain Model
 
@@ -333,6 +335,7 @@ Top-level keys:
 - `hooks`
 - `agent`
 - `codex`
+- `claude`
 
 Unknown keys SHOULD be ignored for forward compatibility.
 
@@ -428,6 +431,19 @@ Fields:
   - Default: empty map.
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
+- `backend` (string)
+  - Default: `codex`.
+  - Supported values for this spec version: `codex`, `claude`.
+  - Unknown values SHOULD be detected at dispatch/backend selection time so a typo only skips the
+    affected issue instead of invalidating the whole workflow file.
+- `backend_by_state` (map `state_name -> backend_name`)
+  - Default: empty map.
+  - State keys are normalized (`lowercase`) for lookup.
+  - Overrides `backend` for matching issue states.
+- `blocked_state` (string)
+  - Default: `Blocked / Needs Attention`.
+  - When a selected backend returns a normalized blocked result and the implementation owns blocked
+    writes, post a blocked comment first and then move the issue to this state.
 
 #### 5.3.6 `codex` (object)
 
@@ -458,6 +474,32 @@ fields locally if they want stricter startup checks.
 - `stall_timeout_ms` (integer)
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
+
+#### 5.3.7 `claude` (object)
+
+Fields:
+
+This object configures the Claude backend only. The Codex path remains behavior-preserving when
+`agent.backend` resolves to `codex`.
+
+- `command` (string executable path/name)
+  - Default: `claude`.
+  - The local runtime launches this executable directly, not through a shell.
+  - Remote workers need an equivalent worker-side executable available in their environment.
+- `args` (list of strings)
+  - Default: `[]`.
+  - Extra fixed Claude CLI arguments appended before Symphony's required prompt-mode arguments.
+- `linear_mcp_command` (string executable path/name, OPTIONAL)
+  - Default: implementation-derived Symphony escript path.
+  - The executable used by Claude's MCP config to start Symphony's Linear MCP server.
+  - Do not include `--linear-mcp` or `--workflow` here; Symphony appends those flags.
+- `linear_mcp_args` (list of strings)
+  - Default: `[]`.
+  - Extra arguments inserted before Symphony's required `--linear-mcp --workflow <abs>` flags.
+- `allowed_tools` (list of strings, OPTIONAL)
+  - Overrides the implementation's default Claude allowed-tool list.
+  - The default SHOULD include Symphony's `linear_graphql` MCP tool and the non-interactive
+    `approval_prompt` MCP tool, plus the file/shell tools required by the workflow.
 
 ### 5.4 Prompt Template Contract
 
@@ -531,8 +573,8 @@ Dynamic reload is REQUIRED:
 - The software MUST detect `WORKFLOW.md` changes.
 - On change, it MUST re-read and re-apply workflow config and prompt template without restart.
 - The software MUST attempt to adjust live behavior to the new config (for example polling
-  cadence, concurrency limits, active/terminal states, codex settings, workspace paths/hooks, and
-  prompt content for future runs).
+  cadence, concurrency limits, active/terminal states, agent backend settings, workspace
+  paths/hooks, and prompt content for future runs).
 - Reloaded config applies to future dispatch, retry scheduling, reconciliation decisions, hook
   execution, and agent launches.
 - Implementations are not REQUIRED to restart in-flight agent sessions automatically when config
@@ -567,7 +609,7 @@ Validation checks:
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution.
 - `tracker.project_slug` is present when REQUIRED by the selected tracker kind.
-- `codex.command` is present and non-empty.
+- The command for any backend that can be selected is present and non-empty.
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
 
@@ -593,6 +635,9 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
+- `agent.backend`: string, default `codex`
+- `agent.backend_by_state`: map of backend names by normalized state, default `{}`
+- `agent.blocked_state`: string, default `Blocked / Needs Attention`
 - `codex.command`: shell command string, default `codex app-server`
 - `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
 - `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
@@ -600,6 +645,11 @@ not require recognizing or validating extension fields unless that extension is 
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
+- `claude.command`: executable path/name, default `claude`
+- `claude.args`: list of strings, default `[]`
+- `claude.linear_mcp_command`: executable path/name or null
+- `claude.linear_mcp_args`: list of strings, default `[]`
+- `claude.allowed_tools`: list of strings or null
 
 ## 7. Orchestration State Machine
 
@@ -913,9 +963,10 @@ Invariant 3: Workspace key is sanitized.
 
 ## 10. Agent Runner Protocol (Coding Agent Integration)
 
-This section defines Symphony's language-neutral responsibilities when integrating a Codex
-app-server. The Codex app-server protocol for the targeted Codex version is the source of truth for
-protocol schemas, message payloads, transport framing, and method names.
+This section defines Symphony's language-neutral responsibilities when integrating coding-agent
+backends. The Codex app-server protocol for the targeted Codex version is the source of truth for
+Codex protocol schemas, message payloads, transport framing, and method names. The Claude Code CLI
+stream-json contract is the corresponding source of truth for the Claude backend.
 
 Protocol source of truth:
 
@@ -931,16 +982,20 @@ Protocol source of truth:
 
 Subprocess launch parameters:
 
-- Command: `codex.command`
-- Invocation: `bash -lc <codex.command>`
+- Backend selection: `agent.backend` with optional `agent.backend_by_state` override
+- Codex command: `codex.command`
+- Codex invocation: `bash -lc <codex.command>`
+- Claude command: `claude.command`
+- Claude invocation: direct executable launch with argv, including prompt mode and stream-json
 - Working directory: workspace path
-- Transport/framing: the protocol transport required by the targeted Codex app-server version
+- Transport/framing: the protocol transport required by the selected backend
 
 Notes:
 
 - The default command is `codex app-server`.
+- The default backend is `codex`, preserving the original app-server execution path.
 - Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
-  using fields supported by the targeted Codex app-server version.
+  using fields supported by the selected backend.
 
 RECOMMENDED additional process settings:
 
@@ -950,34 +1005,36 @@ RECOMMENDED additional process settings:
 
 Reference: https://developers.openai.com/codex/app-server/
 
-Startup MUST follow the targeted Codex app-server contract. Symphony additionally requires the
-client to:
+The orchestrator resolves the backend before claiming an issue. Startup MUST follow the selected
+backend's contract. Symphony additionally requires the client to:
 
-- Start the app-server subprocess in the per-issue workspace.
-- Initialize the app-server session using the targeted Codex app-server protocol.
-- Create or resume a coding-agent thread according to the targeted protocol.
+- Start the coding-agent process in the per-issue workspace.
+- Initialize the backend session using the targeted backend protocol.
+- Create or resume a coding-agent thread/session according to the targeted protocol.
 - Supply the absolute per-issue workspace path as the thread/turn working directory wherever the
   targeted protocol accepts cwd.
 - Start the first turn with the rendered issue prompt.
 - Start later in-worker continuation turns on the same live thread with continuation guidance rather
   than resending the original issue prompt.
-- Supply the implementation's documented approval and sandbox policy using fields supported by the
-  targeted protocol.
+- Supply the implementation's documented approval, sandbox, and tool policy using fields supported
+  by the targeted protocol.
 - Include issue-identifying metadata, such as `<issue.identifier>: <issue.title>`, when the targeted
   protocol supports turn or session titles.
 - Advertise implemented client-side tools using the targeted protocol.
 
 Session identifiers:
 
-- Extract `thread_id` from the thread identity returned by the targeted Codex app-server protocol.
-- Extract `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
-- Emit `session_id = "<thread_id>-<turn_id>"`
-- Reuse the same `thread_id` for all continuation turns inside one worker run
+- For Codex, extract `thread_id` from the thread identity and `turn_id` from each turn identity
+  returned by the targeted app-server protocol.
+- For Claude, use the session identifier emitted in stream-json events when present.
+- Emit a stable `session_id` in worker updates and blocked comments.
+- Reuse the same backend session for all continuation turns inside one worker run when the backend
+  supports it.
 
 ### 10.3 Streaming Turn Processing
 
-The client processes app-server updates according to the targeted Codex app-server protocol until
-the active turn terminates.
+The client processes selected-backend updates according to the targeted backend protocol until the
+active turn terminates.
 
 Completion conditions:
 
@@ -991,19 +1048,18 @@ Continuation processing:
 
 - If the worker decides to continue after a successful turn, it SHOULD start another turn on the same
   live thread using the targeted protocol.
-- The app-server subprocess SHOULD remain alive across those continuation turns and be stopped only
-  when the worker run is ending.
+- The backend session SHOULD remain alive across those continuation turns when supported and be
+  stopped only when the worker run is ending.
 
 Transport handling requirements:
 
-- Follow the transport and framing rules of the targeted Codex app-server version.
+- Follow the transport and framing rules of the targeted backend.
 - For stdio-based transports, keep protocol stream handling separate from diagnostic stderr
   handling unless the targeted protocol specifies otherwise.
 
 ### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
 
-The app-server client emits structured events to the orchestrator callback. Each event SHOULD
-include:
+The backend client emits structured events to the orchestrator callback. Each event SHOULD include:
 
 - `event` (enum/string)
 - `timestamp` (UTC timestamp)
@@ -1054,10 +1110,11 @@ Unsupported dynamic tool calls:
 
 Optional client-side tool extension:
 
-- An implementation MAY expose a limited set of client-side tools to the app-server session.
+- An implementation MAY expose a limited set of client-side tools to the selected backend session.
 - Current standardized optional tool: `linear_graphql`.
-- If implemented, supported tools SHOULD be advertised to the app-server session during startup
-  using the protocol mechanism supported by the targeted Codex app-server version.
+- If implemented, supported tools SHOULD be advertised during startup using the protocol mechanism
+  supported by the selected backend. Codex can receive the tool through its app-server protocol;
+  Claude can receive it through the standalone Symphony MCP server.
 - Unsupported tool names SHOULD still return a failure result using the targeted protocol and
   continue the session.
 
@@ -1124,14 +1181,14 @@ Error mapping (RECOMMENDED normalized categories):
 
 ### 10.7 Agent Runner Contract
 
-The `Agent Runner` wraps workspace + prompt + app-server client.
+The `Agent Runner` wraps workspace + prompt + selected backend client.
 
 Behavior:
 
 1. Create/reuse workspace for issue.
 2. Build prompt from workflow template.
-3. Start app-server session.
-4. Forward app-server events to orchestrator.
+3. Start backend session.
+4. Forward backend events to orchestrator.
 5. On any error, fail the worker attempt (the orchestrator will retry).
 
 Note:
@@ -1221,6 +1278,9 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
   `Human Review`) rather than tracker terminal state `Done`.
 - If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
   toolchain rather than orchestrator business logic.
+- A normalized blocked backend result is the exception: the Agent Runner MAY own a deterministic
+  blocked comment followed by a state update to `agent.blocked_state`, so denied permissions or
+  required operator input are parked consistently.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -1783,8 +1843,13 @@ function reconcile_running_issues(state):
 
 ```text
 function dispatch_issue(issue, state, attempt):
+  backend = config.agent_backend_for_state(issue.state)
+  if backend failed:
+    log_error("invalid agent backend")
+    return state
+
   worker = spawn_worker(
-    fn -> run_agent_attempt(issue, attempt, parent_orchestrator_pid) end
+    fn -> run_agent_attempt(issue, attempt, parent_orchestrator_pid, backend) end
   )
 
   if worker spawn failed:
@@ -1821,7 +1886,7 @@ function dispatch_issue(issue, state, attempt):
 ### 16.5 Worker Attempt (Workspace + Prompt + Agent)
 
 ```text
-function run_agent_attempt(issue, attempt, orchestrator_channel):
+function run_agent_attempt(issue, attempt, orchestrator_channel, backend):
   workspace = workspace_manager.create_for_issue(issue.identifier)
   if workspace failed:
     fail_worker("workspace error")
@@ -1829,7 +1894,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   if run_hook("before_run", workspace.path) failed:
     fail_worker("before_run hook error")
 
-  session = app_server.start_session(workspace=workspace.path)
+  session = backend.start_session(workspace=workspace.path)
   if session failed:
     run_hook_best_effort("after_run", workspace.path)
     fail_worker("agent session startup error")
@@ -1840,11 +1905,11 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   while true:
     prompt = build_turn_prompt(workflow_template, issue, attempt, turn_number, max_turns)
     if prompt failed:
-      app_server.stop_session(session)
+      backend.stop_session(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("prompt error")
 
-    turn_result = app_server.run_turn(
+    turn_result = backend.run_turn(
       session=session,
       prompt=prompt,
       issue=issue,
@@ -1852,13 +1917,20 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
     )
 
     if turn_result failed:
-      app_server.stop_session(session)
+      backend.stop_session(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("agent turn error")
 
+    if turn_result.status == blocked:
+      if post_blocked_comment(issue, turn_result) succeeded:
+        update_issue_state(issue.id, config.agent.blocked_state)
+      backend.stop_session(session)
+      run_hook_best_effort("after_run", workspace.path)
+      exit_normal()
+
     refreshed_issue = tracker.fetch_issue_states_by_ids([issue.id])
     if refreshed_issue failed:
-      app_server.stop_session(session)
+      backend.stop_session(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("issue state refresh error")
 
@@ -1872,7 +1944,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
 
     turn_number = turn_number + 1
 
-  app_server.stop_session(session)
+  backend.stop_session(session)
   run_hook_best_effort("after_run", workspace.path)
 
   exit_normal()
@@ -2011,12 +2083,13 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   limits
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
 
-### 17.5 Coding-Agent App-Server Client
+### 17.5 Coding-Agent Backend Client
 
-- Launch command uses workspace cwd and invokes `bash -lc <codex.command>`
-- Session startup follows the targeted Codex app-server protocol.
-- Client identity/capability payloads are valid when the targeted Codex app-server protocol requires
-  them.
+- Selected backend launch uses the workspace cwd.
+- Codex launch invokes `bash -lc <codex.command>`.
+- Claude launch invokes `claude.command` directly with argv.
+- Session startup follows the targeted backend protocol.
+- Client identity/capability payloads are valid when the targeted backend protocol requires them.
 - Policy-related startup payloads use the implementation's documented approval/sandbox settings
 - Thread and turn identities exposed by the targeted protocol are extracted and used to emit
   `session_started`
@@ -2031,8 +2104,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Usage and rate-limit telemetry exposed by the targeted protocol is extracted
 - Approval, user-input-required, usage, and rate-limit signals are interpreted according to the
   targeted protocol
-- If client-side tools are implemented, session startup advertises the supported tool specs
-  using the targeted app-server protocol
+- If client-side tools are implemented, session startup advertises the supported tool specs using
+  the targeted backend protocol or MCP configuration
 - If the `linear_graphql` client-side tool extension is implemented:
   - the tool is advertised to the session
   - valid `query` / `variables` inputs execute against configured Linear auth
@@ -2092,8 +2165,9 @@ Use the same validation profiles as Section 17:
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
-- Coding-agent app-server subprocess client with JSON line protocol
+- Agent backend abstraction with a Codex app-server subprocess client
 - Codex launch command config (`codex.command`, default `codex app-server`)
+- Optional Claude backend config (`agent.backend`, `agent.backend_by_state`, `claude.*`)
 - Strict prompt rendering with `issue` and `attempt` variables
 - Exponential retry queue with continuation retries after normal exit
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
@@ -2107,7 +2181,7 @@ Use the same validation profiles as Section 17:
 - HTTP server extension honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
-  app-server session using configured Symphony auth.
+  selected backend session or MCP server using configured Symphony auth.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
@@ -2142,11 +2216,11 @@ Extension config:
 - Each worker run is assigned to one host at a time, and that host becomes part of the run's
   effective execution identity along with the issue workspace.
 - `workspace.root` is interpreted on the remote host, not on the orchestrator host.
-- The coding-agent app-server is launched over SSH stdio instead of as a local subprocess, so the
-  orchestrator still owns the session lifecycle even though commands execute remotely.
+- The selected coding-agent backend is launched over SSH stdio instead of as a local subprocess, so
+  the orchestrator still owns the session lifecycle even though commands execute remotely.
 - Continuation turns inside one worker lifetime SHOULD stay on the same host and workspace.
 - A remote host SHOULD satisfy the same basic contract as a local worker environment: reachable
-  shell, writable workspace root, coding-agent executable, and any required auth or repository
+  shell, writable workspace root, configured coding-agent executable, and any required auth or repository
   prerequisites.
 
 ### A.2 Scheduling Notes
