@@ -639,6 +639,8 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "normal worker exit schedules active-state continuation retry" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
     issue_id = "issue-resume"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
