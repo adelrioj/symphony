@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Agent do
   alias SymphonyElixir.Agent.Result
 
   @type session :: term()
-  @type on_message :: (SymphonyElixir.Agent.Event.t() -> any())
+  @type on_message :: (map() -> any())
 
   @callback start_session(workspace :: Path.t(), opts :: keyword()) ::
               {:ok, session()} | {:error, term()}

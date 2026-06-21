@@ -20,6 +20,11 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
     assert result.summary == "done summary"
   end
 
+  test "step/1 initializes a stream accumulator and emits a worker update" do
+    assert {%Stream{session_id: "sess-step"}, %{event: :session_started, session_id: "sess-step"}} =
+             Stream.step(%{"type" => "system", "subtype" => "init", "session_id" => "sess-step"})
+  end
+
   test "max_turns stream folds to an error" do
     assert {:error, {:claude_error, "error_max_turns"}} = Stream.fold(load("max_turns.jsonl"), 1)
   end

@@ -73,13 +73,10 @@ defmodule SymphonyElixir.Config do
         config.agent.backend
       )
 
-    case value do
-      backend when backend in ["codex", "claude"] -> {:ok, backend}
-      other -> {:error, {:invalid_agent_backend, state_name, to_string(other)}}
-    end
+    validate_agent_backend(value, state_name)
   end
 
-  def agent_backend_for_state(_state_name), do: {:ok, settings!().agent.backend}
+  def agent_backend_for_state(_state_name), do: validate_agent_backend(settings!().agent.backend, "")
 
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
@@ -150,6 +147,15 @@ defmodule SymphonyElixir.Config do
 
       true ->
         :ok
+    end
+  end
+
+  defp validate_agent_backend(value, state_name) do
+    backend = to_string(value)
+
+    case SymphonyElixir.Agent.module_for(backend) do
+      {:ok, _module} -> {:ok, backend}
+      {:error, {:invalid_agent_backend, _backend}} -> {:error, {:invalid_agent_backend, state_name, backend}}
     end
   end
 

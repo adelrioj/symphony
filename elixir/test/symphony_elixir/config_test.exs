@@ -44,6 +44,19 @@ defmodule SymphonyElixir.ConfigTest do
       assert SymphonyElixir.Config.agent_backend_for_state("Implemented") ==
                {:error, {:invalid_agent_backend, "Implemented", "gemini"}}
     end
+
+    test "unknown global backend value returns an invalid_agent_backend error" do
+      write_workflow!("""
+      ---
+      tracker: {kind: memory}
+      agent: {backend: gemini, backend_by_state: {}}
+      ---
+      body
+      """)
+
+      assert SymphonyElixir.Config.agent_backend_for_state("Implemented") ==
+               {:error, {:invalid_agent_backend, "Implemented", "gemini"}}
+    end
   end
 
   test "normalize_state_backends/1 handles nil" do

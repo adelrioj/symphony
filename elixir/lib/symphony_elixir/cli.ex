@@ -27,9 +27,12 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    case evaluate(args) do
-      :ok ->
+    case evaluate_mode(args) do
+      {:ok, :daemon} ->
         wait_for_shutdown()
+
+      {:ok, :linear_mcp} ->
+        System.halt(0)
 
       {:error, message} ->
         IO.puts(:stderr, message)
@@ -39,17 +42,31 @@ defmodule SymphonyElixir.CLI do
 
   @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
   def evaluate(args, deps \\ runtime_deps()) do
+    case evaluate_mode(args, deps) do
+      {:ok, _mode} -> :ok
+      {:error, _message} = error -> error
+    end
+  end
+
+  @spec evaluate_mode([String.t()], deps()) :: {:ok, :daemon | :linear_mcp} | {:error, String.t()}
+  defp evaluate_mode(args, deps \\ runtime_deps()) do
     case OptionParser.parse(args, strict: @switches) do
       {opts, positional, []} ->
-        if Keyword.get(opts, :linear_mcp, false) do
-          evaluate_linear_mcp(opts, positional, deps)
-        else
-          evaluate_daemon(opts, positional, deps)
-        end
+        opts
+        |> Keyword.get(:linear_mcp, false)
+        |> evaluate_parsed_mode(opts, positional, deps)
 
       _ ->
         {:error, usage_message()}
     end
+  end
+
+  defp evaluate_parsed_mode(true, opts, positional, deps) do
+    with :ok <- evaluate_linear_mcp(opts, positional, deps), do: {:ok, :linear_mcp}
+  end
+
+  defp evaluate_parsed_mode(false, opts, positional, deps) do
+    with :ok <- evaluate_daemon(opts, positional, deps), do: {:ok, :daemon}
   end
 
   @spec run(String.t(), deps()) :: :ok | {:error, String.t()}
@@ -73,7 +90,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]\n       symphony --linear-mcp --workflow <path-to-WORKFLOW.md>"
   end
 
   @spec runtime_deps() :: deps()
@@ -207,44 +224,116 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp serve_linear_mcp do
-    serve_linear_mcp_loop()
+    serve_linear_mcp_loop(:stdio, :stdio)
   end
 
-  defp serve_linear_mcp_loop do
-    case IO.read(:stdio, :line) do
+  @doc false
+  @spec serve_linear_mcp_loop(IO.device(), IO.device()) :: :ok
+  def serve_linear_mcp_loop(input, output) do
+    case read_linear_mcp_request(input) do
       :eof ->
         :ok
 
-      {:error, _reason} ->
-        :ok
+      :skip ->
+        serve_linear_mcp_loop(input, output)
 
-      line ->
-        line
-        |> String.trim()
-        |> decode_and_respond()
-
-        serve_linear_mcp_loop()
-    end
-  end
-
-  defp decode_and_respond(""), do: :ok
-
-  defp decode_and_respond(line) do
-    case Jason.decode(line) do
-      {:ok, request} ->
+      {:ok, request, framing} ->
         request
         |> LinearServer.handle_request()
-        |> write_linear_mcp_response()
+        |> write_linear_mcp_response(output, framing)
 
-      {:error, _reason} ->
-        :ok
+        serve_linear_mcp_loop(input, output)
     end
   end
 
-  defp write_linear_mcp_response(nil), do: :ok
+  defp read_linear_mcp_request(input) do
+    case IO.binread(input, :line) do
+      :eof ->
+        :eof
 
-  defp write_linear_mcp_response(response) do
-    IO.puts(Jason.encode!(response))
+      {:error, _reason} ->
+        :eof
+
+      line ->
+        decode_linear_mcp_line(input, line)
+    end
+  end
+
+  defp decode_linear_mcp_line(input, line) do
+    trimmed = String.trim(line)
+
+    cond do
+      trimmed == "" ->
+        :skip
+
+      content_length = content_length(trimmed) ->
+        with :ok <- skip_mcp_headers(input),
+             {:ok, body} <- read_mcp_body(input, content_length),
+             {:ok, request} <- Jason.decode(body) do
+          {:ok, request, :content_length}
+        else
+          _ -> :skip
+        end
+
+      true ->
+        case Jason.decode(trimmed) do
+          {:ok, request} -> {:ok, request, :line}
+          {:error, _reason} -> :skip
+        end
+    end
+  end
+
+  defp content_length(line) do
+    with [name, value] <- String.split(line, ":", parts: 2),
+         true <- String.downcase(name) == "content-length" do
+      parse_content_length(value)
+    else
+      _ -> nil
+    end
+  end
+
+  defp parse_content_length(value) do
+    value
+    |> String.trim()
+    |> Integer.parse()
+    |> case do
+      {length, ""} when length >= 0 -> length
+      _ -> nil
+    end
+  end
+
+  defp skip_mcp_headers(input) do
+    case IO.binread(input, :line) do
+      line when is_binary(line) ->
+        if String.trim(line) == "" do
+          :ok
+        else
+          skip_mcp_headers(input)
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp read_mcp_body(_input, 0), do: {:ok, ""}
+
+  defp read_mcp_body(input, byte_count) do
+    case IO.binread(input, byte_count) do
+      body when is_binary(body) and byte_size(body) == byte_count -> {:ok, body}
+      _ -> :error
+    end
+  end
+
+  defp write_linear_mcp_response(nil, _output, _framing), do: :ok
+
+  defp write_linear_mcp_response(response, output, :content_length) do
+    encoded = Jason.encode!(response)
+    IO.write(output, ["Content-Length: ", Integer.to_string(byte_size(encoded)), "\r\n\r\n", encoded])
+  end
+
+  defp write_linear_mcp_response(response, output, :line) do
+    IO.puts(output, Jason.encode!(response))
   end
 
   @spec wait_for_shutdown() :: no_return()

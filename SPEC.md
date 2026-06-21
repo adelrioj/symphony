@@ -489,17 +489,22 @@ This object configures the Claude backend only. The Codex path remains behavior-
 - `args` (list of strings)
   - Default: `[]`.
   - Extra fixed Claude CLI arguments appended before Symphony's required prompt-mode arguments.
+- Turn and stall timeouts for this implementation profile are controlled by `codex.turn_timeout_ms`
+  and `codex.stall_timeout_ms` unless an implementation adds Claude-specific timeout fields.
 - `linear_mcp_command` (string executable path/name, OPTIONAL)
   - Default: implementation-derived Symphony escript path.
   - The executable used by Claude's MCP config to start Symphony's Linear MCP server.
   - Do not include `--linear-mcp` or `--workflow` here; Symphony appends those flags.
+  - For SSH workers, the command is resolved on the worker host.
 - `linear_mcp_args` (list of strings)
   - Default: `[]`.
   - Extra arguments inserted before Symphony's required `--linear-mcp --workflow <abs>` flags.
 - `allowed_tools` (list of strings, OPTIONAL)
   - Overrides the implementation's default Claude allowed-tool list.
-  - The default SHOULD include Symphony's `linear_graphql` MCP tool and the non-interactive
-    `approval_prompt` MCP tool, plus the file/shell tools required by the workflow.
+  - The default SHOULD include Symphony's `linear_graphql` MCP tool plus the file/shell tools
+    required by the workflow.
+  - The non-interactive `approval_prompt` MCP tool SHOULD be supplied through Claude's
+    permission-prompt tool mechanism, not the normal allowed-tool list.
 
 ### 5.4 Prompt Template Contract
 
@@ -2132,6 +2137,14 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
+- CLI supports `--linear-mcp --workflow <path-to-WORKFLOW.md>` as a helper mode for Claude MCP
+  access.
+- CLI rejects positional workflow arguments in `--linear-mcp` mode.
+- CLI requires `--workflow` in `--linear-mcp` mode and does not require the normal guardrails
+  acknowledgement flag for that helper mode.
+- CLI MCP helper mode speaks JSON-RPC over stdio using Content-Length framing and MAY also accept
+  newline-delimited JSON for local debugging compatibility.
+- CLI exits successfully when MCP helper mode reaches normal stdin EOF.
 
 ### 17.8 Real Integration Profile (RECOMMENDED)
 
@@ -2222,6 +2235,10 @@ Extension config:
 - A remote host SHOULD satisfy the same basic contract as a local worker environment: reachable
   shell, writable workspace root, configured coding-agent executable, and any required auth or repository
   prerequisites.
+- For Claude-backed remote runs, each worker SHOULD resolve `claude.command` and either
+  `claude.linear_mcp_command` or `symphony` on `PATH`. The MCP helper runs on the worker with a
+  worker-readable workflow/config file and requires the same tracker auth environment, such as
+  `LINEAR_API_KEY`.
 
 ### A.2 Scheduling Notes
 

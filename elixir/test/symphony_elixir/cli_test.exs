@@ -159,4 +159,51 @@ defmodule SymphonyElixir.CLITest do
     assert_received {:workflow, "/abs/WORKFLOW.md"}
     assert_received :served
   end
+
+  test "serve_linear_mcp_loop/2 handles Content-Length framed requests and responses" do
+    request =
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/list",
+        "params" => %{}
+      })
+
+    input = ["Content-Length: ", Integer.to_string(byte_size(request)), "\r\n\r\n", request]
+
+    {:ok, input_pid} = StringIO.open(IO.iodata_to_binary(input))
+    {:ok, output_pid} = StringIO.open("")
+
+    assert :ok = CLI.serve_linear_mcp_loop(input_pid, output_pid)
+
+    {_input, output} = StringIO.contents(output_pid)
+    assert output =~ "Content-Length: "
+
+    [_headers, body] = String.split(output, "\r\n\r\n", parts: 2)
+    response = Jason.decode!(body)
+
+    assert response["id"] == 1
+    assert response["result"]["tools"] |> Enum.map(& &1["name"]) |> Enum.sort() == ["approval_prompt", "linear_graphql"]
+  end
+
+  test "serve_linear_mcp_loop/2 preserves newline-delimited JSON compatibility" do
+    request =
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => 2,
+        "method" => "tools/call",
+        "params" => %{"name" => "approval_prompt", "arguments" => %{"action" => "write"}}
+      })
+
+    {:ok, input_pid} = StringIO.open(request <> "\n")
+    {:ok, output_pid} = StringIO.open("")
+
+    assert :ok = CLI.serve_linear_mcp_loop(input_pid, output_pid)
+
+    {_input, output} = StringIO.contents(output_pid)
+    response = output |> String.trim() |> Jason.decode!()
+
+    assert response["id"] == 2
+    assert response["result"]["isError"] == true
+  end
 end

@@ -86,6 +86,12 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     assert "stream-json" in args
     assert "--mcp-config" in args
     assert Enum.at(args, Enum.find_index(args, &(&1 == "--mcp-config")) + 1) == session.mcp_config_path
+    assert "--permission-prompt-tool" in args
+    assert Enum.at(args, Enum.find_index(args, &(&1 == "--permission-prompt-tool")) + 1) == "mcp__symphony__approval_prompt"
+
+    allowed_tools = Enum.at(args, Enum.find_index(args, &(&1 == "--allowedTools")) + 1)
+    refute allowed_tools =~ "mcp__symphony__approval_prompt"
+
     assert Enum.at(args, -2) == "--"
     assert Enum.count(args, &(&1 == prompt)) == 1
     assert List.last(args) == prompt
@@ -120,6 +126,13 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
 
   test "default_mcp_command/1 uses script name or executable fallback" do
     assert Claude.default_mcp_command(~c"/tmp/symphony") == "/tmp/symphony"
+    assert Claude.default_mcp_command(~c"./bin/symphony") == Path.expand("./bin/symphony")
+
+    sh_path = System.find_executable("sh")
+    assert Claude.default_mcp_command(~c"sh") == sh_path
+
+    missing = "definitely_missing_symphony_escript_#{System.unique_integer([:positive])}"
+    assert Claude.default_mcp_command(to_charlist(missing)) == Path.expand(missing)
     assert Claude.default_mcp_command([]) in [System.find_executable("symphony"), "symphony"]
   end
 
@@ -345,7 +358,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
   end
 
   defp write_claude_workflow!(command, opts \\ []) do
-    allowed_tools = Keyword.get(opts, :allowed_tools, ["Read", "mcp__symphony__linear_graphql", "mcp__symphony__approval_prompt"])
+    allowed_tools = Keyword.get(opts, :allowed_tools, nil)
 
     File.write!(Workflow.workflow_file_path(), """
     ---

@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
-  Polls Linear and dispatches repository copies to Codex-backed workers.
+  Polls Linear and dispatches repository copies to the configured agent backend.
   """
 
   use GenServer
@@ -933,12 +933,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp backend_module_for_dispatch(%Issue{} = issue) do
-    case Config.agent_backend_for_state(issue.state) do
-      {:ok, backend_name} ->
-        {:ok, backend_module} = SymphonyElixir.Agent.module_for(backend_name)
-        {:ok, backend_module}
-
+    with {:ok, backend_name} <- Config.agent_backend_for_state(issue.state),
+         {:ok, backend_module} <- SymphonyElixir.Agent.module_for(backend_name) do
+      {:ok, backend_module}
+    else
       {:error, {:invalid_agent_backend, _state, value}} ->
+        Logger.error("Skipping dispatch: invalid_agent_backend value=#{value} issue_id=#{issue.id} issue_identifier=#{issue.identifier}")
+        :error
+
+      {:error, {:invalid_agent_backend, value}} ->
         Logger.error("Skipping dispatch: invalid_agent_backend value=#{value} issue_id=#{issue.id} issue_identifier=#{issue.identifier}")
         :error
     end

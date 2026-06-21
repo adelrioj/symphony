@@ -12,6 +12,8 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     refute command =~ "whoami"
     assert command =~ "claude"
     assert command =~ "--output-format stream-json"
+    assert command =~ "--permission-prompt-tool"
+    refute command =~ "symphony_prompt_file"
   end
 
   test "run_turn over ssh delivers the prompt through stdin and folds the stream" do
@@ -21,10 +23,12 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     ssh_trace = Path.join(tmp, "ssh.trace")
     stdin_capture = Path.join(tmp, "stdin.txt")
     argv_capture = Path.join(tmp, "argv.txt")
+    mcp_config_capture = Path.join(tmp, "mcp.json")
     hacked = Path.join(tmp, "hacked")
     previous_path = System.get_env("PATH")
     previous_stdin_capture = System.get_env("CLAUDE_STDIN_CAPTURE")
     previous_argv_capture = System.get_env("CLAUDE_ARGV_CAPTURE")
+    previous_mcp_config_capture = System.get_env("CLAUDE_MCP_CONFIG_CAPTURE")
 
     File.mkdir_p!(workspace)
     write_fake_ssh!(tmp, ssh_trace)
@@ -35,11 +39,13 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       restore_env("PATH", previous_path)
       restore_env("CLAUDE_STDIN_CAPTURE", previous_stdin_capture)
       restore_env("CLAUDE_ARGV_CAPTURE", previous_argv_capture)
+      restore_env("CLAUDE_MCP_CONFIG_CAPTURE", previous_mcp_config_capture)
       File.rm_rf(tmp)
     end)
 
     System.put_env("CLAUDE_STDIN_CAPTURE", stdin_capture)
     System.put_env("CLAUDE_ARGV_CAPTURE", argv_capture)
+    System.put_env("CLAUDE_MCP_CONFIG_CAPTURE", mcp_config_capture)
     {:ok, session} = Claude.start_session(workspace, worker_host: "localhost")
 
     on_exit(fn ->
@@ -75,7 +81,20 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     assert "--mcp-config" in args
     assert "--strict-mcp-config" in args
     assert "--allowedTools" in args
+    assert "--permission-prompt-tool" in args
+    assert Enum.at(args, Enum.find_index(args, &(&1 == "--permission-prompt-tool")) + 1) == "mcp__symphony__approval_prompt"
     refute prompt in args
+
+    allowed_tools = Enum.at(args, Enum.find_index(args, &(&1 == "--allowedTools")) + 1)
+    refute allowed_tools =~ "mcp__symphony__approval_prompt"
+
+    mcp_config = mcp_config_capture |> File.read!() |> Jason.decode!()
+    remote_args = get_in(mcp_config, ["mcpServers", "symphony", "args"])
+    workflow_index = Enum.find_index(remote_args, &(&1 == "--workflow"))
+    remote_workflow_path = Enum.at(remote_args, workflow_index + 1)
+
+    assert remote_workflow_path =~ "/tmp/symphony-claude-workflow."
+    refute remote_workflow_path == Workflow.current_path()
 
     assert_received {:claude_update, %{event: :session_started, session_id: "ssh-run"}}
 
@@ -111,8 +130,13 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     File.write!(path, """
     #!/bin/sh
     : > "$CLAUDE_ARGV_CAPTURE"
+    previous=
     for arg in "$@"; do
       printf '%s\\n' "$arg" >> "$CLAUDE_ARGV_CAPTURE"
+      if [ "$previous" = "--mcp-config" ] && [ -n "$CLAUDE_MCP_CONFIG_CAPTURE" ]; then
+        cp "$arg" "$CLAUDE_MCP_CONFIG_CAPTURE"
+      fi
+      previous=$arg
     done
     cat > "$CLAUDE_STDIN_CAPTURE"
     printf '%s\\n' '{"type":"system","subtype":"init","session_id":"ssh-run"}'
@@ -130,7 +154,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     claude:
       command: #{Jason.encode!(command)}
       linear_mcp_command: "/bin/true"
-      allowed_tools: ["Read", "mcp__symphony__linear_graphql", "mcp__symphony__approval_prompt"]
+      allowed_tools: null
     ---
     body
     """)

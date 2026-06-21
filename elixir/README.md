@@ -193,7 +193,6 @@ claude:
   linear_mcp_args: []
   allowed_tools:
     - mcp__symphony__linear_graphql
-    - mcp__symphony__approval_prompt
     - Read
     - Grep
     - Glob
@@ -203,8 +202,20 @@ claude:
 ```
 
 `linear_mcp_command` is an executable path only. Symphony appends the required
-`--linear-mcp --workflow <absolute WORKFLOW.md>` flags itself. The helper mode can also be run
-directly when debugging MCP wiring:
+`--linear-mcp --workflow <absolute WORKFLOW.md>` flags itself. Claude permission prompts are routed
+through `--permission-prompt-tool mcp__symphony__approval_prompt`, not through the normal
+`allowed_tools` list.
+
+Claude currently uses the shared `codex.turn_timeout_ms` and `codex.stall_timeout_ms` settings for
+turn and stall timeouts.
+
+For SSH workers, each worker must be able to resolve `claude.command` and either
+`claude.linear_mcp_command` or `symphony` on `PATH`. The worker-side MCP helper is started with a
+temporary copy of the active workflow config and must have tracker auth available there, typically
+through `LINEAR_API_KEY` or equivalent worker environment. `claude.linear_mcp_args` is inserted
+before Symphony's required `--linear-mcp --workflow <worker-temp-WORKFLOW.md>` flags.
+
+The helper mode can also be run directly when debugging MCP wiring:
 
 ```bash
 ./bin/symphony --linear-mcp --workflow /absolute/path/to/WORKFLOW.md

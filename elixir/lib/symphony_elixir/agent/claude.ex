@@ -2,20 +2,19 @@ defmodule SymphonyElixir.Agent.Claude do
   @moduledoc """
   Agent backend that runs Claude Code (`claude -p`) per turn.
 
-  Claude emits newline-delimited `stream-json`; this adapter collects decoded
-  events and folds them into an `Agent.Result`.
+  Claude emits newline-delimited `stream-json`; this adapter folds decoded
+  events into an `Agent.Result` while emitting normalized worker updates.
   """
 
   @behaviour SymphonyElixir.Agent
 
   alias SymphonyElixir.Agent.Claude.Stream
-  alias SymphonyElixir.Agent.{Event, Result}
+  alias SymphonyElixir.Agent.Result
   alias SymphonyElixir.{Config, SSH, Workflow}
 
   @approval_tool "mcp__symphony__approval_prompt"
   @default_allowed_tools [
     "mcp__symphony__linear_graphql",
-    @approval_tool,
     "Read",
     "Grep",
     "Glob",
@@ -53,7 +52,7 @@ defmodule SymphonyElixir.Agent.Claude do
     on_message = Keyword.get(opts, :on_message)
 
     case run_claude(session, workspace, prompt, on_message) do
-      {:ok, events, exit_status} -> Stream.fold(events, exit_status)
+      {:ok, %Result{} = result} -> {:ok, result}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -68,21 +67,24 @@ defmodule SymphonyElixir.Agent.Claude do
   @doc false
   @spec remote_command(String.t(), String.t()) :: String.t()
   def remote_command(workspace, _prompt) when is_binary(workspace) do
+    remote_workflow_path = remote_temp_path("symphony-claude-workflow", ".md")
+    remote_mcp_config = mcp_config(remote_workflow_path, remote_mcp_command())
+
     [
       "cd #{shell_escape(workspace)}",
       "umask 077",
       remote_mktemp_function(),
-      "cleanup() { rm -f \"${symphony_prompt_file:-}\" \"${symphony_mcp_config_file:-}\"; }",
+      "cleanup() { rm -f #{shell_escape(remote_workflow_path)} \"${symphony_mcp_config_file:-}\"; }",
       "trap cleanup EXIT HUP INT TERM",
-      "symphony_prompt_file=$(symphony_mktemp symphony-claude-prompt)",
       "symphony_mcp_config_file=$(symphony_mktemp symphony-claude-mcp)",
-      "[ -n \"$symphony_prompt_file\" ]",
       "[ -n \"$symphony_mcp_config_file\" ]",
+      "IFS= read -r symphony_workflow_bytes",
+      "case \"$symphony_workflow_bytes\" in ''|*[!0-9]*) exit 64;; esac",
+      "dd bs=1 count=\"$symphony_workflow_bytes\" 2>/dev/null > #{shell_escape(remote_workflow_path)}",
+      "chmod 600 #{shell_escape(remote_workflow_path)}",
       "IFS= read -r symphony_prompt_bytes",
       "case \"$symphony_prompt_bytes\" in ''|*[!0-9]*) exit 64;; esac",
-      "head -c \"$symphony_prompt_bytes\" > \"$symphony_prompt_file\"",
-      "chmod 600 \"$symphony_prompt_file\"",
-      "printf %s #{shell_escape(Jason.encode!(mcp_config()))} > \"$symphony_mcp_config_file\"",
+      "printf %s #{shell_escape(Jason.encode!(remote_mcp_config))} > \"$symphony_mcp_config_file\"",
       "chmod 600 \"$symphony_mcp_config_file\"",
       remote_claude_invocation()
     ]
@@ -99,14 +101,14 @@ defmodule SymphonyElixir.Agent.Claude do
     end
   end
 
-  defp mcp_config do
+  defp mcp_config(workflow_path \\ Workflow.current_path(), command \\ nil) do
     claude = Config.settings!().claude
 
     %{
       "mcpServers" => %{
         "symphony" => %{
-          "command" => claude.linear_mcp_command || default_mcp_command(),
-          "args" => claude.linear_mcp_args ++ ["--linear-mcp", "--workflow", Workflow.current_path()]
+          "command" => command || claude.linear_mcp_command || default_mcp_command(),
+          "args" => claude.linear_mcp_args ++ ["--linear-mcp", "--workflow", workflow_path]
         }
       }
     }
@@ -141,7 +143,9 @@ defmodule SymphonyElixir.Agent.Claude do
   def default_mcp_command(script_name \\ :escript.script_name()) do
     case script_name do
       script_name when is_list(script_name) and script_name != [] ->
-        List.to_string(script_name)
+        script_name
+        |> List.to_string()
+        |> expand_script_name()
 
       _ ->
         System.find_executable("symphony") || "symphony"
@@ -194,6 +198,8 @@ defmodule SymphonyElixir.Agent.Claude do
         "--strict-mcp-config",
         "--allowedTools",
         Enum.join(allowed_tools, ","),
+        "--permission-prompt-tool",
+        @approval_tool,
         "--",
         prompt
       ]
@@ -201,7 +207,7 @@ defmodule SymphonyElixir.Agent.Claude do
 
   @doc false
   @spec drive_port(binary(), [String.t()], Path.t(), (map() -> any()) | nil) ::
-          {:ok, [map()], non_neg_integer()} | {:error, term()}
+          {:ok, Result.t()} | {:error, term()}
   def drive_port(executable, argv, workspace, on_message) do
     port =
       Port.open({:spawn_executable, String.to_charlist(executable)}, [
@@ -219,8 +225,9 @@ defmodule SymphonyElixir.Agent.Claude do
   end
 
   defp drive_ssh(host, workspace, prompt, on_message) do
-    with {:ok, port} <- SSH.start_port(host, remote_command(workspace, prompt), line: @port_line_bytes),
-         :ok <- SSH.write_stdin(port, ssh_prompt_payload(prompt)) do
+    with {:ok, payload} <- ssh_payload(prompt),
+         {:ok, port} <- SSH.start_port(host, remote_command(workspace, prompt), line: @port_line_bytes),
+         :ok <- SSH.write_stdin(port, payload) do
       collect_port_stream(port, on_message)
     end
   rescue
@@ -230,10 +237,14 @@ defmodule SymphonyElixir.Agent.Claude do
   defp collect_port_stream(port, on_message) do
     settings = Config.settings!().codex
     deadline = monotonic_ms() + settings.turn_timeout_ms
-    collect_stream(port, on_message, [], "", nil, deadline, settings.stall_timeout_ms)
+    collect_stream(port, on_message, Stream.new(), "", deadline, settings.stall_timeout_ms)
   end
 
-  defp ssh_prompt_payload(prompt) when is_binary(prompt), do: [Integer.to_string(byte_size(prompt)), "\n", prompt]
+  defp ssh_payload(prompt) when is_binary(prompt) do
+    with {:ok, workflow} <- File.read(Workflow.current_path()) do
+      {:ok, [Integer.to_string(byte_size(workflow)), "\n", workflow, Integer.to_string(byte_size(prompt)), "\n", prompt]}
+    end
+  end
 
   defp remote_mktemp_function do
     [
@@ -262,36 +273,37 @@ defmodule SymphonyElixir.Agent.Claude do
           "\"$symphony_mcp_config_file\"",
           "--strict-mcp-config",
           "--allowedTools",
-          shell_escape(Enum.join(allowed_tools, ","))
+          shell_escape(Enum.join(allowed_tools, ",")),
+          "--permission-prompt-tool",
+          shell_escape(@approval_tool)
         ]
 
-    Enum.join([shell_escape(claude.command) | args], " ") <> " < \"$symphony_prompt_file\""
+    "dd bs=1 count=\"$symphony_prompt_bytes\" 2>/dev/null | " <> Enum.join([shell_escape(claude.command) | args], " ")
   end
 
   defp shell_escape(value) do
     "'" <> String.replace(to_string(value), "'", "'\"'\"'") <> "'"
   end
 
-  defp collect_stream(port, on_message, events, pending_line, session_id, deadline, stall_timeout_ms) do
+  defp collect_stream(port, on_message, acc, pending_line, deadline, stall_timeout_ms) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         line = pending_line <> to_string(chunk)
-        {updated_events, updated_session_id} = handle_line(line, on_message, events, session_id)
-        collect_stream(port, on_message, updated_events, "", updated_session_id, deadline, stall_timeout_ms)
+        updated_acc = handle_line(line, on_message, acc)
+        collect_stream(port, on_message, updated_acc, "", deadline, stall_timeout_ms)
 
       {^port, {:data, {:noeol, chunk}}} ->
         collect_stream(
           port,
           on_message,
-          events,
+          acc,
           pending_line <> to_string(chunk),
-          session_id,
           deadline,
           stall_timeout_ms
         )
 
       {^port, {:exit_status, status}} ->
-        {:ok, Enum.reverse(events), status}
+        Stream.finalize(acc, status)
     after
       receive_timeout(deadline, stall_timeout_ms) ->
         close_port(port)
@@ -299,20 +311,17 @@ defmodule SymphonyElixir.Agent.Claude do
     end
   end
 
-  defp handle_line(line, on_message, events, session_id) do
+  defp handle_line(line, on_message, acc) do
     case Jason.decode(line) do
       {:ok, event} when is_map(event) ->
-        updated_session_id = event_session_id(event) || session_id
-        maybe_emit(on_message, event_to_agent_event(event, updated_session_id))
-        {[event | events], updated_session_id}
+        {updated_acc, update} = Stream.step(event, acc)
+        maybe_emit(on_message, update)
+        updated_acc
 
       _decode_error ->
-        {events, session_id}
+        acc
     end
   end
-
-  defp event_session_id(%{"session_id" => session_id}) when is_binary(session_id), do: session_id
-  defp event_session_id(_event), do: nil
 
   defp receive_timeout(deadline, stall_timeout_ms) do
     remaining = max(deadline - monotonic_ms(), 0)
@@ -337,82 +346,32 @@ defmodule SymphonyElixir.Agent.Claude do
   end
 
   defp maybe_emit(nil, _event), do: :ok
+  defp maybe_emit(_on_message, nil), do: :ok
+  defp maybe_emit(on_message, event) when is_function(on_message, 1) and is_map(event), do: on_message.(event)
 
-  defp maybe_emit(on_message, %Event{} = event) when is_function(on_message, 1) do
-    on_message.(Event.to_worker_update(event))
+  defp remote_mcp_command do
+    Config.settings!().claude.linear_mcp_command || "symphony"
   end
 
-  defp event_to_agent_event(%{"type" => "system", "subtype" => "init"} = event, session_id) do
-    %Event{
-      kind: :session_started,
-      session_id: event_session_id(event) || session_id,
-      detail: %{}
-    }
+  defp remote_temp_path(prefix, suffix) do
+    token = :crypto.strong_rand_bytes(18) |> Base.url_encode64(padding: false)
+    "/tmp/#{prefix}.#{token}#{suffix}"
   end
 
-  defp event_to_agent_event(%{"type" => "result"} = event, session_id) do
-    kind = if Map.get(event, "is_error") == true, do: :error, else: :completed
+  defp expand_script_name(script_name) do
+    cond do
+      Path.type(script_name) == :absolute ->
+        script_name
 
-    %Event{
-      kind: kind,
-      session_id: session_id,
-      tokens: tokens_from(Map.get(event, "usage")),
-      seconds_running: div(Map.get(event, "duration_ms", 0), 1000),
-      detail: %{"subtype" => Map.get(event, "subtype")}
-    }
-  end
+      String.contains?(script_name, "/") ->
+        Path.expand(script_name)
 
-  defp event_to_agent_event(%{"message" => %{"content" => content}} = event, session_id) do
-    case blocked_action(content) do
-      nil ->
-        %Event{
-          kind: :usage_updated,
-          session_id: session_id,
-          tokens: tokens_from(get_in(event, ["message", "usage"])),
-          detail: %{}
-        }
+      executable = System.find_executable(script_name) ->
+        executable
 
-      action ->
-        %Event{
-          kind: :blocked,
-          session_id: session_id,
-          tokens: tokens_from(get_in(event, ["message", "usage"])),
-          detail: %{"action" => action}
-        }
+      true ->
+        Path.expand(script_name)
     end
-  end
-
-  defp event_to_agent_event(%{"message" => %{"usage" => usage}}, session_id) when is_map(usage) do
-    %Event{kind: :usage_updated, session_id: session_id, tokens: tokens_from(usage), detail: %{}}
-  end
-
-  defp event_to_agent_event(_event, session_id) do
-    %Event{kind: :usage_updated, session_id: session_id, detail: %{}}
-  end
-
-  defp blocked_action(content) when is_list(content) do
-    Enum.find_value(content, fn
-      %{"type" => "tool_use", "name" => @approval_tool, "input" => %{} = input} ->
-        Map.get(input, "action") || Jason.encode!(input)
-
-      %{"type" => "tool_use", "name" => @approval_tool, "input" => input} ->
-        to_string(input)
-
-      _content ->
-        nil
-    end)
-  end
-
-  defp blocked_action(_content), do: nil
-
-  defp tokens_from(nil), do: nil
-
-  defp tokens_from(usage) when is_map(usage) do
-    input = Map.get(usage, "input_tokens", 0)
-    output = Map.get(usage, "output_tokens", 0)
-    total = Map.get(usage, "total_tokens", input + output)
-
-    %{input: input, output: output, total: total}
   end
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
