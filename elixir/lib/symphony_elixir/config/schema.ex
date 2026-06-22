@@ -138,6 +138,9 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
+      field(:backend, :string, default: "codex")
+      field(:backend_by_state, :map, default: %{})
+      field(:blocked_state, :string, default: "Blocked / Needs Attention")
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -145,13 +148,22 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :max_concurrent_agents,
+          :max_turns,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state,
+          :backend,
+          :backend_by_state,
+          :blocked_state
+        ],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
+      |> update_change(:backend_by_state, &Schema.normalize_state_backends/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
     end
   end
@@ -198,10 +210,29 @@ defmodule SymphonyElixir.Config.Schema do
         ],
         empty_values: []
       )
-      |> validate_required([:command])
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+    end
+  end
+
+  defmodule Claude do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:command, :string, default: "claude")
+      field(:args, {:array, :string}, default: [])
+      field(:linear_mcp_command, :string)
+      field(:linear_mcp_args, {:array, :string}, default: [])
+      field(:allowed_tools, {:array, :string})
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      cast(schema, attrs, [:command, :args, :linear_mcp_command, :linear_mcp_args, :allowed_tools], empty_values: [])
     end
   end
 
@@ -274,6 +305,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -325,7 +357,9 @@ defmodule SymphonyElixir.Config.Schema do
 
   @spec normalize_issue_state(String.t()) :: String.t()
   def normalize_issue_state(state_name) when is_binary(state_name) do
-    String.downcase(state_name)
+    state_name
+    |> String.trim()
+    |> String.downcase()
   end
 
   @doc false
@@ -335,6 +369,16 @@ defmodule SymphonyElixir.Config.Schema do
   def normalize_state_limits(limits) when is_map(limits) do
     Enum.reduce(limits, %{}, fn {state_name, limit}, acc ->
       Map.put(acc, normalize_issue_state(to_string(state_name)), limit)
+    end)
+  end
+
+  @doc false
+  @spec normalize_state_backends(nil | map()) :: map()
+  def normalize_state_backends(nil), do: %{}
+
+  def normalize_state_backends(backends) when is_map(backends) do
+    Enum.reduce(backends, %{}, fn {state_name, backend}, acc ->
+      Map.put(acc, normalize_issue_state(to_string(state_name)), to_string(backend))
     end)
   end
 
@@ -366,6 +410,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
+    |> cast_embed(:claude, with: &Claude.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)

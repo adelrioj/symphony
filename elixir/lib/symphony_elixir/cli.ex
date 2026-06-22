@@ -4,24 +4,37 @@ defmodule SymphonyElixir.CLI do
   """
 
   alias SymphonyElixir.LogFile
+  alias SymphonyElixir.MCP.LinearServer
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
-  @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
+  @switches [
+    {@acknowledgement_switch, :boolean},
+    logs_root: :string,
+    port: :integer,
+    linear_mcp: :boolean,
+    workflow: :string
+  ]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
-          file_regular?: (String.t() -> boolean()),
-          set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
-          set_logs_root: (String.t() -> :ok | {:error, term()}),
-          set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
-          ensure_all_started: (-> ensure_started_result())
+          required(:file_regular?) => (String.t() -> boolean()),
+          required(:set_workflow_file_path) => (String.t() -> :ok | {:error, term()}),
+          required(:set_logs_root) => (String.t() -> :ok | {:error, term()}),
+          required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
+          required(:ensure_all_started) => (-> ensure_started_result()),
+          optional(:ensure_linear_mcp_started) => (-> ensure_started_result()),
+          optional(:configure_linear_mcp_logger) => (-> :ok),
+          optional(:serve_linear_mcp) => (-> :ok)
         }
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    case evaluate(args) do
-      :ok ->
+    case evaluate_mode(args) do
+      {:ok, :daemon} ->
         wait_for_shutdown()
+
+      {:ok, :linear_mcp} ->
+        System.halt(0)
 
       {:error, message} ->
         IO.puts(:stderr, message)
@@ -31,24 +44,31 @@ defmodule SymphonyElixir.CLI do
 
   @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
   def evaluate(args, deps \\ runtime_deps()) do
-    case OptionParser.parse(args, strict: @switches) do
-      {opts, [], []} ->
-        with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- maybe_set_logs_root(opts, deps),
-             :ok <- maybe_set_server_port(opts, deps) do
-          run(Path.expand("WORKFLOW.md"), deps)
-        end
+    case evaluate_mode(args, deps) do
+      {:ok, _mode} -> :ok
+      {:error, _message} = error -> error
+    end
+  end
 
-      {opts, [workflow_path], []} ->
-        with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- maybe_set_logs_root(opts, deps),
-             :ok <- maybe_set_server_port(opts, deps) do
-          run(workflow_path, deps)
-        end
+  @spec evaluate_mode([String.t()], deps()) :: {:ok, :daemon | :linear_mcp} | {:error, String.t()}
+  defp evaluate_mode(args, deps \\ runtime_deps()) do
+    case OptionParser.parse(args, strict: @switches) do
+      {opts, positional, []} ->
+        opts
+        |> Keyword.get(:linear_mcp, false)
+        |> evaluate_parsed_mode(opts, positional, deps)
 
       _ ->
         {:error, usage_message()}
     end
+  end
+
+  defp evaluate_parsed_mode(true, opts, positional, deps) do
+    with :ok <- evaluate_linear_mcp(opts, positional, deps), do: {:ok, :linear_mcp}
+  end
+
+  defp evaluate_parsed_mode(false, opts, positional, deps) do
+    with :ok <- evaluate_daemon(opts, positional, deps), do: {:ok, :daemon}
   end
 
   @spec run(String.t(), deps()) :: :ok | {:error, String.t()}
@@ -72,7 +92,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]\n       symphony --linear-mcp --workflow <path-to-WORKFLOW.md>"
   end
 
   @spec runtime_deps() :: deps()
@@ -82,8 +102,75 @@ defmodule SymphonyElixir.CLI do
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
-      ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
+      ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end,
+      ensure_linear_mcp_started: fn -> Application.ensure_all_started(:req) end,
+      configure_linear_mcp_logger: &configure_linear_mcp_logger/0,
+      serve_linear_mcp: &serve_linear_mcp/0
     }
+  end
+
+  defp evaluate_daemon(opts, positional, deps) do
+    case positional do
+      [] ->
+        with :ok <- require_guardrails_acknowledgement(opts),
+             :ok <- maybe_set_logs_root(opts, deps),
+             :ok <- maybe_set_server_port(opts, deps) do
+          run(Path.expand("WORKFLOW.md"), deps)
+        end
+
+      [workflow_path] ->
+        with :ok <- require_guardrails_acknowledgement(opts),
+             :ok <- maybe_set_logs_root(opts, deps),
+             :ok <- maybe_set_server_port(opts, deps) do
+          run(workflow_path, deps)
+        end
+
+      _other ->
+        {:error, usage_message()}
+    end
+  end
+
+  defp evaluate_linear_mcp(opts, [], deps) do
+    case Keyword.get(opts, :workflow) do
+      workflow when is_binary(workflow) and workflow != "" ->
+        expanded_workflow = Path.expand(workflow)
+        :ok = deps.set_workflow_file_path.(expanded_workflow)
+
+        case ensure_linear_mcp_started(deps) do
+          {:ok, _started_apps} ->
+            :ok = configure_linear_mcp_logger(deps)
+            serve_linear_mcp = Map.get(deps, :serve_linear_mcp, &serve_linear_mcp/0)
+            serve_linear_mcp.()
+
+          {:error, reason} ->
+            {:error, "Failed to start Symphony linear MCP runtime with workflow #{expanded_workflow}: #{inspect(reason)}"}
+        end
+
+      _missing ->
+        {:error, usage_message()}
+    end
+  end
+
+  defp evaluate_linear_mcp(_opts, _positional, _deps), do: {:error, usage_message()}
+
+  defp ensure_linear_mcp_started(deps) do
+    deps
+    |> Map.get(:ensure_linear_mcp_started, fn -> {:ok, []} end)
+    |> then(& &1.())
+  end
+
+  defp configure_linear_mcp_logger(deps) do
+    deps
+    |> Map.get(:configure_linear_mcp_logger, &configure_linear_mcp_logger/0)
+    |> then(& &1.())
+  end
+
+  defp configure_linear_mcp_logger do
+    case :logger.remove_handler(:default) do
+      :ok -> :ok
+      {:error, {:not_found, :default}} -> :ok
+      {:error, _reason} -> :ok
+    end
   end
 
   defp maybe_set_logs_root(opts, deps) do
@@ -167,6 +254,119 @@ defmodule SymphonyElixir.CLI do
   defp set_server_port_override(port) when is_integer(port) and port >= 0 do
     Application.put_env(:symphony_elixir, :server_port_override, port)
     :ok
+  end
+
+  defp serve_linear_mcp do
+    serve_linear_mcp_loop(:stdio, :stdio)
+  end
+
+  @doc false
+  @spec serve_linear_mcp_loop(IO.device(), IO.device()) :: :ok
+  def serve_linear_mcp_loop(input, output) do
+    case read_linear_mcp_request(input) do
+      :eof ->
+        :ok
+
+      :skip ->
+        serve_linear_mcp_loop(input, output)
+
+      {:ok, request, framing} ->
+        request
+        |> LinearServer.handle_request()
+        |> write_linear_mcp_response(output, framing)
+
+        serve_linear_mcp_loop(input, output)
+    end
+  end
+
+  defp read_linear_mcp_request(input) do
+    case IO.binread(input, :line) do
+      :eof ->
+        :eof
+
+      {:error, _reason} ->
+        :eof
+
+      line ->
+        decode_linear_mcp_line(input, line)
+    end
+  end
+
+  defp decode_linear_mcp_line(input, line) do
+    trimmed = String.trim(line)
+
+    cond do
+      trimmed == "" ->
+        :skip
+
+      content_length = content_length(trimmed) ->
+        with :ok <- skip_mcp_headers(input),
+             {:ok, body} <- read_mcp_body(input, content_length),
+             {:ok, request} <- Jason.decode(body) do
+          {:ok, request, :content_length}
+        else
+          _ -> :skip
+        end
+
+      true ->
+        case Jason.decode(trimmed) do
+          {:ok, request} -> {:ok, request, :line}
+          {:error, _reason} -> :skip
+        end
+    end
+  end
+
+  defp content_length(line) do
+    with [name, value] <- String.split(line, ":", parts: 2),
+         true <- String.downcase(name) == "content-length" do
+      parse_content_length(value)
+    else
+      _ -> nil
+    end
+  end
+
+  defp parse_content_length(value) do
+    value
+    |> String.trim()
+    |> Integer.parse()
+    |> case do
+      {length, ""} when length >= 0 -> length
+      _ -> nil
+    end
+  end
+
+  defp skip_mcp_headers(input) do
+    case IO.binread(input, :line) do
+      line when is_binary(line) ->
+        if String.trim(line) == "" do
+          :ok
+        else
+          skip_mcp_headers(input)
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp read_mcp_body(_input, 0), do: {:ok, ""}
+
+  defp read_mcp_body(input, byte_count) do
+    case IO.binread(input, byte_count) do
+      body when is_binary(body) and byte_size(body) == byte_count -> {:ok, body}
+      _ -> :error
+    end
+  end
+
+  defp write_linear_mcp_response(nil, _output, _framing), do: :ok
+
+  defp write_linear_mcp_response(response, output, :content_length) do
+    encoded = Jason.encode!(response)
+    IO.write(output, ["Content-Length: ", Integer.to_string(byte_size(encoded)), "\r\n\r\n", encoded])
+  end
+
+  defp write_linear_mcp_response(response, output, :line) do
+    IO.puts(output, Jason.encode!(response))
   end
 
   @spec wait_for_shutdown() :: no_return()

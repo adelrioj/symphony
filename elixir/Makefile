@@ -25,6 +25,7 @@ lint:
 
 coverage:
 	$(MIX) test --cover
+	SYMPHONY_COVER_REVIEW_MODULES=1 $(MIX) test --cover
 
 test:
 	$(MIX) test

@@ -26,6 +26,14 @@ defmodule SymphonyElixir.SSH do
     end
   end
 
+  @spec write_stdin(port(), iodata()) :: :ok | {:error, :closed}
+  def write_stdin(port, data) when is_port(port) do
+    Port.command(port, data)
+    :ok
+  rescue
+    ArgumentError -> {:error, :closed}
+  end
+
   @spec remote_shell_command(String.t()) :: String.t()
   def remote_shell_command(command) when is_binary(command) do
     "bash -lc " <> shell_escape(command)

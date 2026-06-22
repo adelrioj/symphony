@@ -13,6 +13,12 @@ defmodule SymphonyElixir.Workflow do
       Path.join(File.cwd!(), @workflow_file_name)
   end
 
+  @spec current_path() :: Path.t()
+  def current_path do
+    workflow_file_path()
+    |> Path.expand()
+  end
+
   @spec set_workflow_file_path(Path.t()) :: :ok
   def set_workflow_file_path(path) when is_binary(path) do
     Application.put_env(:symphony_elixir, :workflow_file_path, path)

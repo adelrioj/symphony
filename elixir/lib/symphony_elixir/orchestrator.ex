@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
-  Polls Linear and dispatches repository copies to Codex-backed workers.
+  Polls Linear and dispatches repository copies to the configured agent backend.
   """
 
   use GenServer
@@ -909,7 +909,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        case backend_module_for_dispatch(refreshed_issue) do
+          {:ok, backend_module} ->
+            do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, backend_module)
+
+          :error ->
+            state
+        end
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
@@ -926,7 +932,22 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+  defp backend_module_for_dispatch(%Issue{} = issue) do
+    with {:ok, backend_name} <- Config.agent_backend_for_state(issue.state),
+         {:ok, backend_module} <- SymphonyElixir.Agent.module_for(backend_name) do
+      {:ok, backend_module}
+    else
+      {:error, {:invalid_agent_backend, _state, value}} ->
+        Logger.error("Skipping dispatch: invalid_agent_backend value=#{value} issue_id=#{issue.id} issue_identifier=#{issue.identifier}")
+        :error
+
+      {:error, {:invalid_agent_backend, value}} ->
+        Logger.error("Skipping dispatch: invalid_agent_backend value=#{value} issue_id=#{issue.id} issue_identifier=#{issue.identifier}")
+        :error
+    end
+  end
+
+  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host, backend_module) do
     recipient = self()
 
     case select_worker_host(state, preferred_worker_host) do
@@ -935,13 +956,17 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, backend_module)
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, backend_module) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             backend_module: backend_module
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)

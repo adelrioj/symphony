@@ -61,6 +61,23 @@ defmodule SymphonyElixir.Config do
 
   def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
 
+  @spec agent_backend_for_state(term()) ::
+          {:ok, String.t()} | {:error, {:invalid_agent_backend, String.t(), String.t()}}
+  def agent_backend_for_state(state_name) when is_binary(state_name) do
+    config = settings!()
+
+    value =
+      Map.get(
+        config.agent.backend_by_state,
+        Schema.normalize_issue_state(state_name),
+        config.agent.backend
+      )
+
+    validate_agent_backend(value, state_name)
+  end
+
+  def agent_backend_for_state(_state_name), do: validate_agent_backend(settings!().agent.backend, "")
+
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
     case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do
@@ -115,6 +132,12 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_semantics(settings) do
+    with :ok <- validate_tracker_semantics(settings) do
+      validate_backend_commands(settings)
+    end
+  end
+
+  defp validate_tracker_semantics(settings) do
     cond do
       is_nil(settings.tracker.kind) ->
         {:error, :missing_tracker_kind}
@@ -130,6 +153,35 @@ defmodule SymphonyElixir.Config do
 
       true ->
         :ok
+    end
+  end
+
+  defp validate_backend_commands(settings) do
+    cond do
+      selected_backend?(settings, "codex") and blank_string?(settings.codex.command) ->
+        {:error, {:invalid_workflow_config, "codex.command can't be blank"}}
+
+      selected_backend?(settings, "claude") and blank_string?(settings.claude.command) ->
+        {:error, {:invalid_workflow_config, "claude.command can't be blank"}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp selected_backend?(settings, backend_name) do
+    [settings.agent.backend | Map.values(settings.agent.backend_by_state)]
+    |> Enum.any?(&(to_string(&1) == backend_name))
+  end
+
+  defp blank_string?(value), do: not is_binary(value) or String.trim(value) == ""
+
+  defp validate_agent_backend(value, state_name) do
+    backend = to_string(value)
+
+    case SymphonyElixir.Agent.module_for(backend) do
+      {:ok, _module} -> {:ok, backend}
+      {:error, {:invalid_agent_backend, _backend}} -> {:error, {:invalid_agent_backend, state_name, backend}}
     end
   end
 

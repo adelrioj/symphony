@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"sess-3"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__symphony__approval_prompt","input":{"action":"write outside workspace"}}]}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":700,"usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9}}

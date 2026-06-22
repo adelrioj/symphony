@@ -1,13 +1,14 @@
 defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
-  Executes a single Linear issue in its workspace with Codex.
+  Executes a single Linear issue in its workspace with the selected agent backend.
   """
 
   require Logger
-  alias SymphonyElixir.Codex.AppServer
+  alias SymphonyElixir.Agent.Result
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
+  @blocked_comment_detail_limit 4_000
 
   @doc false
   @spec continue_with_issue_for_test(Issue.t(), ([String.t()] -> term())) ::
@@ -28,6 +29,9 @@ defmodule SymphonyElixir.AgentRunner do
       :ok ->
         :ok
 
+      {:blocked, _result} ->
+        :ok
+
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
@@ -42,9 +46,12 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
-          end
+          outcome =
+            with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+              run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+            end
+
+          handle_run_outcome(outcome, issue)
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
         end
@@ -54,7 +61,46 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp codex_message_handler(recipient, issue) do
+  defp handle_run_outcome({:blocked, result}, issue), do: post_blocked_state(issue, result)
+  defp handle_run_outcome(other, _issue), do: other
+
+  defp post_blocked_state(%Issue{} = issue, result) do
+    body = blocked_comment_body(issue, result)
+
+    case Tracker.create_comment(issue.id, body) do
+      :ok ->
+        blocked_state = Config.settings!().agent.blocked_state
+
+        case Tracker.update_issue_state(issue.id, blocked_state) do
+          :ok ->
+            Logger.info("Parked blocked issue #{issue_context(issue)} state=#{blocked_state}")
+
+          {:error, reason} ->
+            Logger.error("Blocked state update failed for #{issue_context(issue)}: #{inspect(reason)} (comment posted; will retry on next poll)")
+        end
+
+      {:error, reason} ->
+        Logger.error("Blocked comment failed for #{issue_context(issue)}: #{inspect(reason)} (state NOT changed; will retry on next poll)")
+    end
+
+    :ok
+  end
+
+  defp blocked_comment_body(%Issue{} = _issue, result) do
+    detail = result.blocked_action || result.summary || "No blocked action detail was provided."
+    truncated = String.slice(detail, 0, @blocked_comment_detail_limit)
+    suffix = if String.length(detail) > @blocked_comment_detail_limit, do: "\n... (truncated)", else: ""
+
+    """
+    **Symphony: blocked**
+
+    session_id: #{result.session_id || "unknown"}
+
+    #{truncated}#{suffix}
+    """
+  end
+
+  defp agent_message_handler(recipient, issue) do
     fn message ->
       send_codex_update(recipient, issue, message)
     end
@@ -87,64 +133,87 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    backend = Keyword.get(opts, :backend_module, SymphonyElixir.Agent.Codex)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    session_opts = Keyword.put(opts, :worker_host, worker_host)
+
+    with {:ok, session} <- backend.start_session(workspace, session_opts) do
+      turn_context = %{
+        backend: backend,
+        session: session,
+        workspace: workspace,
+        issue: issue,
+        recipient: codex_update_recipient,
+        opts: opts,
+        issue_state_fetcher: issue_state_fetcher,
+        max_turns: max_turns
+      }
+
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_agent_turns(turn_context, 1)
       after
-        AppServer.stop_session(session)
+        backend.stop_session(session)
       end
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+  defp do_run_agent_turns(%{issue: issue, opts: opts, max_turns: max_turns} = context, turn_number) do
+    prompt = build_turn_prompt(issue, opts, turn_number, max_turns, context.backend)
 
-    with {:ok, turn_session} <-
-           AppServer.run_turn(
-             app_session,
-             prompt,
-             issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
-           ) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+    turn_opts = Keyword.put(opts, :on_message, agent_message_handler(context.recipient, issue))
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+    with {:ok, %Result{} = result} <- context.backend.run_turn(context.session, prompt, issue, turn_opts) do
+      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{result.session_id} workspace=#{context.workspace} turn=#{turn_number}/#{max_turns}")
 
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
-
-        {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
-
-          :ok
-
-        {:done, _refreshed_issue} ->
-          :ok
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      handle_turn_result(context, result, turn_number)
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp handle_turn_result(%{issue: issue, issue_state_fetcher: fetcher, max_turns: max_turns} = context, %Result{status: :done}, turn_number) do
+    case continue_with_issue?(issue, fetcher) do
+      {:continue, refreshed_issue} when turn_number < max_turns ->
+        Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
-  defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
+        do_run_agent_turns(%{context | issue: refreshed_issue}, turn_number + 1)
+
+      {:continue, refreshed_issue} ->
+        Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+
+        :ok
+
+      {:done, _refreshed_issue} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp handle_turn_result(_context, %Result{status: :blocked} = result, _turn_number), do: {:blocked, result}
+
+  defp build_turn_prompt(issue, opts, 1, _max_turns, _backend), do: PromptBuilder.build_prompt(issue, opts)
+
+  defp build_turn_prompt(issue, opts, turn_number, max_turns, SymphonyElixir.Agent.Claude) do
+    original_prompt = PromptBuilder.build_prompt(issue, opts)
+
+    """
+    #{original_prompt}
+
+    Continuation guidance:
+
+    - The previous Claude turn completed normally, but the Linear issue is still in an active state.
+    - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
+    - Resume from the current workspace and workpad state instead of restarting from scratch.
+    - The full issue instructions are included above because Claude runs each turn in a fresh process.
+    - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
+    """
+  end
+
+  defp build_turn_prompt(_issue, _opts, turn_number, max_turns, _backend) do
     """
     Continuation guidance:
 
-    - The previous Codex turn completed normally, but the Linear issue is still in an active state.
+    - The previous agent turn completed normally, but the Linear issue is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
@@ -155,7 +224,8 @@ defmodule SymphonyElixir.AgentRunner do
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue) do
+        if same_issue_state?(issue.state, refreshed_issue.state) and active_issue_state?(refreshed_issue.state) and
+             issue_routable?(refreshed_issue) do
           {:continue, refreshed_issue}
         else
           {:done, refreshed_issue}
@@ -179,6 +249,12 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp active_issue_state?(_state_name), do: false
+
+  defp same_issue_state?(current_state, refreshed_state) when is_binary(current_state) and is_binary(refreshed_state) do
+    normalize_issue_state(current_state) == normalize_issue_state(refreshed_state)
+  end
+
+  defp same_issue_state?(_current_state, _refreshed_state), do: false
 
   defp issue_routable?(%Issue{} = issue) do
     Issue.routable?(issue, Config.settings!().tracker.required_labels)

@@ -108,6 +108,9 @@ defmodule SymphonyElixir.TestSupport do
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
+          agent_backend: "codex",
+          agent_backend_by_state: %{},
+          agent_blocked_state: "Blocked / Needs Attention",
           codex_command: "codex app-server",
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
           codex_thread_sandbox: "workspace-write",
@@ -115,6 +118,11 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
+          claude_command: "claude",
+          claude_args: [],
+          claude_linear_mcp_command: nil,
+          claude_linear_mcp_args: [],
+          claude_allowed_tools: nil,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -146,6 +154,9 @@ defmodule SymphonyElixir.TestSupport do
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
+    agent_backend = Keyword.get(config, :agent_backend)
+    agent_backend_by_state = Keyword.get(config, :agent_backend_by_state)
+    agent_blocked_state = Keyword.get(config, :agent_blocked_state)
     codex_command = Keyword.get(config, :codex_command)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
@@ -153,6 +164,11 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    claude_command = Keyword.get(config, :claude_command)
+    claude_args = Keyword.get(config, :claude_args)
+    claude_linear_mcp_command = Keyword.get(config, :claude_linear_mcp_command)
+    claude_linear_mcp_args = Keyword.get(config, :claude_linear_mcp_args)
+    claude_allowed_tools = Keyword.get(config, :claude_allowed_tools)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -187,6 +203,9 @@ defmodule SymphonyElixir.TestSupport do
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
+        "  backend: #{yaml_value(agent_backend)}",
+        "  backend_by_state: #{yaml_value(agent_backend_by_state)}",
+        "  blocked_state: #{yaml_value(agent_blocked_state)}",
         "codex:",
         "  command: #{yaml_value(codex_command)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
@@ -195,6 +214,12 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        "claude:",
+        "  command: #{yaml_value(claude_command)}",
+        "  args: #{yaml_value(claude_args)}",
+        "  linear_mcp_command: #{yaml_value(claude_linear_mcp_command)}",
+        "  linear_mcp_args: #{yaml_value(claude_linear_mcp_args)}",
+        "  allowed_tools: #{yaml_value(claude_allowed_tools)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),

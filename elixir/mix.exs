@@ -10,34 +10,9 @@ defmodule SymphonyElixir.MixProject do
       start_permanent: Mix.env() == :prod,
       test_coverage: [
         summary: [
-          threshold: 100
+          threshold: coverage_threshold()
         ],
-        ignore_modules: [
-          SymphonyElixir.Config,
-          SymphonyElixir.Linear.Client,
-          SymphonyElixir.SpecsCheck,
-          SymphonyElixir.Orchestrator,
-          SymphonyElixir.Orchestrator.State,
-          SymphonyElixir.AgentRunner,
-          SymphonyElixir.CLI,
-          SymphonyElixir.Codex.AppServer,
-          SymphonyElixir.Codex.DynamicTool,
-          SymphonyElixir.HttpServer,
-          SymphonyElixir.StatusDashboard,
-          SymphonyElixir.LogFile,
-          SymphonyElixir.Workspace,
-          SymphonyElixirWeb.DashboardLive,
-          SymphonyElixirWeb.Endpoint,
-          SymphonyElixirWeb.ErrorHTML,
-          SymphonyElixirWeb.ErrorJSON,
-          SymphonyElixirWeb.Layouts,
-          SymphonyElixirWeb.ObservabilityApiController,
-          SymphonyElixirWeb.Presenter,
-          SymphonyElixirWeb.StaticAssetController,
-          SymphonyElixirWeb.StaticAssets,
-          SymphonyElixirWeb.Router,
-          SymphonyElixirWeb.Router.Helpers
-        ]
+        ignore_modules: coverage_ignore_modules()
       ],
       test_ignore_filters: [
         "test/support/snapshot_support.exs",
@@ -49,6 +24,57 @@ defmodule SymphonyElixir.MixProject do
       escript: escript(),
       aliases: aliases(),
       deps: deps()
+    ]
+  end
+
+  defp coverage_threshold do
+    case System.get_env("SYMPHONY_COVER_REVIEW_MODULES") do
+      "1" -> 80
+      _ -> 100
+    end
+  end
+
+  defp coverage_ignore_modules do
+    ignored_modules = [
+      SymphonyElixir.Config,
+      SymphonyElixir.Linear.Client,
+      SymphonyElixir.SpecsCheck,
+      SymphonyElixir.Orchestrator,
+      SymphonyElixir.Orchestrator.State,
+      SymphonyElixir.AgentRunner,
+      SymphonyElixir.CLI,
+      SymphonyElixir.Codex.AppServer,
+      SymphonyElixir.Codex.DynamicTool,
+      SymphonyElixir.HttpServer,
+      SymphonyElixir.StatusDashboard,
+      SymphonyElixir.LogFile,
+      SymphonyElixir.Workspace,
+      SymphonyElixirWeb.DashboardLive,
+      SymphonyElixirWeb.Endpoint,
+      SymphonyElixirWeb.ErrorHTML,
+      SymphonyElixirWeb.ErrorJSON,
+      SymphonyElixirWeb.Layouts,
+      SymphonyElixirWeb.ObservabilityApiController,
+      SymphonyElixirWeb.Presenter,
+      SymphonyElixirWeb.StaticAssetController,
+      SymphonyElixirWeb.StaticAssets,
+      SymphonyElixirWeb.Router,
+      SymphonyElixirWeb.Router.Helpers
+    ]
+
+    if System.get_env("SYMPHONY_COVER_REVIEW_MODULES") == "1" do
+      ignored_modules -- review_coverage_modules()
+    else
+      ignored_modules
+    end
+  end
+
+  defp review_coverage_modules do
+    [
+      SymphonyElixir.Config,
+      SymphonyElixir.Orchestrator,
+      SymphonyElixir.AgentRunner,
+      SymphonyElixir.CLI
     ]
   end
 
