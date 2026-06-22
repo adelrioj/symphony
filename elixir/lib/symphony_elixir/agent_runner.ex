@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.Agent.{Event, Result}
+  alias SymphonyElixir.Agent.Result
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
@@ -102,12 +102,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp agent_message_handler(recipient, issue) do
     fn message ->
-      send_codex_update(recipient, issue, normalize_agent_message(message))
+      send_codex_update(recipient, issue, message)
     end
   end
-
-  defp normalize_agent_message(%Event{} = event), do: Event.to_worker_update(event)
-  defp normalize_agent_message(message), do: message
 
   defp send_codex_update(recipient, %Issue{id: issue_id}, message)
        when is_binary(issue_id) and is_pid(recipient) do

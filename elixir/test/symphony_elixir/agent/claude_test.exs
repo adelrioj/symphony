@@ -313,6 +313,24 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     end)
   end
 
+  test "collect_port_stream logs and skips an undecodable line, still folding the valid result" do
+    result_json =
+      Jason.encode!(%{"type" => "result", "subtype" => "success", "is_error" => false, "result" => "after bad line"})
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        with_collect_port(fn port ->
+          send(self(), {port, {:data, {:eol, "{not valid json"}}})
+          send(self(), {port, {:data, {:eol, result_json}}})
+          send(self(), {port, {:exit_status, 0}})
+
+          assert {:ok, %Result{status: :done, summary: "after bad line"}} = Claude.collect_port_stream(port, nil)
+        end)
+      end)
+
+    assert log =~ "Claude stream line dropped (undecodable)"
+  end
+
   test "run_turn folds a final stream JSON result without a trailing newline" do
     tmp = Path.join(System.tmp_dir!(), "symphony-claude-noeol-test-#{System.unique_integer([:positive])}")
     workspace = Path.join(tmp, "workspace")

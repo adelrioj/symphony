@@ -26,12 +26,18 @@ defmodule SymphonyElixir.Agent.Result do
     tokens = Map.get(attrs, :tokens) || %{input: 0, output: 0, total: 0}
 
     %__MODULE__{
-      status: Map.fetch!(attrs, :status),
+      status: validate_status!(Map.fetch!(attrs, :status)),
       session_id: Map.get(attrs, :session_id),
       tokens: Map.merge(%{input: 0, output: 0, total: 0}, tokens),
       seconds_running: Map.get(attrs, :seconds_running, 0),
       summary: Map.get(attrs, :summary),
       blocked_action: Map.get(attrs, :blocked_action)
     }
+  end
+
+  defp validate_status!(status) when status in [:done, :blocked], do: status
+
+  defp validate_status!(status) do
+    raise ArgumentError, "invalid agent result status: #{inspect(status)} (expected :done or :blocked)"
   end
 end

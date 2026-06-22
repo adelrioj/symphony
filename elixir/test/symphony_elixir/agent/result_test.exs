@@ -20,4 +20,10 @@ defmodule SymphonyElixir.Agent.ResultTest do
     assert result.blocked_action == "approve shell write"
     assert result.summary == "needs approval"
   end
+
+  test "new/1 raises on an unknown status atom" do
+    assert_raise ArgumentError, ~r/invalid agent result status: :complete/, fn ->
+      Result.new(status: :complete)
+    end
+  end
 end

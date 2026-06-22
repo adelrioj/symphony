@@ -1,7 +1,6 @@
 defmodule SymphonyElixir.AgentRunnerStubBackend do
   @behaviour SymphonyElixir.Agent
 
-  alias SymphonyElixir.Agent.Event
   alias SymphonyElixir.Agent.Result
 
   @impl true
@@ -20,10 +19,11 @@ defmodule SymphonyElixir.AgentRunnerStubBackend do
 
     if on_message = opts[:on_message] do
       message =
-        Keyword.get(opts, :test_message, %Event{
-          kind: :usage_updated,
+        Keyword.get(opts, :test_message, %{
+          event: :usage_updated,
+          timestamp: DateTime.utc_now(),
           session_id: "stub-1",
-          tokens: %{input: 1, output: 2, total: 3}
+          usage: %{input_tokens: 1, output_tokens: 2, total_tokens: 3}
         })
 
       on_message.(message)

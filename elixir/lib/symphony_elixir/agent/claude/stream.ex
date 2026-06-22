@@ -7,6 +7,8 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   nonzero exits.
   """
 
+  require Logger
+
   alias SymphonyElixir.Agent.Result
 
   @approval_tool "mcp__symphony__approval_prompt"
@@ -102,6 +104,10 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
 
   @spec finalize(t(), integer() | nil) :: {:ok, Result.t()} | {:error, term()}
   def finalize(%__MODULE__{blocked_action: action} = acc, _exit_status) when is_binary(action) do
+    # Blocked wins over a later error/nonzero exit (a denied permission ends the
+    # run), but log any discarded error subtype so the precedence is auditable.
+    log_discarded_error(acc)
+
     {:ok,
      Result.new(
        status: :blocked,
@@ -139,6 +145,12 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   def finalize(%__MODULE__{saw_result: false}, _exit_status) do
     {:error, {:claude_stream, "nonzero exit without a result event"}}
   end
+
+  defp log_discarded_error(%__MODULE__{result_status: {:error, subtype}, session_id: session_id}) do
+    Logger.warning("Claude run blocked; discarding coexisting error subtype=#{subtype} session_id=#{session_id || "unknown"}")
+  end
+
+  defp log_discarded_error(_acc), do: :ok
 
   defp apply_usage(acc, nil), do: acc
   defp apply_usage(acc, usage) when is_map(usage), do: %{acc | tokens: merge_tokens(acc.tokens, usage)}

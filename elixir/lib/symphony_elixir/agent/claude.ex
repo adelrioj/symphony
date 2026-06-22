@@ -8,6 +8,8 @@ defmodule SymphonyElixir.Agent.Claude do
 
   @behaviour SymphonyElixir.Agent
 
+  require Logger
+
   alias SymphonyElixir.Agent.Claude.Stream
   alias SymphonyElixir.Agent.Result
   alias SymphonyElixir.{Config, SSH, Workflow}
@@ -396,6 +398,9 @@ defmodule SymphonyElixir.Agent.Claude do
         updated_acc
 
       _decode_error ->
+        # Log (without the line body, which may carry secrets) so a truncated or
+        # oversized event is diagnosable instead of silently downgrading the run.
+        Logger.warning("Claude stream line dropped (undecodable) session_id=#{acc.session_id || "unknown"} bytes=#{byte_size(line)}")
         acc
     end
   end

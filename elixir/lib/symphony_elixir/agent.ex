@@ -4,10 +4,10 @@ defmodule SymphonyElixir.Agent do
   `Codex.AppServer` shape; `AgentRunner` owns the multi-turn continuation loop.
   """
 
-  alias SymphonyElixir.Agent.{Event, Result}
+  alias SymphonyElixir.Agent.Result
 
   @type session :: term()
-  @type on_message :: (Event.t() | map() -> any())
+  @type on_message :: (map() -> any())
 
   @callback start_session(workspace :: Path.t(), opts :: keyword()) ::
               {:ok, session()} | {:error, term()}
