@@ -94,7 +94,7 @@ defmodule SymphonyElixir.Agent.Claude do
   defp write_mcp_config(workspace) do
     with {:ok, dir} <- mcp_config_dir(workspace),
          :ok <- File.mkdir_p(dir),
-         path = Path.join(dir, "symphony-claude-mcp-#{System.unique_integer([:positive])}.json"),
+         path = Path.join(dir, "symphony-claude-mcp-#{temp_token()}.json"),
          :ok <- File.write(path, Jason.encode!(mcp_config()), [:write, :exclusive]),
          :ok <- File.chmod(path, 0o600) do
       {:ok, path}
@@ -153,8 +153,13 @@ defmodule SymphonyElixir.Agent.Claude do
   end
 
   defp run_claude(%{worker_host: nil, mcp_config_path: mcp_config_path}, workspace, prompt, on_message) do
-    with {:ok, executable} <- claude_executable(Config.settings!().claude.command) do
-      drive_port(executable, argv(mcp_config_path, prompt), workspace, on_message)
+    with {:ok, executable} <- claude_executable(Config.settings!().claude.command),
+         {:ok, prompt_path} <- write_prompt_file(workspace, prompt) do
+      try do
+        drive_port(executable, argv(mcp_config_path), workspace, on_message, prompt_path)
+      after
+        _ = File.rm(prompt_path)
+      end
     end
   end
 
@@ -183,7 +188,7 @@ defmodule SymphonyElixir.Agent.Claude do
     end
   end
 
-  defp argv(mcp_config_path, prompt) do
+  defp argv(mcp_config_path) do
     claude = Config.settings!().claude
     allowed_tools = claude.allowed_tools || @default_allowed_tools
 
@@ -199,9 +204,7 @@ defmodule SymphonyElixir.Agent.Claude do
         "--allowedTools",
         Enum.join(allowed_tools, ","),
         "--permission-prompt-tool",
-        @approval_tool,
-        "--",
-        prompt
+        @approval_tool
       ]
   end
 
@@ -209,12 +212,34 @@ defmodule SymphonyElixir.Agent.Claude do
   @spec drive_port(binary(), [String.t()], Path.t(), (map() -> any()) | nil) ::
           {:ok, Result.t()} | {:error, term()}
   def drive_port(executable, argv, workspace, on_message) do
+    drive_port(executable, argv, workspace, on_message, nil)
+  end
+
+  @spec drive_port(binary(), [String.t()], Path.t(), (map() -> any()) | nil, Path.t() | nil) ::
+          {:ok, Result.t()} | {:error, term()}
+  def drive_port(executable, argv, workspace, on_message, nil) do
     port =
       Port.open({:spawn_executable, String.to_charlist(executable)}, [
         :binary,
         :exit_status,
         :stderr_to_stdout,
         args: Enum.map(argv, &String.to_charlist/1),
+        cd: String.to_charlist(workspace),
+        line: @port_line_bytes
+      ])
+
+    collect_port_stream(port, on_message)
+  rescue
+    error -> {:error, {:claude_port, error}}
+  end
+
+  def drive_port(executable, argv, workspace, on_message, stdin_path) when is_binary(stdin_path) do
+    port =
+      Port.open({:spawn_executable, ~c"/bin/sh"}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: [~c"-c", stdin_redirect_command(executable, argv, stdin_path) |> String.to_charlist()],
         cd: String.to_charlist(workspace),
         line: @port_line_bytes
       ])
@@ -234,7 +259,9 @@ defmodule SymphonyElixir.Agent.Claude do
     error -> {:error, {:claude_ssh_port, error}}
   end
 
-  defp collect_port_stream(port, on_message) do
+  @doc false
+  @spec collect_port_stream(port(), (map() -> any()) | nil) :: {:ok, Result.t()} | {:error, term()}
+  def collect_port_stream(port, on_message) do
     settings = Config.settings!().codex
     deadline = monotonic_ms() + settings.turn_timeout_ms
     collect_stream(port, on_message, Stream.new(), "", deadline, settings.stall_timeout_ms)
@@ -243,6 +270,27 @@ defmodule SymphonyElixir.Agent.Claude do
   defp ssh_payload(prompt) when is_binary(prompt) do
     with {:ok, workflow} <- File.read(Workflow.current_path()) do
       {:ok, [Integer.to_string(byte_size(workflow)), "\n", workflow, Integer.to_string(byte_size(prompt)), "\n", prompt]}
+    end
+  end
+
+  defp write_prompt_file(workspace, prompt) do
+    with {:ok, dir} <- mcp_config_dir(workspace),
+         :ok <- File.mkdir_p(dir),
+         path = Path.join(dir, "symphony-claude-prompt-#{temp_token()}.txt"),
+         :ok <- write_private_file(path, prompt) do
+      {:ok, path}
+    end
+  end
+
+  defp write_private_file(path, contents) do
+    with {:ok, result} <- File.open(path, [:write, :binary, :exclusive], &write_private_file_contents(&1, path, contents)) do
+      result
+    end
+  end
+
+  defp write_private_file_contents(io, path, contents) do
+    with :ok <- File.chmod(path, 0o600) do
+      IO.binwrite(io, contents)
     end
   end
 
@@ -281,6 +329,11 @@ defmodule SymphonyElixir.Agent.Claude do
     "dd bs=1 count=\"$symphony_prompt_bytes\" 2>/dev/null | " <> Enum.join([shell_escape(claude.command) | args], " ")
   end
 
+  defp stdin_redirect_command(executable, argv, stdin_path) do
+    command = Enum.map_join([executable | argv], " ", &shell_escape/1)
+    "exec " <> command <> " < " <> shell_escape(stdin_path)
+  end
+
   defp shell_escape(value) do
     "'" <> String.replace(to_string(value), "'", "'\"'\"'") <> "'"
   end
@@ -303,12 +356,36 @@ defmodule SymphonyElixir.Agent.Claude do
         )
 
       {^port, {:exit_status, status}} ->
-        Stream.finalize(acc, status)
+        {drained_acc, drained_pending_line} = drain_port_data(port, on_message, acc, pending_line)
+        finalize_stream(drained_acc, drained_pending_line, on_message, status)
     after
       receive_timeout(deadline, stall_timeout_ms) ->
         close_port(port)
         {:error, receive_timeout_reason(deadline)}
     end
+  end
+
+  defp drain_port_data(port, on_message, acc, pending_line) do
+    receive do
+      {^port, {:data, {:eol, chunk}}} ->
+        line = pending_line <> to_string(chunk)
+        updated_acc = handle_line(line, on_message, acc)
+        drain_port_data(port, on_message, updated_acc, "")
+
+      {^port, {:data, {:noeol, chunk}}} ->
+        drain_port_data(port, on_message, acc, pending_line <> to_string(chunk))
+    after
+      0 ->
+        {acc, pending_line}
+    end
+  end
+
+  defp finalize_stream(acc, "", _on_message, status), do: Stream.finalize(acc, status)
+
+  defp finalize_stream(acc, pending_line, on_message, status) do
+    pending_line
+    |> handle_line(on_message, acc)
+    |> Stream.finalize(status)
   end
 
   defp handle_line(line, on_message, acc) do
@@ -358,8 +435,11 @@ defmodule SymphonyElixir.Agent.Claude do
   end
 
   defp remote_temp_path(prefix, suffix) do
-    token = :crypto.strong_rand_bytes(18) |> Base.url_encode64(padding: false)
-    "/tmp/#{prefix}.#{token}#{suffix}"
+    "/tmp/#{prefix}.#{temp_token()}#{suffix}"
+  end
+
+  defp temp_token do
+    :crypto.strong_rand_bytes(18) |> Base.url_encode64(padding: false)
   end
 
   defp expand_script_name(script_name) do

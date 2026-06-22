@@ -38,24 +38,28 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     refute File.exists?(session.mcp_config_path)
   end
 
-  test "run_turn launches with argv, real mcp config path, and prompt as one argument" do
+  test "run_turn launches with argv, real mcp config path, and prompt through stdin" do
     tmp = Path.join(System.tmp_dir!(), "symphony-claude-test-#{System.unique_integer([:positive])}")
     workspace = Path.join(tmp, "workspace")
     script = Path.join(tmp, "fake_claude")
     capture = Path.join(tmp, "argv.txt")
+    stdin_capture = Path.join(tmp, "stdin.txt")
     hacked = Path.join(tmp, "hacked")
 
     File.mkdir_p!(workspace)
     write_fake_claude!(script)
 
     previous_capture = System.get_env("CLAUDE_ARGV_CAPTURE")
+    previous_stdin_capture = System.get_env("CLAUDE_STDIN_CAPTURE")
 
     on_exit(fn ->
       restore_env("CLAUDE_ARGV_CAPTURE", previous_capture)
+      restore_env("CLAUDE_STDIN_CAPTURE", previous_stdin_capture)
       File.rm_rf(tmp)
     end)
 
     System.put_env("CLAUDE_ARGV_CAPTURE", capture)
+    System.put_env("CLAUDE_STDIN_CAPTURE", stdin_capture)
     write_claude_workflow!(script)
 
     {:ok, session} = Claude.start_session(workspace, [])
@@ -92,9 +96,9 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     allowed_tools = Enum.at(args, Enum.find_index(args, &(&1 == "--allowedTools")) + 1)
     refute allowed_tools =~ "mcp__symphony__approval_prompt"
 
-    assert Enum.at(args, -2) == "--"
-    assert Enum.count(args, &(&1 == prompt)) == 1
-    assert List.last(args) == prompt
+    refute "--" in args
+    refute prompt in args
+    assert File.read!(stdin_capture) == prompt
     refute File.exists?(hacked)
 
     assert_received {:claude_update, %{event: :session_started, session_id: "sess-run"}}
@@ -227,6 +231,25 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     assert {:error, {:claude_port, _error}} = Claude.drive_port(<<0>>, [], File.cwd!(), nil)
   end
 
+  test "drive_port/4 folds direct process output" do
+    tmp = Path.join(System.tmp_dir!(), "symphony-claude-direct-port-test-#{System.unique_integer([:positive])}")
+    workspace = Path.join(tmp, "workspace")
+    script = Path.join(tmp, "direct_claude")
+    File.mkdir_p!(workspace)
+
+    write_fake_claude_lines!(script, [
+      %{"type" => "result", "subtype" => "success", "is_error" => false, "result" => "direct ok"}
+    ])
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    assert {:ok, %Result{status: :done, summary: "direct ok"}} = Claude.drive_port(script, [], workspace, nil)
+  end
+
+  test "drive_port/5 reports redirected port startup errors" do
+    assert {:error, {:claude_port, _error}} = Claude.drive_port("/bin/true", [], <<0>>, nil, "/tmp/prompt")
+  end
+
   test "run_turn reports ssh launch errors" do
     assert {:error, {:claude_ssh_port, %FunctionClauseError{}}} =
              Claude.run_turn(%{workspace: nil, worker_host: "remote", mcp_config_path: "/tmp/mcp"}, "prompt", %{}, [])
@@ -261,6 +284,62 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     {:ok, long_session} = Claude.start_session(workspace, [])
     assert {:ok, %Result{summary: ^huge_summary}} = Claude.run_turn(long_session, "prompt", %{}, [])
     assert :ok = Claude.stop_session(long_session)
+  end
+
+  test "collect_port_stream folds split no-eol chunks before exit" do
+    result_json =
+      Jason.encode!(%{"type" => "result", "subtype" => "success", "is_error" => false, "result" => "split ok"})
+
+    {head, tail} = String.split_at(result_json, 12)
+
+    with_collect_port(fn port ->
+      send(self(), {port, {:data, {:noeol, head}}})
+      send(self(), {port, {:data, {:eol, tail}}})
+      send(self(), {port, {:exit_status, 0}})
+
+      assert {:ok, %Result{status: :done, summary: "split ok"}} = Claude.collect_port_stream(port, nil)
+    end)
+  end
+
+  test "collect_port_stream drains queued eol data after exit_status" do
+    result_json =
+      Jason.encode!(%{"type" => "result", "subtype" => "success", "is_error" => false, "result" => "drained ok"})
+
+    with_collect_port(fn port ->
+      send(self(), {port, {:exit_status, 0}})
+      send(self(), {port, {:data, {:eol, result_json}}})
+
+      assert {:ok, %Result{status: :done, summary: "drained ok"}} = Claude.collect_port_stream(port, nil)
+    end)
+  end
+
+  test "run_turn folds a final stream JSON result without a trailing newline" do
+    tmp = Path.join(System.tmp_dir!(), "symphony-claude-noeol-test-#{System.unique_integer([:positive])}")
+    workspace = Path.join(tmp, "workspace")
+    script = Path.join(tmp, "noeol_claude")
+    File.mkdir_p!(workspace)
+
+    write_fake_claude_raw!(
+      script,
+      Jason.encode!(%{
+        "type" => "result",
+        "subtype" => "success",
+        "is_error" => false,
+        "duration_ms" => 1000,
+        "usage" => %{"input_tokens" => 3, "output_tokens" => 4, "total_tokens" => 7},
+        "result" => "no-newline ok"
+      })
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    write_claude_workflow!(script)
+    {:ok, session} = Claude.start_session(workspace, [])
+
+    assert {:ok, %Result{status: :done, summary: "no-newline ok", tokens: %{input: 3, output: 4, total: 7}}} =
+             Claude.run_turn(session, "prompt", %{}, [])
+
+    assert :ok = Claude.stop_session(session)
   end
 
   test "run_turn maps varied stream events to worker updates" do
@@ -349,12 +428,43 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
         printf '%s\\n' "$arg" >> "$CLAUDE_ARGV_CAPTURE"
       done
     fi
+    if [ -n "$CLAUDE_STDIN_CAPTURE" ]; then
+      cat > "$CLAUDE_STDIN_CAPTURE"
+    fi
     cat <<'SYMPHONY_CLAUDE_EVENTS'
     #{lines}
     SYMPHONY_CLAUDE_EVENTS
     """)
 
     File.chmod!(path, 0o700)
+  end
+
+  defp write_fake_claude_raw!(path, output) do
+    File.write!(path, """
+    #!/bin/sh
+    printf '%s' '#{output}'
+    """)
+
+    File.chmod!(path, 0o700)
+  end
+
+  defp with_collect_port(fun) do
+    port = Port.open({:spawn, "sleep 5"}, [:binary, :exit_status])
+
+    try do
+      fun.(port)
+    after
+      _ = Claude.close_port(port)
+      flush_port_messages(port)
+    end
+  end
+
+  defp flush_port_messages(port) do
+    receive do
+      {^port, _message} -> flush_port_messages(port)
+    after
+      0 -> :ok
+    end
   end
 
   defp write_claude_workflow!(command, opts \\ []) do

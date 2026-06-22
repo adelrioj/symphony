@@ -255,11 +255,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
     File.write!(fake_claude, """
     #!/bin/sh
-    last_arg=""
-    for arg in "$@"; do
-      last_arg="$arg"
-    done
-    printf '%s\\n---SYMPHONY-PROMPT---\\n' "$last_arg" >> "#{prompt_capture}"
+    cat >> "#{prompt_capture}"
+    printf '\\n---SYMPHONY-PROMPT---\\n' >> "#{prompt_capture}"
     printf '%s\\n' '{"type":"system","subtype":"init","session_id":"claude-cont"}'
     printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"result":"done"}'
     """)

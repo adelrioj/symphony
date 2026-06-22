@@ -157,10 +157,15 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_backend_commands(settings) do
-    if selected_backend?(settings, "claude") and blank_string?(settings.claude.command) do
-      {:error, {:invalid_workflow_config, "claude.command can't be blank"}}
-    else
-      :ok
+    cond do
+      selected_backend?(settings, "codex") and blank_string?(settings.codex.command) ->
+        {:error, {:invalid_workflow_config, "codex.command can't be blank"}}
+
+      selected_backend?(settings, "claude") and blank_string?(settings.claude.command) ->
+        {:error, {:invalid_workflow_config, "claude.command can't be blank"}}
+
+      true ->
+        :ok
     end
   end
 

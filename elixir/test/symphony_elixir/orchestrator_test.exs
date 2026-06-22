@@ -169,6 +169,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     send(pid, :run_poll_cycle)
 
     wait_until(fn -> File.exists?(argv_capture) end)
+    wait_until(fn -> File.read!(argv_capture) =~ "--permission-prompt-tool" end)
 
     args = argv_capture |> File.read!() |> String.split("\n", trim: true)
     assert "-p" in args

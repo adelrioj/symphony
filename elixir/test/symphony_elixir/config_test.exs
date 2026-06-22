@@ -64,6 +64,52 @@ defmodule SymphonyElixir.ConfigTest do
   end
 
   describe "selected backend command validation" do
+    test "rejects blank codex.command when global backend selects Codex" do
+      write_workflow!("""
+      ---
+      tracker: {kind: memory}
+      agent: {backend: codex}
+      codex: {command: ""}
+      ---
+      body
+      """)
+
+      assert {:error, {:invalid_workflow_config, message}} = SymphonyElixir.Config.validate!()
+      assert message =~ "codex.command"
+      assert message =~ "can't be blank"
+    end
+
+    test "rejects blank codex.command when a state override selects Codex" do
+      write_workflow!("""
+      ---
+      tracker: {kind: memory}
+      agent:
+        backend: claude
+        backend_by_state: {"implemented": codex}
+      codex: {command: ""}
+      claude: {command: "/bin/true"}
+      ---
+      body
+      """)
+
+      assert {:error, {:invalid_workflow_config, message}} = SymphonyElixir.Config.validate!()
+      assert message =~ "codex.command"
+    end
+
+    test "allows blank codex.command when Codex cannot be selected" do
+      write_workflow!("""
+      ---
+      tracker: {kind: memory}
+      agent: {backend: claude, backend_by_state: {}}
+      codex: {command: ""}
+      claude: {command: "/bin/true"}
+      ---
+      body
+      """)
+
+      assert :ok = SymphonyElixir.Config.validate!()
+    end
+
     test "rejects blank claude.command when global backend selects Claude" do
       write_workflow!("""
       ---
