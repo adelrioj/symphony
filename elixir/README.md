@@ -74,6 +74,44 @@ mise exec -- mix build
 mise exec -- ./bin/symphony ./WORKFLOW.md
 ```
 
+## Run several projects (Docker / OrbStack)
+
+One Symphony instance is scoped to a **single** project: one `tracker.project_slug` and one
+repo. To orchestrate several projects, run one container per project. The Docker setup at the repo
+root does this and works as-is with [OrbStack](https://orbstack.dev/) (native arm64, no platform
+pins) or Docker Desktop.
+
+Files (repo root): `docker/Dockerfile`, `docker-compose.yml`, `workflows/*.md`, `.env.example`.
+
+**Start new instances, step by step:**
+
+1. **Log in to Codex once** on the host — the containers mount `~/.codex/auth.json` read-only:
+   ```bash
+   codex login
+   ```
+2. **Set your Linear key** (git-ignored; `docker compose` auto-loads `.env`):
+   ```bash
+   cp .env.example .env      # then edit LINEAR_API_KEY
+   ```
+3. **Configure each project's workflow** in `workflows/`. `project-a.md` and `project-b.md` are
+   templates — edit `tracker.project_slug` and the `hooks.after_create` clone URL. Keep
+   `workspace.root: /workspaces` (it must match the volume mount in compose).
+4. **Add a project** by copying a service block in `docker-compose.yml`: give it a unique host
+   port, point `./workflows/<name>.md` at its workflow, and add its own named volumes.
+5. **Launch:**
+   ```bash
+   docker compose up --build          # first build compiles OTP once, then caches it
+   ```
+   Each project's dashboard is on its mapped port (`localhost:4000`, `localhost:4001`, …).
+
+Notes:
+
+- **Private repos:** `after_create` clones over HTTPS. For a private repo, forward a token into the
+  container (add `env_file: .env` to the service so Codex inherits it via
+  `shell_environment_policy.inherit=all`) and use it in the clone URL.
+- **The `claude` backend** is not installed in the image; it ships the Codex CLI only. Add the
+  `claude` CLI and its auth if you route states to it via `agent.backend_by_state`.
+
 ## Configuration
 
 Pass a custom workflow file path to `./bin/symphony` when starting the service:
