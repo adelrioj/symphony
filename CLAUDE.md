@@ -53,6 +53,8 @@ make e2e        # SYMPHONY_RUN_LIVE_E2E=1; targets test/symphony_elixir/live_e2e
 
 `LINEAR_API_KEY` must be set for the `linear` tracker. `--logs-root` overrides the log directory (default `./log`).
 
+One instance drives one project (a single `tracker.project_slug` + one repo). To run several projects, run one container per project via the repo-root Docker Compose setup (`docker/Dockerfile`, `docker-compose.yml`, `workflows/*.md`, `.env.example`) — one service per `WORKFLOW.md`, each with its own port and workspace/log volumes. OrbStack-compatible (no platform pins). Steps are in `elixir/README.md` ("Run several projects"). The image pins its toolchain from `elixir/mise.toml`; keep those two in sync.
+
 ## Architecture
 
 The OTP supervision tree (`SymphonyElixir.Application`, `:one_for_one`) starts, in order:
