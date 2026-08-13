@@ -29,9 +29,10 @@ Tell your favorite coding agent to build Symphony in a programming language of y
 
 Check out [elixir/README.md](elixir/README.md) for instructions on how to set up your environment
 and run the Elixir-based Symphony implementation. One instance drives one project; to run several
-projects, use the Docker Compose setup at the repo root (see
-[Run several projects](elixir/README.md#run-several-projects-docker--orbstack)). You can also ask
-your favorite coding agent to help with the setup:
+projects, run one container per project (see
+[Run in Docker](elixir/README.md#run-in-docker-orbstack-compatible)). Self-hosted deployments live
+in their own repos, seeded from [`deploy/client-template/`](deploy/client-template). You can also
+ask your favorite coding agent to help with the setup:
 
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
