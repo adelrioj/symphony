@@ -1,6 +1,7 @@
 ---
-# Per-project config for one Symphony container. Edit the marked lines, copy this file
-# to add more projects. Blank body below => Symphony's default Codex prompt template.
+# Sanitized example workflow — the only workflow kept in the product repo.
+# Real client deployments live in their own private repos: copy deploy/client-template/.
+# Blank body below => Symphony's default Codex prompt template.
 tracker:
   kind: linear
   provider:
