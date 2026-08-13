@@ -106,9 +106,14 @@ verification fails.
 
 ## Security notes
 
-- The dashboard and JSON API have **no authentication**, so compose publishes port 4000 on
-  `127.0.0.1` only. For remote access, front it with an authenticated reverse proxy or use an SSH
-  tunnel — do not change the binding to `0.0.0.0`.
+- The dashboard and JSON API have **no authentication**. Exposure is controlled on the host side:
+  the `ports:` entry in `docker-compose.yml` publishes on `127.0.0.1:4000` only — do not widen it
+  to `0.0.0.0`. For remote access, front it with an authenticated reverse proxy or use an SSH
+  tunnel.
+- Inside the container, `server.host` in `workflow.md` must stay `0.0.0.0`, and that is not a
+  contradiction: Docker forwards the published port to the container's own network interface, not
+  to its loopback, so a container-side `127.0.0.1` bind makes the dashboard unreachable while the
+  container still looks healthy. Container binds all interfaces; host publishes loopback only.
 - Everything in `.env` is passed into the container and readable by the agents Symphony runs
   (they run with `approval_policy: never`). Keep `.env` to the keys this deployment needs.
 - `.gitignore` here excludes `.env` and common private-key filenames. Keep it that way: a private

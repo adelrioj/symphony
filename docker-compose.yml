@@ -31,7 +31,9 @@ services:
       - --logs-root
       - /app/elixir/log
     ports:
-      - "4000:4000"   # dashboard + JSON API -> http://localhost:4000
+      # loopback only: the dashboard and JSON API have no authentication, and the container binds
+      # all of its own interfaces (server.host in the workflow file). Keep exposure on the host.
+      - "127.0.0.1:4000:4000"   # dashboard + JSON API -> http://localhost:4000
 
 volumes:
   example-workspaces:
