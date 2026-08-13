@@ -1,1 +1,15 @@
+# Secrets never belong in git — a private repo is not a secret store: anything committed
+# here stays in history, is visible to every collaborator, and survives deletion.
 .env
+.env.*
+!.env.example
+
+# SSH private keys and cert material
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.pem
+*.key
+*.p12
+*.pfx

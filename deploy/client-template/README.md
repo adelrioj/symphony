@@ -3,12 +3,27 @@
 One container, one project: a single Linear project plus a single repo. Everything here is
 yours — this directory is meant to be copied into your own private repo.
 
+## Prerequisites
+
+- **Docker Engine with Compose v2** (`docker compose version` must work) — Docker Desktop or
+  [OrbStack](https://orbstack.dev/) both do.
+- **The Codex CLI**, installed on the host and logged in. Symphony's agents run Codex inside the
+  container, but the container has no browser, so it reuses the login file that the CLI writes on
+  the host. Get it from <https://github.com/openai/codex>.
+- **A Linear API key** with access to the project you want automated.
+
 ## Setup
 
 1. Log in to Codex once on the host (the container mounts `~/.codex/auth.json` read-only):
    ```bash
    codex login
+   ls -l ~/.codex/auth.json   # must exist and be a FILE before you start the container
    ```
+   Do not skip the check: if that path does not exist, Docker creates an empty *directory* there
+   when the container starts. Symphony then comes up and the dashboard works, but every agent
+   dispatch fails — and a later real `codex login` breaks too, because a directory now sits where
+   the file belongs. If that happened: `docker compose down`, `rmdir ~/.codex/auth.json`,
+   `codex login`, then start again.
 2. Set your Linear key:
    ```bash
    cp .env.example .env      # then edit LINEAR_API_KEY
@@ -59,6 +74,40 @@ upgrades to be an explicit edit.
 
 ## Private repos
 
-`hooks.after_create` runs inside the container. For a private repo, either clone over SSH with
-a key mounted into the container, or put a token in `.env` and use it in an HTTPS clone URL —
-the agent backend inherits the container environment.
+`hooks.after_create` runs inside the container, so the clone needs credentials that exist there.
+The supported path is HTTPS with a token: compose loads this directory's `.env` into the
+container environment (`env_file`), and the Codex backend inherits it, so a token you put in
+`.env` is available to the clone.
+
+1. Create a GitHub personal access token with read access to the repo (a fine-grained token with
+   *Contents: Read* is enough) and add it to `.env` — never to `workflow.md`, which is committed:
+
+   ```bash
+   # .env
+   LINEAR_API_KEY=lin_api_...
+   GIT_TOKEN=github_pat_...
+   ```
+
+2. Use it in the clone URL in `workflow.md`:
+
+   ```yaml
+   hooks:
+     after_create: |
+       git clone --depth 1 https://x-access-token:${GIT_TOKEN}@github.com/your-org/your-repo .
+   ```
+
+3. `docker compose up -d` again — `.env` changes are read at container start, not hot-reloaded.
+
+SSH cloning also works in principle, but this template does not set it up: it additionally
+requires mounting a private key into the container and seeding `known_hosts`, or host-key
+verification fails.
+
+## Security notes
+
+- The dashboard and JSON API have **no authentication**, so compose publishes port 4000 on
+  `127.0.0.1` only. For remote access, front it with an authenticated reverse proxy or use an SSH
+  tunnel — do not change the binding to `0.0.0.0`.
+- Everything in `.env` is passed into the container and readable by the agents Symphony runs
+  (they run with `approval_policy: never`). Keep `.env` to the keys this deployment needs.
+- `.gitignore` here excludes `.env` and common private-key filenames. Keep it that way: a private
+  repo is not a secret store — a committed key stays in history and is visible to collaborators.
