@@ -2,7 +2,8 @@
 # Second project. Same shape as project-a.md — only the tracker/repo lines differ.
 tracker:
   kind: linear
-  project_slug: "REPLACE-with-linear-project-slug-b"   # <-- this project's Linear project
+  provider:
+    project_slug: "REPLACE-with-linear-project-slug-b"   # <-- this project's Linear project
   required_labels: []
   active_states:
     - Todo

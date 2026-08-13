@@ -1,11 +1,12 @@
 defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
-  Executes a single Linear issue in its workspace with the selected agent backend.
+  Executes a single tracker work item in its workspace with the selected agent backend.
   """
 
   require Logger
   alias SymphonyElixir.Agent.Result
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
   @blocked_comment_detail_limit 4_000
@@ -29,9 +30,6 @@ defmodule SymphonyElixir.AgentRunner do
       :ok ->
         :ok
 
-      {:blocked, _result} ->
-        :ok
-
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
@@ -48,7 +46,7 @@ defmodule SymphonyElixir.AgentRunner do
         try do
           outcome =
             with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-              run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+              run_agent_turns(workspace, issue, codex_update_recipient, opts, worker_host)
             end
 
           handle_run_outcome(outcome, issue)
@@ -130,9 +128,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+  defp run_agent_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
-    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
     backend = Keyword.get(opts, :backend_module, SymphonyElixir.Agent.Codex)
 
     session_opts = Keyword.put(opts, :worker_host, worker_host)
@@ -201,7 +199,7 @@ defmodule SymphonyElixir.AgentRunner do
 
     Continuation guidance:
 
-    - The previous Claude turn completed normally, but the Linear issue is still in an active state.
+    - The previous Claude turn completed normally, but the tracker work item is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The full issue instructions are included above because Claude runs each turn in a fresh process.
@@ -213,7 +211,7 @@ defmodule SymphonyElixir.AgentRunner do
     """
     Continuation guidance:
 
-    - The previous agent turn completed normally, but the Linear issue is still in an active state.
+    - The previous agent turn completed normally, but the tracker work item is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.

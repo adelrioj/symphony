@@ -328,7 +328,8 @@ defmodule SymphonyElixir.AgentRunnerTest do
           description: "The injected backend reports a blocked turn.",
           state: "Implemented",
           url: "https://example.org/issues/BLOCK-1",
-          labels: []
+          labels: [],
+          dispatchable: true
         ],
         overrides
       )

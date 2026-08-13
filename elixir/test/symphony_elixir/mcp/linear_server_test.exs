@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.MCP.LinearServerTest do
-  use ExUnit.Case, async: true
+  use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.MCP.LinearServer
 

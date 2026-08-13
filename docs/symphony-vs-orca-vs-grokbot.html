@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Symphony vs Orca automations vs Grok Bot</title>
+<style>
+  :root {
+    --ink: #10100e;
+    --paper: #f6f4ee;
+    --paper-2: #eeebe2;
+    --rule: #d6d1c4;
+    --muted: #6b6559;
+    --sym: #b4451f;
+    --orca: #1f6f8b;
+    --grok: #6b5b95;
+    --code-bg: #16150f;
+    --code-fg: #e8e3d4;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    font-feature-settings: "kern", "liga";
+  }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 28px 120px; }
+
+  /* ---------- masthead ---------- */
+  header.masthead {
+    border-bottom: 3px solid var(--ink);
+    padding: 56px 0 22px;
+    margin-bottom: 40px;
+  }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: clamp(34px, 6vw, 60px);
+    line-height: 1.02;
+    letter-spacing: -.02em;
+    margin: 0 0 18px;
+  }
+  h1 em { font-style: italic; color: var(--sym); }
+  .standfirst {
+    font-family: var(--serif);
+    font-size: clamp(17px, 2.2vw, 21px);
+    line-height: 1.45;
+    max-width: 62ch;
+    color: #38352d;
+    margin: 0;
+  }
+
+  /* ---------- verdict ---------- */
+  .verdict {
+    border-left: 3px solid var(--sym);
+    background: var(--paper-2);
+    padding: 20px 24px;
+    margin: 0 0 48px;
+  }
+  .verdict p { margin: 0; font-size: 17px; }
+  .verdict strong { font-weight: 650; }
+
+  /* ---------- sections ---------- */
+  section { margin: 0 0 64px; scroll-margin-top: 24px; }
+  h2 {
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border-top: 1px solid var(--rule);
+    padding-top: 12px;
+    margin: 0 0 8px;
+  }
+  h3 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: clamp(24px, 3.4vw, 33px);
+    line-height: 1.15;
+    letter-spacing: -.01em;
+    margin: 0 0 20px;
+  }
+  h4 {
+    font-size: 15px;
+    font-weight: 700;
+    margin: 28px 0 8px;
+    letter-spacing: -.005em;
+  }
+  p { max-width: 74ch; }
+
+  code {
+    font-family: var(--mono);
+    font-size: .87em;
+    background: rgba(16,16,14,.06);
+    border: 1px solid rgba(16,16,14,.09);
+    border-radius: 3px;
+    padding: .08em .34em;
+    overflow-wrap: anywhere;
+  }
+
+  a { color: var(--sym); text-underline-offset: 2px; text-decoration-thickness: 1px; }
+  a:hover { background: rgba(180,69,31,.1); }
+
+  /* ---------- table ---------- */
+  .tablewrap { overflow-x: auto; margin: 8px 0 0; }
+  table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 14.5px; }
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--rule);
+  }
+  thead th {
+    border-bottom: 2px solid var(--ink);
+    font-size: 12px;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  tbody th {
+    font-weight: 600;
+    color: var(--muted);
+    font-size: 13px;
+    width: 150px;
+    white-space: nowrap;
+  }
+  th.c-sym { color: var(--sym); }
+  th.c-orca { color: var(--orca); }
+  th.c-grok { color: var(--grok); }
+  tbody tr:hover { background: rgba(16,16,14,.03); }
+
+  /* ---------- cards ---------- */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-top: 8px; }
+  .card { border: 1px solid var(--rule); background: #fff; padding: 20px 22px 22px; }
+  .card h4 { margin-top: 0; font-family: var(--mono); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; }
+  .card.sym { border-top: 3px solid var(--sym); } .card.sym h4 { color: var(--sym); }
+  .card.orca { border-top: 3px solid var(--orca); } .card.orca h4 { color: var(--orca); }
+  .card.grok { border-top: 3px solid var(--grok); } .card.grok h4 { color: var(--grok); }
+  .card p:last-child { margin-bottom: 0; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin-bottom: 7px; font-size: 14.5px; }
+
+  /* ---------- code block ---------- */
+  pre {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.65;
+    padding: 18px 20px;
+    overflow-x: auto;
+    margin: 16px 0;
+    border-radius: 2px;
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: inherit; color: inherit; white-space: pre; }
+  .c { color: #7c8b6f; }
+  .k { color: #e0a86b; }
+  .s { color: #93b7a2; }
+
+  /* ---------- diagram ---------- */
+  figure { margin: 20px 0 0; }
+  figure svg { display: block; width: 100%; height: auto; background: #fff; border: 1px solid var(--rule); }
+  figcaption { font-size: 13px; color: var(--muted); margin-top: 8px; font-style: italic; }
+
+  /* ---------- callout ---------- */
+  .callout {
+    border: 1px solid var(--ink);
+    padding: 20px 24px;
+    background: #fff;
+    margin-top: 24px;
+  }
+  .callout h4 { margin-top: 0; }
+  .callout.warn { border-color: var(--sym); background: #fdf5f1; }
+
+  /* ---------- decision list ---------- */
+  ol.choose { list-style: none; counter-reset: c; padding: 0; margin: 8px 0 0; }
+  ol.choose li {
+    counter-increment: c;
+    display: grid;
+    grid-template-columns: 40px 1fr;
+    gap: 16px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--rule);
+    max-width: 78ch;
+  }
+  ol.choose li::before {
+    content: counter(c);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    border: 1px solid var(--rule);
+    width: 28px; height: 28px;
+    display: grid; place-items: center;
+    border-radius: 50%;
+  }
+  ol.choose b { display: block; font-size: 16px; margin-bottom: 2px; }
+
+  /* ---------- footer ---------- */
+  footer {
+    border-top: 3px solid var(--ink);
+    padding-top: 20px;
+    font-size: 13.5px;
+    color: var(--muted);
+  }
+  footer ul { padding-left: 18px; margin: 8px 0 0; }
+  footer li { margin-bottom: 5px; }
+
+  .note { font-size: 13.5px; color: var(--muted); max-width: 74ch; }
+
+  @media (max-width: 620px) {
+    .wrap { padding: 0 18px 80px; }
+    ol.choose li { grid-template-columns: 1fr; }
+    ol.choose li::before { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <p class="kicker">Landscape note · 2026-08-13</p>
+  <h1>The tracker is the scheduler:<br><em>Symphony</em> against Orca and Grok Bot</h1>
+  <p class="standfirst">Three products described as "agents that work while you're away." They sit at three different layers, and only one of them derives <em>what should run</em> from the state of your issue tracker.</p>
+</header>
+
+<div class="verdict">
+  <p><strong>Verdict.</strong> These are not competitors. Symphony is a headless delivery daemon bound to a board. Orca is an agent IDE whose automations are cron over git worktrees. Grok Bot is a hosted general-purpose agent with OAuth plugins and a cloud browser. Symphony and Orca compose; Grok Bot solves a different problem.</p>
+</div>
+
+<section>
+  <h2>At a glance</h2>
+  <h3>Same slogan, three layers</h3>
+  <div class="tablewrap">
+  <table>
+    <thead>
+      <tr>
+        <th></th>
+        <th class="c-sym">Symphony</th>
+        <th class="c-orca">Orca automations</th>
+        <th class="c-grok">Grok Bot</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <th>Category</th>
+        <td>Headless daemon + language-agnostic spec</td>
+        <td>Desktop ADE feature: a scheduler over worktrees</td>
+        <td>Hosted consumer/prosumer agent product</td>
+      </tr>
+      <tr>
+        <th>Unit of work</th>
+        <td>A Linear issue</td>
+        <td>A prompt run against a repo or worktree</td>
+        <td>A named persistent chat agent</td>
+      </tr>
+      <tr>
+        <th>Trigger</th>
+        <td>Tracker state poll — <code>polling.interval_ms</code> (5&nbsp;s in <code>elixir/WORKFLOW.md</code>)</td>
+        <td>Wall clock — <code>hourly</code>/<code>daily</code>/<code>weekdays</code>/<code>weekly</code>, cron, RRULE, plus a <code>--precheck</code> shell probe</td>
+        <td>A human message; "routines" continue in the background</td>
+      </tr>
+      <tr>
+        <th>Isolation</th>
+        <td>Per-issue workspace under <code>workspace.root</code>, with <code>after_create</code>/<code>before_remove</code> hooks</td>
+        <td>A real git worktree per task</td>
+        <td>A cloud computer with a browser you sign into yourself</td>
+      </tr>
+      <tr>
+        <th>Completion authority</th>
+        <td>Tracker state — a terminal state ends the run</td>
+        <td><code>worker_done --outcome succeeded|failed</code></td>
+        <td>The user</td>
+      </tr>
+      <tr>
+        <th>Human role</th>
+        <td>Manage the board; the agent posts proof of work</td>
+        <td>Read diffs, commit, push, review in-IDE</td>
+        <td>Steer the chat</td>
+      </tr>
+      <tr>
+        <th>Multi-agent</th>
+        <td>N independent issues, no inter-agent messaging</td>
+        <td>Coordinator/worker DAG with messages, gates, federated SSH workers</td>
+        <td>Multiple agents, no documented coordination</td>
+      </tr>
+      <tr>
+        <th>Distribution</th>
+        <td>Apache-2.0 spec (<code>SPEC.md</code>, RFC 2119) + Elixir/OTP reference implementation</td>
+        <td>Open source app + <code>orca</code> CLI</td>
+        <td>Closed, hosted, beta; Ultra or SuperGrok Heavy plan</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <h2>Control flow</h2>
+  <h3>Who decides that work starts</h3>
+  <figure>
+    <svg viewBox="0 0 980 340" role="img" aria-label="Three control loops: Symphony polls a Linear board and dispatches per-issue workspaces; Orca fires automations on a schedule into worktrees reviewed by a human; Grok Bot responds to chat messages using plugins and a cloud browser.">
+      <defs>
+        <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="#6b6559"/>
+        </marker>
+        <style>
+          .bx { fill:#fff; stroke:#10100e; stroke-width:1.4; }
+          .lbl { font: 600 12.5px ui-monospace, Menlo, monospace; fill:#10100e; }
+          .sub { font: 11px ui-monospace, Menlo, monospace; fill:#6b6559; }
+          .ttl { font: 700 11px ui-monospace, Menlo, monospace; letter-spacing:.12em; }
+          .ln { stroke:#6b6559; stroke-width:1.3; fill:none; marker-end:url(#a); }
+          .lnd { stroke:#6b6559; stroke-width:1.3; fill:none; stroke-dasharray:4 3; marker-end:url(#a); }
+        </style>
+      </defs>
+
+      <!-- Symphony lane -->
+      <text x="20" y="24" class="ttl" fill="#b4451f">SYMPHONY — STATE-DRIVEN</text>
+      <rect class="bx" x="20" y="38" width="130" height="46" stroke="#b4451f"/>
+      <text x="85" y="60" class="lbl" text-anchor="middle">Linear board</text>
+      <text x="85" y="75" class="sub" text-anchor="middle">issue states</text>
+
+      <rect class="bx" x="210" y="38" width="150" height="46" stroke="#b4451f"/>
+      <text x="285" y="60" class="lbl" text-anchor="middle">Orchestrator</text>
+      <text x="285" y="75" class="sub" text-anchor="middle">poll · claim · slots</text>
+
+      <rect class="bx" x="420" y="26" width="170" height="34"/>
+      <text x="505" y="47" class="lbl" text-anchor="middle">workspace/ISS-1</text>
+      <rect class="bx" x="420" y="66" width="170" height="34"/>
+      <text x="505" y="87" class="lbl" text-anchor="middle">workspace/ISS-2</text>
+
+      <rect class="bx" x="650" y="38" width="150" height="46"/>
+      <text x="725" y="60" class="lbl" text-anchor="middle">Codex / Claude</text>
+      <text x="725" y="75" class="sub" text-anchor="middle">max_turns cap</text>
+
+      <path class="ln" d="M150 61 H205"/>
+      <path class="ln" d="M360 55 H415"/>
+      <path class="ln" d="M360 68 H415"/>
+      <path class="ln" d="M590 61 H645"/>
+      <path class="lnd" d="M725 84 V112 H85 V90"/>
+      <text x="405" y="126" class="sub" text-anchor="middle">agent writes ticket state / PR link back — the loop closes on the board</text>
+
+      <line x1="20" y1="146" x2="960" y2="146" stroke="#d6d1c4" stroke-width="1"/>
+
+      <!-- Orca lane -->
+      <text x="20" y="172" class="ttl" fill="#1f6f8b">ORCA — SCHEDULE-DRIVEN</text>
+      <rect class="bx" x="20" y="186" width="130" height="46" stroke="#1f6f8b"/>
+      <text x="85" y="208" class="lbl" text-anchor="middle">cron / RRULE</text>
+      <text x="85" y="223" class="sub" text-anchor="middle">+ precheck</text>
+
+      <rect class="bx" x="210" y="186" width="150" height="46" stroke="#1f6f8b"/>
+      <text x="285" y="208" class="lbl" text-anchor="middle">automation</text>
+      <text x="285" y="223" class="sub" text-anchor="middle">run history</text>
+
+      <rect class="bx" x="420" y="186" width="170" height="46"/>
+      <text x="505" y="208" class="lbl" text-anchor="middle">git worktree</text>
+      <text x="505" y="223" class="sub" text-anchor="middle">isolated branch</text>
+
+      <rect class="bx" x="650" y="186" width="150" height="46"/>
+      <text x="725" y="208" class="lbl" text-anchor="middle">human review</text>
+      <text x="725" y="223" class="sub" text-anchor="middle">diff · commit · push</text>
+
+      <path class="ln" d="M150 209 H205"/>
+      <path class="ln" d="M360 209 H415"/>
+      <path class="ln" d="M590 209 H645"/>
+
+      <line x1="20" y1="256" x2="960" y2="256" stroke="#d6d1c4" stroke-width="1"/>
+
+      <!-- Grok lane -->
+      <text x="20" y="282" class="ttl" fill="#6b5b95">GROK BOT — CHAT-DRIVEN</text>
+      <rect class="bx" x="20" y="292" width="130" height="38" stroke="#6b5b95"/>
+      <text x="85" y="316" class="lbl" text-anchor="middle">your message</text>
+
+      <rect class="bx" x="210" y="292" width="150" height="38" stroke="#6b5b95"/>
+      <text x="285" y="316" class="lbl" text-anchor="middle">persistent agent</text>
+
+      <rect class="bx" x="420" y="292" width="170" height="38"/>
+      <text x="505" y="316" class="lbl" text-anchor="middle">plugins (OAuth)</text>
+
+      <rect class="bx" x="650" y="292" width="150" height="38"/>
+      <text x="725" y="316" class="lbl" text-anchor="middle">cloud browser</text>
+
+      <path class="ln" d="M150 311 H205"/>
+      <path class="ln" d="M360 311 H415"/>
+      <path class="ln" d="M590 311 H645"/>
+    </svg>
+    <figcaption>Only the top lane has a feedback edge. Symphony's termination condition lives outside the process, in the tracker.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>Symphony</h2>
+  <h3>The differentiator is a specified control loop, not a coding agent</h3>
+  <p>Symphony ships no model and no editor. What it ships is <code>SPEC.md</code> — 2,276 lines of RFC&nbsp;2119 normative text — plus an Elixir/OTP reference implementation that may be a superset of the spec but must never conflict with it. The mechanics other tools leave implicit are pinned:</p>
+
+  <h4>Claim state machine (§7.1)</h4>
+  <p><code>Unclaimed → Claimed → {Running, RetryQueued} → Released</code>, mutated by a single authority — one stateful <code>Orchestrator</code> GenServer. Duplicate dispatch is impossible by construction, not by convention.</p>
+
+  <h4>Concurrency (§8.3)</h4>
+  <pre><code>available_slots = max(max_concurrent_agents - running_count, 0)
+<span class="c"># per-state override, else fall back to the global limit</span>
+max_concurrent_agents_by_state[state]
+
+<span class="c"># candidate ordering</span>
+priority asc (null last) → … → identifier lexicographic</code></pre>
+
+  <h4>Retry and backoff (§8.4)</h4>
+  <pre><code><span class="c"># clean worker exit — re-check whether the issue is still active</span>
+delay = 1000 ms
+
+<span class="c"># failure-driven</span>
+delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)
+<span class="c">#                                    default 300000 (5 min)</span></code></pre>
+
+  <h4>Reconciliation, every tick (§8.5)</h4>
+  <p>Stall detection against <code>codex.stall_timeout_ms</code> (measured from the last agent event, else <code>started_at</code>); then a tracker state refresh — terminal state kills the worker <em>and</em> cleans the workspace; a state that is neither active nor terminal kills the worker without cleanup. If the refresh call fails, workers keep running and it retries next tick.</p>
+
+  <h4>Policy lives in the repo</h4>
+  <p><code>WORKFLOW.md</code> is YAML front matter plus a Liquid-templated prompt body. Invalid config at boot halts the process; an invalid file on hot reload is ignored and the last-known-good config is kept, so the BEAM reloads without stopping active agents. Config is reached only through <code>SymphonyElixir.Config</code> — never ad-hoc env reads.</p>
+
+  <h4>Safety is normative</h4>
+  <p>Workspaces must stay under the configured root and a turn's cwd must never be the source repo; the checks live in <code>path_safety.ex</code>. Recovery after restart is tracker-driven and filesystem-driven — there is deliberately no orchestrator database.</p>
+
+  <div class="callout warn">
+    <h4>What it costs</h4>
+    <p>One instance drives one project (a single <code>tracker.project_slug</code> and one repo); scale-out is one Docker container per <code>WORKFLOW.md</code>. The tracker is Linear-only in v1. Blocked entries live in memory and are cleared on restart. The README labels it a low-key engineering preview for trusted environments, and it assumes a repo that already practices harness engineering.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Orca</h2>
+  <h3>Automations are the thin part; orchestration is the real overlap</h3>
+  <p>The scheduling surface is exactly that — a scheduler. It is well-shaped: create disabled, tune, then enable.</p>
+  <pre><code>orca automations create \
+  --name <span class="s">"Weekday triage"</span> \
+  --trigger weekdays --time 09:00 \
+  --prompt <span class="s">"Triage new issues and summarize blockers"</span> \
+  --provider codex --repo my-repo \
+  --precheck <span class="s">"gh pr list --json number -q .[0].number"</span> \
+  --disabled --json</code></pre>
+  <p>Plus <code>--timezone</code>, <code>--workspace</code> targeting instead of <code>--repo</code>, <code>--missed-run-grace-minutes</code>, <code>--reuse-session</code> versus <code>--fresh-session</code>, run history via <code>automations runs</code>, and a manual <strong>Rerun</strong>. A non-zero <code>--precheck</code> exit records a skipped run — the closest thing to a conditional trigger, and it is a shell probe you write yourself.</p>
+
+  <p>The layer that actually overlaps Symphony is <code>orca orchestration</code>: a durable <strong>Run</strong> namespace with a coordinator inbox, <strong>Tasks</strong> (<code>pending</code>/<code>ready</code>/<code>dispatched</code>/<code>completed</code>/<code>failed</code>/<code>blocked</code>) with dependencies, <strong>Dispatches</strong> that hold lifecycle authority, typed messages, and decision gates.</p>
+
+  <div class="cards">
+    <div class="card orca">
+      <h4>Orca has, Symphony doesn't</h4>
+      <ul>
+        <li>Inter-agent messaging and group addresses (<code>@all</code>, <code>@idle</code>, <code>@codex</code>)</li>
+        <li>Blocking <code>ask</code> with enumerated options, and coordinator-owned gates that block a task until resolved</li>
+        <li>Task DAGs with explicit dependencies</li>
+        <li>Federated workers placed on remote SSH hosts</li>
+        <li>A first-class human review surface — diff viewer, attribution, commit/push</li>
+      </ul>
+    </div>
+    <div class="card sym">
+      <h4>Symphony has, Orca doesn't</h4>
+      <ul>
+        <li>An external source of truth: the board decides what exists and when it ends</li>
+        <li>Specified backoff, stall detection, and per-tick reconciliation</li>
+        <li>Restart recovery without a database, derived from tracker + filesystem</li>
+        <li>A portable spec you can reimplement in any language</li>
+        <li>Headless operation — nothing to keep open</li>
+      </ul>
+    </div>
+  </div>
+  <p class="note" style="margin-top:20px;">Recovery in Orca is "open the run and click Rerun." That is a reasonable product decision for a tool with a human at the keyboard; it is not a contract you can operate unattended against.</p>
+</section>
+
+<section>
+  <h2>Grok Bot</h2>
+  <h3>Adjacent, not comparable</h3>
+  <p>Persistent named agents, OAuth plugins (Gmail, Notion, Slack — scoped to the signing-in account and gate-able by a Cursor team admin), a cloud computer where the agent drives a browser you personally logged into, and a secrets store so credentials never land in chat.</p>
+  <p>There is no worktree, no git model, no diff review, and no published retry semantics — the routines help page returns 404; routines exist only as prose on the getting-started page. It is a general knowledge-work agent that happens to be able to code, not a system for landing pull requests unattended.</p>
+  <p>The single axis where it meets Symphony is the promise that work continues while you are away. Symphony's version of that promise is bounded, auditable, versioned in the repository, and terminated by tracker state. Grok Bot's version is a conversation you come back to.</p>
+</section>
+
+<section>
+  <h2>Choosing</h2>
+  <h3>Pick by who owns the queue</h3>
+  <ol class="choose">
+    <li>
+      <div>
+        <b>Board-driven, unattended, auditable delivery → Symphony.</b>
+        The only one where "what should run" is derived from tracker state rather than a clock or a human, and the only one shipping a portable spec so the behavior survives a rewrite in your language.
+      </div>
+    </li>
+    <li>
+      <div>
+        <b>You intend to watch and review → Orca.</b>
+        Automations are a thinner scheduler, but the orchestration primitives — DAGs, gates, blocking <code>ask</code>, federated SSH workers — are richer than Symphony's flat dispatch loop, and the review surface is real.
+      </div>
+    </li>
+    <li>
+      <div>
+        <b>Non-repo knowledge work with SaaS side effects → Grok Bot.</b>
+        Not a candidate for load-bearing code delivery.
+      </div>
+    </li>
+  </ol>
+
+  <div class="callout">
+    <h4>They compose — with one hard constraint</h4>
+    <p>Symphony has no inter-agent messaging and no human decision gate: an issue either progresses or lands in <code>blocked_state</code>. Orca has no tracker-state control loop. Running Symphony as the ingest and scheduling authority while using Orca-style worktrees for human review is coherent.</p>
+      <p style="margin-bottom:0"><strong>What is not coherent:</strong> pointing an <code>orca automations</code> cron and a Symphony poller at the same board. You get two claim authorities with no shared lock, and Symphony's duplicate-dispatch guarantee — which holds only because one GenServer serializes every state mutation — evaporates.</p>
+  </div>
+</section>
+
+<footer>
+  <p><strong>Sources.</strong> Claims about Symphony are taken from this repository; claims about the other two are from their public documentation as of 2026-08-13.</p>
+  <ul>
+    <li>Symphony — <code>SPEC.md</code> §§7–9, <code>CLAUDE.md</code>, <code>README.md</code>, <code>elixir/WORKFLOW.md</code> (this repo)</li>
+    <li>Orca — <a href="https://www.onorca.dev/docs/cli/automations">Scheduled automations</a>, <a href="https://www.onorca.dev/docs/cli/orchestration">Orchestration</a>, <a href="https://www.onorca.dev/docs">What is Orca?</a></li>
+    <li>Grok Bot — <a href="https://cursor.com/help/grok-bot/getting-started">Getting started</a>, <a href="https://cursor.com/help/grok-bot/connect-plugins">Connect plugins</a></li>
+  </ul>
+</footer>
+
+</div>
+</body>
+</html>

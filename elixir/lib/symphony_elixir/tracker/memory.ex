@@ -5,12 +5,16 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Tracker.Issue
 
   @calls_key {__MODULE__, :calls}
   @failures_key {__MODULE__, :failures}
 
   @type operation :: :create_comment | :update_issue_state
+
+  @impl true
+  @spec validate_config(map()) :: :ok
+  def validate_config(_tracker_settings), do: :ok
 
   @spec calls() :: [tuple()]
   def calls do
@@ -33,11 +37,7 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
-  @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_candidate_issues do
-    {:ok, issue_entries()}
-  end
-
+  @impl true
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) do
     normalized_states =
@@ -51,8 +51,9 @@ defmodule SymphonyElixir.Tracker.Memory do
      end)}
   end
 
-  @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issue_states_by_ids(issue_ids) do
+  @impl true
+  @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_ids(issue_ids) do
     wanted_ids = MapSet.new(issue_ids)
 
     {:ok,
@@ -61,6 +62,7 @@ defmodule SymphonyElixir.Tracker.Memory do
      end)}
   end
 
+  @impl true
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) do
     record_call({:create_comment, issue_id})
@@ -73,6 +75,7 @@ defmodule SymphonyElixir.Tracker.Memory do
     end
   end
 
+  @impl true
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
     record_call({:update_issue_state, issue_id, state_name})
@@ -84,6 +87,10 @@ defmodule SymphonyElixir.Tracker.Memory do
       :ok
     end
   end
+
+  @impl true
+  @spec secret_environment_names(map()) :: [String.t()]
+  def secret_environment_names(_tracker_settings), do: []
 
   defp configured_issues do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])

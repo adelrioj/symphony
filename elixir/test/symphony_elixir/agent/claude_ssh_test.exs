@@ -29,6 +29,11 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     previous_stdin_capture = System.get_env("CLAUDE_STDIN_CAPTURE")
     previous_argv_capture = System.get_env("CLAUDE_ARGV_CAPTURE")
     previous_mcp_config_capture = System.get_env("CLAUDE_MCP_CONFIG_CAPTURE")
+    previous_secret_capture = System.get_env("CLAUDE_SECRET_CAPTURE")
+    secret_name = "SYMPHONY_CLAUDE_REMOTE_SECRET"
+    secret_value = "never-put-this-in-ssh-argv"
+    previous_secret = System.get_env(secret_name)
+    secret_capture = Path.join(tmp, "secret.txt")
 
     File.mkdir_p!(workspace)
     write_fake_ssh!(tmp, ssh_trace)
@@ -40,12 +45,16 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       restore_env("CLAUDE_STDIN_CAPTURE", previous_stdin_capture)
       restore_env("CLAUDE_ARGV_CAPTURE", previous_argv_capture)
       restore_env("CLAUDE_MCP_CONFIG_CAPTURE", previous_mcp_config_capture)
+      restore_env("CLAUDE_SECRET_CAPTURE", previous_secret_capture)
+      restore_env(secret_name, previous_secret)
       File.rm_rf(tmp)
     end)
 
     System.put_env("CLAUDE_STDIN_CAPTURE", stdin_capture)
     System.put_env("CLAUDE_ARGV_CAPTURE", argv_capture)
     System.put_env("CLAUDE_MCP_CONFIG_CAPTURE", mcp_config_capture)
+    System.put_env("CLAUDE_SECRET_CAPTURE", secret_capture)
+    System.put_env(secret_name, secret_value)
     {:ok, session} = Claude.start_session(workspace, worker_host: "localhost")
 
     on_exit(fn ->
@@ -71,6 +80,9 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     refute ssh_args =~ "rm -rf"
     refute ssh_args =~ "touch #{hacked}"
     assert ssh_args =~ "--output-format stream-json"
+    assert ssh_args =~ "unset "
+    assert ssh_args =~ secret_name
+    refute ssh_args =~ secret_value
 
     args =
       argv_capture
@@ -89,6 +101,8 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     refute allowed_tools =~ "mcp__symphony__approval_prompt"
 
     mcp_config = mcp_config_capture |> File.read!() |> Jason.decode!()
+    assert get_in(mcp_config, ["mcpServers", "symphony", "env", secret_name]) == secret_value
+    assert File.read!(secret_capture) == "unset"
     remote_args = get_in(mcp_config, ["mcpServers", "symphony", "args"])
     workflow_index = Enum.find_index(remote_args, &(&1 == "--workflow"))
     remote_workflow_path = Enum.at(remote_args, workflow_index + 1)
@@ -138,6 +152,9 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       fi
       previous=$arg
     done
+    if [ -n "$CLAUDE_SECRET_CAPTURE" ]; then
+      printf %s "${SYMPHONY_CLAUDE_REMOTE_SECRET-unset}" > "$CLAUDE_SECRET_CAPTURE"
+    fi
     cat > "$CLAUDE_STDIN_CAPTURE"
     printf '%s\\n' '{"type":"system","subtype":"init","session_id":"ssh-run"}'
     printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},"result":"ssh ok"}'
@@ -149,7 +166,11 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
   defp write_claude_workflow!(command) do
     File.write!(Workflow.workflow_file_path(), """
     ---
-    tracker: {kind: memory}
+    tracker:
+      kind: linear
+      provider:
+        api_key: $SYMPHONY_CLAUDE_REMOTE_SECRET
+        project_slug: project
     codex: {turn_timeout_ms: 2000, stall_timeout_ms: 2000}
     claude:
       command: #{Jason.encode!(command)}

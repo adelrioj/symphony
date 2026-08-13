@@ -18,7 +18,8 @@ defmodule SymphonyElixir.OrchestratorTest do
       title: "Unknown backend",
       description: "Should not be claimed",
       state: "Implemented",
-      url: "https://example.org/issues/MT-BACKEND"
+      url: "https://example.org/issues/MT-BACKEND",
+      dispatchable: true
     }
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
@@ -74,7 +75,8 @@ defmodule SymphonyElixir.OrchestratorTest do
       title: "Unknown global backend",
       description: "Should not be claimed",
       state: "Implemented",
-      url: "https://example.org/issues/MT-GLOBAL"
+      url: "https://example.org/issues/MT-GLOBAL",
+      dispatchable: true
     }
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
@@ -144,7 +146,8 @@ defmodule SymphonyElixir.OrchestratorTest do
       description: "Should run the Claude backend",
       state: "Implemented",
       url: "https://example.org/issues/MT-CLAUDE",
-      labels: []
+      labels: [],
+      dispatchable: true
     }
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])

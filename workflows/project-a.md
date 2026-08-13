@@ -3,7 +3,8 @@
 # to add more projects. Blank body below => Symphony's default Codex prompt template.
 tracker:
   kind: linear
-  project_slug: "REPLACE-with-linear-project-slug-a"   # <-- this project's Linear project
+  provider:
+    project_slug: "REPLACE-with-linear-project-slug-a"   # <-- this project's Linear project
   required_labels: []
   active_states:
     - Todo

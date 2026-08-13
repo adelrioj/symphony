@@ -14,7 +14,7 @@ defmodule SymphonyElixir.MCP.LinearServer do
 
   @spec tool_specs() :: [map()]
   def tool_specs do
-    DynamicTool.tool_specs() ++ [@approval_tool]
+    dynamic_tool_binding().tool_specs ++ [@approval_tool]
   end
 
   @spec handle_request(map()) :: map() | nil
@@ -51,20 +51,22 @@ defmodule SymphonyElixir.MCP.LinearServer do
   def handle_request(%{
         "method" => "tools/call",
         "id" => id,
-        "params" => %{"name" => "linear_graphql"} = params
+        "params" => %{"name" => name} = params
       }) do
-    tool_result = DynamicTool.execute("linear_graphql", Map.get(params, "arguments", %{}), [])
+    binding = dynamic_tool_binding()
 
-    result(id, %{
-      "isError" => not Map.get(tool_result, "success", false),
-      "content" => [
-        %{"type" => "text", "text" => Map.get(tool_result, "output", "")}
-      ]
-    })
-  end
+    if Enum.any?(binding.tool_specs, &(&1["name"] == name)) do
+      tool_result = DynamicTool.execute(name, Map.get(params, "arguments", %{}), binding)
 
-  def handle_request(%{"method" => "tools/call", "id" => id, "params" => %{"name" => name}}) do
-    error(id, -32_601, "Unknown tool: #{name}")
+      result(id, %{
+        "isError" => not Map.get(tool_result, "success", false),
+        "content" => [
+          %{"type" => "text", "text" => Map.get(tool_result, "output", "")}
+        ]
+      })
+    else
+      error(id, -32_601, "Unknown tool: #{name}")
+    end
   end
 
   def handle_request(%{"id" => id}) do
@@ -72,6 +74,18 @@ defmodule SymphonyElixir.MCP.LinearServer do
   end
 
   def handle_request(_request), do: nil
+
+  defp dynamic_tool_binding do
+    case Process.get({__MODULE__, :dynamic_tool_binding}) do
+      nil ->
+        binding = DynamicTool.bind()
+        Process.put({__MODULE__, :dynamic_tool_binding}, binding)
+        binding
+
+      binding ->
+        binding
+    end
+  end
 
   defp result(id, payload), do: %{"jsonrpc" => "2.0", "id" => id, "result" => payload}
 
