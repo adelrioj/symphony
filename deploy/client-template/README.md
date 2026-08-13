@@ -31,8 +31,9 @@ yours — this directory is meant to be copied into your own private repo.
    ```
 3. Edit `workflow.md`:
    - `tracker.provider.project_slug` — the slug from your Linear project's URL, **not** the
-     project's display name. Open the project in Linear and copy the last path segment of
-     `https://linear.app/<workspace>/project/<project-name>-<id>`; it looks like
+     project's display name. Open the project in Linear and copy the `<project-name>-<id>`
+     segment of `https://linear.app/<workspace>/project/<project-name>-<id>/overview`
+     (the URL may end in `/overview` or `/issues` — do not copy that part); it looks like
      `my-project-4c1a9f3b7e02`. This is the one value whose failure is silent: for an unknown
      slug Linear simply returns zero issues, Symphony logs nothing, and the container sits idle
      forever with clean logs and a working dashboard. If no issue is ever picked up, suspect
@@ -49,24 +50,19 @@ yours — this directory is meant to be copied into your own private repo.
    ```
    Dashboard: <http://localhost:4000>
 
-## Authenticating to GHCR
+## Pulling the image
 
-The image lives in GitHub Container Registry. If `docker compose pull` (or the first
-`docker compose up -d`) fails with an authentication error or `denied`, the package is private,
-and a token on its own will not fix that — two halves are needed:
+The image lives in GitHub Container Registry at `ghcr.io/adelrioj/symphony`. The package is
+public, so `docker compose pull` and `docker compose up -d` work with no login and no token.
 
-1. **Operator side:** ask the operator to either make the package public or grant your GitHub
-   account read access to it. A private GHCR package is readable by no account until one of
-   those happens, so without it `docker login` keeps returning `denied`.
-2. **Your side:** log in once with a GitHub personal access token that has the `read:packages`
-   scope:
+If a pull ever fails with an authentication error or `denied`, the package's visibility has
+changed. A token alone cannot fix that: ask the operator to make the package public again or
+grant your GitHub account read access, then log in once with a personal access token carrying
+the `read:packages` scope:
 
-   ```bash
-   echo "$GITHUB_PAT" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-   ```
-
-If the pull succeeds without logging in, the package is public and you can skip this section
-entirely — the operator can make the package public once instead of issuing a token per client.
+```bash
+echo "$GITHUB_PAT" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+```
 
 ## Editing the pipeline
 
