@@ -30,9 +30,18 @@ yours — this directory is meant to be copied into your own private repo.
    cp .env.example .env      # then edit LINEAR_API_KEY
    ```
 3. Edit `workflow.md`:
-   - `tracker.provider.project_slug` — your Linear project
+   - `tracker.provider.project_slug` — the slug from your Linear project's URL, **not** the
+     project's display name. Open the project in Linear and copy the last path segment of
+     `https://linear.app/<workspace>/project/<project-name>-<id>`; it looks like
+     `my-project-4c1a9f3b7e02`. This is the one value whose failure is silent: for an unknown
+     slug Linear simply returns zero issues, Symphony logs nothing, and the container sits idle
+     forever with clean logs and a working dashboard. If no issue is ever picked up, suspect
+     this line first.
    - `hooks.after_create` — the clone command for your repo
-   - `tracker.active_states` / `terminal_states` — must match your Linear workflow states
+   - `tracker.active_states` / `terminal_states` — must match the workflow state names in *your*
+     Linear workspace exactly. `Merging` and `Rework` do not exist in a default workspace; a
+     state name that does not exist there is silently never matched, with the same idle-container
+     symptom as a wrong slug.
    - Keep `workspace.root: /workspaces` (it must match the volume mount in compose)
 4. Start it:
    ```bash
@@ -43,16 +52,21 @@ yours — this directory is meant to be copied into your own private repo.
 ## Authenticating to GHCR
 
 The image lives in GitHub Container Registry. If `docker compose pull` (or the first
-`docker compose up -d`) fails with an authentication error or `denied`, the package is
-private and you need to log in once:
+`docker compose up -d`) fails with an authentication error or `denied`, the package is private,
+and a token on its own will not fix that — two halves are needed:
 
-```bash
-echo "$GITHUB_PAT" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-```
+1. **Operator side:** ask the operator to either make the package public or grant your GitHub
+   account read access to it. A private GHCR package is readable by no account until one of
+   those happens, so without it `docker login` keeps returning `denied`.
+2. **Your side:** log in once with a GitHub personal access token that has the `read:packages`
+   scope:
 
-`GITHUB_PAT` is a GitHub personal access token with the `read:packages` scope. If the pull
-succeeds without logging in, the package is public and you can skip this section entirely —
-the operator can make the package public once instead of issuing a token per client.
+   ```bash
+   echo "$GITHUB_PAT" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+   ```
+
+If the pull succeeds without logging in, the package is public and you can skip this section
+entirely — the operator can make the package public once instead of issuing a token per client.
 
 ## Editing the pipeline
 

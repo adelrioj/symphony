@@ -18,7 +18,10 @@ services:
       LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY in your shell}
     restart: unless-stopped
     volumes:
-      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro   # Codex login from the host
+      # host Codex login; must already exist as a *file*: if that path is missing, Docker creates
+      # an empty directory there, Symphony still boots but every agent dispatch fails, and a later
+      # real `codex login` breaks too. Fix: docker compose down, rmdir the path, codex login.
+      - ${HOME:?run docker compose from a shell where HOME is set}/.codex/auth.json:/root/.codex/auth.json:ro
       - ./workflows:/config:ro
       - example-workspaces:/workspaces
       - example-logs:/app/elixir/log

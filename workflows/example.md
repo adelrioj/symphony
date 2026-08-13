@@ -5,7 +5,7 @@
 tracker:
   kind: linear
   provider:
-    project_slug: "REPLACE-with-linear-project-slug-a"   # <-- this project's Linear project
+    project_slug: "REPLACE-with-your-linear-project-slug"   # <-- this project's Linear project
   required_labels: []
   active_states:
     - Todo
@@ -23,12 +23,16 @@ polling:
 server:
   host: "0.0.0.0"              # <-- bind all interfaces inside the container; a loopback bind
                                #     is unreachable from the published port. Host-side exposure
-                               #     is controlled by the port mapping in compose.
+                               #     is controlled by the port mapping in compose. The 0.0.0.0
+                               #     value is for the container only: when you run this workflow
+                               #     from source, set 127.0.0.1: there is no --host flag, so
+                               #     0.0.0.0 publishes the unauthenticated dashboard and JSON API
+                               #     on every interface of your machine.
 workspace:
   root: /workspaces            # <-- container volume; do NOT change (must match compose)
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/your-org/your-repo-a .   # <-- this project's repo
+    git clone --depth 1 https://github.com/your-org/your-repo .   # <-- this project's repo
 agent:
   max_concurrent_agents: 5
   max_turns: 20

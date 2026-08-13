@@ -22,10 +22,10 @@
 
 ### Task 1: Strip client workflows and repoint the root compose file at local dev
 
-Removes the actual leak (`workflows/wmp-shipit.md`) and collapses the two-project compose demo into a single local-dev service using a directory mount.
+Removes the actual leak (the one real client pipeline, `workflows/<client-workflow>.md`) and collapses the two-project compose demo into a single local-dev service using a directory mount.
 
 **Files:**
-- Delete: `workflows/wmp-shipit.md`
+- Delete: `workflows/<client-workflow>.md` — the real client pipeline; substitute its actual filename when running the commands below
 - Delete: `workflows/project-b.md`
 - Rename: `workflows/project-a.md` → `workflows/example.md`
 - Modify: `docker-compose.yml` (full rewrite, currently 46 lines)
@@ -37,18 +37,20 @@ Removes the actual leak (`workflows/wmp-shipit.md`) and collapses the two-projec
 
 - [ ] **Step 1: Prove nothing in code or tests depends on the files being removed**
 
-Run:
+Run (substitute the real client workflow filename for the `<client-workflow>` placeholder):
 ```bash
-grep -rn "wmp-shipit\|project-a\|project-b\|workflows/" elixir/ docker/ .github/ --include="*.ex" --include="*.exs" --include="*.yml" --include="*.yaml" --include="Dockerfile"
+grep -rn "<client-workflow>\|project-a\|project-b\|workflows/" elixir/ docker/ .github/ --include="*.ex" --include="*.exs" --include="*.yml" --include="*.yaml" --include="Dockerfile"
 ```
 Expected: matches only in `.github/workflows/*.yml` referring to GitHub's own `.github/workflows` directory, and `elixir/test/symphony_elixir/live_e2e_test.exs` referring to its own private `test/support/live_e2e_docker/docker-compose.yml`. **No match may point at the repo-root `workflows/` directory.** If one does, stop — the plan's "no Elixir changes" constraint is wrong and needs escalation.
 
 - [ ] **Step 2: Remove the client workflow and the duplicate placeholder**
 
 ```bash
-git rm workflows/wmp-shipit.md workflows/project-b.md
+git rm workflows/<client-workflow>.md workflows/project-b.md
 git mv workflows/project-a.md workflows/example.md
 ```
+
+(Placeholder again: `<client-workflow>.md` is the real client's pipeline file. This repo is readable by every client, so the file's real name — which identifies the client — is not written down here.)
 
 - [ ] **Step 3: Retitle the example workflow's header comment**
 
@@ -110,11 +112,11 @@ Expected: `COMPOSE_OK`. A YAML or interpolation error prints a `services.symphon
 
 - [ ] **Step 6: Confirm no client data remains in the working tree**
 
-Run:
+Run (substitute the real client org, Linear project slug, and workflow filename for the placeholders — they are deliberately not spelled out in this repo, which every client can read):
 ```bash
-grep -rn "wmp-shipit\|watsonandmonday\|symphony-workflow-2f7600b452dc" . --exclude-dir=.git --exclude-dir=docs
+grep -rn "<client-workflow>\|<client-org>\|<client-project-slug>" . --exclude-dir=.git --exclude-dir=.superpowers
 ```
-Expected: no output. (`docs/` is excluded on purpose: the design spec and this plan discuss the removal by name, and historical plan docs are out of scope per the spec's acceptance criteria.)
+Expected: no output. (`.superpowers/` is excluded on purpose: it holds local review artifacts — stored diffs of the deleted file — and is git-ignored, so it is never part of the tree clients receive.)
 
 - [ ] **Step 7: Commit**
 

@@ -102,6 +102,9 @@ section does not repeat them.
 The repo-root `docker-compose.yml` is local dev only: it builds the image from source and runs
 the sanitized `workflows/example.md` in a single `symphony-example` service.
 
+All commands below run **from the repo root** — `cd ..` if you followed the `## Run` section
+above, which leaves you in `symphony/elixir`.
+
 1. **Log in to Codex once** on the host — the container mounts `~/.codex/auth.json` read-only:
    ```bash
    codex login
@@ -138,8 +141,10 @@ Notes:
   network interface, not to its loopback, so a container-side loopback bind would be
   unreachable. Do not widen the host side.
 - **Private repos:** `after_create` clones over HTTPS. For a private repo, forward a token into
-  the container (add `env_file: .env` to the service so Codex inherits it via
-  `shell_environment_policy.inherit=all`) and use it in the clone URL.
+  the container (add `env_file: .env` to the service) and use it in the clone URL. Symphony runs
+  the hook itself through the container's own shell (`sh -lc`), which inherits the container
+  environment, so a token in `.env` is expanded in the clone URL. Codex is not involved in the
+  clone.
 - **The `claude` backend** is not installed in the image; it ships the Codex CLI only. Add the
   `claude` CLI and its auth if you route states to it via `agent.backend_by_state`.
 
@@ -175,6 +180,12 @@ Pass a custom workflow file path to `./bin/symphony` when starting the service:
 ```
 
 If no path is passed, Symphony defaults to `./WORKFLOW.md`.
+
+Required flag:
+
+- `--i-understand-that-this-will-be-running-without-the-usual-guardrails` — daemon mode refuses to
+  start without it; it acknowledges that Codex runs with no guardrails. Not required for
+  `--linear-mcp`, which serves the Linear MCP tools instead of starting the daemon.
 
 Optional flags:
 

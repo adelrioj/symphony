@@ -7,8 +7,15 @@
 tracker:
   kind: linear
   provider:
-    project_slug: "REPLACE-with-your-linear-project-slug"   # <-- this project's Linear project
+    # <-- the slug from your Linear project's URL, NOT its display name: the last path segment
+    #     of https://linear.app/<workspace>/project/<project-name>-<id>, e.g.
+    #     my-project-4c1a9f3b7e02. A wrong value fails silently: Linear returns zero issues,
+    #     nothing is logged, and the container sits idle forever with a healthy dashboard.
+    project_slug: "REPLACE-with-your-linear-project-slug"
   required_labels: []
+  # active_states / terminal_states must match the workflow state names in YOUR Linear workspace
+  # exactly. Merging and Rework do not exist in a default workspace, and an unknown state name is
+  # silently never matched — same idle-container symptom as a wrong project slug.
   active_states:
     - Todo
     - In Progress

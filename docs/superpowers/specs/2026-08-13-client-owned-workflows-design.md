@@ -8,7 +8,7 @@
 Symphony is deployed by multiple independent clients, each self-hosting one container per
 project. Every client's workflow file — `tracker` scope, Linear state UUIDs, private repo
 clone URLs, pipeline prompts — currently lives in this product repo under `workflows/`
-(`wmp-shipit.md` is a real client pipeline). Clients have access to this repo, so every
+(one of those files is a real client pipeline, named after the client). Clients have access to this repo, so every
 client can read every other client's workflow. Deployment (`docker-compose.yml`) and CI
 docs also assume workflows live in-repo, which forces new clients to clone the product
 repo just to run the image.
@@ -36,14 +36,19 @@ repo-layout and distribution problem.
 
 ### 1. Product repo sheds client content
 
-- Delete `workflows/wmp-shipit.md` (real client data) and `workflows/project-b.md`.
+- Delete the real client's workflow file (client-named, real client data) and `workflows/project-b.md`.
 - Rename `workflows/project-a.md` → `workflows/example.md`; it is already a sanitized
   placeholder template. It remains the only file in `workflows/` and doubles as the
   local-dev workflow for the root compose file.
-- The WMP file's Linear state UUIDs and repo name remain in git history. They are opaque
-  identifiers, unusable without a Linear API key or GitHub credentials, so no history
-  rewrite. Decision recorded here; if that risk posture changes, `git filter-repo` is the
-  tool, done by the operator outside this plan.
+- The deleted file's contents remain in git history, and that history is not innocuous: alongside
+  the Linear state UUIDs it carries the client's GitHub org and repo name in the clone URL, which
+  identifies the client rather than being an opaque identifier. Leaving history alone is therefore
+  a deliberate trade-off, not a claim that the contents are harmless: this repo is a fork that
+  tracks a live upstream, so a `git filter-repo` rewrite invalidates every existing clone and open
+  branch and complicates every future upstream merge — a cost judged higher than the residual
+  exposure, which is limited to readers who already have access to this repo. Decision recorded
+  here; if that risk posture changes, `git filter-repo` is the tool, done by the operator outside
+  this plan.
 
 ### 2. Published image on GHCR
 

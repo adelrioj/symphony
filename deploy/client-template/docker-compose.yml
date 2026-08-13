@@ -20,7 +20,8 @@ services:
       LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY in .env}
     env_file:
       - path: .env          # every variable in .env reaches the container (e.g. a clone token)
-        required: false     # optional so `docker compose config` works before you create .env
+        required: false     # .env is optional to Compose only — the ${LINEAR_API_KEY:?} guard
+                            # above is what enforces the key, and it aborts first if .env is absent
     restart: unless-stopped
     volumes:
       # host Codex login; must already exist as a *file* or Docker creates a directory there
