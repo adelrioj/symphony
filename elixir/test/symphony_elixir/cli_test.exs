@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.CLITest do
-  use ExUnit.Case, async: false
+  use SymphonyElixir.TestSupport
 
   require Logger
 

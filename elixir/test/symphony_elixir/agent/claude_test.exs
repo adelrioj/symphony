@@ -16,6 +16,10 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     end)
 
     assert File.exists?(session.mcp_config_path)
+    assert File.exists?(session.workflow_snapshot_path)
+    refute path_inside?(session.workflow_snapshot_path, workspace)
+    assert {:ok, %File.Stat{mode: workflow_mode}} = File.stat(session.workflow_snapshot_path)
+    assert Bitwise.band(workflow_mode, 0o777) == 0o600
     refute path_inside?(session.mcp_config_path, workspace)
     assert {:ok, %File.Stat{mode: mode}} = File.stat(session.mcp_config_path)
     assert Bitwise.band(mode, 0o777) == 0o600
@@ -32,10 +36,86 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     args = get_in(config, ["mcpServers", "symphony", "args"])
     assert "--linear-mcp" in args
     assert "--workflow" in args
-    assert Workflow.current_path() in args
+    assert session.workflow_snapshot_path in args
 
     assert :ok = Claude.stop_session(session)
     refute File.exists?(session.mcp_config_path)
+    refute File.exists?(session.workflow_snapshot_path)
+  end
+
+  test "owner death removes the private Claude session directory without stop_session" do
+    workspace = Path.join(System.tmp_dir!(), "claude-owner-workspace-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workspace)
+    parent = self()
+
+    owner =
+      spawn(fn ->
+        {:ok, session} = Claude.start_session(workspace, [])
+        send(parent, {:owned_session, session})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:owned_session, session}
+    assert File.dir?(session.session_dir)
+    assert File.exists?(session.mcp_config_path)
+    assert File.exists?(session.workflow_snapshot_path)
+    assert {:ok, %File.Stat{mode: mode}} = File.stat(session.session_dir)
+    assert Bitwise.band(mode, 0o777) == 0o700
+
+    Process.exit(owner, :kill)
+
+    assert_eventually(fn -> not File.exists?(session.session_dir) end)
+    File.rm_rf(workspace)
+  end
+
+  test "remote turn reports malformed private MCP JSON without leaking its contents" do
+    {:ok, session} = Claude.start_session(File.cwd!(), worker_host: "remote")
+    leaked_token = "never-leak-malformed-token"
+    File.write!(session.mcp_config_path, "{not-json #{leaked_token}")
+
+    result = Claude.run_turn(session, "prompt", %{}, [])
+
+    assert {:error, {:claude_mcp_config_decode, path}} = result
+    assert path == session.mcp_config_path
+    refute inspect(result) =~ leaked_token
+    refute inspect(result) =~ "{not-json"
+    assert :ok = Claude.stop_session(session)
+  end
+
+  test "non-UTF-8 tracker credentials return name-only session errors" do
+    secret_name = "LINEAR_API_KEY"
+    secret_value = <<255, 254, 253, 1>>
+
+    result =
+      try do
+        Claude.start_session(File.cwd!(),
+          worker_host: "remote",
+          env_reader: fn
+            ^secret_name -> secret_value
+            _name -> nil
+          end
+        )
+      rescue
+        error -> {:raised, Exception.message(error)}
+      end
+
+    refute inspect(result) =~ inspect(secret_value)
+    assert {:error, {:invalid_tracker_secret_encoding, [^secret_name]}} = result
+
+    {:ok, session} = Claude.start_session(File.cwd!(), worker_host: "remote")
+    File.write!(session.mcp_config_path, secret_value)
+
+    remote_result =
+      try do
+        Claude.run_turn(session, "prompt", %{}, [])
+      rescue
+        error -> {:raised, Exception.message(error)}
+      end
+
+    assert {:error, {:claude_mcp_config_decode, path}} = remote_result
+    assert path == session.mcp_config_path
+    refute inspect(remote_result) =~ inspect(secret_value)
+    assert :ok = Claude.stop_session(session)
   end
 
   test "run_turn launches with argv, real mcp config path, and prompt through stdin" do
@@ -120,7 +200,10 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
       _ = Claude.stop_session(session)
     end)
 
-    assert session.mcp_config_path |> Path.dirname() |> String.ends_with?(".symphony-claude-mcp")
+    parent_dir = session.session_dir |> Path.dirname()
+    assert String.ends_with?(parent_dir, ".symphony-claude-mcp")
+    assert {:ok, %File.Stat{mode: parent_mode}} = File.stat(parent_dir)
+    assert Bitwise.band(parent_mode, 0o777) == 0o700
     assert File.exists?(session.mcp_config_path)
   end
 
@@ -128,16 +211,29 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     assert {:error, {:mcp_config_dir, %FunctionClauseError{}}} = Claude.mcp_config_dir(:bad_workspace)
   end
 
-  test "default_mcp_command/1 uses script name or executable fallback" do
-    assert Claude.default_mcp_command(~c"/tmp/symphony") == "/tmp/symphony"
-    assert Claude.default_mcp_command(~c"./bin/symphony") == Path.expand("./bin/symphony")
-
-    sh_path = System.find_executable("sh")
-    assert Claude.default_mcp_command(~c"sh") == sh_path
+  test "default_mcp_command/1 accepts only an existing executable regular file" do
+    executable = System.find_executable("sh")
+    assert Claude.default_mcp_command(String.to_charlist(executable)) == executable
 
     missing = "definitely_missing_symphony_escript_#{System.unique_integer([:positive])}"
-    assert Claude.default_mcp_command(to_charlist(missing)) == Path.expand(missing)
-    assert Claude.default_mcp_command([]) in [System.find_executable("symphony"), "symphony"]
+    assert Claude.default_mcp_command(String.to_charlist(missing)) in [System.find_executable("symphony"), "symphony"]
+
+    assert Claude.default_mcp_command(~c"--i-understand-that-this-will-be-running-without-the-usual-guardrails") in [
+             System.find_executable("symphony"),
+             "symphony"
+           ]
+  end
+
+  test "default_mcp_command bypasses unusable escript argv under Burrito" do
+    previous_burrito = System.get_env("__BURRITO")
+    on_exit(fn -> restore_env("__BURRITO", previous_burrito) end)
+    System.put_env("__BURRITO", "1")
+
+    fallback = System.find_executable("symphony") || "symphony"
+
+    assert Claude.default_mcp_command() == fallback
+    refute Claude.default_mcp_command() =~ "--i-understand"
+    refute Claude.default_mcp_command() =~ "WORKFLOW.md"
   end
 
   test "close_port/1 tolerates live and already-closed ports" do
@@ -246,13 +342,111 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     assert {:ok, %Result{status: :done, summary: "direct ok"}} = Claude.drive_port(script, [], workspace, nil)
   end
 
+  test "local direct and redirected ports scrub adapter-declared tracker secrets" do
+    tmp = Path.join(System.tmp_dir!(), "symphony-claude-secret-test-#{System.unique_integer([:positive])}")
+    workspace = Path.join(tmp, "workspace")
+    script = Path.join(tmp, "fake_claude")
+    prompt_path = Path.join(tmp, "prompt")
+    secret_name = "SYMPHONY_CLAUDE_TEST_SECRET"
+    previous_secret = System.get_env(secret_name)
+
+    File.mkdir_p!(workspace)
+    File.write!(prompt_path, "prompt")
+
+    File.write!(script, """
+    #!/bin/sh
+    if [ -n "$#{secret_name}" ]; then summary=leaked; else summary=scrubbed; fi
+    printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"result":"'"$summary"'"}'
+    """)
+
+    File.chmod!(script, 0o700)
+    System.put_env(secret_name, "never-inherit-this")
+
+    on_exit(fn ->
+      restore_env(secret_name, previous_secret)
+      File.rm_rf(tmp)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "$#{secret_name}",
+      claude_command: script
+    )
+
+    assert {:ok, %Result{summary: "scrubbed"}} = Claude.drive_port(script, [], workspace, nil)
+
+    assert {:ok, %Result{summary: "scrubbed"}} =
+             Claude.drive_port(script, [], workspace, nil, prompt_path)
+  end
+
+  test "Claude session snapshots tracker tools, workflow, and MCP secret env until cleanup" do
+    tmp = Path.join(System.tmp_dir!(), "symphony-claude-snapshot-test-#{System.unique_integer([:positive])}")
+    workspace = Path.join(tmp, "workspace")
+    script = Path.join(tmp, "fake_claude")
+    argv_capture = Path.join(tmp, "argv")
+    secret_name = "SYMPHONY_CLAUDE_SNAPSHOT_SECRET"
+    secret_value = "snapshot-secret-value"
+    previous_secret = System.get_env(secret_name)
+    previous_capture = System.get_env("CLAUDE_ARGV_CAPTURE")
+
+    File.mkdir_p!(workspace)
+
+    write_fake_claude_lines!(script, [
+      %{"type" => "result", "subtype" => "success", "is_error" => false, "result" => "ok"}
+    ])
+
+    System.put_env(secret_name, secret_value)
+    System.put_env("CLAUDE_ARGV_CAPTURE", argv_capture)
+
+    on_exit(fn ->
+      restore_env(secret_name, previous_secret)
+      restore_env("CLAUDE_ARGV_CAPTURE", previous_capture)
+      File.rm_rf(tmp)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "$#{secret_name}",
+      claude_command: script
+    )
+
+    {:ok, session} = Claude.start_session(workspace, [])
+    workflow_snapshot = File.read!(session.workflow_snapshot_path)
+    mcp_config = session.mcp_config_path |> File.read!() |> Jason.decode!()
+    server = get_in(mcp_config, ["mcpServers", "symphony"])
+
+    assert server["env"][secret_name] == secret_value
+    assert Enum.member?(server["args"], session.workflow_snapshot_path)
+    refute Map.has_key?(session, :workflow_snapshot)
+    refute Map.has_key?(session, :tracker_env)
+    refute Map.has_key?(session, :dynamic_tool_binding)
+    refute inspect(session) =~ secret_value
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", claude_command: script)
+
+    assert {:ok, %Result{status: :done}} = Claude.run_turn(session, "prompt", %{}, [])
+
+    args = argv_capture |> File.read!() |> String.split("\n", trim: true)
+    allowed_tools = Enum.at(args, Enum.find_index(args, &(&1 == "--allowedTools")) + 1)
+    assert allowed_tools =~ "mcp__symphony__linear_graphql"
+    assert File.read!(session.workflow_snapshot_path) == workflow_snapshot
+
+    assert session.tool_specs |> Enum.map(& &1["name"]) |> Enum.member?("linear_graphql")
+
+    assert :ok = Claude.stop_session(session)
+    refute File.exists?(session.mcp_config_path)
+    refute File.exists?(session.workflow_snapshot_path)
+  end
+
   test "drive_port/5 reports redirected port startup errors" do
     assert {:error, {:claude_port, _error}} = Claude.drive_port("/bin/true", [], <<0>>, nil, "/tmp/prompt")
   end
 
   test "run_turn reports ssh launch errors" do
-    assert {:error, {:claude_ssh_port, %FunctionClauseError{}}} =
-             Claude.run_turn(%{workspace: nil, worker_host: "remote", mcp_config_path: "/tmp/mcp"}, "prompt", %{}, [])
+    {:ok, session} = Claude.start_session(File.cwd!(), worker_host: "remote")
+
+    assert {:error, {:claude_ssh_port, _error}} =
+             Claude.run_turn(%{session | workflow_snapshot_path: nil}, "prompt", %{}, [])
+
+    assert :ok = Claude.stop_session(session)
   end
 
   test "run_turn handles timeout and split long stream lines" do
@@ -504,6 +698,19 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
     :ok
   end
+
+  defp assert_eventually(predicate, attempts \\ 100)
+
+  defp assert_eventually(predicate, attempts) when attempts > 0 do
+    if predicate.() do
+      :ok
+    else
+      Process.sleep(10)
+      assert_eventually(predicate, attempts - 1)
+    end
+  end
+
+  defp assert_eventually(_predicate, 0), do: flunk("condition not met in time")
 
   defp yaml_json(nil), do: "null"
   defp yaml_json(value), do: Jason.encode!(value)

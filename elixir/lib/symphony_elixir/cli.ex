@@ -29,7 +29,13 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    case evaluate_mode(args) do
+    main(args, fn -> Application.ensure_all_started(:symphony_elixir) end)
+  end
+
+  @doc false
+  @spec main([String.t()], (-> ensure_started_result())) :: no_return()
+  def main(args, ensure_all_started) do
+    case evaluate_mode(args, runtime_deps(ensure_all_started)) do
       {:ok, :daemon} ->
         wait_for_shutdown()
 
@@ -51,7 +57,7 @@ defmodule SymphonyElixir.CLI do
   end
 
   @spec evaluate_mode([String.t()], deps()) :: {:ok, :daemon | :linear_mcp} | {:error, String.t()}
-  defp evaluate_mode(args, deps \\ runtime_deps()) do
+  defp evaluate_mode(args, deps) do
     case OptionParser.parse(args, strict: @switches) do
       {opts, positional, []} ->
         opts
@@ -96,13 +102,13 @@ defmodule SymphonyElixir.CLI do
   end
 
   @spec runtime_deps() :: deps()
-  defp runtime_deps do
+  defp runtime_deps(ensure_all_started \\ fn -> Application.ensure_all_started(:symphony_elixir) end) do
     %{
       file_regular?: &File.regular?/1,
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
-      ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end,
+      ensure_all_started: ensure_all_started,
       ensure_linear_mcp_started: fn -> Application.ensure_all_started(:req) end,
       configure_linear_mcp_logger: &configure_linear_mcp_logger/0,
       serve_linear_mcp: &serve_linear_mcp/0

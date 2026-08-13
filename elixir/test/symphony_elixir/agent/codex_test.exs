@@ -3,6 +3,7 @@ defmodule SymphonyElixir.Agent.CodexTest do
 
   alias SymphonyElixir.Agent.Codex
   alias SymphonyElixir.Agent.Result
+  alias SymphonyElixir.Codex.DynamicTool
 
   test "to_result/1 maps a codex turn map with usage to a done Result" do
     turn = %{
@@ -68,7 +69,8 @@ defmodule SymphonyElixir.Agent.CodexTest do
       auto_approve_requests: true,
       turn_sandbox_policy: %{"type" => "workspaceWrite"},
       thread_id: "thread-1",
-      workspace: tmp
+      workspace: tmp,
+      dynamic_tool_binding: DynamicTool.bind()
     }
 
     issue = %{id: "issue-id", identifier: "ISS-1", title: "Broken turn"}
