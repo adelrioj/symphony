@@ -1,0 +1,31 @@
+# One Symphony container for one project (one Linear project + one repo).
+#
+#   cp .env.example .env     # then edit LINEAR_API_KEY
+#   docker compose up -d
+#
+# Upgrade:  docker compose pull && docker compose up -d
+#
+# This directory is mounted read-only at /config as a *directory*, not a single file:
+# a single-file bind mount pins the inode, so an editor's rename-replace on the host stops
+# propagating into the container and live reload of workflow.md dies.
+# Note: .env is therefore visible inside the container at /config/.env — no new exposure,
+# the same key is already passed in as an environment variable.
+
+services:
+  symphony:
+    image: ghcr.io/adelrioj/symphony:latest   # pin a version tag (e.g. :0.0.2) for production
+    environment:
+      LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY in .env}
+    restart: unless-stopped
+    volumes:
+      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro   # host Codex login
+      - .:/config:ro
+      - workspaces:/workspaces
+      - logs:/app/elixir/log
+    command: ["/config/workflow.md", "--port", "4000", "--logs-root", "/app/elixir/log"]
+    ports:
+      - "4000:4000"   # dashboard + JSON API -> http://localhost:4000
+
+volumes:
+  workspaces:
+  logs:
