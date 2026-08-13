@@ -192,16 +192,26 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
   end
 
   test "start_session falls back outside the workspace when system tmp is inside the workspace" do
-    workspace = System.tmp_dir!()
+    root = Path.join(System.tmp_dir!(), "symphony-claude-tmp-root-#{System.unique_integer([:positive])}")
+    workspace = Path.join(root, "workspace")
+    inner_tmp = Path.join(workspace, "tmp")
+    File.mkdir_p!(inner_tmp)
+    previous_tmpdir = System.get_env("TMPDIR")
+
+    on_exit(fn ->
+      restore_env("TMPDIR", previous_tmpdir)
+      File.rm_rf(root)
+    end)
+
+    System.put_env("TMPDIR", inner_tmp)
 
     {:ok, session} = Claude.start_session(workspace, [])
 
-    on_exit(fn ->
-      _ = Claude.stop_session(session)
-    end)
+    on_exit(fn -> _ = Claude.stop_session(session) end)
 
-    parent_dir = session.session_dir |> Path.dirname()
-    assert String.ends_with?(parent_dir, ".symphony-claude-mcp")
+    refute path_inside?(session.session_dir, workspace)
+    parent_dir = Path.dirname(session.session_dir)
+    assert parent_dir == Path.join(root, ".symphony-claude-mcp")
     assert {:ok, %File.Stat{mode: parent_mode}} = File.stat(parent_dir)
     assert Bitwise.band(parent_mode, 0o777) == 0o700
     assert File.exists?(session.mcp_config_path)
