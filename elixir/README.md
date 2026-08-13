@@ -105,7 +105,8 @@ the sanitized `workflows/example.md` in a single `symphony-example` service.
 All commands below run **from the repo root** — `cd ..` if you followed the `## Run` section
 above, which leaves you in `symphony/elixir`.
 
-1. **Log in to Codex once** on the host — the container mounts `~/.codex/auth.json` read-only:
+1. **Log in to Codex once** on the host — the container mounts the `~/.codex` directory
+   read-write, so it shares this login and can refresh the token itself:
    ```bash
    codex login
    ```

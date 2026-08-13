@@ -24,8 +24,11 @@ services:
                             # above is what enforces the key, and it aborts first if .env is absent
     restart: unless-stopped
     volumes:
-      # host Codex login; must already exist as a *file* or Docker creates a directory there
-      - ${HOME:?run docker compose from a shell where HOME is set}/.codex/auth.json:/root/.codex/auth.json:ro
+      # Host Codex login, mounted as a DIRECTORY, not as auth.json directly. The CLI rewrites
+      # auth.json on token refresh, and a single-file bind pins the container to the inode that
+      # existed at start — after the next refresh it reads a stale token forever while the
+      # dashboard still looks healthy. Read-write so the container can refresh on its own.
+      - ${HOME:?run docker compose from a shell where HOME is set}/.codex:/root/.codex
       - .:/config:ro
       - workspaces:/workspaces
       - logs:/app/elixir/log
