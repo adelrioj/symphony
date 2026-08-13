@@ -47,13 +47,13 @@ make e2e        # SYMPHONY_RUN_LIVE_E2E=1; targets test/symphony_elixir/live_e2e
 ## Running the service
 
 ```bash
-./bin/symphony ./WORKFLOW.md          # defaults to ./WORKFLOW.md if no path given
-./bin/symphony ./WORKFLOW.md --port 4000   # also start the Phoenix dashboard + JSON API
+./bin/symphony ./WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails          # defaults to ./WORKFLOW.md if no path given
+./bin/symphony ./WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails --port 4000   # also start the Phoenix dashboard + JSON API
 ```
 
 `LINEAR_API_KEY` must be set for the `linear` tracker. `--logs-root` overrides the log directory (default `./log`).
 
-One instance drives one project (a single `tracker.project_slug` + one repo). To run several projects, run one container per project via the repo-root Docker Compose setup (`docker/Dockerfile`, `docker-compose.yml`, `workflows/*.md`, `.env.example`) — one service per `WORKFLOW.md`, each with its own port and workspace/log volumes. OrbStack-compatible (no platform pins). Steps are in `elixir/README.md` ("Run several projects"). The image pins its toolchain from `elixir/mise.toml`; keep those two in sync.
+One instance drives one project (a single `tracker.project_slug` + one repo). Client deployments are self-hosted from their own private repos, seeded by copying `deploy/client-template/`, which pulls the published image `ghcr.io/adelrioj/symphony` (built and pushed by `.github/workflows/docker-publish.yml`). This repo keeps only local dev: `docker/Dockerfile`, `docker-compose.yml` (one `symphony-example` service), `.env.example`, and the single sanitized `workflows/example.md`. Both compose files mount the workflow file's directory read-only at `/config` — never the single file, or an editor's rename-replace on the host kills hot reload — pass `--i-understand-that-this-will-be-running-without-the-usual-guardrails` (the CLI refuses to start without it), and publish on `127.0.0.1:4000` only, since the dashboard and JSON API have no authentication; the workflow files set `server.host: 0.0.0.0` so the container binds the interface Docker forwards to. Steps are in `elixir/README.md` ("Run in Docker") and `deploy/client-template/README.md`. The image pins its toolchain from `elixir/mise.toml`; keep those two in sync.
 
 ## Architecture
 

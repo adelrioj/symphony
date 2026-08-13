@@ -1,3 +1,7 @@
 
 # local secrets for docker compose
 .env
+
+# local agent/review artifacts: stored diffs of deleted client workflows live here, so this
+# must never be committed to a repo every client can read
+.superpowers/

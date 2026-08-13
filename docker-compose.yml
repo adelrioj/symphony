@@ -1,46 +1,43 @@
-# Run several Symphony projects, one container each. OrbStack-compatible: no platform pins
-# (native arm64 on Apple Silicon), standard bridge networking, standard bind mounts.
+# Local development only: one Symphony container built from source, running the sanitized
+# example workflow. Client deployments do NOT belong here — each client owns a private repo
+# seeded from deploy/client-template/, which pulls the published GHCR image.
 #
 #   export LINEAR_API_KEY=...
 #   docker compose up --build          # or: orb start, then the same command
 #
-# Add a project: copy a service block, point it at a new workflows/<name>.md, give it a
-# unique host port and its own named volumes.
-
-x-symphony: &symphony
-  build:
-    context: .
-    dockerfile: docker/Dockerfile
-  image: symphony:latest
-  environment:
-    LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY in your shell}
-  restart: unless-stopped
+# The workflow is mounted as a directory, not a single file: a single-file bind mount pins
+# the inode, so an editor's rename-replace on the host stops propagating and hot reload dies.
 
 services:
-  project-a:
-    <<: *symphony
+  symphony-example:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: symphony:latest
+    environment:
+      LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY in your shell}
+    restart: unless-stopped
     volumes:
-      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro   # Codex login, shared across projects
-      - ./workflows/project-a.md:/workflow.md:ro
-      - project-a-workspaces:/workspaces
-      - project-a-logs:/app/elixir/log
-    command: ["/workflow.md", "--port", "4000", "--logs-root", "/app/elixir/log"]
+      # host Codex login; must already exist as a *file*: if that path is missing, Docker creates
+      # an empty directory there, Symphony still boots but every agent dispatch fails, and a later
+      # real `codex login` breaks too. Fix: docker compose down, rmdir the path, codex login.
+      - ${HOME:?run docker compose from a shell where HOME is set}/.codex/auth.json:/root/.codex/auth.json:ro
+      - ./workflows:/config:ro
+      - example-workspaces:/workspaces
+      - example-logs:/app/elixir/log
+    # Symphony requires the acknowledgement flag below to run unattended.
+    command:
+      - /config/example.md
+      - --i-understand-that-this-will-be-running-without-the-usual-guardrails
+      - --port
+      - "4000"
+      - --logs-root
+      - /app/elixir/log
     ports:
-      - "4000:4000"   # dashboard + JSON API -> http://localhost:4000
-
-  project-b:
-    <<: *symphony
-    volumes:
-      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
-      - ./workflows/project-b.md:/workflow.md:ro
-      - project-b-workspaces:/workspaces
-      - project-b-logs:/app/elixir/log
-    command: ["/workflow.md", "--port", "4000", "--logs-root", "/app/elixir/log"]
-    ports:
-      - "4001:4000"   # -> http://localhost:4001
+      # loopback only: the dashboard and JSON API have no authentication, and the container binds
+      # all of its own interfaces (server.host in the workflow file). Keep exposure on the host.
+      - "127.0.0.1:4000:4000"   # dashboard + JSON API -> http://localhost:4000
 
 volumes:
-  project-a-workspaces:
-  project-a-logs:
-  project-b-workspaces:
-  project-b-logs:
+  example-workspaces:
+  example-logs:

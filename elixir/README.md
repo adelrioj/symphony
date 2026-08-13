@@ -77,21 +77,35 @@ mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md
+mise exec -- ./bin/symphony ./WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
-## Run several projects (Docker / OrbStack)
+## Run in Docker (OrbStack-compatible)
 
-One Symphony instance is scoped to a **single** project: one
-`tracker.provider.project_slug` and one repo. To orchestrate several projects, run one container per
-project. The Docker setup at the repo root does this and works as-is with
-[OrbStack](https://orbstack.dev/) (native arm64, no platform pins) or Docker Desktop.
+One Symphony instance is scoped to a **single** project: one `tracker.provider.project_slug`
+and one repo. To orchestrate several projects, run one container per project. Everything below
+works as-is with [OrbStack](https://orbstack.dev/) (native arm64, no platform pins) or Docker
+Desktop.
 
-Files (repo root): `docker/Dockerfile`, `docker-compose.yml`, `workflows/*.md`, `.env.example`.
+### Deploying a project
 
-**Start new instances, step by step:**
+Deployments live in their own private repos, not in this one. Copy
+[`deploy/client-template/`](../deploy/client-template) into a new repo and follow the README in
+it: it pulls the published image `ghcr.io/adelrioj/symphony` (built and pushed by
+[`.github/workflows/docker-publish.yml`](../.github/workflows/docker-publish.yml)), mounts that
+repo's own `workflow.md`, and needs no clone of this repo. Prerequisites, hot reload,
+private-repo cloning, GHCR authentication and the security model are documented there; this
+section does not repeat them.
 
-1. **Log in to Codex once** on the host — the containers mount `~/.codex/auth.json` read-only:
+### Local development
+
+The repo-root `docker-compose.yml` is local dev only: it builds the image from source and runs
+the sanitized `workflows/example.md` in a single `symphony-example` service.
+
+All commands below run **from the repo root** — `cd ..` if you followed the `## Run` section
+above, which leaves you in `symphony/elixir`.
+
+1. **Log in to Codex once** on the host — the container mounts `~/.codex/auth.json` read-only:
    ```bash
    codex login
    ```
@@ -99,22 +113,38 @@ Files (repo root): `docker/Dockerfile`, `docker-compose.yml`, `workflows/*.md`, 
    ```bash
    cp .env.example .env      # then edit LINEAR_API_KEY
    ```
-3. **Configure each project's workflow** in `workflows/`. `project-a.md` and `project-b.md` are
-   templates — edit `tracker.provider.project_slug` and the `hooks.after_create` clone URL. Keep
-   `workspace.root: /workspaces` (it must match the volume mount in compose).
-4. **Add a project** by copying a service block in `docker-compose.yml`: give it a unique host
-   port, point `./workflows/<name>.md` at its workflow, and add its own named volumes.
-5. **Launch:**
+3. **Edit `workflows/example.md`** — at minimum `tracker.provider.project_slug` and the
+   `hooks.after_create` clone URL. Keep `workspace.root: /workspaces` (it must match the volume
+   mount in compose) and `server.host: 0.0.0.0` (see the port note below).
+4. **Launch:**
    ```bash
    docker compose up --build          # first build compiles OTP once, then caches it
    ```
-   Each project's dashboard is on its mapped port (`localhost:4000`, `localhost:4001`, …).
+   Dashboard: <http://localhost:4000>.
+
+The `workflows/` directory is mounted read-only at `/config` as a *directory*, never as a single
+file: a single-file bind mount pins the inode, so an editor's rename-replace on the host stops
+propagating and hot reload dies. Editing `workflows/example.md` on the host reloads it in the
+running container within about a second.
+
+Compose runs the daemon with the acknowledgement flag Symphony requires in order to start:
+
+```
+/config/example.md --i-understand-that-this-will-be-running-without-the-usual-guardrails --port 4000 --logs-root /app/elixir/log
+```
 
 Notes:
 
-- **Private repos:** `after_create` clones over HTTPS. For a private repo, forward a token into the
-  container (add `env_file: .env` to the service so Codex inherits it via
-  `shell_environment_policy.inherit=all`) and use it in the clone URL.
+- **Ports:** the dashboard and JSON API have no authentication, so compose publishes
+  `127.0.0.1:4000:4000` — host-side loopback only. Inside the container `server.host` stays
+  `0.0.0.0`, which is not a contradiction: Docker forwards the published port to the container's
+  network interface, not to its loopback, so a container-side loopback bind would be
+  unreachable. Do not widen the host side.
+- **Private repos:** `after_create` clones over HTTPS. For a private repo, forward a token into
+  the container (add `env_file: .env` to the service) and use it in the clone URL. Symphony runs
+  the hook itself through the container's own shell (`sh -lc`), which inherits the container
+  environment, so a token in `.env` is expanded in the clone URL. Codex is not involved in the
+  clone.
 - **The `claude` backend** is not installed in the image; it ships the Codex CLI only. Add the
   `claude` CLI and its auth if you route states to it via `agent.backend_by_state`.
 
@@ -138,7 +168,7 @@ After downloading the executable for your platform from a release:
 
 ```bash
 chmod +x ./symphony-v0.0.1-macos_arm64
-./symphony-v0.0.1-macos_arm64 ./WORKFLOW.md
+./symphony-v0.0.1-macos_arm64 ./WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
 ## Configuration
@@ -146,10 +176,16 @@ chmod +x ./symphony-v0.0.1-macos_arm64
 Pass a custom workflow file path to `./bin/symphony` when starting the service:
 
 ```bash
-./bin/symphony /path/to/custom/WORKFLOW.md
+./bin/symphony /path/to/custom/WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
 If no path is passed, Symphony defaults to `./WORKFLOW.md`.
+
+Required flag:
+
+- `--i-understand-that-this-will-be-running-without-the-usual-guardrails` — daemon mode refuses to
+  start without it; it acknowledges that Codex runs with no guardrails. Not required for
+  `--linear-mcp`, which serves the Linear MCP tools instead of starting the daemon.
 
 Optional flags:
 
