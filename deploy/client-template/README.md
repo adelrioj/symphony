@@ -15,16 +15,14 @@ yours — this directory is meant to be copied into your own private repo.
 
 ## Setup
 
-1. Log in to Codex once on the host (the container mounts `~/.codex/auth.json` read-only):
+1. Log in to Codex once on the host (the container mounts the `~/.codex` directory):
    ```bash
    codex login
-   ls -l ~/.codex/auth.json   # must exist and be a FILE before you start the container
+   ls -ld ~/.codex        # a directory containing auth.json
    ```
-   Do not skip the check: if that path does not exist, Docker creates an empty *directory* there
-   when the container starts. Symphony then comes up and the dashboard works, but every agent
-   dispatch fails — and a later real `codex login` breaks too, because a directory now sits where
-   the file belongs. If that happened: `docker compose down`, `rmdir ~/.codex/auth.json`,
-   `codex login`, then start again.
+   The container shares this one login and can refresh the token itself, so a long-running
+   deployment keeps working without you logging in again. If you run several projects on one
+   host, they all share this directory and therefore the same Codex account.
 2. Set your Linear key:
    ```bash
    cp .env.example .env      # then edit LINEAR_API_KEY
