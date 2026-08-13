@@ -20,6 +20,10 @@ tracker:
     - Done
 polling:
   interval_ms: 5000
+server:
+  host: "0.0.0.0"              # <-- bind all interfaces inside the container; a loopback bind
+                               #     is unreachable from the published port. Host-side exposure
+                               #     is controlled by the port mapping in compose.
 workspace:
   root: /workspaces            # <-- container volume; do NOT change (must match compose)
 hooks:

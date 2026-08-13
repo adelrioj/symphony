@@ -77,8 +77,9 @@ upgrades to be an explicit edit.
 
 `hooks.after_create` runs inside the container, so the clone needs credentials that exist there.
 The supported path is HTTPS with a token: compose loads this directory's `.env` into the
-container environment (`env_file`), and the Codex backend inherits it, so a token you put in
-`.env` is available to the clone.
+container environment (`env_file`), and Symphony runs the hook through the container's own shell
+(`sh -lc`), which inherits that environment — so a token you put in `.env` is expanded in the
+clone URL.
 
 1. Create a GitHub personal access token with read access to the repo (a fine-grained token with
    *Contents: Read* is enough) and add it to `.env` — never to `workflow.md`, which is committed:

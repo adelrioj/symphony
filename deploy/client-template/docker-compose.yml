@@ -28,7 +28,14 @@ services:
       - .:/config:ro
       - workspaces:/workspaces
       - logs:/app/elixir/log
-    command: ["/config/workflow.md", "--port", "4000", "--logs-root", "/app/elixir/log"]
+    # Symphony requires the acknowledgement flag below to run unattended.
+    command:
+      - /config/workflow.md
+      - --i-understand-that-this-will-be-running-without-the-usual-guardrails
+      - --port
+      - "4000"
+      - --logs-root
+      - /app/elixir/log
     ports:
       # loopback only: the dashboard and JSON API have no authentication. For remote access put
       # an authenticated reverse proxy in front of it, or use an SSH tunnel.

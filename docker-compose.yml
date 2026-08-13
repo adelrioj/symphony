@@ -22,7 +22,14 @@ services:
       - ./workflows:/config:ro
       - example-workspaces:/workspaces
       - example-logs:/app/elixir/log
-    command: ["/config/example.md", "--port", "4000", "--logs-root", "/app/elixir/log"]
+    # Symphony requires the acknowledgement flag below to run unattended.
+    command:
+      - /config/example.md
+      - --i-understand-that-this-will-be-running-without-the-usual-guardrails
+      - --port
+      - "4000"
+      - --logs-root
+      - /app/elixir/log
     ports:
       - "4000:4000"   # dashboard + JSON API -> http://localhost:4000
 

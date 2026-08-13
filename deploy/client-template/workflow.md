@@ -22,6 +22,12 @@ tracker:
     - Done
 polling:
   interval_ms: 5000
+server:
+  host: "0.0.0.0"             # <-- bind all interfaces INSIDE the container; do NOT change.
+                              #     Docker forwards the published port to the container's eth0
+                              #     address, so a loopback bind here is unreachable. Exposure is
+                              #     controlled on the host side, where compose publishes on
+                              #     127.0.0.1 only — the two settings are a pair.
 workspace:
   root: /workspaces            # <-- container volume; do NOT change (must match compose)
 hooks:
