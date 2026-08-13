@@ -5,8 +5,9 @@ yours — this directory is meant to be copied into your own private repo.
 
 ## Prerequisites
 
-- **Docker Engine with Compose v2** (`docker compose version` must work) — Docker Desktop or
-  [OrbStack](https://orbstack.dev/) both do.
+- **Docker Engine with Docker Compose v2.24 or newer** — Docker Desktop or
+  [OrbStack](https://orbstack.dev/) both ship it. Check with `docker compose version`; older
+  Compose releases reject the `env_file` mapping in `docker-compose.yml` with a parse error.
 - **The Codex CLI**, installed on the host and logged in. Symphony's agents run Codex inside the
   container, but the container has no browser, so it reuses the login file that the CLI writes on
   the host. Get it from <https://github.com/openai/codex>.
