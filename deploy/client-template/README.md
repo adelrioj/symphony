@@ -66,11 +66,19 @@ echo "$GITHUB_PAT" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-std
 
 Save `workflow.md` and the running container picks it up within about a second — no restart.
 If an edit is invalid, Symphony logs the error and keeps running the last valid version, so a
-typo degrades to "no change" rather than an outage. Check with:
+typo degrades to "no change" rather than an outage.
+
+That error does **not** appear in `docker compose logs`. Symphony's status board owns the
+container's stdout, so it removes the console log handler at startup and every log line goes to a
+rotating file inside the `logs` volume instead. Read it with:
 
 ```bash
-docker compose logs -f
+docker compose exec symphony sh -lc 'cat /app/elixir/log/symphony.log.[0-9]*' | tail -n 20
 ```
+
+A rejected edit shows up there as `Failed to reload workflow path=/config/workflow.md reason=...`.
+A successful reload logs nothing at all — confirm it instead from the status board in
+`docker compose logs`, which re-renders with the new values (the `Project:` line, for example).
 
 ## Upgrading
 

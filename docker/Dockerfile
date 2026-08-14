@@ -25,6 +25,13 @@ COPY elixir/mise.toml ./
 RUN mise trust && mise install && mise reshim \
  && mix local.hex --force && mix local.rebar --force
 
+# The Erlang VM takes its native name encoding from the locale, and node:20-bookworm-slim ships
+# none: without this the VM comes up latin1 and warns that Elixir "may malfunction" — any
+# non-ASCII byte in an issue title, branch name or path is mangled on the way to the filesystem.
+# Placed below the OTP layer on purpose: setting it earlier would invalidate that slow build.
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
 # Dependency layer: cached until mix.exs / mix.lock change.
 COPY elixir/mix.exs elixir/mix.lock ./
 RUN mix deps.get

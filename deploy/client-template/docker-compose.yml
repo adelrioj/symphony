@@ -38,8 +38,11 @@ services:
       - --i-understand-that-this-will-be-running-without-the-usual-guardrails
       - --port
       - "4000"
+      # --logs-root is the directory Symphony creates `log/` *under*, not the log directory
+      # itself: it writes <root>/log/symphony.log*. Passing the volume path here would nest them
+      # at /app/elixir/log/log/, outside the `logs` volume mounted above.
       - --logs-root
-      - /app/elixir/log
+      - /app/elixir
     ports:
       # loopback only: the dashboard and JSON API have no authentication. For remote access put
       # an authenticated reverse proxy in front of it, or use an SSH tunnel.

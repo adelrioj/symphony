@@ -54,7 +54,7 @@ CI runs `make all` (`.github/workflows/make-all.yml`). PR descriptions are linte
 ./bin/symphony ./WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails --port 4000   # also start the Phoenix dashboard + JSON API
 ```
 
-`--logs-root` overrides the log directory (default `./log`). Tracker credentials, the `--linear-mcp` mode, and Docker deployment are in `.claude/docs/deployment.md`.
+`--logs-root <dir>` sets where Symphony creates `log/`; it writes `<dir>/log/symphony.log*` (default: cwd). Logs never go to stdout — the status board owns it, so the console handler is removed at startup. Tracker credentials, the `--linear-mcp` mode, and Docker deployment are in `.claude/docs/deployment.md`.
 
 ## Non-negotiables
 

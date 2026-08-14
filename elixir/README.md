@@ -131,7 +131,7 @@ running container within about a second.
 Compose runs the daemon with the acknowledgement flag Symphony requires in order to start:
 
 ```
-/config/example.md --i-understand-that-this-will-be-running-without-the-usual-guardrails --port 4000 --logs-root /app/elixir/log
+/config/example.md --i-understand-that-this-will-be-running-without-the-usual-guardrails --port 4000 --logs-root /app/elixir
 ```
 
 Notes:
@@ -190,7 +190,9 @@ Required flag:
 
 Optional flags:
 
-- `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
+- `--logs-root` sets the directory Symphony creates `log/` under; it writes
+  `<root>/log/symphony.log*` (default root: the working directory, so `./log/symphony.log`).
+  Pass the parent, not the log directory itself, or the logs land one level deeper than intended
 - `--port` also starts the Phoenix observability service (default: disabled)
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
