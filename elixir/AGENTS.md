@@ -1,6 +1,6 @@
 # Symphony Elixir
 
-This directory contains the Elixir agent orchestration service that polls Linear, creates per-issue workspaces, and runs Codex in app-server mode.
+This directory contains the Elixir agent orchestration service that polls an issue tracker, creates per-issue workspaces, and runs a coding-agent backend inside each one. Both boundaries are pluggable behaviours: `SymphonyElixir.Tracker` (`asana`, `github`, `gitlab`, `jira`, `linear`, plus `memory` for tests) and `SymphonyElixir.Agent` (`codex` via app-server, `claude` via the Claude Code CLI), selectable per issue state.
 
 ## Environment
 

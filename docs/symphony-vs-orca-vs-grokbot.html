@@ -238,7 +238,7 @@
 <div class="wrap">
 
 <header class="masthead">
-  <p class="kicker">Landscape note · 2026-08-13</p>
+  <p class="kicker">Landscape note · 2026-08-13 · revised 2026-08-14</p>
   <h1>The tracker is the scheduler:<br><em>Symphony</em> against Orca and Grok Bot</h1>
   <p class="standfirst">Three products described as "agents that work while you're away." They sit at three different layers, and only one of them derives <em>what should run</em> from the state of your issue tracker.</p>
 </header>
@@ -269,7 +269,7 @@
       </tr>
       <tr>
         <th>Unit of work</th>
-        <td>A Linear issue</td>
+        <td>A tracker issue — Linear, Jira, Asana, GitHub, or GitLab</td>
         <td>A prompt run against a repo or worktree</td>
         <td>A named persistent chat agent</td>
       </tr>
@@ -284,6 +284,12 @@
         <td>Per-issue workspace under <code>workspace.root</code>, with <code>after_create</code>/<code>before_remove</code> hooks</td>
         <td>A real git worktree per task</td>
         <td>A cloud computer with a browser you sign into yourself</td>
+      </tr>
+      <tr>
+        <th>Agent runtime</th>
+        <td>Pluggable behaviour — <code>codex</code> (app-server) or <code>claude</code> (Claude Code CLI), overridable per issue state via <code>agent.backend_by_state</code></td>
+        <td><code>--provider codex</code> per automation</td>
+        <td>Fixed and hosted</td>
       </tr>
       <tr>
         <th>Completion authority</th>
@@ -318,7 +324,7 @@
   <h2>Control flow</h2>
   <h3>Who decides that work starts</h3>
   <figure>
-    <svg viewBox="0 0 980 340" role="img" aria-label="Three control loops: Symphony polls a Linear board and dispatches per-issue workspaces; Orca fires automations on a schedule into worktrees reviewed by a human; Grok Bot responds to chat messages using plugins and a cloud browser.">
+    <svg viewBox="0 0 980 340" role="img" aria-label="Three control loops: Symphony polls an issue-tracker board and dispatches per-issue workspaces; Orca fires automations on a schedule into worktrees reviewed by a human; Grok Bot responds to chat messages using plugins and a cloud browser.">
       <defs>
         <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" fill="#6b6559"/>
@@ -336,7 +342,7 @@
       <!-- Symphony lane -->
       <text x="20" y="24" class="ttl" fill="#b4451f">SYMPHONY — STATE-DRIVEN</text>
       <rect class="bx" x="20" y="38" width="130" height="46" stroke="#b4451f"/>
-      <text x="85" y="60" class="lbl" text-anchor="middle">Linear board</text>
+      <text x="85" y="60" class="lbl" text-anchor="middle">tracker board</text>
       <text x="85" y="75" class="sub" text-anchor="middle">issue states</text>
 
       <rect class="bx" x="210" y="38" width="150" height="46" stroke="#b4451f"/>
@@ -410,7 +416,7 @@
 <section>
   <h2>Symphony</h2>
   <h3>The differentiator is a specified control loop, not a coding agent</h3>
-  <p>Symphony ships no model and no editor. What it ships is <code>SPEC.md</code> — 2,276 lines of RFC&nbsp;2119 normative text — plus an Elixir/OTP reference implementation that may be a superset of the spec but must never conflict with it. The mechanics other tools leave implicit are pinned:</p>
+  <p>Symphony ships no model and no editor. What it ships is <code>SPEC.md</code> — 2,414 lines of RFC&nbsp;2119 normative text — plus an Elixir/OTP reference implementation that may be a superset of the spec but must never conflict with it. The spec pins the tracker and agent boundaries as adapter contracts, so "which board" and "which coding agent" are both configuration. The mechanics other tools leave implicit are pinned:</p>
 
   <h4>Claim state machine (§7.1)</h4>
   <p><code>Unclaimed → Claimed → {Running, RetryQueued} → Released</code>, mutated by a single authority — one stateful <code>Orchestrator</code> GenServer. Duplicate dispatch is impossible by construction, not by convention.</p>
@@ -442,7 +448,7 @@ delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)
 
   <div class="callout warn">
     <h4>What it costs</h4>
-    <p>One instance drives one project (a single <code>tracker.project_slug</code> and one repo); scale-out is one Docker container per <code>WORKFLOW.md</code>. The tracker is Linear-only in v1. Blocked entries live in memory and are cleared on restart. The README labels it a low-key engineering preview for trusted environments, and it assumes a repo that already practices harness engineering.</p>
+    <p>One instance drives one project (a single <code>tracker.project_slug</code> and one repo); scale-out is one Docker container per <code>WORKFLOW.md</code>. Blocked entries live in memory and are cleared on restart. There is no inter-agent messaging and no human decision gate. The README labels it a low-key engineering preview for trusted environments, and it assumes a repo that already practices harness engineering.</p>
   </div>
 </section>
 
@@ -526,9 +532,9 @@ delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)
 </section>
 
 <footer>
-  <p><strong>Sources.</strong> Claims about Symphony are taken from this repository; claims about the other two are from their public documentation as of 2026-08-13.</p>
+  <p><strong>Sources.</strong> Claims about Symphony are taken from this repository and re-verified against it on 2026-08-14; claims about the other two are from their public documentation as of 2026-08-13 and have not been re-checked since.</p>
   <ul>
-    <li>Symphony — <code>SPEC.md</code> §§7–9, <code>CLAUDE.md</code>, <code>README.md</code>, <code>elixir/WORKFLOW.md</code> (this repo)</li>
+    <li>Symphony — <code>SPEC.md</code> §§5, 7–9, <code>CLAUDE.md</code> + <code>.claude/docs/</code>, <code>elixir/AGENTS.md</code>, <code>elixir/WORKFLOW.md</code> (this repo)</li>
     <li>Orca — <a href="https://www.onorca.dev/docs/cli/automations">Scheduled automations</a>, <a href="https://www.onorca.dev/docs/cli/orchestration">Orchestration</a>, <a href="https://www.onorca.dev/docs">What is Orca?</a></li>
     <li>Grok Bot — <a href="https://cursor.com/help/grok-bot/getting-started">Getting started</a>, <a href="https://cursor.com/help/grok-bot/connect-plugins">Connect plugins</a></li>
   </ul>
