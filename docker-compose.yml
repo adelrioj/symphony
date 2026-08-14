@@ -33,8 +33,11 @@ services:
       - --i-understand-that-this-will-be-running-without-the-usual-guardrails
       - --port
       - "4000"
+      # --logs-root is the directory Symphony creates `log/` *under*, not the log directory
+      # itself: it writes <root>/log/symphony.log*. Passing the volume path here would nest them
+      # at /app/elixir/log/log/, outside the mount below.
       - --logs-root
-      - /app/elixir/log
+      - /app/elixir
     ports:
       # loopback only: the dashboard and JSON API have no authentication, and the container binds
       # all of its own interfaces (server.host in the workflow file). Keep exposure on the host.
