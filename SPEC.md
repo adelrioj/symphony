@@ -186,6 +186,12 @@ Fields:
 - `assignee_id` (string or null)
 - `labels` (list of strings)
   - Normalized to lowercase.
+- `attachments` (list of attachment refs)
+  - OPTIONAL non-secret provider file metadata. Each ref contains:
+    - `title` (string or null)
+    - `url` (string)
+  - Downloaded via a provider-native agent tool using the adapter credential;
+    a token is never placed on the Issue.
 - `blocked_by` (list of blocker refs)
   - Best-effort provider metadata. Each blocker ref contains:
     - `id` (string or null)
@@ -2330,6 +2336,9 @@ Use the same validation profiles as Section 17:
   host-side configured adapter auth without passing tracker secrets to the child.
 - The `linear_graphql` provider tool can expose raw Linear GraphQL access through a Codex app-server
   session or the standalone MCP bridge using configured Symphony auth.
+- The `linear_fetch_attachment` provider tool can download a Linear file attachment's contents
+  (for example a design spec) through the same broker using configured Symphony auth, returning
+  the file to the agent without exposing the token.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.

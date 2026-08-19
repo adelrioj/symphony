@@ -252,7 +252,7 @@ defmodule SymphonyElixir.CLITest do
     response = Jason.decode!(body)
 
     assert response["id"] == 1
-    assert response["result"]["tools"] |> Enum.map(& &1["name"]) |> Enum.sort() == ["approval_prompt", "linear_graphql"]
+    assert response["result"]["tools"] |> Enum.map(& &1["name"]) |> Enum.sort() == ["approval_prompt", "linear_fetch_attachment", "linear_graphql"]
   end
 
   test "serve_linear_mcp_loop/2 preserves newline-delimited JSON compatibility" do

@@ -26,11 +26,32 @@ defmodule SymphonyElixir.Linear.AgentTool do
     }
   }
 
+  @linear_fetch_attachment_tool "linear_fetch_attachment"
+  @linear_fetch_attachment_description """
+  Download the contents of a Linear file attachment (for example a design spec attached to the issue) using Symphony's configured auth. Pass the attachment `url` exactly as returned by Linear (an https://uploads.linear.app/... URL). Returns the file contents as UTF-8 text.
+  """
+  @linear_fetch_attachment_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["url"],
+    "properties" => %{
+      "url" => %{
+        "type" => "string",
+        "description" => "The Linear attachment URL to download (https://uploads.linear.app/...)."
+      }
+    }
+  }
+  @attachment_upload_host "uploads.linear.app"
+  @max_attachment_bytes 1_048_576
+
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts) do
     case tool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
+
+      @linear_fetch_attachment_tool ->
+        execute_linear_fetch_attachment(arguments, opts)
 
       other ->
         failure_response(%{
@@ -49,6 +70,11 @@ defmodule SymphonyElixir.Linear.AgentTool do
         "name" => @linear_graphql_tool,
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
+      },
+      %{
+        "name" => @linear_fetch_attachment_tool,
+        "description" => @linear_fetch_attachment_description,
+        "inputSchema" => @linear_fetch_attachment_input_schema
       }
     ]
   end
@@ -63,6 +89,42 @@ defmodule SymphonyElixir.Linear.AgentTool do
     else
       {:error, reason} ->
         failure_response(tool_error_payload(reason))
+    end
+  end
+
+  defp execute_linear_fetch_attachment(arguments, opts) do
+    fetcher = Keyword.get(opts, :attachment_fetcher, &Client.fetch_attachment/2)
+    client_opts = Keyword.take(opts, [:tracker_settings])
+
+    with {:ok, url} <- normalize_attachment_url(arguments),
+         {:ok, body} <- fetcher.(url, client_opts),
+         {:ok, text} <- attachment_text(body) do
+      success_response(text)
+    else
+      {:error, reason} ->
+        failure_response(tool_error_payload(reason))
+    end
+  end
+
+  defp normalize_attachment_url(%{"url" => url}) when is_binary(url), do: validate_attachment_url(url)
+  defp normalize_attachment_url(%{url: url}) when is_binary(url), do: validate_attachment_url(url)
+  defp normalize_attachment_url(url) when is_binary(url), do: validate_attachment_url(url)
+  defp normalize_attachment_url(_arguments), do: {:error, :missing_url}
+
+  defp validate_attachment_url(url) do
+    trimmed = String.trim(url)
+
+    case URI.parse(trimmed) do
+      %URI{scheme: "https", host: @attachment_upload_host} -> {:ok, trimmed}
+      _ -> {:error, :invalid_attachment_url}
+    end
+  end
+
+  defp attachment_text(body) when is_binary(body) do
+    cond do
+      byte_size(body) > @max_attachment_bytes -> {:error, :attachment_too_large}
+      String.valid?(body) -> {:ok, body}
+      true -> {:error, :attachment_not_text}
     end
   end
 
@@ -122,6 +184,10 @@ defmodule SymphonyElixir.Linear.AgentTool do
     dynamic_tool_response(success, encode_payload(response))
   end
 
+  defp success_response(output) when is_binary(output) do
+    dynamic_tool_response(true, output)
+  end
+
   defp failure_response(payload) do
     dynamic_tool_response(false, encode_payload(payload))
   end
@@ -177,10 +243,42 @@ defmodule SymphonyElixir.Linear.AgentTool do
     }
   end
 
+  defp tool_error_payload(:missing_url) do
+    %{
+      "error" => %{
+        "message" => "`linear_fetch_attachment` requires a non-empty `url` string."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_attachment_url) do
+    %{
+      "error" => %{
+        "message" => "`linear_fetch_attachment` only downloads Linear attachment URLs (https://#{@attachment_upload_host}/...)."
+      }
+    }
+  end
+
+  defp tool_error_payload(:attachment_too_large) do
+    %{
+      "error" => %{
+        "message" => "Attachment exceeds the #{@max_attachment_bytes}-byte download limit."
+      }
+    }
+  end
+
+  defp tool_error_payload(:attachment_not_text) do
+    %{
+      "error" => %{
+        "message" => "Attachment is not UTF-8 text and cannot be returned inline."
+      }
+    }
+  end
+
   defp tool_error_payload({:linear_api_status, status}) do
     %{
       "error" => %{
-        "message" => "Linear GraphQL request failed with HTTP #{status}.",
+        "message" => "Linear request failed with HTTP #{status}.",
         "status" => status
       }
     }
@@ -189,7 +287,7 @@ defmodule SymphonyElixir.Linear.AgentTool do
   defp tool_error_payload({:linear_api_request, reason}) do
     %{
       "error" => %{
-        "message" => "Linear GraphQL request failed before receiving a successful response.",
+        "message" => "Linear request failed before receiving a successful response.",
         "reason" => inspect(reason)
       }
     }
@@ -198,7 +296,7 @@ defmodule SymphonyElixir.Linear.AgentTool do
   defp tool_error_payload(reason) do
     %{
       "error" => %{
-        "message" => "Linear GraphQL tool execution failed.",
+        "message" => "Linear tool execution failed.",
         "reason" => inspect(reason)
       }
     }

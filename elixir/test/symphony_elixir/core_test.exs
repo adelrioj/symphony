@@ -1453,6 +1453,38 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "No description provided."
   end
 
+  test "prompt builder default template lists attachments with fetch guidance" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "")
+
+    issue = %Issue{
+      identifier: "MT-900",
+      title: "Spec-driven ticket",
+      state: "Todo",
+      url: "https://example.org/issues/MT-900",
+      attachments: [%{title: "MT-900-design.md", url: "https://uploads.linear.app/xyz"}]
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    assert prompt =~ "MT-900-design.md — https://uploads.linear.app/xyz"
+    assert prompt =~ "linear_fetch_attachment"
+  end
+
+  test "prompt builder default template omits the attachment section when none are present" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "")
+
+    issue = %Issue{
+      identifier: "MT-901",
+      title: "No files",
+      state: "Todo",
+      url: "https://example.org/issues/MT-901"
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    refute prompt =~ "linear_fetch_attachment"
+  end
+
   test "prompt builder reports workflow load failures separately from template parse errors" do
     original_workflow_path = Workflow.workflow_file_path()
     workflow_store_pid = Process.whereis(SymphonyElixir.WorkflowStore)

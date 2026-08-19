@@ -25,7 +25,7 @@ The default backend is Codex in
 Claude backend that runs `claude -p --output-format stream-json`.
 
 During Codex app-server sessions, the selected tracker adapter may advertise provider-native tools.
-Linear serves `linear_graphql`, GitHub Issues serves `github_api`, Jira Cloud serves `jira_rest`,
+Linear serves `linear_graphql` and `linear_fetch_attachment`, GitHub Issues serves `github_api`, Jira Cloud serves `jira_rest`,
 Asana serves `asana_api`, and GitLab serves `gitlab_api`. Symphony executes those tools with
 configured host-side auth and removes declared tracker-token environment variables from the Codex
 child, so the agent does not need a second tracker login. The Claude backend exposes the selected
@@ -368,6 +368,14 @@ The helper mode can also be run directly when debugging MCP wiring:
   with the session-bound endpoint/token and strips declared token environment variables from the
   Codex child. `project_slug` scopes scheduler reads, not raw tool calls; the tool can access
   whatever the configured Linear token can access.
+- Attachments: the poll query also fetches issue `attachments` (title + url) onto the normalized
+  `Issue`, and the default prompt lists them. The adapter advertises `linear_fetch_attachment`,
+  which downloads an `https://uploads.linear.app/...` attachment with the configured token and
+  returns its UTF-8 contents to the agent. It rejects non-Linear hosts, caps downloads at 1 MiB,
+  and rejects non-text payloads (`{:error, :missing_url}`, `{:error, :invalid_attachment_url}`,
+  `{:error, :attachment_too_large}`, `{:error, :attachment_not_text}`, plus the shared
+  `{:error, :missing_linear_api_token}` / `{:error, {:linear_api_status, status}}` /
+  `{:error, {:linear_api_request, reason}}`).
 - Responsibility and errors: `linear_graphql` adds no idempotency key, retry, scope guard, or
   rate-limit policy, so workflows own idempotent mutations and handling provider errors. Read/config
   failures use `{:error, :missing_linear_api_token}`, `{:error, :missing_linear_project_slug}`,
