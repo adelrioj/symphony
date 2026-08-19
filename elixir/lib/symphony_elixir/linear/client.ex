@@ -8,10 +8,11 @@ defmodule SymphonyElixir.Linear.Client do
   alias SymphonyElixir.Tracker.Issue
 
   @issue_page_size 50
+  @attachment_page_size 25
   @max_error_body_log_bytes 1_000
 
   @query """
-  query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+  query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $attachmentFirst: Int!, $after: String) {
     issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
       nodes {
         id
@@ -30,6 +31,12 @@ defmodule SymphonyElixir.Linear.Client do
         labels {
           nodes {
             name
+          }
+        }
+        attachments(first: $attachmentFirst) {
+          nodes {
+            title
+            url
           }
         }
         inverseRelations(first: $relationFirst) {
@@ -56,7 +63,7 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   @query_by_ids """
-  query SymphonyLinearIssuesById($ids: [ID!]!, $projectSlug: String!, $first: Int!, $relationFirst: Int!) {
+  query SymphonyLinearIssuesById($ids: [ID!]!, $projectSlug: String!, $first: Int!, $relationFirst: Int!, $attachmentFirst: Int!) {
     issues(filter: {id: {in: $ids}, project: {slugId: {eq: $projectSlug}}}, first: $first) {
       nodes {
         id
@@ -75,6 +82,12 @@ defmodule SymphonyElixir.Linear.Client do
         labels {
           nodes {
             name
+          }
+        }
+        attachments(first: $attachmentFirst) {
+          nodes {
+            title
+            url
           }
         }
         inverseRelations(first: $relationFirst) {
@@ -165,6 +178,29 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  @spec fetch_attachment(String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def fetch_attachment(url, opts \\ []) when is_binary(url) and is_list(opts) do
+    tracker_settings = Keyword.get_lazy(opts, :tracker_settings, fn -> Config.settings!().tracker end)
+
+    request_fun =
+      Keyword.get(opts, :request_fun, fn request_url, headers ->
+        get_attachment_request(request_url, headers)
+      end)
+
+    with {:ok, headers} <- attachment_headers(tracker_settings),
+         {:ok, %{status: 200, body: body}} <- request_fun.(url, headers) do
+      {:ok, body}
+    else
+      {:ok, response} ->
+        Logger.error("Linear attachment download failed status=#{response.status}")
+        {:error, {:linear_api_status, response.status}}
+
+      {:error, reason} ->
+        Logger.error("Linear attachment download failed: #{inspect(reason)}")
+        {:error, {:linear_api_request, reason}}
+    end
+  end
+
   @doc false
   @spec normalize_issue_for_test(map()) :: Issue.t() | nil
   def normalize_issue_for_test(issue) when is_map(issue) do
@@ -228,6 +264,7 @@ defmodule SymphonyElixir.Linear.Client do
              stateNames: state_names,
              first: @issue_page_size,
              relationFirst: @issue_page_size,
+             attachmentFirst: @attachment_page_size,
              after: after_cursor
            }),
          {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
@@ -276,7 +313,8 @@ defmodule SymphonyElixir.Linear.Client do
            ids: batch_ids,
            projectSlug: project_slug,
            first: length(batch_ids),
-           relationFirst: @issue_page_size
+           relationFirst: @issue_page_size,
+           attachmentFirst: @attachment_page_size
          }) do
       {:ok, body} ->
         with {:ok, issues} <- decode_linear_response_strict(body, assignee_filter) do
@@ -392,6 +430,20 @@ defmodule SymphonyElixir.Linear.Client do
     )
   end
 
+  defp attachment_headers(tracker_settings) do
+    case tracker_settings.api_key do
+      nil -> {:error, :missing_linear_api_token}
+      token -> {:ok, [{"Authorization", token}]}
+    end
+  end
+
+  defp get_attachment_request(url, headers) do
+    Req.get(url,
+      headers: headers,
+      connect_options: [timeout: 30_000]
+    )
+  end
+
   defp decode_linear_response(response, assignee_filter) do
     decode_linear_response(response, assignee_filter, :drop_malformed)
   end
@@ -481,6 +533,7 @@ defmodule SymphonyElixir.Linear.Client do
         assignee_id: assignee_field(assignee, "id"),
         blocked_by: blockers,
         labels: extract_labels(issue),
+        attachments: extract_attachments(issue),
         dispatchable: dispatchable?(state_name, blockers, assignee, assignee_filter),
         created_at: parse_datetime(issue["createdAt"]),
         updated_at: parse_datetime(issue["updatedAt"])
@@ -614,6 +667,24 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_labels(_), do: []
+
+  defp extract_attachments(%{"attachments" => %{"nodes" => nodes}}) when is_list(nodes) do
+    Enum.flat_map(nodes, fn
+      %{"url" => url} = node when is_binary(url) ->
+        case String.trim(url) do
+          "" -> []
+          trimmed -> [%{title: attachment_title(node["title"]), url: trimmed}]
+        end
+
+      _ ->
+        []
+    end)
+  end
+
+  defp extract_attachments(_), do: []
+
+  defp attachment_title(title) when is_binary(title), do: title
+  defp attachment_title(_), do: nil
 
   defp extract_blockers(%{"inverseRelations" => %{"nodes" => inverse_relations}})
        when is_list(inverse_relations) do

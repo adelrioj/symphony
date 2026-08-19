@@ -72,6 +72,15 @@ Description:
 No description provided.
 {% endif %}
 
+{% assign attachment_count = issue.attachments | size %}
+{% if attachment_count > 0 %}
+Attachments (files attached to this ticket; contents are not inlined here):
+{% for attachment in issue.attachments %}
+- {{ attachment.title }} — {{ attachment.url }}
+{% endfor %}
+Read an attachment's contents with the `linear_fetch_attachment` tool, passing its `url`. A `<IDENT>-design.md` attachment is the authoritative design spec: read it before planning and treat it as required acceptance input.
+{% endif %}
+
 Instructions:
 
 1. This is an unattended orchestration session. Do not ask a human to perform follow-up actions.

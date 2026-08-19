@@ -454,6 +454,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         "id" => "user-1"
       },
       "labels" => %{"nodes" => [%{"name" => "Backend"}, %{"name" => " backend "}, %{"name" => " "}]},
+      "attachments" => %{
+        "nodes" => [
+          %{"title" => "MT-1-design.md", "url" => "  https://uploads.linear.app/abc  "},
+          %{"title" => nil, "url" => "https://uploads.linear.app/def"},
+          %{"title" => "blank", "url" => "  "},
+          %{"title" => "no-url"}
+        ]
+      },
       "inverseRelations" => %{
         "nodes" => [
           %{
@@ -482,6 +490,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert issue.blocked_by == [%{id: "issue-2", identifier: "MT-2", state: "In Progress"}]
     assert issue.labels == ["backend"]
+
+    assert issue.attachments == [
+             %{title: "MT-1-design.md", url: "https://uploads.linear.app/abc"},
+             %{title: nil, url: "https://uploads.linear.app/def"}
+           ]
+
     assert issue.native_ref == nil
     assert issue.priority == 2
     assert issue.state == "Todo"
@@ -536,6 +550,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     issue = Client.normalize_issue_for_test(raw_issue, "user-1")
 
     refute issue.dispatchable
+    assert issue.attachments == []
   end
 
   test "linear client pagination merge helper preserves issue ordering" do

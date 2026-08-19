@@ -254,7 +254,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, ["issue-1"]} = Adapter.fetch_issues_by_ids(["issue-1"])
     assert_receive {:fetch_issues_by_ids_called, ["issue-1"]}
 
-    assert [%{"name" => "linear_graphql"}] = Adapter.agent_tool_specs()
+    assert [%{"name" => "linear_graphql"}, %{"name" => "linear_fetch_attachment"}] =
+             Adapter.agent_tool_specs()
   end
 
   test "linear adapter validates blocked comment and state update responses" do

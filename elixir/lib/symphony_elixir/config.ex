@@ -18,6 +18,14 @@ defmodule SymphonyElixir.Config do
   {% else %}
   No description provided.
   {% endif %}
+  {% assign attachment_count = issue.attachments | size %}
+  {% if attachment_count > 0 %}
+  Attachments (files attached to this ticket; contents are not inlined here):
+  {% for attachment in issue.attachments %}
+  - {{ attachment.title }} — {{ attachment.url }}
+  {% endfor %}
+  Read an attachment's contents with the `linear_fetch_attachment` tool, passing its `url`. A `<IDENT>-design.md` attachment is the authoritative design spec.
+  {% endif %}
   """
 
   @type codex_runtime_settings :: %{

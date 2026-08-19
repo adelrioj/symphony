@@ -7,6 +7,9 @@ defmodule SymphonyElixir.Tracker.Issue do
   board or project entry. `native_ref` carries non-secret provider identifiers
   needed by provider-native agent tools. `identifier` remains the human-readable
   value used to derive the workspace key and must be unique within that scope.
+  `attachments` carries non-secret file metadata (`title`, `url`) for the agent;
+  the URLs are downloaded through a provider-native tool, never with a token on
+  this struct.
   """
 
   defstruct [
@@ -23,6 +26,7 @@ defmodule SymphonyElixir.Tracker.Issue do
     blocked_by: [],
     labels: [],
     dispatchable: false,
+    attachments: [],
     created_at: nil,
     updated_at: nil
   ]
@@ -39,6 +43,7 @@ defmodule SymphonyElixir.Tracker.Issue do
           url: String.t() | nil,
           assignee_id: String.t() | nil,
           labels: [String.t()],
+          attachments: [map()],
           blocked_by: [map()],
           dispatchable: boolean(),
           created_at: DateTime.t() | nil,

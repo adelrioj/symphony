@@ -21,7 +21,7 @@ defmodule SymphonyElixir.MCP.LinearServerTest do
     assert LinearServer.handle_request(%{"jsonrpc" => "2.0", "method" => "notifications/cancelled"}) == nil
   end
 
-  test "tools/list returns linear_graphql and approval_prompt" do
+  test "tools/list returns linear tools and approval_prompt" do
     response =
       LinearServer.handle_request(%{
         "jsonrpc" => "2.0",
@@ -31,7 +31,7 @@ defmodule SymphonyElixir.MCP.LinearServerTest do
       })
 
     names = response["result"]["tools"] |> Enum.map(& &1["name"]) |> Enum.sort()
-    assert names == ["approval_prompt", "linear_graphql"]
+    assert names == ["approval_prompt", "linear_fetch_attachment", "linear_graphql"]
   end
 
   test "approval_prompt always denies" do
