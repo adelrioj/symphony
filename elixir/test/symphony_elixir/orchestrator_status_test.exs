@@ -1226,6 +1226,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert rendered =~ "http://127.0.0.1:4000/"
   end
 
+  test "status board shows team scope when team keys are configured" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => ["MDZ", "TRA"]},
+      tracker_any_labels: ["bug-symphony"]
+    )
+
+    rendered = StatusDashboard.format_project_link_lines_for_test()
+
+    assert rendered =~ "Scope:"
+    assert rendered =~ "MDZ, TRA"
+    assert rendered =~ "bug-symphony"
+    refute rendered =~ "linear.app/project"
+  end
+
   test "status dashboard prefers the bound server port and normalizes wildcard hosts" do
     assert StatusDashboard.dashboard_url_for_test("0.0.0.0", 0, 43_123) ==
              "http://127.0.0.1:43123/"

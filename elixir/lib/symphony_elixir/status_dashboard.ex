@@ -393,17 +393,20 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_project_link_lines do
-    project_part =
+    {label, scope_part} =
       case Config.settings!().tracker do
+        %{kind: "linear", team_keys: team_keys} = tracker when is_list(team_keys) and team_keys != [] ->
+          {"Scope", colorize(format_team_scope(tracker), @ansi_cyan)}
+
         %{kind: "linear", project_slug: project_slug}
         when is_binary(project_slug) and project_slug != "" ->
-          colorize(linear_project_url(project_slug), @ansi_cyan)
+          {"Project", colorize(linear_project_url(project_slug), @ansi_cyan)}
 
         _ ->
-          colorize("n/a", @ansi_gray)
+          {"Project", colorize("n/a", @ansi_gray)}
       end
 
-    project_line = colorize("│ Project: ", @ansi_bold) <> project_part
+    project_line = colorize("│ #{label}: ", @ansi_bold) <> scope_part
 
     case dashboard_url() do
       url when is_binary(url) ->
@@ -411,6 +414,15 @@ defmodule SymphonyElixir.StatusDashboard do
 
       _ ->
         [project_line]
+    end
+  end
+
+  defp format_team_scope(tracker) do
+    labels = (Map.get(tracker, :any_labels) || []) ++ (Map.get(tracker, :required_labels) || [])
+
+    case labels do
+      [] -> Enum.join(tracker.team_keys, ", ")
+      labels -> Enum.join(tracker.team_keys, ", ") <> " · " <> Enum.join(labels, ", ")
     end
   end
 
@@ -528,6 +540,10 @@ defmodule SymphonyElixir.StatusDashboard do
       {second, rolling_tps(token_samples, now_ms, current_tokens)}
     end
   end
+
+  @doc false
+  @spec format_project_link_lines_for_test() :: String.t()
+  def format_project_link_lines_for_test, do: Enum.join(format_project_link_lines(), "\n")
 
   @doc false
   @spec format_timestamp_for_test(DateTime.t()) :: String.t()
