@@ -269,8 +269,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:error, :missing_linear_scope} ->
-        message = "Tracker scope missing in WORKFLOW.md: set tracker.provider.team_keys or .project_slug"
-        Logger.error(message)
+        Logger.error("Tracker scope missing in WORKFLOW.md: set tracker.provider.team_keys or tracker.provider.project_slug")
         state
 
       {:error, :missing_tracker_kind} ->
