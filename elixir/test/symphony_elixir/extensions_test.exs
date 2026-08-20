@@ -740,6 +740,15 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, _reason} = HttpServer.start_link(host: "bad host", port: 0)
   end
 
+  test "Tracker.preflight is a no-op for adapters that do not implement it" do
+    # the memory adapter does not export preflight/1
+    assert :ok = SymphonyElixir.Tracker.preflight(%{kind: "memory"})
+  end
+
+  test "Tracker.preflight delegates to an adapter that implements it" do
+    assert :ok = SymphonyElixir.Tracker.preflight(%{kind: "linear", team_keys: [], project_slug: "p-1"})
+  end
+
   defp start_test_endpoint(overrides) do
     endpoint_config =
       :symphony_elixir

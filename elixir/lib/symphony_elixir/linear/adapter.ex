@@ -58,6 +58,9 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @spec preflight(map()) :: :ok | {:error, term()}
+  def preflight(_tracker_settings), do: :ok
+
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
 
