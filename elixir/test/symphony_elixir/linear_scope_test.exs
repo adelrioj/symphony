@@ -104,4 +104,10 @@ defmodule SymphonyElixir.LinearScopeTest do
              ]
            }
   end
+
+  test "a blank project slug produces no project conjunct" do
+    filter = Client.build_issue_filter(tracker(%{project_slug: "   ", team_keys: ["MDZ"]}), state_names: ["Todo"])
+
+    refute Enum.any?(filter.and, &Map.has_key?(&1, :project))
+  end
 end
