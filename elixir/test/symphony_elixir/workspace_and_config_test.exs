@@ -431,13 +431,50 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "tracker issue routing requires every configured label" do
     issue = %Issue{labels: [" Symphony ", "JavaScript"], dispatchable: true}
 
-    assert Issue.routable?(issue, [])
-    assert Issue.routable?(issue, ["symphony"])
-    assert Issue.routable?(issue, ["SYMPHONY", "javascript"])
-    refute Issue.routable?(issue, ["symph"])
-    refute Issue.routable?(issue, [" "])
-    refute Issue.routable?(issue, ["symphony", "security"])
-    refute Issue.routable?(%{issue | dispatchable: false}, ["symphony"])
+    assert Issue.routable?(issue, %{required_labels: [], any_labels: []})
+    assert Issue.routable?(issue, %{required_labels: ["symphony"], any_labels: []})
+    assert Issue.routable?(issue, %{required_labels: ["SYMPHONY", "javascript"], any_labels: []})
+    refute Issue.routable?(issue, %{required_labels: ["symph"], any_labels: []})
+    refute Issue.routable?(issue, %{required_labels: [" "], any_labels: []})
+    refute Issue.routable?(issue, %{required_labels: ["symphony", "security"], any_labels: []})
+    refute Issue.routable?(%{issue | dispatchable: false}, %{required_labels: ["symphony"], any_labels: []})
+  end
+
+  test "routable? requires all required_labels and at least one any_label" do
+    issue = %Issue{
+      id: "i-1",
+      identifier: "MT-1",
+      title: "Scoped",
+      state: "Todo",
+      labels: ["bug-symphony", "backend"],
+      dispatchable: true
+    }
+
+    # any_labels: at least one match is enough
+    assert Issue.routable?(issue, %{required_labels: [], any_labels: ["bug-symphony", "feat-symphony"]})
+
+    # any_labels: no match rejects
+    refute Issue.routable?(issue, %{required_labels: [], any_labels: ["feat-symphony"]})
+
+    # empty any_labels imposes no constraint
+    assert Issue.routable?(issue, %{required_labels: [], any_labels: []})
+
+    # required_labels still ANDs
+    assert Issue.routable?(issue, %{required_labels: ["backend"], any_labels: ["bug-symphony"]})
+    refute Issue.routable?(issue, %{required_labels: ["frontend"], any_labels: ["bug-symphony"]})
+
+    # both must hold together
+    refute Issue.routable?(issue, %{required_labels: ["backend"], any_labels: ["feat-symphony"]})
+
+    # case and whitespace insensitive on both lists
+    assert Issue.routable?(issue, %{required_labels: [" BACKEND "], any_labels: [" Bug-Symphony "]})
+
+    # a blank configured label matches nothing (SPEC 5.3.1)
+    refute Issue.routable?(issue, %{required_labels: [""], any_labels: []})
+    refute Issue.routable?(issue, %{required_labels: [], any_labels: [""]})
+
+    # dispatchable: false always rejects
+    refute Issue.routable?(%{issue | dispatchable: false}, %{required_labels: [], any_labels: []})
   end
 
   test "linear client normalizes blockers from inverse relations" do
