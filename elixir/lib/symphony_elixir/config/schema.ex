@@ -56,6 +56,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:provider, :map, default: %{})
       field(:secret_environment_names, {:array, :string}, default: [])
       field(:required_labels, {:array, :string}, default: [])
+      field(:any_labels, {:array, :string}, default: [])
+      field(:team_keys, {:array, :string}, default: [])
       field(:active_states, {:array, :string})
       field(:terminal_states, {:array, :string})
     end
@@ -73,12 +75,18 @@ defmodule SymphonyElixir.Config.Schema do
           :assignee,
           :provider,
           :required_labels,
+          :any_labels,
           :active_states,
           :terminal_states
         ],
         empty_values: []
       )
       |> update_change(:required_labels, fn labels ->
+        labels
+        |> Enum.map(&(String.trim(&1) |> String.downcase()))
+        |> Enum.uniq()
+      end)
+      |> update_change(:any_labels, fn labels ->
         labels
         |> Enum.map(&(String.trim(&1) |> String.downcase()))
         |> Enum.uniq()
@@ -482,7 +490,9 @@ defmodule SymphonyElixir.Config.Schema do
         provider: provider,
         secret_environment_names: Enum.uniq(secret_environment_names),
         active_states: active_states,
-        terminal_states: terminal_states
+        terminal_states: terminal_states,
+        any_labels: settings.tracker.any_labels,
+        team_keys: normalize_team_keys(Map.get(provider, "team_keys"))
     }
 
     workspace = %{
@@ -510,6 +520,16 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_optional_map(nil), do: nil
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
+
+  defp normalize_team_keys(keys) when is_list(keys) do
+    keys
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp normalize_team_keys(_keys), do: []
 
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)

@@ -1181,6 +1181,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().codex.command == "codex app-server"
   end
 
+  test "any_labels normalizes like required_labels and team_keys come from the provider map" do
+    # Note: tracker_project_slug: nil is in the brief but causes issues; using default project: "project"
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_provider: %{"team_keys" => [" MDZ ", "MDZ", "TRA"]},
+      tracker_any_labels: [" Bug-Symphony ", "BUG-SYMPHONY", "Feat-Symphony"]
+    )
+
+    tracker = Config.settings!().tracker
+
+    assert tracker.any_labels == ["bug-symphony", "feat-symphony"]
+    assert tracker.team_keys == ["MDZ", "TRA"]
+  end
+
+  test "any_labels and team_keys default to empty lists" do
+    write_workflow_file!(Workflow.workflow_file_path())
+
+    tracker = Config.settings!().tracker
+
+    assert tracker.any_labels == []
+    assert tracker.team_keys == []
+  end
+
   test "config resolves $VAR references for env-backed secret and path values" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
