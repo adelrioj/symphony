@@ -281,15 +281,39 @@ defmodule SymphonyElixir.CLITest do
     File.write!(workflow_path, "---\ntracker:\n  kind: linear\n---\nprompt\n")
     on_exit(fn -> File.rm(workflow_path) end)
 
+    parent = self()
+
     deps = %{
       file_regular?: fn _path -> true end,
       set_workflow_file_path: fn _path -> :ok end,
-      ensure_all_started: fn -> {:ok, []} end,
+      ensure_all_started: fn ->
+        send(parent, :started)
+        {:ok, []}
+      end,
       preflight: fn -> {:error, {:linear_preflight_failed, ["unknown Linear team key \"NOPE\""]}} end
     }
 
     assert {:error, message} = SymphonyElixir.CLI.run(workflow_path, deps)
     assert message =~ "NOPE"
+    # Preflight must run before the supervision tree, or a bad scope dispatches work first.
+    refute_received :started
+  end
+
+  test "run reports the application start failure distinctly from a preflight failure" do
+    workflow_path = Path.join(System.tmp_dir!(), "cli_start_failure_WORKFLOW.md")
+    File.write!(workflow_path, "---\ntracker:\n  kind: linear\n---\nprompt\n")
+    on_exit(fn -> File.rm(workflow_path) end)
+
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      ensure_all_started: fn -> {:error, :boom} end,
+      preflight: fn -> :ok end
+    }
+
+    assert {:error, message} = SymphonyElixir.CLI.run(workflow_path, deps)
+    assert message =~ "Failed to start Symphony with workflow"
+    assert message =~ ":boom"
   end
 
   test "run succeeds when preflight passes" do
