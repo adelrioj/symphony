@@ -9,13 +9,22 @@ tracker:
   provider:
     # <-- the slug from your Linear project's URL, NOT its display name: the last path segment
     #     of https://linear.app/<workspace>/project/<project-name>-<id>, e.g.
-    #     my-project-4c1a9f3b7e02. A wrong value fails silently: Linear returns zero issues,
-    #     nothing is logged, and the container sits idle forever with a healthy dashboard.
+    #     my-project-4c1a9f3b7e02. Preflight does NOT validate this: a wrong slug still fails
+    #     silently, Linear returns zero issues, nothing is logged, and the container sits idle
+    #     forever with a healthy dashboard.
     project_slug: "REPLACE-with-your-linear-project-slug"
+    # Or scope by team and let any project's tickets qualify:
+    # team_keys: ["SYM"]
+  # any_labels:
+  #   - bug-symphony
+  #   - feat-symphony
   required_labels: []
   # active_states / terminal_states must match the workflow state names in YOUR Linear workspace
-  # exactly. Merging and Rework do not exist in a default workspace, and an unknown state name is
-  # silently never matched — same idle-container symptom as a wrong project slug.
+  # exactly. Merging and Rework do not exist in a default workspace. If team_keys above is set,
+  # preflight resolves these (and any team_keys/any_labels) against Linear at startup and refuses
+  # to boot on an unknown one, naming it. With team_keys empty (project_slug-only, the default
+  # here), preflight is skipped entirely and an unknown state name is silently never matched —
+  # same idle-container symptom as a wrong project slug.
   active_states:
     - Todo
     - In Progress

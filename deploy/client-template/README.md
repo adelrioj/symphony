@@ -1,7 +1,8 @@
 # Symphony deployment
 
-One container, one project: a single Linear project plus a single repo. Everything here is
-yours — this directory is meant to be copied into your own private repo.
+One container, one repo, and a Linear scope: either a single project or one or more teams plus
+optional labels. Everything here is yours — this directory is meant to be copied into your own
+private repo.
 
 ## Prerequisites
 
@@ -28,19 +29,23 @@ yours — this directory is meant to be copied into your own private repo.
    cp .env.example .env      # then edit LINEAR_API_KEY
    ```
 3. Edit `workflow.md`:
-   - `tracker.provider.project_slug` — the slug from your Linear project's URL, **not** the
-     project's display name. Open the project in Linear and copy the `<project-name>-<id>`
-     segment of `https://linear.app/<workspace>/project/<project-name>-<id>/overview`
-     (the URL may end in `/overview` or `/issues` — do not copy that part); it looks like
-     `my-project-4c1a9f3b7e02`. This is the one value whose failure is silent: for an unknown
-     slug Linear simply returns zero issues, Symphony logs nothing, and the container sits idle
-     forever with clean logs and a working dashboard. If no issue is ever picked up, suspect
-     this line first.
+   - **Scope** — either `tracker.provider.project_slug` (the `<project-name>-<id>` segment of
+     the project URL, not the display name) or `tracker.provider.team_keys` (a list of Linear
+     team keys, the prefix in issue identifiers such as `WMP` in `WMP-14`). Team scoping plus
+     `tracker.any_labels` lets tickets in any project qualify by carrying a label, so adding a
+     project needs no config change here.
+     When `team_keys` is set, Symphony resolves it (plus `active_states`, `terminal_states`, and
+     any labels) against Linear at startup and refuses to boot if one doesn't exist, naming each
+     one — so a typo is a startup error, not a silently idle container. `project_slug` is NOT
+     checked this way: an unknown slug still fails silently, Linear returns zero issues, and the
+     container sits idle forever with clean logs and a working dashboard. If no issue is ever
+     picked up on a project-scoped deploy, suspect this line first.
    - `hooks.after_create` — the clone command for your repo
    - `tracker.active_states` / `terminal_states` — must match the workflow state names in *your*
-     Linear workspace exactly. `Merging` and `Rework` do not exist in a default workspace; a
-     state name that does not exist there is silently never matched, with the same idle-container
-     symptom as a wrong slug.
+     Linear workspace exactly. `Merging` and `Rework` do not exist in a default workspace. Startup
+     preflight catches an unknown one here too, but only when `team_keys` is set; with
+     `project_slug` alone, a bad state name is silently never matched, with the same
+     idle-container symptom as a wrong slug.
    - Keep `workspace.root: /workspaces` (it must match the volume mount in compose)
 4. Start it:
    ```bash
