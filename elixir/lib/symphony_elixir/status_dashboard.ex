@@ -417,14 +417,25 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
+  # Required labels are prefixed with `+` so a mandatory label does not read as one more
+  # member of the `any_labels` OR-set, and the project is shown when both selectors are set
+  # because `build_issue_filter/2` ANDs the project conjunct into every query.
   defp format_team_scope(tracker) do
-    labels = (Map.get(tracker, :any_labels) || []) ++ (Map.get(tracker, :required_labels) || [])
+    labels =
+      (Map.get(tracker, :any_labels) || []) ++
+        Enum.map(Map.get(tracker, :required_labels) || [], &("+" <> &1))
 
-    case labels do
-      [] -> Enum.join(tracker.team_keys, ", ")
-      labels -> Enum.join(tracker.team_keys, ", ") <> " · " <> Enum.join(labels, ", ")
-    end
+    [
+      Enum.join(tracker.team_keys, ", "),
+      if(labels != [], do: Enum.join(labels, ", ")),
+      scope_project_part(Map.get(tracker, :project_slug))
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" · ")
   end
+
+  defp scope_project_part(project_slug) when is_binary(project_slug) and project_slug != "", do: "project " <> project_slug
+  defp scope_project_part(_project_slug), do: nil
 
   defp format_project_refresh_line(%{checking?: true}) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("checking now…", @ansi_cyan)

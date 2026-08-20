@@ -371,6 +371,13 @@ The helper mode can also be run directly when debugging MCP wiring:
   present in at least one of them resolves, a label that exists only in some other team does not,
   and a workspace-level label (belonging to no team) counts as present in every team. This check
   runs only when `team_keys` is set; project-only deploys are unaffected.
+- Upgrade note: state matching became case-insensitive for every Linear deploy, including
+  existing project-only ones, where it was previously an exact match. An issue whose Linear state
+  differs from the configured `active_states`/`terminal_states` spelling by case alone (for
+  example `TODO` against a configured `Todo`) starts being picked up after upgrading. Names that
+  differ by anything other than case — `To Do` against `Todo` — are still not matched. Review
+  `active_states` and `terminal_states` before upgrading if your workspace has states whose names
+  collide only by case.
 - Identity and normalization: `issue.id` is the Linear issue ID and `issue.native_ref` is currently
   `nil`. Records missing a nonblank ID, identifier, title, or state are dropped from candidate
   pages and fail ID refreshes. State keeps Linear's spelling; integer priorities are preserved and

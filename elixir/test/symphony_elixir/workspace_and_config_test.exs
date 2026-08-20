@@ -1247,6 +1247,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert tracker.any_labels == ["bug-symphony", "feat-symphony"]
   end
 
+  test "a scalar provider.team_keys is rejected instead of silently falling back to project scope" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{tracker: %{kind: "linear", provider: %{project_slug: "p-1", team_keys: "SYM"}}})
+
+    assert message =~ "tracker.provider.team_keys must be a list of non-blank strings"
+  end
+
+  test "a provider.team_keys list holding a blank entry is rejected" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{tracker: %{kind: "linear", provider: %{team_keys: ["MDZ", "  "]}}})
+
+    assert message =~ "tracker.provider.team_keys must be a list of non-blank strings"
+  end
+
+  test "a top-level tracker.team_keys is rejected instead of being dropped by the changeset" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{tracker: %{kind: "linear", project_slug: "p-1", team_keys: ["SYM"]}})
+
+    assert message =~ "tracker.team_keys is not supported"
+    assert message =~ "tracker.provider.team_keys"
+  end
+
+  test "an empty provider.team_keys list stays valid" do
+    assert {:ok, settings} = Schema.parse(%{tracker: %{kind: "linear", project_slug: "p-1", provider: %{team_keys: []}}})
+
+    assert settings.tracker.team_keys == []
+  end
+
   test "any_labels and team_keys default to empty lists" do
     write_workflow_file!(Workflow.workflow_file_path())
 

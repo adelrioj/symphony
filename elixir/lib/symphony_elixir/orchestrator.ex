@@ -870,7 +870,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
 
   defp issue_routable?(%Issue{} = issue) do
-    Issue.routable?(issue, Config.settings!().tracker)
+    # Only the label fields: the tracker struct also carries the resolved Linear API token,
+    # which a FunctionClauseError on this hot path would `inspect/1` into the log file.
+    Issue.routable?(issue, Map.take(Config.settings!().tracker, [:required_labels, :any_labels]))
   end
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do

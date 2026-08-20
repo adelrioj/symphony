@@ -336,19 +336,46 @@ defmodule SymphonyElixir.Config.Schema do
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
   def parse(config) when is_map(config) do
-    config
-    |> normalize_keys()
-    |> drop_nil_values()
-    |> changeset()
-    |> apply_action(:validate)
-    |> case do
-      {:ok, settings} ->
-        {:ok, finalize_settings(settings)}
+    normalized = normalize_keys(config)
 
-      {:error, changeset} ->
-        {:error, {:invalid_workflow_config, format_errors(changeset)}}
+    with :ok <- validate_team_keys(normalized) do
+      normalized
+      |> drop_nil_values()
+      |> changeset()
+      |> apply_action(:validate)
+      |> case do
+        {:ok, settings} ->
+          {:ok, finalize_settings(settings)}
+
+        {:error, changeset} ->
+          {:error, {:invalid_workflow_config, format_errors(changeset)}}
+      end
     end
   end
+
+  # `team_keys` is only read from the provider map and only when it is a list, so both a
+  # misplaced top-level key and a scalar value would otherwise be dropped in silence and the
+  # deploy would fall back to project-only scope with nothing anywhere saying so.
+  defp validate_team_keys(%{"tracker" => tracker}) when is_map(tracker) do
+    cond do
+      Map.has_key?(tracker, "team_keys") ->
+        {:error, {:invalid_workflow_config, "tracker.team_keys is not supported: set tracker.provider.team_keys instead"}}
+
+      not valid_team_keys?(Map.get(tracker, "provider")) ->
+        {:error, {:invalid_workflow_config, "tracker.provider.team_keys must be a list of non-blank strings"}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_team_keys(_config), do: :ok
+
+  defp valid_team_keys?(%{"team_keys" => team_keys}) do
+    is_list(team_keys) and Enum.all?(team_keys, &(is_binary(&1) and String.trim(&1) != ""))
+  end
+
+  defp valid_team_keys?(_provider), do: true
 
   @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil) :: map()
   def resolve_turn_sandbox_policy(settings, workspace \\ nil) do

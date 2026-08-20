@@ -661,8 +661,9 @@ Validation checks:
 - `tracker.kind` is present and supported.
 - The selected adapter accepts `tracker.provider` after documented defaults and `$VAR`
   resolution.
-- The selected adapter's configured scope selectors resolve against the live tracker; if any
-  do not resolve, fail startup naming each one.
+- At startup only (this check MUST NOT be repeated per tick, as it requires live tracker
+  requests): the selected adapter's configured scope selectors resolve against the live tracker;
+  if any do not resolve, fail startup naming each one.
 - The command for any backend that can be selected is present and non-empty.
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)

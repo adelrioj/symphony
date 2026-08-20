@@ -255,7 +255,9 @@ defmodule SymphonyElixir.AgentRunner do
   defp same_issue_state?(_current_state, _refreshed_state), do: false
 
   defp issue_routable?(%Issue{} = issue) do
-    Issue.routable?(issue, Config.settings!().tracker)
+    # Only the label fields: the tracker struct also carries the resolved Linear API token,
+    # which a FunctionClauseError on this hot path would `inspect/1` into the log file.
+    Issue.routable?(issue, Map.take(Config.settings!().tracker, [:required_labels, :any_labels]))
   end
 
   defp selected_worker_host(nil, []), do: nil

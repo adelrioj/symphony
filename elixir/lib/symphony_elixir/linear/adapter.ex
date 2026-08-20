@@ -5,6 +5,8 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
+  require Logger
+
   alias SymphonyElixir.Linear.{AgentTool, Client}
   alias SymphonyElixir.Tracker.Issue
 
@@ -38,18 +40,18 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
-  # Neither query paginates or sets `first:` — both rely on Linear's default page size.
-  # Truncation here would drop resolved values and fail preflight on values that actually
-  # exist (a false positive, not the silent-idle failure this function exists to catch).
-  # Unlikely in practice: the teams query is filtered to the configured keys, and a
-  # workspace rarely has enough matching labels or workflow states per team to hit a
-  # default page limit. Left undocumented pagination handling as a known limitation.
+  # Neither query paginates; both cap every connection at Linear's maximum page size of 250
+  # instead of relying on the default (50). The labels query matches by name across every team
+  # in the workspace, so a large workspace where many teams carry the same label name could
+  # otherwise page the listed team's row off the end and refuse to boot a valid deployment.
+  # Truncation past 250 would still fail preflight on values that actually exist (a false
+  # positive, not the silent-idle failure this function exists to catch).
   @teams_preflight_query """
   query SymphonyPreflightTeams($filter: TeamFilter!) {
-    teams(filter: $filter) {
+    teams(filter: $filter, first: 250) {
       nodes {
         key
-        states {
+        states(first: 250) {
           nodes {
             name
           }
@@ -61,7 +63,7 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @labels_preflight_query """
   query SymphonyPreflightLabels($filter: IssueLabelFilter!) {
-    issueLabels(filter: $filter) {
+    issueLabels(filter: $filter, first: 250) {
       nodes {
         name
         team {
@@ -153,9 +155,11 @@ defmodule SymphonyElixir.Linear.Adapter do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
   end
 
+  # Blank labels are deliberately kept: `Issue.routable?/2` can never satisfy one, so a config
+  # that normalizes a label to "" dispatches nothing. Letting it miss the label query turns that
+  # into a loud preflight failure instead of a permanently idle boot.
   defp preflight_label_names(tracker_settings) do
     ((Map.get(tracker_settings, :any_labels) || []) ++ (Map.get(tracker_settings, :required_labels) || []))
-    |> Enum.reject(&(String.trim(&1) == ""))
     |> Enum.uniq()
   end
 
@@ -164,6 +168,7 @@ defmodule SymphonyElixir.Linear.Adapter do
 
     case client_module().graphql(@teams_preflight_query, %{filter: filter}) do
       {:ok, %{"data" => %{"teams" => %{"nodes" => nodes}}}} when is_list(nodes) -> {:ok, nodes}
+      {:ok, %{"errors" => errors}} -> {:error, {:linear_graphql_errors, errors}}
       {:ok, _body} -> {:error, :linear_unknown_payload}
       {:error, reason} -> {:error, reason}
     end
@@ -176,6 +181,7 @@ defmodule SymphonyElixir.Linear.Adapter do
 
     case client_module().graphql(@labels_preflight_query, %{filter: filter}) do
       {:ok, %{"data" => %{"issueLabels" => %{"nodes" => nodes}}}} when is_list(nodes) -> {:ok, nodes}
+      {:ok, %{"errors" => errors}} -> {:error, {:linear_graphql_errors, errors}}
       {:ok, _body} -> {:error, :linear_unknown_payload}
       {:error, reason} -> {:error, reason}
     end
@@ -202,18 +208,24 @@ defmodule SymphonyElixir.Linear.Adapter do
   end
 
   defp unknown_state_names(tracker_settings, teams) do
-    known_states =
-      teams
-      |> Enum.flat_map(fn team -> get_in(team, ["states", "nodes"]) || [] end)
-      |> MapSet.new(&String.downcase(&1["name"] || ""))
+    states_by_team =
+      Map.new(teams, fn team ->
+        states = MapSet.new(get_in(team, ["states", "nodes"]) || [], &String.downcase(&1["name"] || ""))
+        {team["key"] || "", states}
+      end)
 
-    configured_states =
-      ((Map.get(tracker_settings, :active_states) || []) ++ (Map.get(tracker_settings, :terminal_states) || []))
-      |> Enum.uniq()
+    known_states = states_by_team |> Map.values() |> Enum.reduce(MapSet.new(), &MapSet.union/2)
 
-    configured_states
-    |> Enum.reject(&MapSet.member?(known_states, String.downcase(&1)))
-    |> Enum.map(&"state name #{inspect(&1)} does not exist in any listed team")
+    ((Map.get(tracker_settings, :active_states) || []) ++ (Map.get(tracker_settings, :terminal_states) || []))
+    |> Enum.uniq()
+    |> Enum.flat_map(fn state ->
+      if MapSet.member?(known_states, String.downcase(state)) do
+        warn_partial_scope("state", state, teams_missing_state(states_by_team, state))
+        []
+      else
+        ["state name #{inspect(state)} does not exist in any listed team"]
+      end
+    end)
   end
 
   defp unknown_label_names(tracker_settings, team_keys, labels) do
@@ -229,8 +241,14 @@ defmodule SymphonyElixir.Linear.Adapter do
 
     tracker_settings
     |> preflight_label_names()
-    |> Enum.reject(&label_in_listed_teams?(label_teams, listed_team_keys, &1))
-    |> Enum.map(&"label #{inspect(&1)} does not exist in any listed team")
+    |> Enum.flat_map(fn label ->
+      if label_in_listed_teams?(label_teams, listed_team_keys, label) do
+        warn_partial_scope("label", label, teams_missing_label(label_teams, listed_team_keys, label))
+        []
+      else
+        ["label #{inspect(label)} does not exist in any listed team"]
+      end
+    end)
   end
 
   # A label with no `team` key (a workspace-level label) is normalized to team key ""
@@ -240,6 +258,36 @@ defmodule SymphonyElixir.Linear.Adapter do
       {:ok, teams} -> MapSet.member?(teams, "") or not MapSet.disjoint?(teams, listed_team_keys)
       :error -> false
     end
+  end
+
+  defp teams_missing_state(states_by_team, state) do
+    downcased = String.downcase(state)
+
+    states_by_team
+    |> Enum.reject(fn {_key, states} -> MapSet.member?(states, downcased) end)
+    |> Enum.map(fn {key, _states} -> key end)
+    |> Enum.sort()
+  end
+
+  defp teams_missing_label(label_teams, listed_team_keys, label_name) do
+    teams = Map.fetch!(label_teams, String.downcase(label_name))
+
+    if MapSet.member?(teams, "") do
+      []
+    else
+      listed_team_keys |> MapSet.difference(teams) |> Enum.sort()
+    end
+  end
+
+  # Design §5: absent from every listed team is an error; absent from only some is a warning —
+  # the configured scope still resolves, but no issue in the named teams can ever match.
+  defp warn_partial_scope(_kind, _name, []), do: :ok
+
+  defp warn_partial_scope(kind, name, missing_team_keys) do
+    Logger.warning(
+      "Linear preflight #{kind} missing from some listed teams " <>
+        "#{kind}=#{name} missing_team_keys=#{Enum.join(missing_team_keys, ",")} outcome=issues_in_those_teams_never_match"
+    )
   end
 
   defp resolve_state_id(issue_id, state_name) do

@@ -174,6 +174,8 @@ defmodule SymphonyElixir.LinearScopeTest do
   end
 
   describe "preflight" do
+    import ExUnit.CaptureLog
+
     alias SymphonyElixir.Linear.Adapter
 
     defmodule StubClient do
@@ -182,6 +184,7 @@ defmodule SymphonyElixir.LinearScopeTest do
       @spec graphql(String.t(), map()) :: {:ok, map()} | {:error, term()}
       def graphql(query, _variables) do
         responses = Process.get(:preflight_responses, %{})
+        Process.put(:preflight_queries, [query | Process.get(:preflight_queries, [])])
 
         case Process.get(:preflight_request_counter) do
           nil -> :ok
@@ -410,6 +413,81 @@ defmodule SymphonyElixir.LinearScopeTest do
       })
 
       assert {:error, :linear_unknown_payload} = Adapter.preflight(scoped_settings(%{}))
+    end
+
+    test "a label present in only some listed teams warns without failing startup" do
+      stub(
+        teams_response([{"MDZ", ["To Do", "Done"]}, {"TRA", ["To Do", "Done"]}]),
+        labels_response([{"bug-symphony", "MDZ"}])
+      )
+
+      log =
+        capture_log(fn ->
+          assert :ok = Adapter.preflight(scoped_settings(%{team_keys: ["MDZ", "TRA"]}))
+        end)
+
+      assert log =~ "label=bug-symphony"
+      assert log =~ "missing_team_keys=tra"
+    end
+
+    test "a state present in only some listed teams warns without failing startup" do
+      stub(
+        teams_response([{"MDZ", ["To Do", "Done"]}, {"TRA", ["Done"]}]),
+        labels_response([{"bug-symphony", nil}])
+      )
+
+      log =
+        capture_log(fn ->
+          assert :ok = Adapter.preflight(scoped_settings(%{team_keys: ["MDZ", "TRA"]}))
+        end)
+
+      assert log =~ "state=To Do"
+      assert log =~ "missing_team_keys=TRA"
+    end
+
+    test "a label that normalizes to blank is reported rather than dropped" do
+      # Config.Schema trims and downcases labels but does not drop blanks, so `any_labels: ["  "]`
+      # reaches the tracker as [""] — which Issue.routable?/2 can never satisfy. Preflight must
+      # say so instead of booting a deployment that will never dispatch anything.
+      stub(teams_response([{"MDZ", ["To Do", "Done"]}]), labels_response([]))
+
+      assert {:error, {:linear_preflight_failed, reasons}} =
+               Adapter.preflight(scoped_settings(%{any_labels: [""]}))
+
+      assert Enum.any?(reasons, &(&1 == ~s(label "" does not exist in any listed team)))
+    end
+
+    test "a GraphQL error body on the teams query carries Linear's own message" do
+      Process.put(:preflight_responses, %{
+        teams: {:ok, %{"data" => nil, "errors" => [%{"message" => "Authentication required"}]}},
+        labels: {:ok, labels_response([])}
+      })
+
+      assert {:error, {:linear_graphql_errors, [%{"message" => "Authentication required"}]}} =
+               Adapter.preflight(scoped_settings(%{}))
+    end
+
+    test "a GraphQL error body on the labels query carries Linear's own message" do
+      Process.put(:preflight_responses, %{
+        teams: {:ok, teams_response([{"MDZ", ["To Do", "Done"]}])},
+        labels: {:ok, %{"data" => nil, "errors" => [%{"message" => "Query too complex"}]}}
+      })
+
+      assert {:error, {:linear_graphql_errors, [%{"message" => "Query too complex"}]}} =
+               Adapter.preflight(scoped_settings(%{}))
+    end
+
+    test "both preflight queries cap every connection at Linear's maximum page size" do
+      # Without an explicit `first:`, the labels query (which matches by name across every team
+      # in the workspace) can page the listed team's row off the default 50 and refuse to boot.
+      stub(teams_response([{"MDZ", ["To Do", "Done"]}]), labels_response([{"bug-symphony", "MDZ"}]))
+
+      assert :ok = Adapter.preflight(scoped_settings(%{}))
+
+      queries = Process.get(:preflight_queries, [])
+
+      assert Enum.any?(queries, &(&1 =~ "teams(filter: $filter, first: 250)" and &1 =~ "states(first: 250)"))
+      assert Enum.any?(queries, &(&1 =~ "issueLabels(filter: $filter, first: 250)"))
     end
 
     test "no configured labels skips the labels request" do
