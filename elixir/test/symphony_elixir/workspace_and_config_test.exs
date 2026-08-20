@@ -1182,7 +1182,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "any_labels normalizes like required_labels and team_keys come from the provider map" do
-    # Note: tracker_project_slug: nil is in the brief but causes issues; using default project: "project"
+    # Brief includes `tracker_project_slug: nil`; omitted due to pre-existing `:missing_linear_project_slug`
+    # validation that triggers WorkflowStore's silent last-known-good fallback, reading stale fixture config.
+    # Team-only config assertion moves to Task 6 when `:missing_linear_scope` replaces this check.
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_provider: %{"team_keys" => [" MDZ ", "MDZ", "TRA"]},
       tracker_any_labels: [" Bug-Symphony ", "BUG-SYMPHONY", "Feat-Symphony"]

@@ -491,7 +491,6 @@ defmodule SymphonyElixir.Config.Schema do
         secret_environment_names: Enum.uniq(secret_environment_names),
         active_states: active_states,
         terminal_states: terminal_states,
-        any_labels: settings.tracker.any_labels,
         team_keys: normalize_team_keys(Map.get(provider, "team_keys"))
     }
 
