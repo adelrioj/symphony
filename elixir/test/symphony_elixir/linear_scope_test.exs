@@ -172,4 +172,172 @@ defmodule SymphonyElixir.LinearScopeTest do
       assert {:error, :missing_linear_scope} = Adapter.validate_config(dropped)
     end
   end
+
+  describe "preflight" do
+    alias SymphonyElixir.Linear.Adapter
+
+    defmodule StubClient do
+      @moduledoc false
+
+      @spec graphql(String.t(), map()) :: {:ok, map()} | {:error, term()}
+      def graphql(query, _variables) do
+        responses = Process.get(:preflight_responses, %{})
+
+        cond do
+          query =~ "teams(" -> Map.fetch!(responses, :teams)
+          query =~ "issueLabels(" -> Map.fetch!(responses, :labels)
+        end
+      end
+    end
+
+    setup do
+      previous = Application.get_env(:symphony_elixir, :linear_client_module)
+      Application.put_env(:symphony_elixir, :linear_client_module, StubClient)
+
+      on_exit(fn ->
+        if is_nil(previous) do
+          Application.delete_env(:symphony_elixir, :linear_client_module)
+        else
+          Application.put_env(:symphony_elixir, :linear_client_module, previous)
+        end
+      end)
+
+      :ok
+    end
+
+    defp stub(teams, labels) do
+      Process.put(:preflight_responses, %{teams: {:ok, teams}, labels: {:ok, labels}})
+    end
+
+    defp teams_response(teams) do
+      %{
+        "data" => %{
+          "teams" => %{
+            "nodes" =>
+              Enum.map(teams, fn {key, states} ->
+                %{"key" => key, "states" => %{"nodes" => Enum.map(states, &%{"name" => &1})}}
+              end)
+          }
+        }
+      }
+    end
+
+    defp labels_response(pairs) do
+      %{
+        "data" => %{
+          "issueLabels" => %{
+            "nodes" => Enum.map(pairs, fn {name, team} -> %{"name" => name, "team" => %{"key" => team}} end)
+          }
+        }
+      }
+    end
+
+    defp scoped_settings(overrides) do
+      Map.merge(
+        %{
+          endpoint: "https://api.linear.app/graphql",
+          api_key: "token",
+          project_slug: nil,
+          team_keys: ["MDZ"],
+          any_labels: ["bug-symphony"],
+          required_labels: [],
+          active_states: ["To Do"],
+          terminal_states: ["Done"]
+        },
+        overrides
+      )
+    end
+
+    test "everything resolving is ok" do
+      stub(teams_response([{"MDZ", ["To Do", "Done"]}]), labels_response([{"bug-symphony", "MDZ"}]))
+
+      assert :ok = Adapter.preflight(scoped_settings(%{}))
+    end
+
+    test "no team keys short-circuits without a request" do
+      # StubClient would raise KeyError if called, since no responses are stubbed
+      assert :ok = Adapter.preflight(scoped_settings(%{team_keys: [], project_slug: "p-1"}))
+    end
+
+    test "an unknown team key is reported" do
+      stub(teams_response([]), labels_response([]))
+
+      assert {:error, {:linear_preflight_failed, reasons}} =
+               Adapter.preflight(scoped_settings(%{team_keys: ["NOPE"]}))
+
+      assert Enum.any?(reasons, &(&1 =~ "team key" and &1 =~ "NOPE"))
+    end
+
+    test "an unknown state name is reported" do
+      stub(teams_response([{"MDZ", ["To Do"]}]), labels_response([{"bug-symphony", "MDZ"}]))
+
+      assert {:error, {:linear_preflight_failed, reasons}} =
+               Adapter.preflight(scoped_settings(%{active_states: ["Todo"]}))
+
+      assert Enum.any?(reasons, &(&1 =~ "state" and &1 =~ "Todo"))
+    end
+
+    test "a label missing from every listed team is an error" do
+      stub(teams_response([{"MDZ", ["To Do", "Done"]}]), labels_response([]))
+
+      assert {:error, {:linear_preflight_failed, reasons}} =
+               Adapter.preflight(scoped_settings(%{}))
+
+      assert Enum.any?(reasons, &(&1 =~ "bug-symphony"))
+    end
+
+    test "a label present in one of two listed teams is not an error" do
+      stub(
+        teams_response([{"MDZ", ["To Do", "Done"]}, {"TRA", ["To Do", "Done"]}]),
+        labels_response([{"bug-symphony", "MDZ"}])
+      )
+
+      assert :ok = Adapter.preflight(scoped_settings(%{team_keys: ["MDZ", "TRA"]}))
+    end
+
+    test "every unresolved value is reported in one error" do
+      stub(teams_response([{"MDZ", ["To Do"]}]), labels_response([]))
+
+      assert {:error, {:linear_preflight_failed, reasons}} =
+               Adapter.preflight(scoped_settings(%{team_keys: ["MDZ", "NOPE"], active_states: ["Todo"], any_labels: ["bug-symphony"]}))
+
+      assert length(reasons) >= 3
+    end
+
+    test "a transport error propagates unchanged" do
+      Process.put(:preflight_responses, %{teams: {:error, :timeout}, labels: {:ok, labels_response([])}})
+
+      assert {:error, :timeout} = Adapter.preflight(scoped_settings(%{}))
+    end
+
+    test "a labels transport error propagates unchanged" do
+      Process.put(:preflight_responses, %{
+        teams: {:ok, teams_response([{"MDZ", ["To Do", "Done"]}])},
+        labels: {:error, :timeout}
+      })
+
+      assert {:error, :timeout} = Adapter.preflight(scoped_settings(%{}))
+    end
+
+    test "a malformed teams payload is reported as an unknown payload" do
+      Process.put(:preflight_responses, %{teams: {:ok, %{"data" => %{}}}, labels: {:ok, labels_response([])}})
+
+      assert {:error, :linear_unknown_payload} = Adapter.preflight(scoped_settings(%{}))
+    end
+
+    test "a malformed labels payload is reported as an unknown payload" do
+      Process.put(:preflight_responses, %{
+        teams: {:ok, teams_response([{"MDZ", ["To Do", "Done"]}])},
+        labels: {:ok, %{"data" => %{}}}
+      })
+
+      assert {:error, :linear_unknown_payload} = Adapter.preflight(scoped_settings(%{}))
+    end
+
+    test "no configured labels skips the labels request" do
+      stub(teams_response([{"MDZ", ["To Do", "Done"]}]), labels_response([]))
+
+      assert :ok = Adapter.preflight(scoped_settings(%{any_labels: [], required_labels: []}))
+    end
+  end
 end

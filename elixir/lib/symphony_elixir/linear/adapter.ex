@@ -38,6 +38,34 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @teams_preflight_query """
+  query SymphonyPreflightTeams($filter: TeamFilter!) {
+    teams(filter: $filter) {
+      nodes {
+        key
+        states {
+          nodes {
+            name
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @labels_preflight_query """
+  query SymphonyPreflightLabels($filter: IssueLabelFilter!) {
+    issueLabels(filter: $filter) {
+      nodes {
+        name
+        team {
+          key
+        }
+      }
+    }
+  }
+  """
+
   @spec validate_config(map()) :: :ok | {:error, term()}
   def validate_config(tracker_settings) do
     cond do
@@ -59,7 +87,18 @@ defmodule SymphonyElixir.Linear.Adapter do
   end
 
   @spec preflight(map()) :: :ok | {:error, term()}
-  def preflight(_tracker_settings), do: :ok
+  def preflight(tracker_settings) do
+    case Map.get(tracker_settings, :team_keys) || [] do
+      [] ->
+        :ok
+
+      team_keys ->
+        with {:ok, teams} <- fetch_preflight_teams(team_keys),
+             {:ok, labels} <- fetch_preflight_labels(preflight_label_names(tracker_settings)) do
+          report_preflight(team_keys, teams, labels, tracker_settings)
+        end
+    end
+  end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
@@ -106,6 +145,84 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
+  end
+
+  defp preflight_label_names(tracker_settings) do
+    ((Map.get(tracker_settings, :any_labels) || []) ++ (Map.get(tracker_settings, :required_labels) || []))
+    |> Enum.reject(&(String.trim(&1) == ""))
+    |> Enum.uniq()
+  end
+
+  defp fetch_preflight_teams(team_keys) do
+    filter = %{or: Enum.map(team_keys, &%{key: %{eqIgnoreCase: &1}})}
+
+    case client_module().graphql(@teams_preflight_query, %{filter: filter}) do
+      {:ok, %{"data" => %{"teams" => %{"nodes" => nodes}}}} when is_list(nodes) -> {:ok, nodes}
+      {:ok, _body} -> {:error, :linear_unknown_payload}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_preflight_labels([]), do: {:ok, []}
+
+  defp fetch_preflight_labels(label_names) do
+    filter = %{or: Enum.map(label_names, &%{name: %{eqIgnoreCase: &1}})}
+
+    case client_module().graphql(@labels_preflight_query, %{filter: filter}) do
+      {:ok, %{"data" => %{"issueLabels" => %{"nodes" => nodes}}}} when is_list(nodes) -> {:ok, nodes}
+      {:ok, _body} -> {:error, :linear_unknown_payload}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp report_preflight(team_keys, teams, labels, tracker_settings) do
+    reasons =
+      unknown_team_keys(team_keys, teams) ++
+        unknown_state_names(tracker_settings, teams) ++
+        unknown_label_names(tracker_settings, labels)
+
+    case reasons do
+      [] -> :ok
+      reasons -> {:error, {:linear_preflight_failed, reasons}}
+    end
+  end
+
+  defp unknown_team_keys(team_keys, teams) do
+    resolved_keys = MapSet.new(teams, &String.downcase(&1["key"] || ""))
+
+    team_keys
+    |> Enum.reject(&MapSet.member?(resolved_keys, String.downcase(&1)))
+    |> Enum.map(&"unknown Linear team key #{inspect(&1)}")
+  end
+
+  defp unknown_state_names(tracker_settings, teams) do
+    known_states =
+      teams
+      |> Enum.flat_map(fn team -> get_in(team, ["states", "nodes"]) || [] end)
+      |> MapSet.new(&String.downcase(&1["name"] || ""))
+
+    configured_states =
+      ((Map.get(tracker_settings, :active_states) || []) ++ (Map.get(tracker_settings, :terminal_states) || []))
+      |> Enum.uniq()
+
+    configured_states
+    |> Enum.reject(&MapSet.member?(known_states, String.downcase(&1)))
+    |> Enum.map(&"state name #{inspect(&1)} does not exist in any listed team")
+  end
+
+  defp unknown_label_names(tracker_settings, labels) do
+    label_teams =
+      Enum.reduce(labels, %{}, fn label, acc ->
+        name = String.downcase(label["name"] || "")
+        team_key = String.downcase(get_in(label, ["team", "key"]) || "")
+
+        Map.update(acc, name, MapSet.new([team_key]), &MapSet.put(&1, team_key))
+      end)
+
+    tracker_settings
+    |> preflight_label_names()
+    |> Enum.reject(&Map.has_key?(label_teams, String.downcase(&1)))
+    |> Enum.map(&"label #{inspect(&1)} does not exist in any listed team")
   end
 
   defp resolve_state_id(issue_id, state_name) do
