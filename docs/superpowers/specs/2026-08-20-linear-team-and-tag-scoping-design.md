@@ -227,8 +227,14 @@ refuses to start.
 ### 6. Status board
 
 `status_dashboard.ex:395` hard-codes `format_project_link_lines/0` around a Linear project
-URL. It shows the configured team keys and matched labels; the project link stays when
-`project_slug` is set, and the line reads "Scope:" rather than "Project:".
+URL.
+
+The line keeps its `Project:` label and current content when only `project_slug` is set, and
+becomes `Scope:` listing team keys and matched labels only when `team_keys` is set. An
+unconditional rename would rewrite ten snapshot fixtures under
+`test/fixtures/status_dashboard_snapshots/` — five `.snapshot.txt` plus five `.evidence.md`,
+all generated with the default `project_slug: "project"` — for no gain in the project-only
+case. Existing fixtures stay byte-identical and team scoping gets one new fixture.
 
 ## Testing
 
