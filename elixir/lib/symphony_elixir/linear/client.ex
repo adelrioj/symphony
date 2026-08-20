@@ -201,6 +201,31 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  @doc """
+  Builds a Linear `IssueFilter` map for the configured scope.
+
+  Team keys, label names, and state names are matched with `eqIgnoreCase`
+  because Linear's `StringComparator` offers `in` but no `inIgnoreCase`, so a
+  case-insensitive set match has to be an `or` list of single comparisons.
+
+  Top-level keys AND with the `and` conjunct list, so the result reads as
+  `state AND (team ...) AND project AND (any label ...) AND required label ...`.
+  """
+  @spec build_issue_filter(map(), keyword()) :: map()
+  def build_issue_filter(tracker_settings, opts) when is_map(tracker_settings) and is_list(opts) do
+    conjuncts =
+      [
+        team_conjunct(Map.get(tracker_settings, :team_keys) || []),
+        project_conjunct(tracker_settings.project_slug),
+        any_labels_conjunct(Map.get(tracker_settings, :any_labels) || [])
+      ] ++ required_label_conjuncts(Map.get(tracker_settings, :required_labels) || [])
+
+    %{}
+    |> maybe_put_state(Keyword.get(opts, :state_names))
+    |> maybe_put_ids(Keyword.get(opts, :ids))
+    |> maybe_put_conjuncts(Enum.reject(conjuncts, &is_nil/1))
+  end
+
   @doc false
   @spec normalize_issue_for_test(map()) :: Issue.t() | nil
   def normalize_issue_for_test(issue) when is_map(issue) do
@@ -350,6 +375,43 @@ defmodule SymphonyElixir.Linear.Client do
       _ -> fallback_index
     end)
   end
+
+  defp team_conjunct([]), do: nil
+
+  defp team_conjunct(team_keys) do
+    %{or: Enum.map(team_keys, &%{team: %{key: %{eqIgnoreCase: &1}}})}
+  end
+
+  defp project_conjunct(project_slug) when is_binary(project_slug) do
+    if String.trim(project_slug) == "", do: nil, else: %{project: %{slugId: %{eq: project_slug}}}
+  end
+
+  defp project_conjunct(_project_slug), do: nil
+
+  defp any_labels_conjunct([]), do: nil
+
+  defp any_labels_conjunct(any_labels) do
+    %{or: Enum.map(any_labels, &label_clause/1)}
+  end
+
+  defp required_label_conjuncts(required_labels), do: Enum.map(required_labels, &label_clause/1)
+
+  defp label_clause(label), do: %{labels: %{some: %{name: %{eqIgnoreCase: label}}}}
+
+  defp maybe_put_state(filter, state_names) when is_list(state_names) and state_names != [] do
+    Map.put(filter, :state, %{or: Enum.map(state_names, &%{name: %{eqIgnoreCase: &1}})})
+  end
+
+  defp maybe_put_state(filter, _state_names), do: filter
+
+  defp maybe_put_ids(filter, ids) when is_list(ids) and ids != [] do
+    Map.put(filter, :id, %{in: ids})
+  end
+
+  defp maybe_put_ids(filter, _ids), do: filter
+
+  defp maybe_put_conjuncts(filter, []), do: filter
+  defp maybe_put_conjuncts(filter, conjuncts), do: Map.put(filter, :and, conjuncts)
 
   defp build_graphql_payload(query, variables, operation_name) do
     %{
