@@ -473,6 +473,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute Issue.routable?(issue, %{required_labels: [""], any_labels: []})
     refute Issue.routable?(issue, %{required_labels: [], any_labels: [""]})
 
+    # nil-tolerance: Map.get(..) || [] guards handle nil values
+    assert Issue.routable?(issue, %{required_labels: nil, any_labels: nil})
+    assert Issue.routable?(issue, %{required_labels: nil, any_labels: ["bug-symphony"]})
+    assert Issue.routable?(issue, %{required_labels: ["backend"], any_labels: nil})
+
     # dispatchable: false always rejects
     refute Issue.routable?(%{issue | dispatchable: false}, %{required_labels: [], any_labels: []})
   end
