@@ -24,7 +24,8 @@ defmodule SymphonyElixir.CLI do
           required(:ensure_all_started) => (-> ensure_started_result()),
           optional(:ensure_linear_mcp_started) => (-> ensure_started_result()),
           optional(:configure_linear_mcp_logger) => (-> :ok),
-          optional(:serve_linear_mcp) => (-> :ok)
+          optional(:serve_linear_mcp) => (-> :ok),
+          optional(:preflight) => (-> :ok | {:error, term()})
         }
 
   @spec main([String.t()]) :: no_return()
@@ -86,13 +87,23 @@ defmodule SymphonyElixir.CLI do
 
       case deps.ensure_all_started.() do
         {:ok, _started_apps} ->
-          :ok
+          handle_preflight(expanded_path, deps)
 
         {:error, reason} ->
           {:error, "Failed to start Symphony with workflow #{expanded_path}: #{inspect(reason)}"}
       end
     else
       {:error, "Workflow file not found: #{expanded_path}"}
+    end
+  end
+
+  defp handle_preflight(expanded_path, deps) do
+    case run_preflight(deps) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Tracker preflight failed for workflow #{expanded_path}: #{format_preflight_error(reason)}"}
     end
   end
 
@@ -111,7 +122,8 @@ defmodule SymphonyElixir.CLI do
       ensure_all_started: ensure_all_started,
       ensure_linear_mcp_started: fn -> Application.ensure_all_started(:req) end,
       configure_linear_mcp_logger: &configure_linear_mcp_logger/0,
-      serve_linear_mcp: &serve_linear_mcp/0
+      serve_linear_mcp: &serve_linear_mcp/0,
+      preflight: fn -> SymphonyElixir.Tracker.preflight(SymphonyElixir.Config.settings!().tracker) end
     }
   end
 
@@ -164,6 +176,18 @@ defmodule SymphonyElixir.CLI do
     |> Map.get(:ensure_linear_mcp_started, fn -> {:ok, []} end)
     |> then(& &1.())
   end
+
+  defp run_preflight(deps) do
+    deps
+    |> Map.get(:preflight, fn -> :ok end)
+    |> then(& &1.())
+  end
+
+  defp format_preflight_error({:linear_preflight_failed, reasons}) when is_list(reasons) do
+    Enum.join(reasons, "; ")
+  end
+
+  defp format_preflight_error(reason), do: inspect(reason)
 
   defp configure_linear_mcp_logger(deps) do
     deps
