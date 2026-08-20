@@ -397,7 +397,8 @@ The helper mode can also be run directly when debugging MCP wiring:
   rate-limit policy, so workflows own idempotent mutations and handling provider errors. Read/config
   failures use `{:error, :missing_linear_api_token}`, `{:error, :missing_linear_scope}`,
   `{:error, :invalid_linear_endpoint}`, `{:error, :invalid_linear_assignee}`,
-  `{:error, :missing_linear_viewer_identity}`, `{:error, {:linear_api_status, status}}`,
+  `{:error, :missing_linear_viewer_identity}`,
+  `{:error, {:linear_preflight_failed, reasons}}`, `{:error, {:linear_api_status, status}}`,
   `{:error, {:linear_api_request, reason}}`, `{:error, {:linear_graphql_errors, errors}}`,
   `{:error, :linear_unknown_payload}`, or `{:error, :linear_missing_end_cursor}`. Tool results
   are maps with `"success"`, JSON-string `"output"`, and text `"contentItems"`; invalid
