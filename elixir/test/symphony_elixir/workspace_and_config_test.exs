@@ -1683,4 +1683,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.rm_rf(test_root)
     end
   end
+
+  test "test helper emits a tracker provider block and any_labels" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => ["MDZ", "TRA"]},
+      tracker_any_labels: ["bug-symphony", "feat-symphony"]
+    )
+
+    content = File.read!(Workflow.workflow_file_path())
+
+    assert content =~ "  provider:"
+    assert content =~ "    team_keys: [\"MDZ\", \"TRA\"]"
+    assert content =~ "  any_labels: [\"bug-symphony\", \"feat-symphony\"]"
+  end
 end
