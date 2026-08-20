@@ -38,6 +38,12 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  # Neither query paginates or sets `first:` — both rely on Linear's default page size.
+  # Truncation here would drop resolved values and fail preflight on values that actually
+  # exist (a false positive, not the silent-idle failure this function exists to catch).
+  # Unlikely in practice: the teams query is filtered to the configured keys, and a
+  # workspace rarely has enough matching labels or workflow states per team to hit a
+  # default page limit. Left undocumented pagination handling as a known limitation.
   @teams_preflight_query """
   query SymphonyPreflightTeams($filter: TeamFilter!) {
     teams(filter: $filter) {
@@ -179,7 +185,7 @@ defmodule SymphonyElixir.Linear.Adapter do
     reasons =
       unknown_team_keys(team_keys, teams) ++
         unknown_state_names(tracker_settings, teams) ++
-        unknown_label_names(tracker_settings, labels)
+        unknown_label_names(tracker_settings, team_keys, labels)
 
     case reasons do
       [] -> :ok
@@ -210,7 +216,9 @@ defmodule SymphonyElixir.Linear.Adapter do
     |> Enum.map(&"state name #{inspect(&1)} does not exist in any listed team")
   end
 
-  defp unknown_label_names(tracker_settings, labels) do
+  defp unknown_label_names(tracker_settings, team_keys, labels) do
+    listed_team_keys = MapSet.new(team_keys, &String.downcase/1)
+
     label_teams =
       Enum.reduce(labels, %{}, fn label, acc ->
         name = String.downcase(label["name"] || "")
@@ -221,8 +229,17 @@ defmodule SymphonyElixir.Linear.Adapter do
 
     tracker_settings
     |> preflight_label_names()
-    |> Enum.reject(&Map.has_key?(label_teams, String.downcase(&1)))
+    |> Enum.reject(&label_in_listed_teams?(label_teams, listed_team_keys, &1))
     |> Enum.map(&"label #{inspect(&1)} does not exist in any listed team")
+  end
+
+  # A label with no `team` key (a workspace-level label) is normalized to team key ""
+  # above, and counts as present in every listed team, not absent from all of them.
+  defp label_in_listed_teams?(label_teams, listed_team_keys, label_name) do
+    case Map.fetch(label_teams, String.downcase(label_name)) do
+      {:ok, teams} -> MapSet.member?(teams, "") or not MapSet.disjoint?(teams, listed_team_keys)
+      :error -> false
+    end
   end
 
   defp resolve_state_id(issue_id, state_name) do

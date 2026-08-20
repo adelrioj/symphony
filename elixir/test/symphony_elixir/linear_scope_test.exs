@@ -183,6 +183,11 @@ defmodule SymphonyElixir.LinearScopeTest do
       def graphql(query, _variables) do
         responses = Process.get(:preflight_responses, %{})
 
+        case Process.get(:preflight_request_counter) do
+          nil -> :ok
+          pid -> send(pid, :preflight_request)
+        end
+
         cond do
           query =~ "teams(" -> Map.fetch!(responses, :teams)
           query =~ "issueLabels(" -> Map.fetch!(responses, :labels)
@@ -226,7 +231,11 @@ defmodule SymphonyElixir.LinearScopeTest do
       %{
         "data" => %{
           "issueLabels" => %{
-            "nodes" => Enum.map(pairs, fn {name, team} -> %{"name" => name, "team" => %{"key" => team}} end)
+            "nodes" =>
+              Enum.map(pairs, fn
+                {name, nil} -> %{"name" => name, "team" => nil}
+                {name, team} -> %{"name" => name, "team" => %{"key" => team}}
+              end)
           }
         }
       }
@@ -275,6 +284,9 @@ defmodule SymphonyElixir.LinearScopeTest do
                Adapter.preflight(scoped_settings(%{active_states: ["Todo"]}))
 
       assert Enum.any?(reasons, &(&1 =~ "state" and &1 =~ "Todo"))
+      # terminal_states (default ["Done"]) is not stubbed as a known state either, so it
+      # must be reported too — proves terminal_states is actually validated, not just active_states.
+      assert Enum.any?(reasons, &(&1 =~ "state" and &1 =~ "Done"))
     end
 
     test "a label missing from every listed team is an error" do
@@ -295,13 +307,79 @@ defmodule SymphonyElixir.LinearScopeTest do
       assert :ok = Adapter.preflight(scoped_settings(%{team_keys: ["MDZ", "TRA"]}))
     end
 
+    test "a label that exists only in a team that is not listed is an error" do
+      # The label resolves fine against the workspace (it exists, in team ZED), but ZED is
+      # not one of the listed team_keys, so the poll filter (team AND label) would never
+      # match anything. Reverting the team-scoping check to a bare Map.has_key? on label
+      # name alone would make this test fail to raise an error and assert :ok instead.
+      stub(
+        teams_response([{"MDZ", ["To Do", "Done"]}]),
+        labels_response([{"bug-symphony", "ZED"}])
+      )
+
+      assert {:error, {:linear_preflight_failed, reasons}} =
+               Adapter.preflight(scoped_settings(%{team_keys: ["MDZ"]}))
+
+      assert Enum.any?(reasons, &(&1 =~ "bug-symphony"))
+    end
+
+    test "a workspace-level label with no team applies to every listed team" do
+      stub(
+        teams_response([{"MDZ", ["To Do", "Done"]}]),
+        labels_response([{"bug-symphony", nil}])
+      )
+
+      assert :ok = Adapter.preflight(scoped_settings(%{team_keys: ["MDZ"]}))
+    end
+
+    test "team key comparison is case-insensitive" do
+      stub(teams_response([{"MDZ", ["To Do", "Done"]}]), labels_response([{"bug-symphony", "MDZ"}]))
+
+      assert :ok = Adapter.preflight(scoped_settings(%{team_keys: ["mdz"]}))
+    end
+
+    test "state name comparison is case-insensitive" do
+      stub(teams_response([{"MDZ", ["TO DO", "DONE"]}]), labels_response([{"bug-symphony", "MDZ"}]))
+
+      assert :ok = Adapter.preflight(scoped_settings(%{}))
+    end
+
+    test "exactly two requests are made regardless of team, state, or label count" do
+      parent = self()
+
+      Process.put(:preflight_responses, %{
+        teams: {:ok, teams_response([{"MDZ", ["To Do", "Done"]}, {"TRA", ["To Do", "Done"]}])},
+        labels: {:ok, labels_response([{"bug-symphony", "MDZ"}, {"feat-symphony", "TRA"}, {"backend", "MDZ"}])}
+      })
+
+      Process.put(:preflight_request_counter, parent)
+
+      settings =
+        scoped_settings(%{
+          team_keys: ["MDZ", "TRA"],
+          any_labels: ["bug-symphony", "feat-symphony"],
+          required_labels: ["backend"],
+          active_states: ["To Do"],
+          terminal_states: ["Done"]
+        })
+
+      assert :ok = Adapter.preflight(settings)
+      assert_receive :preflight_request, 0
+      assert_receive :preflight_request, 0
+      refute_receive :preflight_request, 0
+    end
+
     test "every unresolved value is reported in one error" do
       stub(teams_response([{"MDZ", ["To Do"]}]), labels_response([]))
 
       assert {:error, {:linear_preflight_failed, reasons}} =
                Adapter.preflight(scoped_settings(%{team_keys: ["MDZ", "NOPE"], active_states: ["Todo"], any_labels: ["bug-symphony"]}))
 
-      assert length(reasons) >= 3
+      # One reason per category, not just a headcount, so this fails if any one category
+      # stops accumulating (three state-only errors could otherwise satisfy a bare length check).
+      assert Enum.any?(reasons, &(&1 =~ "team key" and &1 =~ "NOPE"))
+      assert Enum.any?(reasons, &(&1 =~ "state" and &1 =~ "Todo"))
+      assert Enum.any?(reasons, &(&1 =~ "bug-symphony"))
     end
 
     test "a transport error propagates unchanged" do
@@ -335,7 +413,9 @@ defmodule SymphonyElixir.LinearScopeTest do
     end
 
     test "no configured labels skips the labels request" do
-      stub(teams_response([{"MDZ", ["To Do", "Done"]}]), labels_response([]))
+      # No :labels key is stubbed at all, so if fetch_preflight_labels([]) did not
+      # short-circuit and instead issued a request, StubClient would raise KeyError.
+      Process.put(:preflight_responses, %{teams: {:ok, teams_response([{"MDZ", ["To Do", "Done"]}])}})
 
       assert :ok = Adapter.preflight(scoped_settings(%{any_labels: [], required_labels: []}))
     end
