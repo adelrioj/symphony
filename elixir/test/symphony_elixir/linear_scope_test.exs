@@ -110,4 +110,21 @@ defmodule SymphonyElixir.LinearScopeTest do
 
     refute Enum.any?(filter.and, &Map.has_key?(&1, :project))
   end
+
+  test "the by-ids query passes a filter variable carrying the requested ids" do
+    parent = self()
+
+    graphql_fun = fn query, variables ->
+      send(parent, {:graphql, query, variables})
+
+      {:ok, %{"data" => %{"issues" => %{"nodes" => []}}}}
+    end
+
+    assert {:ok, []} = Client.fetch_issues_by_ids_for_test(["id-1", "id-2"], graphql_fun)
+
+    assert_receive {:graphql, query, variables}
+    assert query =~ "$filter: IssueFilter!"
+    refute query =~ "$projectSlug"
+    assert variables.filter.id == %{in: ["id-1", "id-2"]}
+  end
 end

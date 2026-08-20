@@ -635,7 +635,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       body = %{
         "data" => %{
           "issues" => %{
-            "nodes" => Enum.map(variables.ids, raw_issue)
+            "nodes" => Enum.map(variables.filter.id.in, raw_issue)
           }
         }
       }
@@ -649,20 +649,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert_receive {:fetch_issue_states_page, query,
                     %{
-                      ids: ^first_batch_ids,
-                      projectSlug: "test-project",
+                      filter: %{id: %{in: ^first_batch_ids}},
                       first: 50,
                       relationFirst: 50
                     }}
 
     assert query =~ "SymphonyLinearIssuesById"
-    assert query =~ "projectSlug"
-    assert query =~ "slugId"
+    assert query =~ "$filter: IssueFilter!"
+    refute query =~ "$projectSlug"
 
     assert_receive {:fetch_issue_states_page, ^query,
                     %{
-                      ids: ^second_batch_ids,
-                      projectSlug: "test-project",
+                      filter: %{id: %{in: ^second_batch_ids}},
                       first: 5,
                       relationFirst: 50
                     }}
