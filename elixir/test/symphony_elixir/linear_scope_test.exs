@@ -127,4 +127,49 @@ defmodule SymphonyElixir.LinearScopeTest do
     refute query =~ "$projectSlug"
     assert variables.filter.id == %{in: ["id-1", "id-2"]}
   end
+
+  describe "validate_config scope rules" do
+    alias SymphonyElixir.Linear.Adapter
+
+    defp settings(overrides) do
+      Map.merge(
+        %{
+          endpoint: "https://api.linear.app/graphql",
+          api_key: "token",
+          project_slug: nil,
+          team_keys: [],
+          assignee: nil,
+          any_labels: [],
+          required_labels: [],
+          secret_environment_names: []
+        },
+        overrides
+      )
+    end
+
+    test "neither scope is an error" do
+      assert {:error, :missing_linear_scope} = Adapter.validate_config(settings(%{}))
+    end
+
+    test "a blank project slug with no team keys is an error" do
+      assert {:error, :missing_linear_scope} = Adapter.validate_config(settings(%{project_slug: "  "}))
+    end
+
+    test "project slug alone is valid" do
+      assert :ok = Adapter.validate_config(settings(%{project_slug: "p-1"}))
+    end
+
+    test "team keys alone are valid" do
+      assert :ok = Adapter.validate_config(settings(%{team_keys: ["MDZ"]}))
+    end
+
+    test "both together are valid" do
+      assert :ok = Adapter.validate_config(settings(%{team_keys: ["MDZ"], project_slug: "p-1"}))
+    end
+
+    test "a settings map carrying neither scope key is an error" do
+      dropped = Map.drop(settings(%{}), [:project_slug, :team_keys])
+      assert {:error, :missing_linear_scope} = Adapter.validate_config(dropped)
+    end
+  end
 end

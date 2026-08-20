@@ -1222,9 +1222,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "any_labels normalizes like required_labels and team_keys come from the provider map" do
-    # Brief includes `tracker_project_slug: nil`; omitted due to pre-existing `:missing_linear_project_slug`
-    # validation that triggers WorkflowStore's silent last-known-good fallback, reading stale fixture config.
-    # Team-only config assertion moves to Task 6 when `:missing_linear_scope` replaces this check.
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_provider: %{"team_keys" => [" MDZ ", "MDZ", "TRA"]},
       tracker_any_labels: [" Bug-Symphony ", "BUG-SYMPHONY", "Feat-Symphony"]
@@ -1234,6 +1231,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert tracker.any_labels == ["bug-symphony", "feat-symphony"]
     assert tracker.team_keys == ["MDZ", "TRA"]
+  end
+
+  test "a team-only config with no project slug loads its labels and team keys" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => [" MDZ ", "MDZ", "TRA"]},
+      tracker_any_labels: [" Bug-Symphony ", "BUG-SYMPHONY", "Feat-Symphony"]
+    )
+
+    tracker = Config.settings!().tracker
+
+    assert tracker.project_slug == nil
+    assert tracker.team_keys == ["MDZ", "TRA"]
+    assert tracker.any_labels == ["bug-symphony", "feat-symphony"]
   end
 
   test "any_labels and team_keys default to empty lists" do

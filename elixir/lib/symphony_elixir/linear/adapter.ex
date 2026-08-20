@@ -47,8 +47,8 @@ defmodule SymphonyElixir.Linear.Adapter do
       not present_string?(tracker_settings.api_key) ->
         {:error, :missing_linear_api_token}
 
-      not present_string?(tracker_settings.project_slug) ->
-        {:error, :missing_linear_project_slug}
+      not scoped?(tracker_settings) ->
+        {:error, :missing_linear_scope}
 
       not is_nil(tracker_settings.assignee) and not present_string?(tracker_settings.assignee) ->
         {:error, :invalid_linear_assignee}
@@ -119,4 +119,8 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
   defp present_string?(_value), do: false
+
+  defp scoped?(%{team_keys: team_keys}) when is_list(team_keys) and team_keys != [], do: true
+  defp scoped?(%{project_slug: project_slug}), do: present_string?(project_slug)
+  defp scoped?(_tracker_settings), do: false
 end

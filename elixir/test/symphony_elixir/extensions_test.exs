@@ -136,10 +136,10 @@ defmodule SymphonyElixir.ExtensionsTest do
       prompt: "Semantic-invalid prompt"
     )
 
-    assert {:error, :missing_linear_project_slug} = WorkflowStore.force_reload()
+    assert {:error, :missing_linear_scope} = WorkflowStore.force_reload()
     assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
     assert Config.settings!().polling.interval_ms == good_settings.polling.interval_ms
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+    assert {:error, :missing_linear_scope} = Config.validate!()
 
     third_workflow = Path.join(Path.dirname(Workflow.workflow_file_path()), "THIRD_WORKFLOW.md")
     write_workflow_file!(third_workflow, prompt: "Third prompt")
