@@ -28,8 +28,10 @@ Tell your favorite coding agent to build Symphony in a programming language of y
 ### Option 2. Use our experimental reference implementation
 
 Check out [elixir/README.md](elixir/README.md) for instructions on how to set up your environment
-and run the Elixir-based Symphony implementation. One instance drives one project; to run several
-projects, run one container per project (see
+and run the Elixir-based Symphony implementation. One instance drives one repo, scoped either to a
+single Linear project or to one or more Linear teams plus optional labels; team scoping lets tickets
+from any project qualify, so adding a project needs no config change. To drive several repos, run
+one container per repo (see
 [Run in Docker](elixir/README.md#run-in-docker-orbstack-compatible)). Self-hosted deployments live
 in their own repos, seeded from [`deploy/client-template/`](deploy/client-template). You can also
 ask your favorite coding agent to help with the setup:
