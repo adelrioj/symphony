@@ -477,16 +477,21 @@ defmodule SymphonyElixir.LinearScopeTest do
                Adapter.preflight(scoped_settings(%{}))
     end
 
-    test "both preflight queries cap every connection at Linear's maximum page size" do
-      # Without an explicit `first:`, the labels query (which matches by name across every team
-      # in the workspace) can page the listed team's row off the default 50 and refuse to boot.
+    test "both preflight queries keep their page sizes within Linear's complexity budget" do
+      # These numbers are not free choices and not "Linear's maximum page size" — they are capped by
+      # Linear's query-complexity budget (max 10000), which is MULTIPLICATIVE across nested
+      # connections. Measured against the live API: teams 250 x states 250 scored 69025 and
+      # 250 x 50 scored 14025, both rejected; 100 x 50 was accepted. The single-level labels query is
+      # cheap and accepts 250. An earlier version of this test asserted 250 x 250 and passed happily
+      # against the stub while every real preflight call 400'd, so if you change a number here,
+      # re-measure against the API rather than trusting this test.
       stub(teams_response([{"MDZ", ["To Do", "Done"]}]), labels_response([{"bug-symphony", "MDZ"}]))
 
       assert :ok = Adapter.preflight(scoped_settings(%{}))
 
       queries = Process.get(:preflight_queries, [])
 
-      assert Enum.any?(queries, &(&1 =~ "teams(filter: $filter, first: 250)" and &1 =~ "states(first: 250)"))
+      assert Enum.any?(queries, &(&1 =~ "teams(filter: $filter, first: 100)" and &1 =~ "states(first: 50)"))
       assert Enum.any?(queries, &(&1 =~ "issueLabels(filter: $filter, first: 250)"))
     end
 

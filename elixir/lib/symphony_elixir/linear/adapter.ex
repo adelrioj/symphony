@@ -44,14 +44,20 @@ defmodule SymphonyElixir.Linear.Adapter do
   # instead of relying on the default (50). The labels query matches by name across every team
   # in the workspace, so a large workspace where many teams carry the same label name could
   # otherwise page the listed team's row off the end and refuse to boot a valid deployment.
-  # Truncation past 250 would still fail preflight on values that actually exist (a false
-  # positive, not the silent-idle failure this function exists to catch).
+  # Truncation would still fail preflight on values that actually exist (a false positive, not the
+  # silent-idle failure this function exists to catch).
+  #
+  # The page sizes are capped by Linear's query-complexity budget (max 10000), and complexity is
+  # MULTIPLICATIVE across nested connections, so teams x states is the binding constraint rather
+  # than either number alone. Measured against the live API: 250x250 = 69025 and 250x50 = 14025 both
+  # rejected; 100x50 accepted. The single-level labels query is cheap, and 250 is accepted there.
+  # Raising either teams number means re-measuring, not just doubling it.
   @teams_preflight_query """
   query SymphonyPreflightTeams($filter: TeamFilter!) {
-    teams(filter: $filter, first: 250) {
+    teams(filter: $filter, first: 100) {
       nodes {
         key
-        states(first: 250) {
+        states(first: 50) {
           nodes {
             name
           }
