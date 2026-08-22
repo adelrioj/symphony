@@ -24,7 +24,8 @@ defmodule SymphonyElixir.CLI do
           required(:ensure_all_started) => (-> ensure_started_result()),
           optional(:ensure_linear_mcp_started) => (-> ensure_started_result()),
           optional(:configure_linear_mcp_logger) => (-> :ok),
-          optional(:serve_linear_mcp) => (-> :ok)
+          optional(:serve_linear_mcp) => (-> :ok),
+          optional(:preflight) => (-> :ok | {:error, term()})
         }
 
   @spec main([String.t()]) :: no_return()
@@ -84,15 +85,31 @@ defmodule SymphonyElixir.CLI do
     if deps.file_regular?.(expanded_path) do
       :ok = deps.set_workflow_file_path.(expanded_path)
 
-      case deps.ensure_all_started.() do
-        {:ok, _started_apps} ->
-          :ok
-
-        {:error, reason} ->
-          {:error, "Failed to start Symphony with workflow #{expanded_path}: #{inspect(reason)}"}
-      end
+      # SPEC §6.3: validate configuration *before* starting the scheduling loop, otherwise a
+      # bad scope dispatches work (workspace, clone, agent) before preflight can halt the VM.
+      with :ok <- handle_preflight(expanded_path, deps), do: start_application(expanded_path, deps)
     else
       {:error, "Workflow file not found: #{expanded_path}"}
+    end
+  end
+
+  defp start_application(expanded_path, deps) do
+    case deps.ensure_all_started.() do
+      {:ok, _started_apps} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Failed to start Symphony with workflow #{expanded_path}: #{inspect(reason)}"}
+    end
+  end
+
+  defp handle_preflight(expanded_path, deps) do
+    case run_preflight(deps) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Tracker preflight failed for workflow #{expanded_path}: #{format_preflight_error(reason)}"}
     end
   end
 
@@ -111,8 +128,24 @@ defmodule SymphonyElixir.CLI do
       ensure_all_started: ensure_all_started,
       ensure_linear_mcp_started: fn -> Application.ensure_all_started(:req) end,
       configure_linear_mcp_logger: &configure_linear_mcp_logger/0,
-      serve_linear_mcp: &serve_linear_mcp/0
+      serve_linear_mcp: &serve_linear_mcp/0,
+      preflight: &run_tracker_preflight/0
     }
+  end
+
+  # Runs before the supervision tree, so it starts only the HTTP client it needs (same shape as
+  # the --linear-mcp branch). An unloadable workflow is left to application start, which reports
+  # it with its own message rather than as a preflight failure.
+  defp run_tracker_preflight do
+    case SymphonyElixir.Config.settings() do
+      {:ok, settings} ->
+        with {:ok, _started_apps} <- Application.ensure_all_started(:req) do
+          SymphonyElixir.Tracker.preflight(settings.tracker)
+        end
+
+      {:error, _reason} ->
+        :ok
+    end
   end
 
   defp evaluate_daemon(opts, positional, deps) do
@@ -164,6 +197,18 @@ defmodule SymphonyElixir.CLI do
     |> Map.get(:ensure_linear_mcp_started, fn -> {:ok, []} end)
     |> then(& &1.())
   end
+
+  defp run_preflight(deps) do
+    deps
+    |> Map.get(:preflight, fn -> :ok end)
+    |> then(& &1.())
+  end
+
+  defp format_preflight_error({:linear_preflight_failed, reasons}) when is_list(reasons) do
+    Enum.join(reasons, "; ")
+  end
+
+  defp format_preflight_error(reason), do: inspect(reason)
 
   defp configure_linear_mcp_logger(deps) do
     deps

@@ -401,6 +401,14 @@ Fields:
   - An issue MUST contain every configured label to dispatch or continue.
   - Matching ignores case and surrounding whitespace.
   - A blank configured label matches no issue.
+- `any_labels` (list of strings)
+  - Default: `[]`.
+  - When non-empty, an issue MUST contain at least one configured label to dispatch or
+    continue. An empty list imposes no constraint.
+  - Matching ignores case and surrounding whitespace.
+  - A blank configured label matches no issue.
+  - Composes with `required_labels` as a conjunction: all of `required_labels` AND at least
+    one of `any_labels`.
 - `active_states` (list of strings)
   - REQUIRED unless the selected adapter profile documents a default.
   - Values are provider-native state names compared case-insensitively by the scheduler.
@@ -653,6 +661,9 @@ Validation checks:
 - `tracker.kind` is present and supported.
 - The selected adapter accepts `tracker.provider` after documented defaults and `$VAR`
   resolution.
+- At startup only (this check MUST NOT be repeated per tick, as it requires live tracker
+  requests): the selected adapter's configured scope selectors resolve against the live tracker;
+  if any do not resolve, fail startup naming each one.
 - The command for any backend that can be selected is present and non-empty.
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
@@ -664,6 +675,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.kind`: string, REQUIRED, selects one supported adapter
 - `tracker.provider`: object, default `{}`, adapter-owned endpoint/scope/auth settings
 - `tracker.required_labels`: list of strings, default `[]`
+- `tracker.any_labels`: list of strings, default `[]`
 - `tracker.active_states`: list of provider-native state names, adapter-defined default
 - `tracker.terminal_states`: list of provider-native state names, adapter-defined default
 - `polling.interval_ms`: integer, default `30000`
@@ -820,13 +832,15 @@ An issue is dispatch-eligible only if all are true:
 - Its state is in `active_states` and not in `terminal_states`.
 - Its adapter-provided `dispatchable` value is `true`.
 - It contains every label in `tracker.required_labels`.
+- If `tracker.any_labels` is non-empty, it contains at least one of those labels.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
 
 For refresh and continuation checks, `issue_routable(issue)` means only that adapter-provided
-`dispatchable` is true and all `tracker.required_labels` match. State, claims, and concurrency are
+`dispatchable` is true and all `tracker.required_labels` and, when non-empty, at least one
+`tracker.any_labels` match. State, claims, and concurrency are
 checked separately by the surrounding algorithm.
 
 Sorting order (stable intent):

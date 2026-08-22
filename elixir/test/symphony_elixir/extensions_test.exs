@@ -136,10 +136,10 @@ defmodule SymphonyElixir.ExtensionsTest do
       prompt: "Semantic-invalid prompt"
     )
 
-    assert {:error, :missing_linear_project_slug} = WorkflowStore.force_reload()
+    assert {:error, :missing_linear_scope} = WorkflowStore.force_reload()
     assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
     assert Config.settings!().polling.interval_ms == good_settings.polling.interval_ms
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+    assert {:error, :missing_linear_scope} = Config.validate!()
 
     third_workflow = Path.join(Path.dirname(Workflow.workflow_file_path()), "THIRD_WORKFLOW.md")
     write_workflow_file!(third_workflow, prompt: "Third prompt")
@@ -738,6 +738,15 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert method_not_allowed_response.body["error"]["code"] == "method_not_allowed"
 
     assert {:error, _reason} = HttpServer.start_link(host: "bad host", port: 0)
+  end
+
+  test "Tracker.preflight is a no-op for adapters that do not implement it" do
+    # the memory adapter does not export preflight/1
+    assert :ok = SymphonyElixir.Tracker.preflight(%{kind: "memory"})
+  end
+
+  test "Tracker.preflight delegates to an adapter that implements it" do
+    assert :ok = SymphonyElixir.Tracker.preflight(%{kind: "linear", team_keys: [], project_slug: "p-1"})
   end
 
   defp start_test_endpoint(overrides) do

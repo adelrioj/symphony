@@ -431,13 +431,55 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "tracker issue routing requires every configured label" do
     issue = %Issue{labels: [" Symphony ", "JavaScript"], dispatchable: true}
 
-    assert Issue.routable?(issue, [])
-    assert Issue.routable?(issue, ["symphony"])
-    assert Issue.routable?(issue, ["SYMPHONY", "javascript"])
-    refute Issue.routable?(issue, ["symph"])
-    refute Issue.routable?(issue, [" "])
-    refute Issue.routable?(issue, ["symphony", "security"])
-    refute Issue.routable?(%{issue | dispatchable: false}, ["symphony"])
+    assert Issue.routable?(issue, %{required_labels: [], any_labels: []})
+    assert Issue.routable?(issue, %{required_labels: ["symphony"], any_labels: []})
+    assert Issue.routable?(issue, %{required_labels: ["SYMPHONY", "javascript"], any_labels: []})
+    refute Issue.routable?(issue, %{required_labels: ["symph"], any_labels: []})
+    refute Issue.routable?(issue, %{required_labels: [" "], any_labels: []})
+    refute Issue.routable?(issue, %{required_labels: ["symphony", "security"], any_labels: []})
+    refute Issue.routable?(%{issue | dispatchable: false}, %{required_labels: ["symphony"], any_labels: []})
+  end
+
+  test "routable? requires all required_labels and at least one any_label" do
+    issue = %Issue{
+      id: "i-1",
+      identifier: "MT-1",
+      title: "Scoped",
+      state: "Todo",
+      labels: ["bug-symphony", "backend"],
+      dispatchable: true
+    }
+
+    # any_labels: at least one match is enough
+    assert Issue.routable?(issue, %{required_labels: [], any_labels: ["bug-symphony", "feat-symphony"]})
+
+    # any_labels: no match rejects
+    refute Issue.routable?(issue, %{required_labels: [], any_labels: ["feat-symphony"]})
+
+    # empty any_labels imposes no constraint
+    assert Issue.routable?(issue, %{required_labels: [], any_labels: []})
+
+    # required_labels still ANDs
+    assert Issue.routable?(issue, %{required_labels: ["backend"], any_labels: ["bug-symphony"]})
+    refute Issue.routable?(issue, %{required_labels: ["frontend"], any_labels: ["bug-symphony"]})
+
+    # both must hold together
+    refute Issue.routable?(issue, %{required_labels: ["backend"], any_labels: ["feat-symphony"]})
+
+    # case and whitespace insensitive on both lists
+    assert Issue.routable?(issue, %{required_labels: [" BACKEND "], any_labels: [" Bug-Symphony "]})
+
+    # a blank configured label matches nothing (SPEC 5.3.1)
+    refute Issue.routable?(issue, %{required_labels: [""], any_labels: []})
+    refute Issue.routable?(issue, %{required_labels: [], any_labels: [""]})
+
+    # nil-tolerance: Map.get(..) || [] guards handle nil values
+    assert Issue.routable?(issue, %{required_labels: nil, any_labels: nil})
+    assert Issue.routable?(issue, %{required_labels: nil, any_labels: ["bug-symphony"]})
+    assert Issue.routable?(issue, %{required_labels: ["backend"], any_labels: nil})
+
+    # dispatchable: false always rejects
+    refute Issue.routable?(%{issue | dispatchable: false}, %{required_labels: [], any_labels: []})
   end
 
   test "linear client normalizes blockers from inverse relations" do
@@ -593,7 +635,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       body = %{
         "data" => %{
           "issues" => %{
-            "nodes" => Enum.map(variables.ids, raw_issue)
+            "nodes" => Enum.map(variables.filter.id.in, raw_issue)
           }
         }
       }
@@ -607,20 +649,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert_receive {:fetch_issue_states_page, query,
                     %{
-                      ids: ^first_batch_ids,
-                      projectSlug: "test-project",
+                      filter: %{id: %{in: ^first_batch_ids}},
                       first: 50,
                       relationFirst: 50
                     }}
 
     assert query =~ "SymphonyLinearIssuesById"
-    assert query =~ "projectSlug"
-    assert query =~ "slugId"
+    assert query =~ "$filter: IssueFilter!"
+    refute query =~ "$projectSlug"
 
     assert_receive {:fetch_issue_states_page, ^query,
                     %{
-                      ids: ^second_batch_ids,
-                      projectSlug: "test-project",
+                      filter: %{id: %{in: ^second_batch_ids}},
                       first: 5,
                       relationFirst: 50
                     }}
@@ -1181,6 +1221,69 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().codex.command == "codex app-server"
   end
 
+  test "any_labels normalizes like required_labels and team_keys come from the provider map" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_provider: %{"team_keys" => [" MDZ ", "MDZ", "TRA"]},
+      tracker_any_labels: [" Bug-Symphony ", "BUG-SYMPHONY", "Feat-Symphony"]
+    )
+
+    tracker = Config.settings!().tracker
+
+    assert tracker.any_labels == ["bug-symphony", "feat-symphony"]
+    assert tracker.team_keys == ["MDZ", "TRA"]
+  end
+
+  test "a team-only config with no project slug loads its labels and team keys" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => [" MDZ ", "MDZ", "TRA"]},
+      tracker_any_labels: [" Bug-Symphony ", "BUG-SYMPHONY", "Feat-Symphony"]
+    )
+
+    tracker = Config.settings!().tracker
+
+    assert tracker.project_slug == nil
+    assert tracker.team_keys == ["MDZ", "TRA"]
+    assert tracker.any_labels == ["bug-symphony", "feat-symphony"]
+  end
+
+  test "a scalar provider.team_keys is rejected instead of silently falling back to project scope" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{tracker: %{kind: "linear", provider: %{project_slug: "p-1", team_keys: "SYM"}}})
+
+    assert message =~ "tracker.provider.team_keys must be a list of non-blank strings"
+  end
+
+  test "a provider.team_keys list holding a blank entry is rejected" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{tracker: %{kind: "linear", provider: %{team_keys: ["MDZ", "  "]}}})
+
+    assert message =~ "tracker.provider.team_keys must be a list of non-blank strings"
+  end
+
+  test "a top-level tracker.team_keys is rejected instead of being dropped by the changeset" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{tracker: %{kind: "linear", project_slug: "p-1", team_keys: ["SYM"]}})
+
+    assert message =~ "tracker.team_keys is not supported"
+    assert message =~ "tracker.provider.team_keys"
+  end
+
+  test "an empty provider.team_keys list stays valid" do
+    assert {:ok, settings} = Schema.parse(%{tracker: %{kind: "linear", project_slug: "p-1", provider: %{team_keys: []}}})
+
+    assert settings.tracker.team_keys == []
+  end
+
+  test "any_labels and team_keys default to empty lists" do
+    write_workflow_file!(Workflow.workflow_file_path())
+
+    tracker = Config.settings!().tracker
+
+    assert tracker.any_labels == []
+    assert tracker.team_keys == []
+  end
+
   test "config resolves $VAR references for env-backed secret and path values" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
@@ -1682,5 +1785,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "test helper emits a tracker provider block and any_labels" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => ["MDZ", "TRA"]},
+      tracker_any_labels: ["bug-symphony", "feat-symphony"]
+    )
+
+    content = File.read!(Workflow.workflow_file_path())
+
+    assert content =~ "  provider:"
+    assert content =~ "    team_keys: [\"MDZ\", \"TRA\"]"
+    assert content =~ "  any_labels: [\"bug-symphony\", \"feat-symphony\"]"
   end
 end

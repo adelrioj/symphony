@@ -55,14 +55,25 @@ defmodule SymphonyElixir.Tracker.Issue do
     labels
   end
 
-  @spec routable?(t(), [String.t()]) :: boolean()
-  def routable?(%__MODULE__{dispatchable: true, labels: labels}, required_labels)
-      when is_list(labels) and is_list(required_labels) do
+  @spec routable?(t(), map()) :: boolean()
+  def routable?(%__MODULE__{dispatchable: true, labels: labels}, label_policy)
+      when is_list(labels) and is_map(label_policy) do
     issue_labels = MapSet.new(labels, &normalize_label/1)
-    Enum.all?(required_labels, &MapSet.member?(issue_labels, normalize_label(&1)))
+
+    required_labels = Map.get(label_policy, :required_labels) || []
+    any_labels = Map.get(label_policy, :any_labels) || []
+
+    Enum.all?(required_labels, &MapSet.member?(issue_labels, normalize_label(&1))) and
+      any_label_satisfied?(any_labels, issue_labels)
   end
 
-  def routable?(%__MODULE__{}, _required_labels), do: false
+  def routable?(%__MODULE__{}, _label_policy), do: false
+
+  defp any_label_satisfied?([], _issue_labels), do: true
+
+  defp any_label_satisfied?(any_labels, issue_labels) when is_list(any_labels) do
+    Enum.any?(any_labels, &MapSet.member?(issue_labels, normalize_label(&1)))
+  end
 
   defp normalize_label(label) when is_binary(label) do
     label

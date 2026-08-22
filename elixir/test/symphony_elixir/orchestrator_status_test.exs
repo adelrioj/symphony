@@ -1226,6 +1226,36 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert rendered =~ "http://127.0.0.1:4000/"
   end
 
+  test "status board shows team scope when team keys are configured" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => ["MDZ", "TRA"]},
+      tracker_any_labels: ["bug-symphony"]
+    )
+
+    rendered = StatusDashboard.format_project_link_lines_for_test()
+
+    assert rendered =~ "Scope:"
+    assert rendered =~ "MDZ, TRA"
+    assert rendered =~ "bug-symphony"
+    refute rendered =~ "linear.app/project"
+  end
+
+  test "status board scope names the project too and marks required labels as mandatory" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: "acme-4c1a9f3b",
+      tracker_provider: %{"team_keys" => ["MDZ"]},
+      tracker_any_labels: ["bug-symphony"],
+      tracker_required_labels: ["urgent"]
+    )
+
+    rendered = StatusDashboard.format_project_link_lines_for_test()
+
+    # build_issue_filter/2 ANDs the project conjunct in, so a scope line omitting it is not
+    # the scope; and `urgent` is mandatory, not one more member of the any_labels OR-set.
+    assert rendered =~ "MDZ · bug-symphony, +urgent · project acme-4c1a9f3b"
+  end
+
   test "status dashboard prefers the bound server port and normalizes wildcard hosts" do
     assert StatusDashboard.dashboard_url_for_test("0.0.0.0", 0, 43_123) ==
              "http://127.0.0.1:43123/"

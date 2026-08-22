@@ -97,6 +97,8 @@ defmodule SymphonyElixir.TestSupport do
           tracker_api_token: "token",
           tracker_project_slug: "project",
           tracker_assignee: nil,
+          tracker_provider: nil,
+          tracker_any_labels: nil,
           tracker_required_labels: [],
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
@@ -143,6 +145,8 @@ defmodule SymphonyElixir.TestSupport do
     tracker_api_token = Keyword.get(config, :tracker_api_token)
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
+    tracker_provider = Keyword.get(config, :tracker_provider)
+    tracker_any_labels = Keyword.get(config, :tracker_any_labels)
     tracker_required_labels = Keyword.get(config, :tracker_required_labels)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
@@ -190,6 +194,8 @@ defmodule SymphonyElixir.TestSupport do
         "  api_key: #{yaml_value(tracker_api_token)}",
         "  project_slug: #{yaml_value(tracker_project_slug)}",
         "  assignee: #{yaml_value(tracker_assignee)}",
+        tracker_provider_yaml(tracker_provider),
+        optional_tracker_line("any_labels", tracker_any_labels),
         "  required_labels: #{yaml_value(tracker_required_labels)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
@@ -315,4 +321,19 @@ defmodule SymphonyElixir.TestSupport do
 
     "  #{name}: |\n#{indented}"
   end
+
+  defp tracker_provider_yaml(nil), do: nil
+  defp tracker_provider_yaml(provider) when provider == %{}, do: nil
+
+  defp tracker_provider_yaml(provider) when is_map(provider) do
+    entries =
+      Enum.map(provider, fn {key, value} ->
+        "    #{key}: #{yaml_value(value)}"
+      end)
+
+    Enum.join(["  provider:" | entries], "\n")
+  end
+
+  defp optional_tracker_line(_key, nil), do: nil
+  defp optional_tracker_line(key, value), do: "  #{key}: #{yaml_value(value)}"
 end

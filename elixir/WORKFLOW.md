@@ -3,6 +3,11 @@ tracker:
   kind: linear
   provider:
     project_slug: "symphony-0c79b11b75ea"
+    # Or scope by team and let any project's tickets qualify:
+    # team_keys: ["SYM"]
+  # any_labels:
+  #   - bug-symphony
+  #   - feat-symphony
   required_labels: []
   active_states:
     - Todo

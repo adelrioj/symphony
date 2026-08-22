@@ -268,8 +268,8 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Tracker API token missing in WORKFLOW.md")
         state
 
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Tracker project scope missing in WORKFLOW.md")
+      {:error, :missing_linear_scope} ->
+        Logger.error("Tracker scope missing in WORKFLOW.md: set tracker.provider.team_keys or tracker.provider.project_slug")
         state
 
       {:error, :missing_tracker_kind} ->
@@ -870,7 +870,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
 
   defp issue_routable?(%Issue{} = issue) do
-    Issue.routable?(issue, Config.settings!().tracker.required_labels)
+    # Only the label fields: the tracker struct also carries the resolved Linear API token,
+    # which a FunctionClauseError on this hot path would `inspect/1` into the log file.
+    Issue.routable?(issue, Map.take(Config.settings!().tracker, [:required_labels, :any_labels]))
   end
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do

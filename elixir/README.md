@@ -82,10 +82,12 @@ mise exec -- ./bin/symphony ./WORKFLOW.md --i-understand-that-this-will-be-runni
 
 ## Run in Docker (OrbStack-compatible)
 
-One Symphony instance is scoped to a **single** project: one `tracker.provider.project_slug`
-and one repo. To orchestrate several projects, run one container per project. Everything below
-works as-is with [OrbStack](https://orbstack.dev/) (native arm64, no platform pins) or Docker
-Desktop.
+One Symphony instance is scoped to one repo, and its Linear scope is either a single
+`tracker.provider.project_slug` or one or more `tracker.provider.team_keys` plus optional
+`tracker.any_labels`. Team scoping lets tickets from any project qualify without a config
+change; project scoping does not. To orchestrate several repos, run one container per repo.
+Everything below works as-is with [OrbStack](https://orbstack.dev/) (native arm64, no platform
+pins) or Docker Desktop.
 
 ### Deploying a project
 
@@ -232,6 +234,10 @@ Notes:
 - `tracker.required_labels` is optional. When set, an issue must have every
   configured label to dispatch or continue running. Label matching ignores
   case and surrounding whitespace. A blank configured label matches no issue.
+- `tracker.any_labels` is optional. When set, an issue must have at least one of the
+  configured labels to dispatch or continue running. It composes with `required_labels` as
+  a conjunction: all required labels AND at least one of these. Matching ignores case and
+  surrounding whitespace.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
@@ -347,13 +353,31 @@ The helper mode can also be run directly when debugging MCP wiring:
 
 - Config: use `tracker.kind: linear` with `tracker.provider.endpoint` (default
   `https://api.linear.app/graphql`), `api_key` (defaults to `LINEAR_API_KEY` and accepts
-  `$VAR`), required `project_slug`, and optional `assignee` (a Linear user ID or `me`,
-  defaulting to `LINEAR_ASSIGNEE`).
+  `$VAR`), a scope — `team_keys` (list of Linear team keys such as `["MDZ"]`, the prefix in
+  issue identifiers like `MDZ-14`), `project_slug`, or both, at least one required — and
+  optional `assignee` (a Linear user ID or `me`, defaulting to `LINEAR_ASSIGNEE`).
   The legacy flat `tracker.endpoint`, `api_key`, `project_slug`, and `assignee` aliases remain
-  supported. `required_labels`, `active_states`, and `terminal_states` stay under `tracker`.
-- Scope and paging: candidate reads filter the configured project slug and requested state names,
-  following Linear pages of 50. ID refreshes are also project-scoped and batch up to 50 IDs. Empty
-  state/ID lists return `{:ok, []}` without a Linear request.
+  supported; `team_keys` is provider-only. `required_labels`, `any_labels`, `active_states`, and
+  `terminal_states` stay under `tracker`.
+- Scope and paging: candidate reads filter the configured scope and requested state names,
+  following Linear pages of 50. Scope is `provider.team_keys`, `provider.project_slug`, or both;
+  at least one is required, and both together are a conjunction. Team keys, label names, and
+  state names are compared case-insensitively. ID refreshes apply the same scope and batch up to
+  50 IDs. Empty state/ID lists return `{:ok, []}` without a Linear request.
+- Preflight: at startup the adapter resolves the configured team keys, `active_states`,
+  `terminal_states`, and label names against Linear and fails startup listing every value that
+  does not resolve, not just the first. This exists because an unknown scope selector returns an
+  empty result set rather than an error. Label resolution is scoped to the listed teams: a label
+  present in at least one of them resolves, a label that exists only in some other team does not,
+  and a workspace-level label (belonging to no team) counts as present in every team. This check
+  runs only when `team_keys` is set; project-only deploys are unaffected.
+- Upgrade note: state matching became case-insensitive for every Linear deploy, including
+  existing project-only ones, where it was previously an exact match. An issue whose Linear state
+  differs from the configured `active_states`/`terminal_states` spelling by case alone (for
+  example `TODO` against a configured `Todo`) starts being picked up after upgrading. Names that
+  differ by anything other than case — `To Do` against `Todo` — are still not matched. Review
+  `active_states` and `terminal_states` before upgrading if your workspace has states whose names
+  collide only by case.
 - Identity and normalization: `issue.id` is the Linear issue ID and `issue.native_ref` is currently
   `nil`. Records missing a nonblank ID, identifier, title, or state are dropped from candidate
   pages and fail ID refreshes. State keeps Linear's spelling; integer priorities are preserved and
@@ -366,8 +390,8 @@ The helper mode can also be run directly when debugging MCP wiring:
 - Tool: the Linear adapter advertises `linear_graphql`, accepting either a raw query string or an
   object with nonblank `query` and optional object `variables`. Symphony executes it host-side
   with the session-bound endpoint/token and strips declared token environment variables from the
-  Codex child. `project_slug` scopes scheduler reads, not raw tool calls; the tool can access
-  whatever the configured Linear token can access.
+  Codex child. `team_keys` and `project_slug` scope scheduler reads, not raw tool calls; the tool
+  can access whatever the configured Linear token can access.
 - Attachments: the poll query also fetches issue `attachments` (title + url) onto the normalized
   `Issue`, and the default prompt lists them. The adapter advertises `linear_fetch_attachment`,
   which downloads an `https://uploads.linear.app/...` attachment with the configured token and
@@ -378,9 +402,10 @@ The helper mode can also be run directly when debugging MCP wiring:
   `{:error, {:linear_api_request, reason}}`).
 - Responsibility and errors: `linear_graphql` adds no idempotency key, retry, scope guard, or
   rate-limit policy, so workflows own idempotent mutations and handling provider errors. Read/config
-  failures use `{:error, :missing_linear_api_token}`, `{:error, :missing_linear_project_slug}`,
+  failures use `{:error, :missing_linear_api_token}`, `{:error, :missing_linear_scope}`,
   `{:error, :invalid_linear_endpoint}`, `{:error, :invalid_linear_assignee}`,
-  `{:error, :missing_linear_viewer_identity}`, `{:error, {:linear_api_status, status}}`,
+  `{:error, :missing_linear_viewer_identity}`,
+  `{:error, {:linear_preflight_failed, reasons}}`, `{:error, {:linear_api_status, status}}`,
   `{:error, {:linear_api_request, reason}}`, `{:error, {:linear_graphql_errors, errors}}`,
   `{:error, :linear_unknown_payload}`, or `{:error, :linear_missing_end_cursor}`. Tool results
   are maps with `"success"`, JSON-string `"output"`, and text `"contentItems"`; invalid
