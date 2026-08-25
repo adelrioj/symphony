@@ -710,6 +710,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              and: [%{project: %{slugId: %{eq: "acme-web"}}}]
            }
 
+    assert variables.first == 50
+    assert variables.relationFirst == 50
+    assert variables.attachmentFirst == 25
+
     assert query =~ "SymphonyLinearPoll"
     assert query =~ "$filter: IssueFilter!"
     refute query =~ "$projectSlug"
@@ -722,10 +726,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     graphql_fun = fn query, variables ->
       send(self(), {:poll_page, query, variables})
 
+      # Counts pages as well as matching the cursor: a regression that dropped the cursor would
+      # re-enter the first-page clause forever and hang the test until ExUnit's timeout, so an
+      # unexpected (page, cursor) pair has to fail loudly and name the value it saw.
+      page_number = Process.get(:poll_page_number, 0) + 1
+      Process.put(:poll_page_number, page_number)
+
       page_info =
-        case variables.after do
-          nil -> %{"hasNextPage" => true, "endCursor" => "cursor-1"}
-          "cursor-1" -> %{"hasNextPage" => false, "endCursor" => nil}
+        case {page_number, variables.after} do
+          {1, nil} -> %{"hasNextPage" => true, "endCursor" => "cursor-1"}
+          {2, "cursor-1"} -> %{"hasNextPage" => false, "endCursor" => nil}
+          {number, cursor} -> raise "unexpected poll page #{number} with after cursor #{inspect(cursor)}"
         end
 
       {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => page_info}}}}

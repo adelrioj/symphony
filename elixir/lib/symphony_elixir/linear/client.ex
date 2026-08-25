@@ -12,7 +12,9 @@ defmodule SymphonyElixir.Linear.Client do
   @attachment_page_size 25
   @max_error_body_log_bytes 1_000
 
-  @issue_fields """
+  # A connection body, not a bare field list: it opens with `nodes {`, so it only interpolates
+  # inside an `issues(...)` selection, never where a plain field list is expected.
+  @issue_nodes_selection """
       nodes {
         id
         identifier
@@ -58,7 +60,7 @@ defmodule SymphonyElixir.Linear.Client do
   @query """
   query SymphonyLinearPoll($filter: IssueFilter!, $first: Int!, $relationFirst: Int!, $attachmentFirst: Int!, $after: String) {
     issues(filter: $filter, first: $first, after: $after) {
-  #{@issue_fields}
+  #{@issue_nodes_selection}
       pageInfo {
         hasNextPage
         endCursor
@@ -70,7 +72,7 @@ defmodule SymphonyElixir.Linear.Client do
   @query_by_ids """
   query SymphonyLinearIssuesById($filter: IssueFilter!, $first: Int!, $relationFirst: Int!, $attachmentFirst: Int!) {
     issues(filter: $filter, first: $first) {
-  #{@issue_fields}
+  #{@issue_nodes_selection}
     }
   }
   """
