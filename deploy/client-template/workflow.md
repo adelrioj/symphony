@@ -19,13 +19,18 @@ tracker:
     # team_keys: ["REPLACE-with-your-team-key"]
     # current_cycle: true       # requires team_keys; the team's active sprint becomes the queue
     # At least one of project_slug / team_keys / current_cycle is required.
+    # BEFORE you uncomment team_keys, prune the active_states / terminal_states lists below to
+    # names that really exist in those teams — that check only runs once team_keys is set, and it
+    # fails the boot rather than warning. The shipped lists will not survive it as-is: Merging and
+    # Rework do not exist in a default workspace, and Cancelled / Canceled are two spellings of one
+    # state, so at most one of them can resolve.
   required_labels: []
   # any_labels: []              # when non-empty, an issue needs at least one of these labels
   # active_states / terminal_states must match the workflow state names in YOUR Linear workspace
-  # exactly. Merging and Rework do not exist in a default workspace. With team_keys set, a state
-  # name that exists in no listed team fails the boot with a named error; with only project_slug
-  # set there is nothing to check it against, and it is silently never matched — the same
-  # idle-container symptom as a wrong project slug.
+  # exactly. Merging and Rework do not exist in a default workspace, and Cancelled / Canceled are
+  # two spellings of one state. With team_keys set, a state name that exists in no listed team
+  # fails the boot with a named error; with only project_slug set there is nothing to check it
+  # against, and it is silently never matched — the same idle-container symptom as a wrong slug.
   active_states:
     - Todo
     - In Progress

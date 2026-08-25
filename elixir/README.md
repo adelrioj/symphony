@@ -474,6 +474,15 @@ The helper mode can also be run directly when debugging MCP wiring:
   and accept `$VAR`. Set explicit Jira-native `active_states` and `terminal_states`.
 - Issues and reads: candidate reads and ID refreshes stay scoped to the configured project and
   requested statuses; `issue.id` is Jira's immutable ID and `issue.identifier` is the issue key.
+- **Known deviation from `SPEC.md` §11.1, fix pending.** §11.1 requires that an ID refresh apply no
+  configured scope selection as a filter, and exempts only an adapter that cannot produce a complete
+  normalized snapshot outside its container. This adapter fits neither: the bulk-fetch request is
+  already unscoped and its `issue.id` is Jira's global immutable ID, yet the response is then
+  filtered by project key. Consequence: an issue moved out of the configured project while an agent
+  is running on it is reported as missing rather than as still-live, so the orchestrator releases
+  the claim and stops the run. Candidate-read scoping is correct and unaffected. The fix is a code
+  change outside the scope of the change that amended §11.1, so it is recorded here per §11.2 rather
+  than left as an undocumented conflict.
 - Blockers: inward `Blocks` links populate `blocked_by`; issues in Jira's `new` status category
   wait until blockers reach configured terminal states, while in-progress categories keep running.
 - Tool: `jira_rest` sends relative `/rest/api/3/` requests host-side with configured Basic auth,
@@ -485,7 +494,10 @@ The helper mode can also be run directly when debugging MCP wiring:
   `endpoint` (default `https://app.asana.com/api/1.0`), and `api_key` (defaults to `ASANA_PAT` and
   accepts `$VAR`); `active_states` and `terminal_states` are project section names.
 - Scope: Symphony polls tasks in the configured project, treats their section as state, and omits
-  deleted or out-of-project tasks during ID refreshes.
+  deleted or out-of-project tasks during ID refreshes. That omission is `SPEC.md` §11.1's
+  container-bound case rather than a deviation: a task's normalized `state` is the name of its
+  section *within the configured project*, so outside that project there is no state to report and
+  no complete snapshot to return.
 - Tool: `asana_api` sends relative Asana REST requests host-side with the configured auth; Symphony
   strips `ASANA_PAT` and configured token variables from the Codex child, while raw tool calls are
   not limited to the configured project.

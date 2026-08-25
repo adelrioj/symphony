@@ -1291,9 +1291,12 @@ An implementation MUST support these adapter operations:
    - Return current normalized issue snapshots for the supplied opaque dispatch IDs.
    - Used for active-run reconciliation and stale-dispatch revalidation.
    - An empty `issue_ids` list MUST return an empty result without a provider request.
-   - `fetch_issues_by_ids` MUST NOT apply configured scope selection as a filter. An adapter whose
-     IDs are only meaningful inside a container MAY remain container-bound; this is REQUIRED for
-     GitHub and GitLab, where an ID is `#N` within a repository.
+   - `fetch_issues_by_ids` MUST NOT apply configured scope selection as a filter. An adapter that
+     cannot produce a complete normalized snapshot outside its configured container MAY remain
+     container-bound; this is REQUIRED for GitHub and GitLab, where an ID is `#N` within a
+     repository, and it also covers an adapter that derives a required normalized field — a state,
+     for instance — from the issue's membership of that container. Being container-bound is a
+     property of what the adapter can normalize, not of how global its IDs happen to be.
    - Omission MUST mean the ID is not retrievable — deleted, inaccessible, or foreign to the
      credential's workspace — never "outside the configured scope". An issue that merely left the
      configured scope MUST NOT be reported as missing. When an ID is genuinely omitted, the
@@ -1323,6 +1326,11 @@ are treated as a set, and each dispatch ID appears at most once.
 
 The refresh operation returns full normalized snapshots, not only state strings, because label,
 assignment, routing, and provider-specific dispatchability can change while a run is active.
+
+An implementation that knowingly ships an adapter deviating from these operation contracts MUST
+record the deviation, and its operator-visible consequence, in that adapter's profile per
+Section 11.2. An undocumented deviation is indistinguishable from a bug the operator is expected to
+debug from an empty queue.
 
 ### 11.2 Adapter Responsibilities
 
@@ -1356,7 +1364,9 @@ containing:
   categories and human-readable messages;
 - OPTIONAL startup scope resolution: which selectors are resolved, the request cost, and which
   unresolved values are boot failures versus warnings, if implemented;
-- the OPTIONAL operator-facing scope description, if implemented.
+- the OPTIONAL operator-facing scope description, if implemented;
+- any known deviation from Section 11.1, with its operator-visible consequence and whether a fix is
+  pending.
 
 ### 11.3 Normalization Rules
 
@@ -1435,10 +1445,11 @@ the provider answers a well-formed query with zero issues, so the service starts
 unusual, and idles forever. Two OPTIONAL adapter capabilities exist to close that gap. Neither is
 REQUIRED for conformance, and an adapter that implements neither MUST keep working.
 
-Startup scope resolution:
+Startup scope resolution — `preflight(tracker_config)`:
 
-- An adapter MAY resolve its configured scope selectors, state names, and label names against the
-  live provider once, before the scheduling loop starts. Failure MUST fail startup with an
+- An adapter MAY implement `preflight`, resolving its configured scope selectors, state names, and
+  label names against the live provider once, before the scheduling loop starts. An adapter that
+  does not implement it behaves as though it returned success. Failure MUST fail startup with an
   operator-visible error, per Section 6.3.
 - Resolution MUST report every unresolved value in one error rather than the first, so an operator
   fixes one boot's worth of mistakes at a time. It MAY suppress reasons that are merely derived
@@ -1456,10 +1467,10 @@ Startup scope resolution:
 - Resolution SHOULD cost a bounded number of requests independent of how many values are
   configured.
 
-Scope reporting:
+Scope reporting — `scope_summary(tracker_config)`:
 
-- An adapter MAY expose a short human-readable description of its configured read scope, for the
-  status surface in Section 13.4.
+- An adapter MAY implement `scope_summary`, returning a short human-readable description of its
+  configured read scope, for the status surface in Section 13.4.
 - An adapter that reports no scope MUST be renderable: the surface shows an explicit sentinel
   rather than omitting the line, so "no scope configured" and "scope line not implemented" are not
   confusable.
@@ -1971,8 +1982,9 @@ function start_service():
     fail_startup(validation)
 
   # OPTIONAL, Section 11.6: resolve adapter scope selectors against the live provider before any
-  # dispatch can create a workspace or launch an agent.
-  resolution = tracker.resolve_scope_if_supported()
+  # dispatch can create a workspace or launch an agent. An adapter that does not implement
+  # `preflight` returns ok.
+  resolution = tracker.preflight(tracker_config)
   if resolution is not ok:
     log_validation_error(resolution)
     fail_startup(resolution)

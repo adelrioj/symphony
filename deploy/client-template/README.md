@@ -47,13 +47,16 @@ directory is meant to be copied into your own private repo.
        is loud rather than silent.
    - `hooks.after_create` — the clone command for your repo
    - `tracker.active_states` / `terminal_states` — must match the workflow state names in *your*
-     Linear workspace exactly. `Merging` and `Rework` do not exist in a default workspace. With
-     `team_keys` configured, startup checks these too: a state name that exists in none of the
-     listed teams fails the boot with a named error, and one missing from only some of them logs a
-     warning naming those teams. With a project-only scope there is nothing to check them against,
-     and an unknown state name is silently never matched, with the same idle-container symptom as
-     a wrong slug. Configured `required_labels` / `any_labels` are checked by exactly the same
-     rule, and likewise only when `team_keys` is set.
+     Linear workspace exactly. `Merging` and `Rework` do not exist in a default workspace, and
+     `Cancelled` / `Canceled` are two spellings of one state, so prune the shipped lists before you
+     enable `team_keys`. With `team_keys` configured, startup checks these too: a state name that
+     exists in none of the listed teams fails the boot with a named error, and one missing from only
+     some of them logs a warning naming those teams — unless a listed team has 50 or more workflow
+     states, in which case its absence cannot be proven and Symphony warns instead of failing. With
+     a project-only scope there is nothing to check them against, and an unknown state name is
+     silently never matched, with the same idle-container symptom as a wrong slug. Configured
+     `required_labels` / `any_labels` are checked by exactly the same rule, and likewise only when
+     `team_keys` is set.
    - Keep `workspace.root: /workspaces` (it must match the volume mount in compose)
 4. Start it:
    ```bash
