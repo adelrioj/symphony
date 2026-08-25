@@ -670,10 +670,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert_receive {:fetch_issue_states_page, query, first_page_variables}
 
-    assert first_page_variables.filter == %{
-             id: %{in: first_batch_ids},
-             and: [%{project: %{slugId: %{eq: "test-project"}}}]
-           }
+    # Exact equality, not a subset pattern. Elixir map patterns are non-exact, so
+    # `%{filter: %{id: %{in: ids}}}` also matches a filter carrying `and: [project…]`,
+    # and asserting on document text proves nothing once the filter is a variable.
+    assert first_page_variables.filter == %{id: %{in: first_batch_ids}}
 
     assert first_page_variables.first == 50
     assert first_page_variables.relationFirst == 50
@@ -683,13 +683,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert_receive {:fetch_issue_states_page, ^query, second_page_variables}
 
-    assert second_page_variables.filter == %{
-             id: %{in: second_batch_ids},
-             and: [%{project: %{slugId: %{eq: "test-project"}}}]
-           }
+    assert second_page_variables.filter == %{id: %{in: second_batch_ids}}
 
     assert second_page_variables.first == 5
     assert second_page_variables.relationFirst == 50
+  end
+
+  test "linear id refresh applies no scope filter even when scope is configured" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: "acme-web",
+      tracker_any_labels: ["feat-symphony"],
+      tracker_provider: %{"team_keys" => ["MDZ"], "current_cycle" => true}
+    )
+
+    graphql_fun = fn _query, variables ->
+      send(self(), {:by_ids, variables})
+      {:ok, %{"data" => %{"issues" => %{"nodes" => []}}}}
+    end
+
+    assert {:ok, []} = Client.fetch_issues_by_ids_for_test(["issue-1"], graphql_fun)
+
+    assert_receive {:by_ids, variables}
+    assert variables.filter == %{id: %{in: ["issue-1"]}}
   end
 
   test "linear poll sends the configured scope as one filter variable" do

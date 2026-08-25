@@ -110,9 +110,9 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, []}
 
       ids ->
-        with {:ok, tracker} <- configured_tracker_for_read(),
+        with {:ok, _tracker} <- configured_tracker_for_read(),
              {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_issue_states(ids, tracker, assignee_filter)
+          do_fetch_issue_states(ids, assignee_filter)
         end
     end
   end
@@ -217,7 +217,7 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, []}
 
       ids ->
-        do_fetch_issue_states(ids, %{project_slug: "test-project", provider: %{}, any_labels: [], required_labels: []}, nil, graphql_fun)
+        do_fetch_issue_states(ids, nil, graphql_fun)
     end
   end
 
@@ -274,28 +274,31 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp finalize_paginated_issues(acc_issues) when is_list(acc_issues), do: Enum.reverse(acc_issues)
 
-  defp do_fetch_issue_states(ids, tracker, assignee_filter) do
-    do_fetch_issue_states(ids, tracker, assignee_filter, &graphql/2)
+  defp do_fetch_issue_states(ids, assignee_filter) do
+    do_fetch_issue_states(ids, assignee_filter, &graphql/2)
   end
 
-  defp do_fetch_issue_states(ids, tracker, assignee_filter, graphql_fun)
-       when is_list(ids) and is_map(tracker) and is_function(graphql_fun, 2) do
+  defp do_fetch_issue_states(ids, assignee_filter, graphql_fun)
+       when is_list(ids) and is_function(graphql_fun, 2) do
     issue_order_index = issue_order_index(ids)
-    do_fetch_issue_states_page(ids, tracker, assignee_filter, graphql_fun, [], issue_order_index)
+    do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, [], issue_order_index)
   end
 
-  defp do_fetch_issue_states_page([], _tracker, _assignee_filter, _graphql_fun, acc_issues, issue_order_index) do
+  defp do_fetch_issue_states_page([], _assignee_filter, _graphql_fun, acc_issues, issue_order_index) do
     acc_issues
     |> finalize_paginated_issues()
     |> sort_issues_by_requested_ids(issue_order_index)
     |> then(&{:ok, &1})
   end
 
-  defp do_fetch_issue_states_page(ids, tracker, assignee_filter, graphql_fun, acc_issues, issue_order_index) do
+  # SPEC 11.1: an ID refresh applies no configured scope selection. Linear issue IDs are
+  # workspace-unique UUIDs and the API token already bounds the query to one workspace, so
+  # the read stays exact. Admission is scope-gated; continuation is state-gated.
+  defp do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, acc_issues, issue_order_index) do
     {batch_ids, rest_ids} = Enum.split(ids, @issue_page_size)
 
     case graphql_fun.(@query_by_ids, %{
-           filter: Map.put(Scope.filter(tracker, []), :id, %{in: batch_ids}),
+           filter: %{id: %{in: batch_ids}},
            first: length(batch_ids),
            relationFirst: @issue_page_size,
            attachmentFirst: @attachment_page_size
@@ -304,7 +307,7 @@ defmodule SymphonyElixir.Linear.Client do
         with {:ok, issues} <- decode_linear_response_strict(body, assignee_filter) do
           updated_acc = prepend_page_issues(issues, acc_issues)
 
-          do_fetch_issue_states_page(rest_ids, tracker, assignee_filter, graphql_fun, updated_acc, issue_order_index)
+          do_fetch_issue_states_page(rest_ids, assignee_filter, graphql_fun, updated_acc, issue_order_index)
         end
 
       {:error, reason} ->
