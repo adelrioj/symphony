@@ -407,7 +407,9 @@ defmodule SymphonyElixir.ExtensionsTest do
   test "preflight warns rather than fails when a state is absent from only some listed teams" do
     Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
 
-    settings = preflight_settings(provider: %{"team_keys" => ["MDZ", "SML"]}, active_states: ["In Progress"])
+    # Lowercase on purpose: the configured keys must resolve case-insensitively AND the warning
+    # must name Linear's own spelling of the team, not the operator's.
+    settings = preflight_settings(provider: %{"team_keys" => ["mdz", "sml"]}, active_states: ["In Progress"])
 
     log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
 
@@ -490,7 +492,9 @@ defmodule SymphonyElixir.ExtensionsTest do
   test "preflight warns rather than fails when a label is absent from only some listed teams" do
     Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
 
-    settings = preflight_settings(provider: %{"team_keys" => ["MDZ", "TRA"]}, any_labels: ["feat-symphony"])
+    # Lowercase on purpose, as in the state warning above: this is the assertion that pins
+    # `resolved_team_keys/1` to Linear's spelling rather than the operator's.
+    settings = preflight_settings(provider: %{"team_keys" => ["mdz", "tra"]}, any_labels: ["feat-symphony"])
 
     log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
 
