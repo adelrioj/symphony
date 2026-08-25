@@ -260,7 +260,7 @@ defmodule SymphonyElixir.Linear.Adapter do
   # Linear's own spelling of every key that resolved. States and labels are judged against
   # these, never against the configured keys, so a key that does not exist is never also named
   # as missing a state or a label it could not have.
-  defp resolved_team_keys(teams), do: Enum.map(teams, & &1["key"])
+  defp resolved_team_keys(teams), do: Enum.map(teams, &(&1["key"] || ""))
 
   defp unknown_team_keys(team_keys, teams) do
     resolved_keys = MapSet.new(teams, &String.downcase(&1["key"] || ""))
@@ -276,7 +276,7 @@ defmodule SymphonyElixir.Linear.Adapter do
     tracker_settings
     |> configured_state_names()
     |> Enum.flat_map(fn state ->
-      {present, absent, unprovable} = classify_state(state, index)
+      {present, absent, unprovable} = classify_selector(state, index)
       state_reason(state, present, absent, unprovable)
     end)
   end
@@ -297,8 +297,10 @@ defmodule SymphonyElixir.Linear.Adapter do
     end)
   end
 
-  defp classify_state(state, index) do
-    name = String.downcase(state)
+  # Shared by both arms: a selector is present in a team, absent from it, or unprovable for it
+  # because that team's evidence was truncated by a page cap preflight cannot raise.
+  defp classify_selector(selector, index) do
+    name = String.downcase(selector)
 
     groups =
       Enum.group_by(
@@ -339,6 +341,19 @@ defmodule SymphonyElixir.Linear.Adapter do
   end
 
   defp unknown_label_names(tracker_settings, team_keys, labels) do
+    index = team_label_index(team_keys, labels)
+
+    Enum.flat_map(preflight_labels(tracker_settings), fn {label, kind} ->
+      {present, absent, unprovable} = classify_selector(label, index)
+      label_reason(label, kind, present, absent, unprovable)
+    end)
+  end
+
+  # `issueLabels` is a single flat connection preflight cannot paginate, so a full page means a
+  # listed team's copy of a label may sit beyond the cap. That is per-team evidence exactly as
+  # the nested `states` connection is: a team whose copy did not come back is unprovable, not
+  # absent. The flag is global because the page is, but it is applied one team at a time.
+  defp team_label_index(team_keys, labels) do
     labels_by_team =
       Enum.group_by(
         labels,
@@ -348,36 +363,30 @@ defmodule SymphonyElixir.Linear.Adapter do
 
     full_page? = length(labels) >= @labels_page_size
 
-    Enum.flat_map(preflight_labels(tracker_settings), fn {label, kind} ->
-      teams_with_label =
-        Enum.filter(team_keys, fn key ->
-          labels_by_team
-          |> Map.get(String.downcase(key), [])
-          |> Enum.member?(String.downcase(label))
-        end)
-
-      label_reason(label, kind, teams_with_label, team_keys, full_page?)
+    Enum.map(team_keys, fn key ->
+      {key, MapSet.new(Map.get(labels_by_team, String.downcase(key), [])), full_page?}
     end)
   end
 
   # Labels are team-scoped in Linear, so the same name exists once per team. Missing from one
   # listed team narrows the scope and is a warning; missing from all of them means nothing can
-  # ever match and is an error. A full label page is the exception: like the nested `states`
-  # connection it is a single unpaginated read, so a listed team's copy of the label may sit
-  # beyond the cap and absence cannot be proven.
-  defp label_reason(label, _kind, [], _team_keys, false), do: ["label #{inspect(label)} does not exist in any listed Linear team"]
+  # ever match and is an error. Unprovable is neither: it is never reported as absent, because a
+  # full label page cannot distinguish a team without the label from a team whose copy of it was
+  # cut off by the cap.
+  defp label_reason(_label, _kind, present, [], _unprovable) when present != [], do: []
 
-  defp label_reason(label, _kind, [], _team_keys, true) do
-    Logger.warning("Linear label #{inspect(label)} was not found, and the label query returned a full page of #{@labels_page_size} labels, so its absence cannot be proven")
-
-    []
+  defp label_reason(label, kind, present, absent, _unprovable) when present != [] do
+    warn_partial_label(label, kind, absent)
   end
 
-  defp label_reason(label, kind, teams_with_label, team_keys, _full_page?) do
-    case team_keys -- teams_with_label do
-      [] -> []
-      missing -> warn_partial_label(label, kind, missing)
-    end
+  defp label_reason(label, _kind, [], _absent, []), do: ["label #{inspect(label)} does not exist in any listed Linear team"]
+
+  defp label_reason(label, _kind, [], _absent, unprovable) do
+    Logger.warning(
+      "Linear label #{inspect(label)} was not found for team(s) #{inspect(unprovable)}, and the label query returned a full page of #{@labels_page_size} labels, so its absence cannot be proven"
+    )
+
+    []
   end
 
   defp warn_partial_label(label, :required, missing) do

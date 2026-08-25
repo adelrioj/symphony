@@ -65,8 +65,13 @@ defmodule SymphonyElixir.ExtensionsTest do
     # what distinguishes "absent from one listed team" (a warning) from "absent everywhere".
     # `crowded-label` exists on 250 unlisted teams, filling the 250-label page the `issueLabels`
     # connection cannot paginate, so a listed team's copy of it could sit beyond the cap.
+    # `crowded-shared` fills the same page but does resolve for MDZ, which is the case that
+    # separates per-team unprovability from absence: TRA's copy could be one of the 249 rows the
+    # cap cut off, so TRA must not be reported as absent.
     @labels [%{"name" => "feat-symphony", "team" => %{"key" => "MDZ"}}] ++
-              Enum.map(1..250, &%{"name" => "crowded-label", "team" => %{"key" => "OTH#{&1}"}})
+              Enum.map(1..250, &%{"name" => "crowded-label", "team" => %{"key" => "OTH#{&1}"}}) ++
+              [%{"name" => "crowded-shared", "team" => %{"key" => "MDZ"}}] ++
+              Enum.map(1..249, &%{"name" => "crowded-shared", "team" => %{"key" => "OTH#{&1}"}})
 
     def graphql(query, variables) do
       send(self(), {:preflight_query, query, variables})
@@ -521,7 +526,21 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
 
-    assert log =~ "Linear label \"crowded-label\" was not found, and the label query returned a full page of 250 labels, so its absence cannot be proven"
+    assert log =~ "Linear label \"crowded-label\" was not found for team(s) [\"MDZ\"], and the label query returned a full page of 250 labels, so its absence cannot be proven"
+  end
+
+  # The state arm classifies unprovability per team; the label arm used to compute one global
+  # flag and then ignore it whenever the label resolved anywhere, so a full page turned every
+  # other listed team into a false "absent from team(s)" warning. The not-full-page counterpart
+  # is "preflight warns rather than fails when a label is absent from only some listed teams".
+  test "preflight does not call a team absent for a label the full page could have truncated" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings = preflight_settings(provider: %{"team_keys" => ["MDZ", "TRA"]}, any_labels: ["crowded-shared"])
+
+    log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
+
+    refute log =~ "absent from team(s)"
   end
 
   test "preflight never names an unresolvable team key as missing a label" do
