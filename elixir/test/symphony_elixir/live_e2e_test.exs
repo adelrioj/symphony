@@ -52,7 +52,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   @create_issue_mutation """
   mutation SymphonyLiveE2ECreateIssue(
     $teamId: String!
-    $projectId: String!
+    $projectId: String
     $title: String!
     $description: String!
     $stateId: String
@@ -119,6 +119,59 @@ defmodule SymphonyElixir.LiveE2ETest do
   }
   """
 
+  @team_active_cycle_query """
+  query SymphonyLiveE2ETeamActiveCycle($id: String!) {
+    team(id: $id) {
+      id
+      activeCycle {
+        id
+        name
+      }
+    }
+  }
+  """
+
+  @create_cycle_mutation """
+  mutation SymphonyLiveE2ECreateCycle($teamId: String!, $startsAt: DateTime!, $endsAt: DateTime!, $name: String) {
+    cycleCreate(input: {teamId: $teamId, startsAt: $startsAt, endsAt: $endsAt, name: $name}) {
+      success
+      cycle {
+        id
+        name
+      }
+    }
+  }
+  """
+
+  @archive_cycle_mutation """
+  mutation SymphonyLiveE2EArchiveCycle($id: String!) {
+    cycleArchive(id: $id) {
+      success
+    }
+  }
+  """
+
+  # `$cycleId` is nullable on purpose: passing it as nil clears the issue's cycle, which is how the
+  # out-of-cycle issue is forced out of a team that auto-adds new issues to the running cycle.
+  @set_issue_cycle_mutation """
+  mutation SymphonyLiveE2ESetIssueCycle($id: String!, $cycleId: String) {
+    issueUpdate(id: $id, input: {cycleId: $cycleId}) {
+      success
+      issue {
+        id
+      }
+    }
+  }
+  """
+
+  @archive_issue_mutation """
+  mutation SymphonyLiveE2EArchiveIssue($id: String!) {
+    issueArchive(id: $id) {
+      success
+    }
+  }
+  """
+
   @tag skip: @live_e2e_skip_reason
   test "creates a real Linear project and issue with a local worker" do
     run_live_issue_flow!(:local)
@@ -127,6 +180,76 @@ defmodule SymphonyElixir.LiveE2ETest do
   @tag skip: @live_e2e_skip_reason
   test "creates a real Linear project and issue with an ssh worker" do
     run_live_issue_flow!(:ssh)
+  end
+
+  @tag skip: @live_e2e_skip_reason
+  test "a team plus current-cycle scope reads only the active cycle while the id refresh ignores scope" do
+    team_key = System.get_env("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key
+
+    # The scope has to be live before the first read: fetch_issues_by_states/1 builds its filter from
+    # tracker.provider, and every mutation below reads the same settings for endpoint and token.
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "$LINEAR_API_KEY",
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => [team_key], "current_cycle" => true},
+      observability_enabled: false
+    )
+
+    team = fetch_team!(team_key)
+    active_state = active_state!(team)
+    state_names = active_state_names(team)
+    {cycle, discard_cycle} = ensure_active_cycle!(team)
+
+    # Each entity is discarded by the `after` of the `try` that created it, so a failure at any step
+    # leaves nothing behind in a real workspace.
+    try do
+      in_cycle_issue = create_scope_issue!(team, active_state, "in cycle")
+
+      try do
+        out_of_cycle_issue = create_scope_issue!(team, active_state, "out of cycle")
+
+        try do
+          assert_cycle_scope!(cycle, state_names, in_cycle_issue, out_of_cycle_issue)
+        after
+          archive_issue(out_of_cycle_issue.id)
+        end
+      after
+        archive_issue(in_cycle_issue.id)
+      end
+    after
+      discard_cycle.()
+    end
+  end
+
+  defp assert_cycle_scope!(cycle, state_names, in_cycle_issue, out_of_cycle_issue) do
+    set_issue_cycle!(in_cycle_issue.id, cycle["id"])
+
+    # Teams that auto-add new issues to the running cycle would otherwise put this issue in the cycle
+    # too, and the negative assertion below would then pass for the wrong reason.
+    set_issue_cycle!(out_of_cycle_issue.id, nil)
+
+    assert {:ok, scoped_issues} = Client.fetch_issues_by_states(state_names)
+    scoped_ids = MapSet.new(scoped_issues, & &1.id)
+
+    assert MapSet.member?(scoped_ids, in_cycle_issue.id),
+           "team + current_cycle did not return the issue seeded into cycle #{inspect(cycle["id"])}; cycle.isActive does not select the running cycle"
+
+    refute MapSet.member?(scoped_ids, out_of_cycle_issue.id),
+           "team + current_cycle returned an issue that belongs to no cycle"
+
+    # Production-path guard: this is the only test in the suite that drives the real
+    # fetch_issues_by_ids/1 wrapper, because the unit-level regression enters at the
+    # fetch_issues_by_ids_for_test/2 seam instead. If a scope filter is ever reintroduced into the
+    # refresh, this assertion is the only thing that fails. Admission is scope-gated; continuation is
+    # state-gated, so an issue that left the cycle must still be refreshable by id.
+    assert {:ok, refreshed} = Client.fetch_issues_by_ids([out_of_cycle_issue.id])
+
+    assert Enum.any?(refreshed, &(&1.id == out_of_cycle_issue.id)),
+           "the by-ids refresh dropped an out-of-scope issue, so it is applying the configured scope"
+  end
+
+  defp create_scope_issue!(team, state, label) do
+    create_issue!(team["id"], nil, state["id"], "Symphony live cycle scope #{label} #{System.unique_integer([:positive])}")
   end
 
   defp fetch_team!(team_key) do
@@ -190,15 +313,18 @@ defmodule SymphonyElixir.LiveE2ETest do
   end
 
   defp create_issue!(team_id, project_id, state_id, title) do
-    issue =
-      @create_issue_mutation
-      |> graphql_data!(%{
+    variables =
+      %{
         teamId: team_id,
-        projectId: project_id,
         title: title,
         description: title,
         stateId: state_id
-      })
+      }
+      |> maybe_put_project_id(project_id)
+
+    issue =
+      @create_issue_mutation
+      |> graphql_data!(variables)
       |> fetch_successful_entity!("issueCreate", "issue")
 
     %Issue{
@@ -211,6 +337,62 @@ defmodule SymphonyElixir.LiveE2ETest do
       labels: [],
       blocked_by: []
     }
+  end
+
+  # A nil project id is dropped from the variables map rather than sent as an explicit null: a
+  # GraphQL variable that is absent at runtime is omitted from the input object entirely, so Linear
+  # sees an issueCreate with no projectId key at all.
+  defp maybe_put_project_id(variables, project_id) when is_binary(project_id) do
+    Map.put(variables, :projectId, project_id)
+  end
+
+  defp maybe_put_project_id(variables, nil), do: variables
+
+  # Reuses the team's own running cycle when it has one. Linear rejects cycles that overlap an
+  # existing one, and a scenario that creates a cycle it did not need would leak it into a real
+  # workspace on every run. The returned function is the cleanup for the cycle this call is
+  # responsible for, so a borrowed cycle is never archived.
+  defp ensure_active_cycle!(team) do
+    @team_active_cycle_query
+    |> graphql_data!(%{id: team["id"]})
+    |> get_in(["team", "activeCycle"])
+    |> case do
+      %{"id" => cycle_id} = cycle when is_binary(cycle_id) ->
+        {cycle, fn -> :ok end}
+
+      _no_active_cycle ->
+        cycle = create_active_cycle!(team["id"])
+        {cycle, fn -> archive_cycle(cycle["id"]) end}
+    end
+  end
+
+  defp create_active_cycle!(team_id) when is_binary(team_id) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    @create_cycle_mutation
+    |> graphql_data!(%{
+      teamId: team_id,
+      startsAt: now |> DateTime.add(-1, :day) |> DateTime.to_iso8601(),
+      endsAt: now |> DateTime.add(13, :day) |> DateTime.to_iso8601(),
+      name: "symphony-live-cycle-#{System.unique_integer([:positive])}"
+    })
+    |> fetch_successful_entity!("cycleCreate", "cycle")
+  end
+
+  # Strict, unlike the cleanup mutations: a silently failed cycle attachment would surface as the
+  # scope assertion failing, which reads as "cycle.isActive is broken" when it is not.
+  defp set_issue_cycle!(issue_id, cycle_id) when is_binary(issue_id) and (is_binary(cycle_id) or is_nil(cycle_id)) do
+    @set_issue_cycle_mutation
+    |> graphql_data!(%{id: issue_id, cycleId: cycle_id})
+    |> fetch_successful_entity!("issueUpdate", "issue")
+  end
+
+  defp archive_cycle(cycle_id) when is_binary(cycle_id) do
+    update_entity(@archive_cycle_mutation, %{id: cycle_id}, "cycleArchive", "cycle")
+  end
+
+  defp archive_issue(issue_id) when is_binary(issue_id) do
+    update_entity(@archive_issue_mutation, %{id: issue_id}, "issueArchive", "issue")
   end
 
   defp complete_project(project_id, completed_status_id)
