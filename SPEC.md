@@ -461,6 +461,13 @@ Fields:
   - Default: `20`
   - Limits the number of coding-agent turns within one worker session.
   - Invalid values fail configuration validation.
+- `max_turn_exhaustions` (positive integer)
+  - Default: `3`
+  - Limits how many consecutive worker runs for one work item MAY end by reaching `max_turns` while
+    the item is still in the same active state.
+  - When the limit is reached, the implementation MUST park the work item as blocked instead of
+    scheduling another continuation retry.
+  - Invalid values fail configuration validation.
 - `max_retry_backoff_ms` (integer)
   - Default: `300000` (5 minutes)
   - Changes SHOULD be re-applied at runtime and affect future retry scheduling.
@@ -675,6 +682,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `hooks.timeout_ms`: integer, default `60000`
 - `agent.max_concurrent_agents`: integer, default `10`
 - `agent.max_turns`: integer, default `20`
+- `agent.max_turn_exhaustions`: integer, default `3`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `agent.backend`: string, default `codex`
@@ -733,6 +741,11 @@ Important nuance:
 - Once the worker exits normally, the orchestrator still schedules a short continuation retry
   (about 1 second) so it can re-check whether the issue remains active and needs another worker
   session.
+- A worker that reaches `agent.max_turns` while the issue is still in the same active state SHOULD
+  report that turn-budget exhaustion to the orchestrator so repeated fruitless sessions can be
+  detected across worker runs.
+- After `agent.max_turn_exhaustions` consecutive exhaustions in the same active state, the
+  orchestrator MUST park the issue as blocked instead of scheduling another continuation retry.
 
 ### 7.2 Run Attempt Lifecycle
 
@@ -764,7 +777,8 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Remove running entry.
   - Update aggregate runtime totals.
   - Schedule continuation retry (attempt `1`) after the worker exhausts or finishes its in-process
-    turn loop.
+    turn loop, unless the issue has reached `agent.max_turn_exhaustions` consecutive turn-budget
+    exhaustions in its current state, in which case park it as blocked.
 
 - `Worker Exit (abnormal)`
   - Remove running entry.
@@ -860,6 +874,15 @@ Backoff formula:
 - Normal continuation retries after a clean worker exit use a short fixed delay of `1000` ms.
 - Failure-driven retries use `delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)`.
 - Power is capped by the configured max retry backoff (default `300000` / 5m).
+
+Continuation give-up:
+
+- Continuation retries after a clean worker exit are not counted by `attempt`; each one starts a
+  fresh worker session at attempt `1`.
+- Consecutive turn-budget exhaustions in the same active state MUST be counted separately, and the
+  issue MUST be parked as blocked once that count reaches `agent.max_turn_exhaustions`.
+- The count MUST reset when the issue leaves that state, when a worker exits without exhausting its
+  turn budget, and when the claim is released.
 
 Retry handling behavior:
 
@@ -2067,6 +2090,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel, backend):
       break
 
     if turn_number >= max_turns:
+      notify_orchestrator_turns_exhausted(orchestrator_channel, issue.id, issue.state)
       break
 
     turn_number = turn_number + 1
@@ -2085,11 +2109,18 @@ on_worker_exit(issue_id, reason, state):
   state = add_runtime_seconds_to_totals(state, running_entry)
 
   if reason == normal:
-    state.completed.add(issue_id)  # bookkeeping only
-    state = schedule_retry(state, issue_id, 1, {
-      identifier: running_entry.identifier,
-      delay_type: continuation
-    })
+    exhaustions = count_consecutive_turn_exhaustions(state, running_entry)
+
+    if exhaustions >= config.agent.max_turn_exhaustions:
+      if post_blocked_comment(issue_id, turn_budget_detail) succeeded:
+        update_issue_state(issue_id, config.agent.blocked_state)
+      state = block_issue(state, issue_id, running_entry)
+    else:
+      state.completed.add(issue_id)  # bookkeeping only
+      state = schedule_retry(state, issue_id, 1, {
+        identifier: running_entry.identifier,
+        delay_type: continuation
+      })
   else:
     state = schedule_retry(state, issue_id, next_attempt_from(running_entry), {
       identifier: running_entry.identifier,
@@ -2214,6 +2245,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Terminal state stops running agent and cleans workspace
 - Reconciliation with no running issues is a no-op
 - Normal worker exit schedules a short continuation retry (attempt 1)
+- Repeated turn-budget exhaustion in the same state parks the issue as blocked after
+  `agent.max_turn_exhaustions` consecutive worker runs
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error
@@ -2322,6 +2355,8 @@ Use the same validation profiles as Section 17:
 - Optional Claude backend config (`agent.backend`, `agent.backend_by_state`, `claude.*`)
 - Strict prompt rendering with `issue` and `attempt` variables
 - Exponential retry queue with continuation retries after normal exit
+- Turn-budget exhaustion cap that parks stuck issues as blocked
+  (`agent.max_turn_exhaustions`, default `3`)
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
 - Reconciliation that stops runs on terminal/non-active tracker states
 - Workspace cleanup for terminal issues (startup sweep + active transition)

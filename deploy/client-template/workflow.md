@@ -44,6 +44,7 @@ hooks:
 agent:
   max_concurrent_agents: 5
   max_turns: 20
+  max_turn_exhaustions: 3    # <-- consecutive max_turns runs before an issue is parked as blocked
   backend: codex
 codex:
   command: codex --config shell_environment_policy.inherit=all app-server
