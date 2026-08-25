@@ -15,6 +15,16 @@ defmodule SymphonyElixir.LiveE2ETest do
   @result_file "LIVE_E2E_RESULT.txt"
   @scope_read_deadline_ms 30_000
   @scope_read_poll_interval_ms 1_000
+  # A borrowed future cycle must not be able to START during the run. `Cycle.isFuture` is evaluated
+  # server-side at read time, but the decisive refute lands much later: after seeding, several round
+  # trips, and up to @scope_read_deadline_ms of polling. A cycle that rolled over mid-run would become
+  # the active cycle, its issue would appear in the scoped read, and the run would flunk with
+  # "cycle.isActive matches cycle membership rather than the running cycle" — the exact wrong
+  # conclusion this scenario exists to rule out. One hour is more than ten times the 300s moduletag
+  # that hard-caps the whole test, and deliberately no larger: the window in which this refuses to
+  # borrow is also the window in which it falls through to minting a cycle, and minting is what can
+  # collide with a cadence team's already-scheduled next cycle.
+  @future_cycle_start_margin_seconds 3_600
   @live_e2e_skip_reason if(System.get_env("SYMPHONY_RUN_LIVE_E2E") != "1",
                           do: "set SYMPHONY_RUN_LIVE_E2E=1 to enable the real Linear/Codex end-to-end test"
                         )
@@ -123,7 +133,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   """
 
   @team_cycles_query """
-  query SymphonyLiveE2ETeamCycles($id: String!) {
+  query SymphonyLiveE2ETeamCycles($id: String!, $futureCycleNotBefore: DateTimeOrDuration!) {
     team(id: $id) {
       id
       activeCycle {
@@ -131,7 +141,7 @@ defmodule SymphonyElixir.LiveE2ETest do
         name
         endsAt
       }
-      cycles(filter: {isFuture: {eq: true}}, first: 1) {
+      cycles(filter: {isFuture: {eq: true}, startsAt: {gt: $futureCycleNotBefore}}, first: 1) {
         nodes {
           id
           name
@@ -459,8 +469,14 @@ defmodule SymphonyElixir.LiveE2ETest do
   defp maybe_put_project_id(variables, nil), do: variables
 
   defp fetch_team_cycles!(team_id) when is_binary(team_id) do
+    future_cycle_not_before =
+      DateTime.utc_now()
+      |> DateTime.truncate(:second)
+      |> DateTime.add(@future_cycle_start_margin_seconds, :second)
+      |> DateTime.to_iso8601()
+
     @team_cycles_query
-    |> graphql_data!(%{id: team_id})
+    |> graphql_data!(%{id: team_id, futureCycleNotBefore: future_cycle_not_before})
     |> get_in(["team"])
     |> case do
       %{"cycles" => %{"nodes" => nodes}} = team_cycles when is_list(nodes) -> team_cycles
