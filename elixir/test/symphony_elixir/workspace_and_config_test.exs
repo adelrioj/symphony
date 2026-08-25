@@ -656,7 +656,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       body = %{
         "data" => %{
           "issues" => %{
-            "nodes" => Enum.map(variables.ids, raw_issue)
+            "nodes" => Enum.map(variables.filter.id.in, raw_issue)
           }
         }
       }
@@ -668,25 +668,74 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Enum.map(issues, & &1.id) == issue_ids
 
-    assert_receive {:fetch_issue_states_page, query,
-                    %{
-                      ids: ^first_batch_ids,
-                      projectSlug: "test-project",
-                      first: 50,
-                      relationFirst: 50
-                    }}
+    assert_receive {:fetch_issue_states_page, query, first_page_variables}
+
+    assert first_page_variables.filter == %{
+             id: %{in: first_batch_ids},
+             and: [%{project: %{slugId: %{eq: "test-project"}}}]
+           }
+
+    assert first_page_variables.first == 50
+    assert first_page_variables.relationFirst == 50
 
     assert query =~ "SymphonyLinearIssuesById"
-    assert query =~ "projectSlug"
-    assert query =~ "slugId"
+    assert query =~ "$filter: IssueFilter!"
 
-    assert_receive {:fetch_issue_states_page, ^query,
-                    %{
-                      ids: ^second_batch_ids,
-                      projectSlug: "test-project",
-                      first: 5,
-                      relationFirst: 50
-                    }}
+    assert_receive {:fetch_issue_states_page, ^query, second_page_variables}
+
+    assert second_page_variables.filter == %{
+             id: %{in: second_batch_ids},
+             and: [%{project: %{slugId: %{eq: "test-project"}}}]
+           }
+
+    assert second_page_variables.first == 5
+    assert second_page_variables.relationFirst == 50
+  end
+
+  test "linear poll sends the configured scope as one filter variable" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_project_slug: "acme-web")
+
+    graphql_fun = fn query, variables ->
+      send(self(), {:poll_page, query, variables})
+
+      {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}
+    end
+
+    assert {:ok, []} = Client.fetch_issues_by_states_for_test(["Todo", "In Progress"], graphql_fun)
+
+    assert_receive {:poll_page, query, variables}
+
+    assert variables.filter == %{
+             state: %{or: [%{name: %{eqIgnoreCase: "Todo"}}, %{name: %{eqIgnoreCase: "In Progress"}}]},
+             and: [%{project: %{slugId: %{eq: "acme-web"}}}]
+           }
+
+    assert query =~ "SymphonyLinearPoll"
+    assert query =~ "$filter: IssueFilter!"
+    refute query =~ "$projectSlug"
+    refute query =~ "$stateNames"
+  end
+
+  test "linear poll resends the identical filter on the next page with the cursor advanced" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_project_slug: "acme-web")
+
+    graphql_fun = fn query, variables ->
+      send(self(), {:poll_page, query, variables})
+
+      page_info =
+        case variables.after do
+          nil -> %{"hasNextPage" => true, "endCursor" => "cursor-1"}
+          "cursor-1" -> %{"hasNextPage" => false, "endCursor" => nil}
+        end
+
+      {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => page_info}}}}
+    end
+
+    assert {:ok, []} = Client.fetch_issues_by_states_for_test(["Todo"], graphql_fun)
+
+    assert_receive {:poll_page, _query, %{filter: first_filter, after: nil}}
+    assert_receive {:poll_page, _query, %{filter: second_filter, after: "cursor-1"}}
+    assert first_filter == second_filter
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do
