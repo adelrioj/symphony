@@ -2,6 +2,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   use SymphonyElixir.TestSupport
 
   require Logger
+  alias SymphonyElixir.Linear.Scope
   alias SymphonyElixir.SSH
 
   @moduletag :live_e2e
@@ -12,6 +13,8 @@ defmodule SymphonyElixir.LiveE2ETest do
   @docker_support_dir Path.expand("../support/live_e2e_docker", __DIR__)
   @docker_compose_file Path.join(@docker_support_dir, "docker-compose.yml")
   @result_file "LIVE_E2E_RESULT.txt"
+  @scope_read_deadline_ms 30_000
+  @scope_read_poll_interval_ms 1_000
   @live_e2e_skip_reason if(System.get_env("SYMPHONY_RUN_LIVE_E2E") != "1",
                           do: "set SYMPHONY_RUN_LIVE_E2E=1 to enable the real Linear/Codex end-to-end test"
                         )
@@ -126,6 +129,7 @@ defmodule SymphonyElixir.LiveE2ETest do
       activeCycle {
         id
         name
+        endsAt
       }
     }
   }
@@ -138,6 +142,7 @@ defmodule SymphonyElixir.LiveE2ETest do
       cycle {
         id
         name
+        endsAt
       }
     }
   }
@@ -184,68 +189,182 @@ defmodule SymphonyElixir.LiveE2ETest do
 
   @tag skip: @live_e2e_skip_reason
   test "a team plus current-cycle scope reads only the active cycle while the id refresh ignores scope" do
+    run_live_cycle_scope_flow!()
+  end
+
+  defp run_live_cycle_scope_flow! do
     team_key = System.get_env("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key
+    runtime_pid = Process.whereis(SymphonyElixir.AgentRuntimeSupervisor)
 
-    # The scope has to be live before the first read: fetch_issues_by_states/1 builds its filter from
-    # tracker.provider, and every mutation below reads the same settings for endpoint and token.
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "$LINEAR_API_KEY",
-      tracker_project_slug: nil,
-      tracker_provider: %{"team_keys" => [team_key], "current_cycle" => true},
-      observability_enabled: false
-    )
-
-    team = fetch_team!(team_key)
-    active_state = active_state!(team)
-    state_names = active_state_names(team)
-    {cycle, discard_cycle} = ensure_active_cycle!(team)
-
-    # Each entity is discarded by the `after` of the `try` that created it, so a failure at any step
-    # leaves nothing behind in a real workspace.
     try do
-      in_cycle_issue = create_scope_issue!(team, active_state, "in cycle")
-
-      try do
-        out_of_cycle_issue = create_scope_issue!(team, active_state, "out of cycle")
-
-        try do
-          assert_cycle_scope!(cycle, state_names, in_cycle_issue, out_of_cycle_issue)
-        after
-          archive_issue(out_of_cycle_issue.id)
-        end
-      after
-        archive_issue(in_cycle_issue.id)
+      # The Orchestrator under AgentRuntimeSupervisor re-reads the active workflow file on every tick,
+      # and write_workflow_file!/2 forces a WorkflowStore reload, so the live scope written below
+      # would make it poll the real workspace with the real token and dispatch Codex agents against
+      # every dispatchable issue in the active cycle, not just the ones seeded here. Both neighbouring
+      # live tests stop the runtime for exactly this reason.
+      if is_pid(runtime_pid) do
+        assert :ok =
+                 Supervisor.terminate_child(
+                   SymphonyElixir.Supervisor,
+                   SymphonyElixir.AgentRuntimeSupervisor
+                 )
       end
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_api_token: "$LINEAR_API_KEY",
+        tracker_project_slug: nil,
+        tracker_provider: %{"team_keys" => [team_key], "current_cycle" => true},
+        observability_enabled: false
+      )
+
+      assert_cycle_scope_loaded!(team_key)
+
+      team = fetch_team!(team_key)
+      active_state = active_state!(team)
+      state_names = active_state_names(team)
+
+      with_cycle_scope_fixtures!(team, active_state, fn fixtures ->
+        seed_cycle_membership!(fixtures)
+        assert_cycle_scope!(fixtures, state_names)
+      end)
     after
-      discard_cycle.()
+      # Put the harmless default workflow back before the runtime returns: restarting it against the
+      # live scope would hand the Orchestrator's immediate first tick the real token after all.
+      write_workflow_file!(Workflow.workflow_file_path())
+      restart_agent_runtime_if_needed()
     end
   end
 
-  defp assert_cycle_scope!(cycle, state_names, in_cycle_issue, out_of_cycle_issue) do
-    set_issue_cycle!(in_cycle_issue.id, cycle["id"])
+  # A provider map that stopped round-tripping through YAML would make Scope.filter/2 silently drop
+  # the cycle key, and the run would then fail as "returned an issue that belongs to no cycle" — a
+  # config bug wearing the costume of a Linear semantics bug, which is the misdiagnosis this scenario
+  # exists to prevent. Prove the scope loaded before trusting any read built from it.
+  defp assert_cycle_scope_loaded!(team_key) do
+    tracker = Config.settings!().tracker
+    filter = Scope.filter(tracker)
+
+    assert match?(%{cycle: %{isActive: %{eq: true}}}, filter),
+           "the workflow did not load as a current-cycle scope, so a scope failure below would be a config bug rather than a Linear one: #{inspect(filter)}"
+
+    assert Scope.team_keys(tracker) == [team_key],
+           "the workflow did not load tracker.provider.team_keys: #{inspect(Scope.team_keys(tracker))}"
+  end
+
+  # Seeds the fixtures the scope assertions need and discards each one in the `after` of the `try`
+  # that created it. The brackets nest rather than sit side by side because discard order matters:
+  # every issue is archived before either cycle.
+  defp with_cycle_scope_fixtures!(team, state, body) when is_function(body, 1) do
+    {active_cycle, discard_active_cycle} = ensure_active_cycle!(team)
+
+    try do
+      future_cycle = create_future_cycle!(team["id"], active_cycle)
+
+      try do
+        in_cycle_issue = create_scope_issue!(team, state, "in cycle")
+
+        try do
+          out_of_cycle_issue = create_scope_issue!(team, state, "out of cycle")
+
+          try do
+            future_cycle_issue = create_scope_issue!(team, state, "future cycle")
+
+            try do
+              body.(%{
+                active_cycle: active_cycle,
+                future_cycle: future_cycle,
+                in_cycle_issue: in_cycle_issue,
+                out_of_cycle_issue: out_of_cycle_issue,
+                future_cycle_issue: future_cycle_issue
+              })
+            after
+              archive_issue(future_cycle_issue.id)
+            end
+          after
+            archive_issue(out_of_cycle_issue.id)
+          end
+        after
+          archive_issue(in_cycle_issue.id)
+        end
+      after
+        archive_cycle(future_cycle["id"])
+      end
+    after
+      discard_active_cycle.()
+    end
+  end
+
+  # Seeding lives outside assert_cycle_scope!/2 on purpose: set_issue_cycle!/2 is strict, and a failed
+  # attachment raising from inside a function named for assertions would read as a scope failure.
+  defp seed_cycle_membership!(fixtures) do
+    set_issue_cycle!(fixtures.in_cycle_issue.id, fixtures.active_cycle["id"])
+    set_issue_cycle!(fixtures.future_cycle_issue.id, fixtures.future_cycle["id"])
 
     # Teams that auto-add new issues to the running cycle would otherwise put this issue in the cycle
-    # too, and the negative assertion below would then pass for the wrong reason.
-    set_issue_cycle!(out_of_cycle_issue.id, nil)
+    # too, and the no-cycle claim below would then hold for the wrong reason.
+    set_issue_cycle!(fixtures.out_of_cycle_issue.id, nil)
+  end
 
-    assert {:ok, scoped_issues} = Client.fetch_issues_by_states(state_names)
-    scoped_ids = MapSet.new(scoped_issues, & &1.id)
-
-    assert MapSet.member?(scoped_ids, in_cycle_issue.id),
-           "team + current_cycle did not return the issue seeded into cycle #{inspect(cycle["id"])}; cycle.isActive does not select the running cycle"
-
-    refute MapSet.member?(scoped_ids, out_of_cycle_issue.id),
-           "team + current_cycle returned an issue that belongs to no cycle"
+  defp assert_cycle_scope!(fixtures, state_names) do
+    # The three cycle-scope claims are settled together by await_cycle_scope_claims!/2, which polls to
+    # a deadline and flunks naming whichever one did not hold; unmet_cycle_scope_claim/2 states them.
+    await_cycle_scope_claims!(fixtures, state_names)
 
     # Production-path guard: this is the only test in the suite that drives the real
     # fetch_issues_by_ids/1 wrapper, because the unit-level regression enters at the
-    # fetch_issues_by_ids_for_test/2 seam instead. If a scope filter is ever reintroduced into the
-    # refresh, this assertion is the only thing that fails. Admission is scope-gated; continuation is
+    # fetch_issues_by_ids_for_test/2 seam instead. It catches a reintroduced cycle or foreign-project
+    # conjunct. It does NOT catch a reintroduced team conjunct: this issue belongs to the scoped team,
+    # so a team-filtered refresh would still return it. Admission is scope-gated; continuation is
     # state-gated, so an issue that left the cycle must still be refreshable by id.
-    assert {:ok, refreshed} = Client.fetch_issues_by_ids([out_of_cycle_issue.id])
+    assert {:ok, refreshed} = Client.fetch_issues_by_ids([fixtures.out_of_cycle_issue.id])
 
-    assert Enum.any?(refreshed, &(&1.id == out_of_cycle_issue.id)),
+    assert Enum.any?(refreshed, &(&1.id == fixtures.out_of_cycle_issue.id)),
            "the by-ids refresh dropped an out-of-scope issue, so it is applying the configured scope"
+  end
+
+  # Linear is not documented to reflect a cycle attachment in its issue index on the very next read,
+  # and a cold miss would flunk as "cycle.isActive does not select the running cycle" — the exact
+  # wrong conclusion, and the one this scenario exists to rule out. Poll to a deadline first, with the
+  # same idiom as wait_for_ssh_host!/2.
+  defp await_cycle_scope_claims!(fixtures, state_names) do
+    await_cycle_scope_claims!(fixtures, state_names, System.monotonic_time(:millisecond) + @scope_read_deadline_ms)
+  end
+
+  defp await_cycle_scope_claims!(fixtures, state_names, deadline_ms) do
+    assert {:ok, scoped_issues} = Client.fetch_issues_by_states(state_names)
+    scoped_ids = MapSet.new(scoped_issues, & &1.id)
+
+    case unmet_cycle_scope_claim(scoped_ids, fixtures) do
+      nil ->
+        :ok
+
+      claim ->
+        if System.monotonic_time(:millisecond) < deadline_ms do
+          Process.sleep(@scope_read_poll_interval_ms)
+          await_cycle_scope_claims!(fixtures, state_names, deadline_ms)
+        else
+          flunk("#{claim} (still true after #{@scope_read_deadline_ms}ms of polling)")
+        end
+    end
+  end
+
+  # The three claims a team + current_cycle scope has to satisfy, in the order that makes a failure
+  # readable. The future-cycle claim is the decisive one: without it the other two would still hold if
+  # `cycle.isActive` merely meant "belongs to some cycle", because only that issue sits in a real,
+  # non-overlapping cycle that has not started yet.
+  defp unmet_cycle_scope_claim(scoped_ids, fixtures) do
+    cond do
+      not MapSet.member?(scoped_ids, fixtures.in_cycle_issue.id) ->
+        "team + current_cycle did not return the issue seeded into the active cycle, so cycle.isActive does not select the running cycle"
+
+      MapSet.member?(scoped_ids, fixtures.out_of_cycle_issue.id) ->
+        "team + current_cycle returned an issue that belongs to no cycle"
+
+      MapSet.member?(scoped_ids, fixtures.future_cycle_issue.id) ->
+        "team + current_cycle returned an issue from a cycle that has not started, so cycle.isActive matches cycle membership rather than the running cycle"
+
+      true ->
+        nil
+    end
   end
 
   defp create_scope_issue!(team, state, label) do
@@ -369,15 +488,37 @@ defmodule SymphonyElixir.LiveE2ETest do
   defp create_active_cycle!(team_id) when is_binary(team_id) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
+    create_cycle!(team_id, DateTime.add(now, -1, :day), DateTime.add(now, 13, :day), "active")
+  end
+
+  # Starts a full day after the active cycle ends so the two windows cannot overlap: Linear rejects
+  # overlapping cycles for a team. A cycle that has not started yet is the only fixture that can tell
+  # `isActive` apart from "belongs to some cycle".
+  defp create_future_cycle!(team_id, active_cycle) when is_binary(team_id) do
+    starts_at = active_cycle |> cycle_ends_at!() |> DateTime.add(1, :day)
+
+    create_cycle!(team_id, starts_at, DateTime.add(starts_at, 14, :day), "future")
+  end
+
+  defp create_cycle!(team_id, %DateTime{} = starts_at, %DateTime{} = ends_at, label) do
     @create_cycle_mutation
     |> graphql_data!(%{
       teamId: team_id,
-      startsAt: now |> DateTime.add(-1, :day) |> DateTime.to_iso8601(),
-      endsAt: now |> DateTime.add(13, :day) |> DateTime.to_iso8601(),
-      name: "symphony-live-cycle-#{System.unique_integer([:positive])}"
+      startsAt: DateTime.to_iso8601(starts_at),
+      endsAt: DateTime.to_iso8601(ends_at),
+      name: "symphony-live-#{label}-cycle-#{System.unique_integer([:positive])}"
     })
     |> fetch_successful_entity!("cycleCreate", "cycle")
   end
+
+  defp cycle_ends_at!(%{"endsAt" => ends_at}) when is_binary(ends_at) do
+    case DateTime.from_iso8601(ends_at) do
+      {:ok, datetime, _utc_offset} -> DateTime.truncate(datetime, :second)
+      {:error, reason} -> flunk("expected an ISO8601 endsAt on the active cycle, got #{inspect(ends_at)}: #{inspect(reason)}")
+    end
+  end
+
+  defp cycle_ends_at!(cycle), do: flunk("expected the active cycle to expose endsAt, got: #{inspect(cycle)}")
 
   # Strict, unlike the cleanup mutations: a silently failed cycle attachment would surface as the
   # scope assertion failing, which reads as "cycle.isActive is broken" when it is not.
