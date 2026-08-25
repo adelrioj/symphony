@@ -119,6 +119,9 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @spec scope_summary(map()) :: String.t()
+  def scope_summary(tracker_settings), do: Scope.scope_summary(tracker_settings)
+
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
 

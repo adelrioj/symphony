@@ -95,7 +95,7 @@ defmodule SymphonyElixir.TestSupport do
           tracker_kind: "linear",
           tracker_endpoint: "https://api.linear.app/graphql",
           tracker_api_token: "token",
-          tracker_project_slug: "project",
+          tracker_project_slug: "acme-web",
           tracker_assignee: nil,
           tracker_required_labels: [],
           tracker_any_labels: [],

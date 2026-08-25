@@ -540,6 +540,31 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert :ok = SymphonyElixir.Tracker.preflight(%{kind: "memory"})
   end
 
+  test "the tracker facade delegates scope_summary to the linear adapter" do
+    settings = %{
+      kind: "linear",
+      provider: %{"team_keys" => ["MDZ"], "current_cycle" => true},
+      project_slug: nil,
+      any_labels: [],
+      required_labels: []
+    }
+
+    assert SymphonyElixir.Tracker.scope_summary(settings) == "teams MDZ · current cycle"
+  end
+
+  test "the tracker facade falls back to n/a for adapters without scope_summary" do
+    assert SymphonyElixir.Tracker.scope_summary(%{kind: "memory"}) == "n/a"
+  end
+
+  test "the tracker facade returns n/a rather than raising for an unknown kind" do
+    # format_scope_and_dashboard_lines/0 also runs on the dashboard's degraded :error path.
+    assert SymphonyElixir.Tracker.scope_summary(%{kind: "nope"}) == "n/a"
+  end
+
+  test "the tracker facade returns n/a rather than raising for settings without a kind" do
+    assert SymphonyElixir.Tracker.scope_summary(%{}) == "n/a"
+  end
+
   test "tracker reports an explicit error when an adapter does not support blocked writes" do
     File.write!(Workflow.workflow_file_path(), """
     ---
