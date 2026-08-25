@@ -87,18 +87,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) when is_list(state_names) do
-    normalized_states = Enum.map(state_names, &to_string/1) |> Enum.uniq()
-
-    case normalized_states do
-      [] ->
-        {:ok, []}
-
-      states ->
-        with {:ok, tracker} <- configured_tracker_for_read(),
-             {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_by_states(tracker, states, assignee_filter)
-        end
-    end
+    do_fetch_by_states(state_names, &routing_assignee_filter/0, &graphql/2)
   end
 
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
@@ -205,20 +194,15 @@ defmodule SymphonyElixir.Linear.Client do
     |> finalize_paginated_issues()
   end
 
+  # No empty-ids short-circuit here: `do_fetch_issue_states_page/5` already answers `[]` with
+  # `{:ok, []}`. The identical guard in `fetch_issues_by_ids/1` is load-bearing per `SPEC.md`,
+  # which requires the by-IDs read to issue no request for an empty refresh set.
   @doc false
   @spec fetch_issues_by_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids_for_test(issue_ids, graphql_fun)
       when is_list(issue_ids) and is_function(graphql_fun, 2) do
-    ids = Enum.uniq(issue_ids)
-
-    case ids do
-      [] ->
-        {:ok, []}
-
-      ids ->
-        do_fetch_issue_states(ids, nil, graphql_fun)
-    end
+    do_fetch_issue_states(Enum.uniq(issue_ids), nil, graphql_fun)
   end
 
   @doc false
@@ -226,21 +210,24 @@ defmodule SymphonyElixir.Linear.Client do
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states_for_test(state_names, graphql_fun)
       when is_list(state_names) and is_function(graphql_fun, 2) do
-    normalized_states = state_names |> Enum.map(&to_string/1) |> Enum.uniq()
+    do_fetch_by_states(state_names, fn -> {:ok, nil} end, graphql_fun)
+  end
 
-    case normalized_states do
+  # The seam and the production entry point share the state normalization, the empty-state
+  # short-circuit, the request gate and the first page's arguments, so neither can drift from the
+  # other. Only the transport and the assignee resolver differ: the seam resolves no assignee, so
+  # it never issues the viewer request that `assignee: "me"` would need.
+  defp do_fetch_by_states(state_names, assignee_filter_fun, graphql_fun) do
+    case state_names |> Enum.map(&to_string/1) |> Enum.uniq() do
       [] ->
         {:ok, []}
 
       states ->
-        with {:ok, tracker} <- configured_tracker_for_read() do
-          do_fetch_by_states_page(tracker, states, nil, nil, [], graphql_fun)
+        with {:ok, tracker} <- configured_tracker_for_read(),
+             {:ok, assignee_filter} <- assignee_filter_fun.() do
+          do_fetch_by_states_page(tracker, states, assignee_filter, nil, [], graphql_fun)
         end
     end
-  end
-
-  defp do_fetch_by_states(tracker, state_names, assignee_filter) do
-    do_fetch_by_states_page(tracker, state_names, assignee_filter, nil, [], &graphql/2)
   end
 
   defp do_fetch_by_states_page(tracker, state_names, assignee_filter, after_cursor, acc_issues, graphql_fun) do

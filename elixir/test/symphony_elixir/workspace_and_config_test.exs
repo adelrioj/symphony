@@ -689,6 +689,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert second_page_variables.relationFirst == 50
   end
 
+  # The property is proven by the emitted filter, which both entry points build in
+  # `do_fetch_issue_states_page/5`, so this setup is not what makes the assertion hold:
+  # `fetch_issues_by_ids_for_test/2` reads no config today. It is a forward guard, so that the day
+  # the by-IDs path does read the configured scope, a scope is already configured here for it to
+  # wrongly apply.
   test "linear id refresh applies no scope filter even when scope is configured" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_project_slug: "acme-web",
