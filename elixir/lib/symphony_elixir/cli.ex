@@ -24,7 +24,7 @@ defmodule SymphonyElixir.CLI do
           required(:set_logs_root) => (String.t() -> :ok | {:error, term()}),
           required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
           required(:ensure_all_started) => (-> ensure_started_result()),
-          optional(:preflight) => (-> :ok | {:error, term()}),
+          required(:preflight) => (-> :ok | {:error, term()}),
           optional(:ensure_linear_mcp_started) => (-> ensure_started_result()),
           optional(:configure_linear_mcp_logger) => (-> :ok),
           optional(:serve_linear_mcp) => (-> :ok)
@@ -96,18 +96,13 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp handle_preflight(expanded_path, deps) do
-    case run_preflight(deps) do
+    case deps.preflight.() do
       :ok ->
         :ok
 
       {:error, reason} ->
         {:error, "Tracker preflight failed for workflow #{expanded_path}: #{format_preflight_error(reason)}"}
     end
-  end
-
-  defp run_preflight(deps) do
-    preflight = Map.get(deps, :preflight, fn -> :ok end)
-    preflight.()
   end
 
   # Runs before the supervision tree, so it starts only the HTTP client it needs. An unloadable

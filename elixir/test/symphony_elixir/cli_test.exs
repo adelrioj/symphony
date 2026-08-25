@@ -40,7 +40,8 @@ defmodule SymphonyElixir.CLITest do
       ensure_all_started: fn ->
         send(parent, :started)
         {:ok, [:symphony_elixir]}
-      end
+      end,
+      preflight: fn -> :ok end
     }
 
     assert {:error, banner} = CLI.evaluate(["WORKFLOW.md"], deps)
@@ -61,7 +62,8 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      preflight: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag], deps)
@@ -83,7 +85,8 @@ defmodule SymphonyElixir.CLITest do
       end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      preflight: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag, workflow_path], deps)
@@ -102,7 +105,8 @@ defmodule SymphonyElixir.CLITest do
         :ok
       end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      preflight: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "--logs-root", "tmp/custom-logs", "WORKFLOW.md"], deps)
@@ -116,7 +120,8 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      preflight: fn -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
@@ -129,7 +134,8 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:error, :boom} end
+      ensure_all_started: fn -> {:error, :boom} end,
+      preflight: fn -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
@@ -143,7 +149,8 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      preflight: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
@@ -183,8 +190,18 @@ defmodule SymphonyElixir.CLITest do
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
-    assert_received :preflighted
-    assert_received :started
+
+    # Drained in mailbox order: preflight must run before the supervision tree starts.
+    markers =
+      Enum.map(1..2, fn _ ->
+        receive do
+          marker -> marker
+        after
+          0 -> :no_message
+        end
+      end)
+
+    assert markers == [:preflighted, :started]
   end
 
   test "evaluate/2 with --linear-mcp loads the workflow and enters mcp mode" do
@@ -206,7 +223,8 @@ defmodule SymphonyElixir.CLITest do
       serve_linear_mcp: fn ->
         send(test_pid, :served)
         :ok
-      end
+      end,
+      preflight: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate(["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"], deps)
@@ -232,7 +250,8 @@ defmodule SymphonyElixir.CLITest do
         Logger.error("Linear GraphQL request failed: :timeout")
         IO.write(protocol_output)
         :ok
-      end
+      end,
+      preflight: fn -> :ok end
     }
 
     stdout =
@@ -258,7 +277,8 @@ defmodule SymphonyElixir.CLITest do
       serve_linear_mcp: fn ->
         send(test_pid, :served)
         :ok
-      end
+      end,
+      preflight: fn -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate(["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"], deps)

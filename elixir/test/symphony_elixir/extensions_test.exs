@@ -35,6 +35,9 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   defmodule PreflightClient do
+    # SML lacks "In Progress", so a state can be present in one listed team and absent from
+    # another. BIG fills the 50-state page the nested `states` connection cannot filter, so its
+    # workflow states are truncated and absence cannot be proven for it.
     @teams [
       %{
         "key" => "MDZ",
@@ -45,6 +48,16 @@ defmodule SymphonyElixir.ExtensionsTest do
         "key" => "TRA",
         "activeCycle" => nil,
         "states" => %{"nodes" => [%{"name" => "Todo"}, %{"name" => "In Progress"}, %{"name" => "Done"}]}
+      },
+      %{
+        "key" => "SML",
+        "activeCycle" => %{"id" => "cycle-2"},
+        "states" => %{"nodes" => [%{"name" => "Todo"}, %{"name" => "Done"}]}
+      },
+      %{
+        "key" => "BIG",
+        "activeCycle" => %{"id" => "cycle-3"},
+        "states" => %{"nodes" => Enum.map(1..50, &%{"name" => "State #{&1}"})}
       }
     ]
 
@@ -382,13 +395,34 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert reasons == ["unknown Linear team key \"NOPE\""]
   end
 
-  test "preflight reports an unknown state name" do
+  test "preflight reports a state that no listed team defines" do
     Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
 
     settings = preflight_settings(provider: %{"team_keys" => ["mdz"]}, active_states: ["Merging"])
 
     assert {:error, {:linear_preflight_failed, reasons}} = Adapter.preflight(settings)
-    assert reasons == ["state \"Merging\" does not exist in Linear team \"MDZ\""]
+    assert reasons == ["state \"Merging\" does not exist in any listed Linear team"]
+  end
+
+  test "preflight warns rather than fails when a state is absent from only some listed teams" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings = preflight_settings(provider: %{"team_keys" => ["MDZ", "SML"]}, active_states: ["In Progress"])
+
+    log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
+
+    assert log =~ "Linear state \"In Progress\" is absent from team(s) [\"SML\"]"
+  end
+
+  test "preflight treats a full workflow state page as unprovable rather than absent" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings = preflight_settings(provider: %{"team_keys" => ["BIG"]}, active_states: ["Todo"], terminal_states: ["State 1"])
+
+    log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
+
+    assert log =~ "Linear state \"Todo\" was not found, and team(s) [\"BIG\"] returned a full page of 50 workflow states, so its absence cannot be proven"
+    refute log =~ "\"State 1\""
   end
 
   test "preflight reports every failure in one error" do
@@ -406,7 +440,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert reasons == [
              "unknown Linear team key \"NOPE\"",
-             "state \"Merging\" does not exist in Linear team \"MDZ\"",
+             "state \"Merging\" does not exist in any listed Linear team",
              "label \"absent-label\" does not exist in any listed Linear team",
              "label \"also-absent\" does not exist in any listed Linear team"
            ]
@@ -461,6 +495,27 @@ defmodule SymphonyElixir.ExtensionsTest do
     log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
 
     assert log =~ "Linear label \"feat-symphony\" is absent from team(s) [\"TRA\"]"
+  end
+
+  test "preflight names the list a partly absent label came from" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings = preflight_settings(provider: %{"team_keys" => ["MDZ", "TRA"]}, required_labels: ["feat-symphony"])
+
+    log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
+
+    assert log =~ "Linear required label \"feat-symphony\" is absent from team(s) [\"TRA\"]; those teams will contribute no issues at all"
+  end
+
+  test "preflight never names an unresolvable team key as missing a label" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings = preflight_settings(provider: %{"team_keys" => ["MDZ", "NOPE"]}, any_labels: ["feat-symphony"])
+
+    {result, log} = with_log(fn -> Adapter.preflight(settings) end)
+
+    assert result == {:error, {:linear_preflight_failed, ["unknown Linear team key \"NOPE\""]}}
+    refute log =~ "absent from team(s)"
   end
 
   test "preflight is a no-op without team keys" do

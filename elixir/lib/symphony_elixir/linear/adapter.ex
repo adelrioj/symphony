@@ -179,9 +179,23 @@ defmodule SymphonyElixir.Linear.Adapter do
   end
 
   defp preflight_label_names(tracker_settings) do
-    ((Map.get(tracker_settings, :any_labels) || []) ++ (Map.get(tracker_settings, :required_labels) || []))
-    |> Enum.uniq()
+    Enum.map(preflight_labels(tracker_settings), &elem(&1, 0))
   end
+
+  # Each name carries the list it came from, because the consequence differs: `Scope.filter/2`
+  # makes a required label a mandatory conjunct, so a team without it contributes no issues at
+  # all, while an `any_labels` entry only narrows what that team contributes. A name in both
+  # lists is reported as required, the stronger of the two.
+  defp preflight_labels(tracker_settings) do
+    any_labels = label_names(tracker_settings, :any_labels)
+    required_labels = label_names(tracker_settings, :required_labels)
+
+    (any_labels ++ required_labels)
+    |> Enum.uniq()
+    |> Enum.map(&{&1, if(&1 in required_labels, do: :required, else: :any)})
+  end
+
+  defp label_names(tracker_settings, key), do: Map.get(tracker_settings, key) || []
 
   # Two requests resolve every selector, not one per value: the teams query carries each team's
   # workflow states and active cycle, and labels are filtered by name in a single second read.
@@ -221,17 +235,29 @@ defmodule SymphonyElixir.Linear.Adapter do
     :ok
   end
 
+  # With nothing resolved there is nothing to resolve states or labels against, and every
+  # configured team key is unresolved and already fatal on its own: reporting each configured
+  # state and label as absent too would bury the one reason that is actionable.
+  defp report_preflight(_tracker_settings, team_keys, [], _labels) do
+    {:error, {:linear_preflight_failed, unknown_team_keys(team_keys, [])}}
+  end
+
   defp report_preflight(tracker_settings, team_keys, teams, labels) do
     reasons =
       unknown_team_keys(team_keys, teams) ++
         unknown_state_names(tracker_settings, teams) ++
-        unknown_label_names(tracker_settings, team_keys, labels)
+        unknown_label_names(tracker_settings, resolved_team_keys(teams), labels)
 
     case reasons do
       [] -> :ok
       reasons -> {:error, {:linear_preflight_failed, reasons}}
     end
   end
+
+  # Linear's own spelling of every key that resolved. States and labels are judged against
+  # these, never against the configured keys, so a key that does not exist is never also named
+  # as missing a state or a label it could not have.
+  defp resolved_team_keys(teams), do: Enum.map(teams, & &1["key"])
 
   defp unknown_team_keys(team_keys, teams) do
     resolved_keys = MapSet.new(teams, &String.downcase(&1["key"] || ""))
@@ -242,21 +268,71 @@ defmodule SymphonyElixir.Linear.Adapter do
   end
 
   defp unknown_state_names(tracker_settings, teams) do
-    configured =
-      ((Map.get(tracker_settings, :active_states) || []) ++ (Map.get(tracker_settings, :terminal_states) || []))
-      |> Enum.uniq()
+    index = team_state_index(teams)
 
-    Enum.flat_map(teams, fn team ->
-      known =
-        team
-        |> get_in(["states", "nodes"])
-        |> Kernel.||([])
-        |> MapSet.new(&String.downcase(&1["name"] || ""))
-
-      configured
-      |> Enum.reject(&MapSet.member?(known, String.downcase(&1)))
-      |> Enum.map(&"state #{inspect(&1)} does not exist in Linear team #{inspect(team["key"])}")
+    tracker_settings
+    |> configured_state_names()
+    |> Enum.flat_map(fn state ->
+      {present, absent, unprovable} = classify_state(state, index)
+      state_reason(state, present, absent, unprovable)
     end)
+  end
+
+  defp configured_state_names(tracker_settings) do
+    ((Map.get(tracker_settings, :active_states) || []) ++ (Map.get(tracker_settings, :terminal_states) || []))
+    |> Enum.uniq()
+  end
+
+  # The nested `states` connection is the one page preflight cannot filter, so a team that fills
+  # it may hold the configured state beyond the cap. The page size cannot be raised to find out:
+  # 100x50 is the measured complexity ceiling, so a full page means absence is unprovable.
+  defp team_state_index(teams) do
+    Enum.map(teams, fn team ->
+      nodes = get_in(team, ["states", "nodes"]) || []
+
+      {team["key"], MapSet.new(nodes, &String.downcase(&1["name"] || "")), length(nodes) >= @team_states_page_size}
+    end)
+  end
+
+  defp classify_state(state, index) do
+    name = String.downcase(state)
+
+    groups =
+      Enum.group_by(
+        index,
+        fn {_key, known, full_page?} ->
+          cond do
+            MapSet.member?(known, name) -> :present
+            full_page? -> :unprovable
+            true -> :absent
+          end
+        end,
+        fn {key, _known, _full_page?} -> key end
+      )
+
+    {Map.get(groups, :present, []), Map.get(groups, :absent, []), Map.get(groups, :unprovable, [])}
+  end
+
+  # Mirrors the label rule, and for the same reason: `Scope.filter/2` ANDs the state conjunct
+  # with the team conjunct, so a state that exists in one listed team still selects that team's
+  # issues and the config reads correctly. Absent from every listed team can never match and is
+  # an error; absent from only some narrows those teams and is a warning. A misspelled state is
+  # absent everywhere, so it still fails the boot.
+  defp state_reason(_state, present, [], _unprovable) when present != [], do: []
+
+  defp state_reason(state, present, absent, _unprovable) when present != [] do
+    Logger.warning("Linear state #{inspect(state)} is absent from team(s) #{inspect(absent)}; those teams will match nothing for it")
+    []
+  end
+
+  defp state_reason(state, [], _absent, []), do: ["state #{inspect(state)} does not exist in any listed Linear team"]
+
+  defp state_reason(state, [], _absent, unprovable) do
+    Logger.warning(
+      "Linear state #{inspect(state)} was not found, and team(s) #{inspect(unprovable)} returned a full page of #{@team_states_page_size} workflow states, so its absence cannot be proven"
+    )
+
+    []
   end
 
   defp unknown_label_names(tracker_settings, team_keys, labels) do
@@ -267,7 +343,7 @@ defmodule SymphonyElixir.Linear.Adapter do
         &String.downcase(&1["name"] || "")
       )
 
-    Enum.flat_map(preflight_label_names(tracker_settings), fn label ->
+    Enum.flat_map(preflight_labels(tracker_settings), fn {label, kind} ->
       teams_with_label =
         Enum.filter(team_keys, fn key ->
           labels_by_team
@@ -275,24 +351,30 @@ defmodule SymphonyElixir.Linear.Adapter do
           |> Enum.member?(String.downcase(label))
         end)
 
-      label_reason(label, teams_with_label, team_keys)
+      label_reason(label, kind, teams_with_label, team_keys)
     end)
   end
 
   # Labels are team-scoped in Linear, so the same name exists once per team. Missing from one
-  # listed team narrows the scope silently and is a warning; missing from all of them means
-  # nothing can ever match and is an error.
-  defp label_reason(label, [], _team_keys), do: ["label #{inspect(label)} does not exist in any listed Linear team"]
+  # listed team narrows the scope and is a warning; missing from all of them means nothing can
+  # ever match and is an error.
+  defp label_reason(label, _kind, [], _team_keys), do: ["label #{inspect(label)} does not exist in any listed Linear team"]
 
-  defp label_reason(label, teams_with_label, team_keys) do
+  defp label_reason(label, kind, teams_with_label, team_keys) do
     case team_keys -- teams_with_label do
-      [] ->
-        []
-
-      missing ->
-        Logger.warning("Linear label #{inspect(label)} is absent from team(s) #{inspect(missing)}; those teams will match nothing for it")
-        []
+      [] -> []
+      missing -> warn_partial_label(label, kind, missing)
     end
+  end
+
+  defp warn_partial_label(label, :required, missing) do
+    Logger.warning("Linear required label #{inspect(label)} is absent from team(s) #{inspect(missing)}; those teams will contribute no issues at all")
+    []
+  end
+
+  defp warn_partial_label(label, :any, missing) do
+    Logger.warning("Linear label #{inspect(label)} is absent from team(s) #{inspect(missing)}; those teams will match nothing for it")
+    []
   end
 
   defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
