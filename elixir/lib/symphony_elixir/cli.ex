@@ -105,18 +105,33 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  # Runs before the supervision tree, so it starts only the HTTP client it needs. An unloadable
-  # workflow is left to application start, which reports it with its own message.
+  # Runs before the supervision tree, so it starts only the HTTP client it needs.
   defp run_tracker_preflight do
-    case Config.settings() do
+    # The rotating disk handler is installed by `SymphonyElixir.start_runtime/0`, which has not run
+    # yet, so without this every preflight warning would reach stdout only and never the durable
+    # log file operators are told to read. `configure/0` removes the handler it owns before adding
+    # it again, so `start_runtime/0`'s later call stays correct.
+    :ok = LogFile.configure()
+
+    case offline_tracker_settings() do
       {:ok, settings} ->
         with {:ok, _started_apps} <- Application.ensure_all_started(:req) do
           Tracker.preflight(settings.tracker)
         end
 
+      # An unloadable or invalid workflow is left to application start, which stops on the same
+      # reason and reports it with the message that names the real problem. Preflighting first
+      # would replace that message with whatever Linear said, and would issue a live request for
+      # a configuration about to be rejected offline.
       {:error, _reason} ->
         :ok
     end
+  end
+
+  # `Config.validate!/0` reloads and validates `WORKFLOW.md` entirely offline, so the whole gate
+  # runs before the supervision tree and before any tracker request.
+  defp offline_tracker_settings do
+    with :ok <- Config.validate!(), do: Config.settings()
   end
 
   defp format_preflight_error({:linear_preflight_failed, reasons}) when is_list(reasons) do
