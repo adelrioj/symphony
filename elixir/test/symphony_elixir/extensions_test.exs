@@ -561,10 +561,6 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert SymphonyElixir.Tracker.scope_summary(%{kind: "nope"}) == "n/a"
   end
 
-  test "the tracker facade returns n/a rather than raising for settings without a kind" do
-    assert SymphonyElixir.Tracker.scope_summary(%{}) == "n/a"
-  end
-
   test "tracker reports an explicit error when an adapter does not support blocked writes" do
     File.write!(Workflow.workflow_file_path(), """
     ---

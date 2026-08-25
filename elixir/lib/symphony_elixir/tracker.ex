@@ -142,8 +142,6 @@ defmodule SymphonyElixir.Tracker do
     end
   end
 
-  def scope_summary(_tracker_settings), do: "n/a"
-
   @spec adapter() :: module()
   def adapter do
     Config.settings!().tracker

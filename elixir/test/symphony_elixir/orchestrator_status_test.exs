@@ -1198,6 +1198,58 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute rendered =~ "Dashboard:"
   end
 
+  test "status dashboard renders the scope sentinel in gray for a tracker with no scope summary" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+
+    # Pins the sentinel to the gray branch of the board's case. The memory tracker does not
+    # implement scope_summary/1, so this is the production path that reaches that branch: a
+    # fully unscoped Linear tracker cannot reach it, being rejected by Config.validate!/0.
+    # Were the sentinel ever to change, the board would render the new value in cyan and this fails.
+    assert rendered =~
+             IO.ANSI.bright() <> "│ Scope: " <> IO.ANSI.reset() <> IO.ANSI.light_black() <> "n/a" <> IO.ANSI.reset()
+  end
+
+  test "status dashboard renders every scope selector, separated and label-downcased" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: "acme-web",
+      tracker_provider: %{"team_keys" => ["MDZ", "TRA"], "current_cycle" => true},
+      tracker_any_labels: ["Feat-Symphony"],
+      tracker_required_labels: ["Migrated"]
+    )
+
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+
+    # No fixture carries more than one selector, so the " · " join and the config's label
+    # downcasing are only ever exercised on a board render here.
+    assert rendered =~
+             IO.ANSI.bright() <>
+               "│ Scope: " <>
+               IO.ANSI.reset() <>
+               IO.ANSI.cyan() <>
+               "teams MDZ, TRA · current cycle · project acme-web · any labels feat-symphony · required labels migrated" <>
+               IO.ANSI.reset()
+  end
+
   test "status dashboard renders dashboard url on its own line when server port is configured" do
     previous_port_override = Application.get_env(:symphony_elixir, :server_port_override)
 
