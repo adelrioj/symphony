@@ -5,6 +5,8 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
+  require Logger
+
   alias SymphonyElixir.Linear.{AgentTool, Client, Scope}
   alias SymphonyElixir.Tracker.Issue
 
@@ -38,6 +40,47 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  # Neither preflight query paginates, and both cap every connection well below Linear's
+  # maximum because query complexity is MULTIPLICATIVE across nested connections with a ceiling
+  # of 10000. Measured against the live API: 250x250 and 250x50 are both rejected, 100x50 is
+  # accepted. Raising either teams number means re-measuring, not just doubling it.
+  @teams_page_size 100
+  @team_states_page_size 50
+  @labels_page_size 250
+
+  # `activeCycle` is a single object rather than a connection, so selecting it costs nothing
+  # against the budget above. Only `id` is read, and only for presence.
+  @teams_preflight_query """
+  query SymphonyPreflightTeams($filter: TeamFilter!) {
+    teams(filter: $filter, first: #{@teams_page_size}) {
+      nodes {
+        key
+        activeCycle {
+          id
+        }
+        states(first: #{@team_states_page_size}) {
+          nodes {
+            name
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @labels_preflight_query """
+  query SymphonyPreflightLabels($filter: IssueLabelFilter!) {
+    issueLabels(filter: $filter, first: #{@labels_page_size}) {
+      nodes {
+        name
+        team {
+          key
+        }
+      }
+    }
+  }
+  """
+
   @spec validate_config(map()) :: :ok | {:error, term()}
   def validate_config(tracker_settings) do
     cond do
@@ -52,6 +95,27 @@ defmodule SymphonyElixir.Linear.Adapter do
 
       true ->
         Scope.validate(tracker_settings)
+    end
+  end
+
+  @doc """
+  Resolves the configured Linear scope against the workspace once at startup.
+
+  Every unresolved selector is reported together, because fixing them one boot
+  at a time is what an operator with four mistyped selectors would otherwise do.
+  """
+  @spec preflight(map()) :: :ok | {:error, term()}
+  def preflight(tracker_settings) do
+    case Scope.team_keys(tracker_settings) do
+      [] ->
+        :ok
+
+      team_keys ->
+        with {:ok, teams} <- fetch_preflight_teams(team_keys),
+             {:ok, labels} <- fetch_preflight_labels(preflight_label_names(tracker_settings)) do
+          warn_missing_active_cycles(tracker_settings, teams)
+          report_preflight(tracker_settings, team_keys, teams, labels)
+        end
     end
   end
 
@@ -111,6 +175,123 @@ defmodule SymphonyElixir.Linear.Adapter do
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :state_not_found}
+    end
+  end
+
+  defp preflight_label_names(tracker_settings) do
+    ((Map.get(tracker_settings, :any_labels) || []) ++ (Map.get(tracker_settings, :required_labels) || []))
+    |> Enum.uniq()
+  end
+
+  # Two requests resolve every selector, not one per value: the teams query carries each team's
+  # workflow states and active cycle, and labels are filtered by name in a single second read.
+  defp fetch_preflight_teams(team_keys) do
+    filter = %{or: Enum.map(team_keys, &%{key: %{eqIgnoreCase: &1}})}
+    preflight_nodes(@teams_preflight_query, filter, "teams")
+  end
+
+  defp fetch_preflight_labels([]), do: {:ok, []}
+
+  defp fetch_preflight_labels(label_names) do
+    filter = %{or: Enum.map(label_names, &%{name: %{eqIgnoreCase: &1}})}
+    preflight_nodes(@labels_preflight_query, filter, "issueLabels")
+  end
+
+  defp preflight_nodes(query, filter, root_key) do
+    case client_module().graphql(query, %{filter: filter}) do
+      {:ok, %{"data" => %{^root_key => %{"nodes" => nodes}}}} when is_list(nodes) -> {:ok, nodes}
+      {:ok, %{"errors" => errors}} -> {:error, {:linear_graphql_errors, errors}}
+      {:ok, _body} -> {:error, :linear_unknown_payload}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # A team legitimately has no active cycle during sprint cooldown, so this is a warning and
+  # not a boot failure: refusing to start would turn a routine Linear state into an outage for
+  # a container that restarts between sprints. At runtime the poll simply returns zero issues.
+  defp warn_missing_active_cycles(tracker_settings, teams) do
+    if Scope.current_cycle?(tracker_settings) do
+      teams
+      |> Enum.filter(&is_nil(&1["activeCycle"]))
+      |> Enum.each(fn team ->
+        Logger.warning("Linear team #{inspect(team["key"])} has no active cycle; scope current_cycle will match nothing until a cycle starts")
+      end)
+    end
+
+    :ok
+  end
+
+  defp report_preflight(tracker_settings, team_keys, teams, labels) do
+    reasons =
+      unknown_team_keys(team_keys, teams) ++
+        unknown_state_names(tracker_settings, teams) ++
+        unknown_label_names(tracker_settings, team_keys, labels)
+
+    case reasons do
+      [] -> :ok
+      reasons -> {:error, {:linear_preflight_failed, reasons}}
+    end
+  end
+
+  defp unknown_team_keys(team_keys, teams) do
+    resolved_keys = MapSet.new(teams, &String.downcase(&1["key"] || ""))
+
+    team_keys
+    |> Enum.reject(&MapSet.member?(resolved_keys, String.downcase(&1)))
+    |> Enum.map(&"unknown Linear team key #{inspect(&1)}")
+  end
+
+  defp unknown_state_names(tracker_settings, teams) do
+    configured =
+      ((Map.get(tracker_settings, :active_states) || []) ++ (Map.get(tracker_settings, :terminal_states) || []))
+      |> Enum.uniq()
+
+    Enum.flat_map(teams, fn team ->
+      known =
+        team
+        |> get_in(["states", "nodes"])
+        |> Kernel.||([])
+        |> MapSet.new(&String.downcase(&1["name"] || ""))
+
+      configured
+      |> Enum.reject(&MapSet.member?(known, String.downcase(&1)))
+      |> Enum.map(&"state #{inspect(&1)} does not exist in Linear team #{inspect(team["key"])}")
+    end)
+  end
+
+  defp unknown_label_names(tracker_settings, team_keys, labels) do
+    labels_by_team =
+      Enum.group_by(
+        labels,
+        &String.downcase(get_in(&1, ["team", "key"]) || ""),
+        &String.downcase(&1["name"] || "")
+      )
+
+    Enum.flat_map(preflight_label_names(tracker_settings), fn label ->
+      teams_with_label =
+        Enum.filter(team_keys, fn key ->
+          labels_by_team
+          |> Map.get(String.downcase(key), [])
+          |> Enum.member?(String.downcase(label))
+        end)
+
+      label_reason(label, teams_with_label, team_keys)
+    end)
+  end
+
+  # Labels are team-scoped in Linear, so the same name exists once per team. Missing from one
+  # listed team narrows the scope silently and is a warning; missing from all of them means
+  # nothing can ever match and is an error.
+  defp label_reason(label, [], _team_keys), do: ["label #{inspect(label)} does not exist in any listed Linear team"]
+
+  defp label_reason(label, teams_with_label, team_keys) do
+    case team_keys -- teams_with_label do
+      [] ->
+        []
+
+      missing ->
+        Logger.warning("Linear label #{inspect(label)} is absent from team(s) #{inspect(missing)}; those teams will match nothing for it")
+        []
     end
   end
 

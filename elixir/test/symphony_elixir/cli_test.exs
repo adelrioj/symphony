@@ -149,6 +149,44 @@ defmodule SymphonyElixir.CLITest do
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
   end
 
+  test "a failing preflight prevents the supervision tree from starting" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> flunk("application must not start when preflight fails") end,
+      preflight: fn -> {:error, {:linear_preflight_failed, ["unknown Linear team key \"NOPE\""]}} end
+    }
+
+    assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+    assert message =~ "Tracker preflight failed"
+    assert message =~ "NOPE"
+  end
+
+  test "a passing preflight starts the supervision tree" do
+    parent = self()
+
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn ->
+        send(parent, :started)
+        {:ok, [:symphony_elixir]}
+      end,
+      preflight: fn ->
+        send(parent, :preflighted)
+        :ok
+      end
+    }
+
+    assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+    assert_received :preflighted
+    assert_received :started
+  end
+
   test "evaluate/2 with --linear-mcp loads the workflow and enters mcp mode" do
     test_pid = self()
 

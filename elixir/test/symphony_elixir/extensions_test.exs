@@ -34,6 +34,50 @@ defmodule SymphonyElixir.ExtensionsTest do
     end
   end
 
+  defmodule PreflightClient do
+    @teams [
+      %{
+        "key" => "MDZ",
+        "activeCycle" => %{"id" => "cycle-1"},
+        "states" => %{"nodes" => [%{"name" => "Todo"}, %{"name" => "In Progress"}, %{"name" => "Done"}]}
+      },
+      %{
+        "key" => "TRA",
+        "activeCycle" => nil,
+        "states" => %{"nodes" => [%{"name" => "Todo"}, %{"name" => "In Progress"}, %{"name" => "Done"}]}
+      }
+    ]
+
+    # `feat-symphony` exists on MDZ only: labels are team-scoped in Linear, so this fixture is
+    # what distinguishes "absent from one listed team" (a warning) from "absent everywhere".
+    @labels [%{"name" => "feat-symphony", "team" => %{"key" => "MDZ"}}]
+
+    def graphql(query, variables) do
+      send(self(), {:preflight_query, query, variables})
+
+      cond do
+        query =~ "SymphonyPreflightTeams" ->
+          {:ok, %{"data" => %{"teams" => %{"nodes" => matching(@teams, variables, :key, "key")}}}}
+
+        query =~ "SymphonyPreflightLabels" ->
+          {:ok, %{"data" => %{"issueLabels" => %{"nodes" => matching(@labels, variables, :name, "name")}}}}
+      end
+    end
+
+    # Applies the filter the way Linear does, so preflight only ever sees the nodes its own
+    # filter selects. `Map.fetch!(:eqIgnoreCase)` is load-bearing: a filter built with any other
+    # comparator raises here instead of silently matching, which is how the tests pin preflight
+    # to the same case-insensitive comparator the read query uses.
+    defp matching(nodes, %{filter: %{or: clauses}}, filter_key, node_key) do
+      wanted =
+        Enum.map(clauses, fn clause ->
+          clause |> Map.fetch!(filter_key) |> Map.fetch!(:eqIgnoreCase) |> String.downcase()
+        end)
+
+      Enum.filter(nodes, &(String.downcase(&1[node_key]) in wanted))
+    end
+  end
+
   defmodule SlowOrchestrator do
     use GenServer
 
@@ -306,6 +350,137 @@ defmodule SymphonyElixir.ExtensionsTest do
     end
   end
 
+  test "preflight resolves known team keys, states and labels" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings =
+      preflight_settings(
+        provider: %{"team_keys" => ["MDZ"]},
+        any_labels: ["feat-symphony"],
+        active_states: ["Todo", "In Progress"]
+      )
+
+    assert :ok = Adapter.preflight(settings)
+
+    assert_received {:preflight_query, teams_query, %{filter: %{or: [%{key: %{eqIgnoreCase: "MDZ"}}]}}}
+    assert teams_query =~ "SymphonyPreflightTeams"
+    assert teams_query =~ "activeCycle"
+    assert teams_query =~ "teams(filter: $filter, first: 100)"
+    assert teams_query =~ "states(first: 50)"
+
+    assert_received {:preflight_query, labels_query, %{filter: %{or: [%{name: %{eqIgnoreCase: "feat-symphony"}}]}}}
+    assert labels_query =~ "SymphonyPreflightLabels"
+    assert labels_query =~ "issueLabels(filter: $filter, first: 250)"
+  end
+
+  test "preflight reports an unknown team key" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings = preflight_settings(provider: %{"team_keys" => ["NOPE"]})
+
+    assert {:error, {:linear_preflight_failed, reasons}} = Adapter.preflight(settings)
+    assert reasons == ["unknown Linear team key \"NOPE\""]
+  end
+
+  test "preflight reports an unknown state name" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings = preflight_settings(provider: %{"team_keys" => ["mdz"]}, active_states: ["Merging"])
+
+    assert {:error, {:linear_preflight_failed, reasons}} = Adapter.preflight(settings)
+    assert reasons == ["state \"Merging\" does not exist in Linear team \"MDZ\""]
+  end
+
+  test "preflight reports every failure in one error" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings =
+      preflight_settings(
+        provider: %{"team_keys" => ["MDZ", "NOPE"]},
+        any_labels: ["absent-label"],
+        required_labels: ["also-absent"],
+        active_states: ["Merging"]
+      )
+
+    assert {:error, {:linear_preflight_failed, reasons}} = Adapter.preflight(settings)
+
+    assert reasons == [
+             "unknown Linear team key \"NOPE\"",
+             "state \"Merging\" does not exist in Linear team \"MDZ\"",
+             "label \"absent-label\" does not exist in any listed Linear team",
+             "label \"also-absent\" does not exist in any listed Linear team"
+           ]
+
+    # Two selector kinds across four values still cost exactly two requests, not one per value.
+    assert_received {:preflight_query, _teams_query, _teams_variables}
+    assert_received {:preflight_query, _labels_query, _labels_variables}
+    refute_received {:preflight_query, _query, _variables}
+  end
+
+  test "preflight surfaces graphql errors, unknown payloads and transport failures" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    settings = preflight_settings(provider: %{"team_keys" => ["MDZ"]})
+
+    for {result, expected} <- [
+          {{:ok, %{"errors" => [%{"message" => "complexity"}]}}, {:error, {:linear_graphql_errors, [%{"message" => "complexity"}]}}},
+          {{:ok, %{"data" => %{"teams" => %{}}}}, {:error, :linear_unknown_payload}},
+          {{:error, :timeout}, {:error, :timeout}}
+        ] do
+      Process.put({FakeLinearClient, :graphql_result}, result)
+      assert Adapter.preflight(settings) == expected
+    end
+  end
+
+  test "preflight warns rather than fails when a listed team has no active cycle" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings = preflight_settings(provider: %{"team_keys" => ["TRA"], "current_cycle" => true})
+
+    log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
+
+    assert log =~ "no active cycle"
+    assert log =~ "TRA"
+  end
+
+  test "preflight does not check cycles when current_cycle is not configured" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings = preflight_settings(provider: %{"team_keys" => ["TRA"]})
+
+    log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
+
+    refute log =~ "no active cycle"
+  end
+
+  test "preflight warns rather than fails when a label is absent from only some listed teams" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings = preflight_settings(provider: %{"team_keys" => ["MDZ", "TRA"]}, any_labels: ["feat-symphony"])
+
+    log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
+
+    assert log =~ "Linear label \"feat-symphony\" is absent from team(s) [\"TRA\"]"
+  end
+
+  test "preflight is a no-op without team keys" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    settings = preflight_settings(provider: %{}, project_slug: "acme-web")
+
+    assert :ok = Adapter.preflight(settings)
+    refute_received {:preflight_query, _query, _variables}
+  end
+
+  test "the tracker facade dispatches preflight to the adapter and falls back to ok" do
+    Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
+
+    assert :ok = SymphonyElixir.Tracker.preflight(preflight_settings(provider: %{"team_keys" => ["MDZ"]}))
+    assert_received {:preflight_query, _query, _variables}
+
+    assert :ok = SymphonyElixir.Tracker.preflight(%{kind: "memory"})
+  end
+
   test "tracker reports an explicit error when an adapter does not support blocked writes" do
     File.write!(Workflow.workflow_file_path(), """
     ---
@@ -336,6 +511,23 @@ defmodule SymphonyElixir.ExtensionsTest do
          "issue" => %{"team" => %{"states" => %{"nodes" => [%{"id" => state_id}]}}}
        }
      }}
+  end
+
+  # Only the keys a given preflight case turns on are stated at the call site; the rest are the
+  # resolvable defaults, so each test reads as the one thing it is about.
+  defp preflight_settings(overrides) do
+    Map.merge(
+      %{
+        kind: "linear",
+        provider: %{},
+        project_slug: nil,
+        any_labels: [],
+        required_labels: [],
+        active_states: ["Todo"],
+        terminal_states: ["Done"]
+      },
+      Map.new(overrides)
+    )
   end
 
   test "phoenix observability api preserves state, issue, and refresh responses" do

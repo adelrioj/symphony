@@ -25,12 +25,14 @@ defmodule SymphonyElixir.Tracker do
   @callback execute_agent_tool(String.t(), term(), keyword()) :: map()
   @callback secret_environment_names(map()) :: [String.t()]
   @callback validate_config(map()) :: :ok | {:error, term()}
+  @callback preflight(map()) :: :ok | {:error, term()}
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
 
   @optional_callbacks agent_tool_specs: 0,
                       execute_agent_tool: 3,
                       validate_config: 1,
+                      preflight: 1,
                       create_comment: 2,
                       update_issue_state: 2
 
@@ -92,6 +94,24 @@ defmodule SymphonyElixir.Tracker do
     with {:ok, adapter} <- adapter_for_kind(kind) do
       if Code.ensure_loaded?(adapter) and function_exported?(adapter, :validate_config, 1) do
         adapter.validate_config(tracker_settings)
+      else
+        :ok
+      end
+    end
+  end
+
+  @doc """
+  Resolves adapter-side configuration against the live tracker once at startup.
+
+  Scope selectors that do not exist usually produce an empty result set rather
+  than an error, which leaves the process running with nothing to do. Adapters
+  that can detect that implement this callback; others inherit the `:ok` default.
+  """
+  @spec preflight(map()) :: :ok | {:error, term()}
+  def preflight(%{kind: kind} = tracker_settings) do
+    with {:ok, adapter} <- adapter_for_kind(kind) do
+      if Code.ensure_loaded?(adapter) and function_exported?(adapter, :preflight, 1) do
+        adapter.preflight(tracker_settings)
       else
         :ok
       end
