@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.Linear.{AgentTool, Client}
+  alias SymphonyElixir.Linear.{AgentTool, Client, Scope}
   alias SymphonyElixir.Tracker.Issue
 
   @create_comment_mutation """
@@ -47,14 +47,11 @@ defmodule SymphonyElixir.Linear.Adapter do
       not present_string?(tracker_settings.api_key) ->
         {:error, :missing_linear_api_token}
 
-      not present_string?(tracker_settings.project_slug) ->
-        {:error, :missing_linear_project_slug}
-
       not is_nil(tracker_settings.assignee) and not present_string?(tracker_settings.assignee) ->
         {:error, :invalid_linear_assignee}
 
       true ->
-        :ok
+        Scope.validate(tracker_settings)
     end
   end
 

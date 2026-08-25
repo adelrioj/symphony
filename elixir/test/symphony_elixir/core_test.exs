@@ -43,7 +43,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_project_slug: nil
     )
 
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+    assert {:error, :missing_linear_scope} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: "   ",
@@ -57,7 +57,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_project_slug: ""
     )
 
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+    assert {:error, :missing_linear_scope} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_project_slug: "project",
@@ -99,6 +99,86 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+  end
+
+  # The two gates used to disagree: config-time validation demanded a project slug via
+  # `present_string?`, and the request-time read demanded one via `is_nil`. A team-only config was
+  # rejected by both; a config that satisfied only one of them would boot clean and then refuse
+  # every poll. Both gates now delegate to `Linear.Scope.validate/1`, so each accept case below
+  # drives both gates in one test.
+  test "a team_keys-only linear config is accepted by the config gate and the request gate" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => ["MDZ"]}
+    )
+
+    # Config gate: Config.validate!/0 -> Tracker.validate_config/1 -> Linear.Adapter.validate_config/1.
+    assert :ok = Config.validate!()
+
+    graphql_fun = fn _query, variables ->
+      send(self(), {:poll_page, variables.filter})
+
+      {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}
+    end
+
+    # Request gate: Linear.Client.configured_tracker_for_read/0, reached through the poll read.
+    assert {:ok, []} = Client.fetch_issues_by_states_for_test(["Todo"], graphql_fun)
+
+    # Asserting the emitted filter, not merely that the read was allowed: a request gate that fell
+    # back to the last-known-good settings would send a project conjunct instead of a team one.
+    assert_receive {:poll_page, filter}
+    assert filter[:and] == [%{or: [%{team: %{key: %{eqIgnoreCase: "MDZ"}}}]}]
+    refute Map.has_key?(filter, :cycle)
+  end
+
+  test "a team_keys plus current_cycle linear config is accepted by the config gate and the request gate" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => ["MDZ"], "current_cycle" => true}
+    )
+
+    # Config gate: Config.validate!/0 -> Tracker.validate_config/1 -> Linear.Adapter.validate_config/1.
+    assert :ok = Config.validate!()
+
+    graphql_fun = fn _query, variables ->
+      send(self(), {:poll_page, variables.filter})
+
+      {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}
+    end
+
+    # Request gate: Linear.Client.configured_tracker_for_read/0, reached through the poll read.
+    assert {:ok, []} = Client.fetch_issues_by_states_for_test(["Todo"], graphql_fun)
+
+    assert_receive {:poll_page, filter}
+    assert filter[:cycle] == %{isActive: %{eq: true}}
+    assert filter[:and] == [%{or: [%{team: %{key: %{eqIgnoreCase: "MDZ"}}}]}]
+  end
+
+  test "current_cycle without team_keys is rejected" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"current_cycle" => true}
+    )
+
+    assert {:error, :missing_linear_team_keys} = Config.validate!()
+  end
+
+  test "a non-boolean current_cycle is rejected" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => ["MDZ"], "current_cycle" => "yes"}
+    )
+
+    assert {:error, :invalid_linear_current_cycle} = Config.validate!()
+  end
+
+  test "a scalar team_keys is rejected" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => "MDZ"}
+    )
+
+    assert {:error, :invalid_linear_team_keys} = Config.validate!()
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -287,7 +367,7 @@ defmodule SymphonyElixir.CoreTest do
 
     previous_trap_exit = Process.flag(:trap_exit, true)
 
-    assert {:error, :missing_linear_project_slug} =
+    assert {:error, :missing_linear_scope} =
              Orchestrator.start_link(name: orchestrator_name)
 
     Process.flag(:trap_exit, previous_trap_exit)
@@ -325,7 +405,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_project_slug: nil
     )
 
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+    assert {:error, :missing_linear_scope} = Config.validate!()
     assert Config.settings!().tracker.kind == "memory"
 
     Process.exit(original_orchestrator_pid, :kill)

@@ -586,13 +586,15 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  # Shares `Scope.validate/1` with `Linear.Adapter.validate_config/1` so the request-time gate and
+  # the config-time gate cannot disagree about which scopes are readable.
   defp configured_tracker_for_read do
     tracker = Config.settings!().tracker
 
-    cond do
-      is_nil(tracker.api_key) -> {:error, :missing_linear_api_token}
-      is_nil(tracker.project_slug) -> {:error, :missing_linear_project_slug}
-      true -> {:ok, tracker}
+    if is_nil(tracker.api_key) do
+      {:error, :missing_linear_api_token}
+    else
+      with :ok <- Scope.validate(tracker), do: {:ok, tracker}
     end
   end
 

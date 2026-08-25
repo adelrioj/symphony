@@ -268,8 +268,20 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Tracker API token missing in WORKFLOW.md")
         state
 
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Tracker project scope missing in WORKFLOW.md")
+      {:error, :missing_linear_scope} ->
+        Logger.error("Tracker scope missing in WORKFLOW.md: set tracker.provider.team_keys, tracker.provider.current_cycle, or tracker.provider.project_slug")
+        state
+
+      {:error, :missing_linear_team_keys} ->
+        Logger.error("Tracker scope invalid in WORKFLOW.md: tracker.provider.current_cycle requires tracker.provider.team_keys")
+        state
+
+      {:error, :invalid_linear_team_keys} ->
+        Logger.error("Tracker scope invalid in WORKFLOW.md: tracker.provider.team_keys must be a list of non-empty team keys")
+        state
+
+      {:error, :invalid_linear_current_cycle} ->
+        Logger.error("Tracker scope invalid in WORKFLOW.md: tracker.provider.current_cycle must be true or false")
         state
 
       {:error, :missing_tracker_kind} ->
