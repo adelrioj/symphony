@@ -122,14 +122,22 @@ defmodule SymphonyElixir.LiveE2ETest do
   }
   """
 
-  @team_active_cycle_query """
-  query SymphonyLiveE2ETeamActiveCycle($id: String!) {
+  @team_cycles_query """
+  query SymphonyLiveE2ETeamCycles($id: String!) {
     team(id: $id) {
       id
       activeCycle {
         id
         name
         endsAt
+      }
+      cycles(filter: {isFuture: {eq: true}}, first: 1) {
+        nodes {
+          id
+          name
+          startsAt
+          endsAt
+        }
       }
     }
   }
@@ -196,43 +204,63 @@ defmodule SymphonyElixir.LiveE2ETest do
     team_key = System.get_env("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key
     runtime_pid = Process.whereis(SymphonyElixir.AgentRuntimeSupervisor)
 
-    try do
-      # The Orchestrator under AgentRuntimeSupervisor re-reads the active workflow file on every tick,
-      # and write_workflow_file!/2 forces a WorkflowStore reload, so the live scope written below
-      # would make it poll the real workspace with the real token and dispatch Codex agents against
-      # every dispatchable issue in the active cycle, not just the ones seeded here. Both neighbouring
-      # live tests stop the runtime for exactly this reason.
-      if is_pid(runtime_pid) do
-        assert :ok =
-                 Supervisor.terminate_child(
-                   SymphonyElixir.Supervisor,
-                   SymphonyElixir.AgentRuntimeSupervisor
-                 )
-      end
-
-      write_workflow_file!(Workflow.workflow_file_path(),
-        tracker_api_token: "$LINEAR_API_KEY",
-        tracker_project_slug: nil,
-        tracker_provider: %{"team_keys" => [team_key], "current_cycle" => true},
-        observability_enabled: false
-      )
-
-      assert_cycle_scope_loaded!(team_key)
-
-      team = fetch_team!(team_key)
-      active_state = active_state!(team)
-      state_names = active_state_names(team)
-
-      with_cycle_scope_fixtures!(team, active_state, fn fixtures ->
-        seed_cycle_membership!(fixtures)
-        assert_cycle_scope!(fixtures, state_names)
-      end)
-    after
-      # Put the harmless default workflow back before the runtime returns: restarting it against the
-      # live scope would hand the Orchestrator's immediate first tick the real token after all.
+    # Cleanup is on_exit/1 rather than try/after because ExUnit kills the test process when the 300s
+    # moduletag expires, and an untrappable kill skips every `after` — which would strand up to five
+    # real entities in a real workspace. ExUnit.OnExitHandler holds these outside the test process, so
+    # they still run. Registered first means LIFO runs it last: every entity discard below still sees
+    # the live token, and TestSupport's setup on_exit was registered earlier still, so it deletes the
+    # workflow root after this one.
+    on_exit(fn ->
       write_workflow_file!(Workflow.workflow_file_path())
       restart_agent_runtime_if_needed()
+    end)
+
+    # The Orchestrator under AgentRuntimeSupervisor re-reads the active workflow file on every tick,
+    # and write_workflow_file!/2 forces a WorkflowStore reload, so the live scope written below would
+    # make it poll the real workspace with the real token and dispatch Codex agents against every
+    # dispatchable issue in the active cycle, not just the ones seeded here. Both neighbouring live
+    # tests stop the runtime for exactly this reason.
+    if is_pid(runtime_pid) do
+      assert :ok =
+               Supervisor.terminate_child(
+                 SymphonyElixir.Supervisor,
+                 SymphonyElixir.AgentRuntimeSupervisor
+               )
     end
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "$LINEAR_API_KEY",
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => [team_key], "current_cycle" => true},
+      observability_enabled: false
+    )
+
+    assert_cycle_scope_loaded!(team_key)
+
+    team = fetch_team!(team_key)
+    active_state = active_state!(team)
+    state_names = active_state_names(team)
+    team_cycles = fetch_team_cycles!(team["id"])
+
+    # Bound one at a time rather than inline in the map below: Elixir does not guarantee the evaluation
+    # order of a map literal's values, and each of these registers its own discard as it is created, so
+    # this order is what fixes the LIFO cleanup order.
+    active_cycle = ensure_active_cycle!(team_cycles)
+    future_cycle = ensure_future_cycle!(team_cycles, active_cycle)
+    in_cycle_issue = create_scope_issue!(team, active_state, "in cycle")
+    out_of_cycle_issue = create_scope_issue!(team, active_state, "out of cycle")
+    future_cycle_issue = create_scope_issue!(team, active_state, "future cycle")
+
+    fixtures = %{
+      active_cycle: active_cycle,
+      future_cycle: future_cycle,
+      in_cycle_issue: in_cycle_issue,
+      out_of_cycle_issue: out_of_cycle_issue,
+      future_cycle_issue: future_cycle_issue
+    }
+
+    seed_cycle_membership!(fixtures)
+    assert_cycle_scope!(fixtures, state_names)
   end
 
   # A provider map that stopped round-tripping through YAML would make Scope.filter/2 silently drop
@@ -248,49 +276,6 @@ defmodule SymphonyElixir.LiveE2ETest do
 
     assert Scope.team_keys(tracker) == [team_key],
            "the workflow did not load tracker.provider.team_keys: #{inspect(Scope.team_keys(tracker))}"
-  end
-
-  # Seeds the fixtures the scope assertions need and discards each one in the `after` of the `try`
-  # that created it. The brackets nest rather than sit side by side because discard order matters:
-  # every issue is archived before either cycle.
-  defp with_cycle_scope_fixtures!(team, state, body) when is_function(body, 1) do
-    {active_cycle, discard_active_cycle} = ensure_active_cycle!(team)
-
-    try do
-      future_cycle = create_future_cycle!(team["id"], active_cycle)
-
-      try do
-        in_cycle_issue = create_scope_issue!(team, state, "in cycle")
-
-        try do
-          out_of_cycle_issue = create_scope_issue!(team, state, "out of cycle")
-
-          try do
-            future_cycle_issue = create_scope_issue!(team, state, "future cycle")
-
-            try do
-              body.(%{
-                active_cycle: active_cycle,
-                future_cycle: future_cycle,
-                in_cycle_issue: in_cycle_issue,
-                out_of_cycle_issue: out_of_cycle_issue,
-                future_cycle_issue: future_cycle_issue
-              })
-            after
-              archive_issue(future_cycle_issue.id)
-            end
-          after
-            archive_issue(out_of_cycle_issue.id)
-          end
-        after
-          archive_issue(in_cycle_issue.id)
-        end
-      after
-        archive_cycle(future_cycle["id"])
-      end
-    after
-      discard_active_cycle.()
-    end
   end
 
   # Seeding lives outside assert_cycle_scope!/2 on purpose: set_issue_cycle!/2 is strict, and a failed
@@ -367,8 +352,14 @@ defmodule SymphonyElixir.LiveE2ETest do
     end
   end
 
+  # Registers its own archive the moment the issue exists, so a scope issue can never be created
+  # without a discard attached to it.
   defp create_scope_issue!(team, state, label) do
-    create_issue!(team["id"], nil, state["id"], "Symphony live cycle scope #{label} #{System.unique_integer([:positive])}")
+    issue = create_issue!(team["id"], nil, state["id"], "Symphony live cycle scope #{label} #{System.unique_integer([:positive])}")
+
+    on_exit(fn -> archive_issue(issue.id) end)
+
+    issue
   end
 
   defp fetch_team!(team_key) do
@@ -467,37 +458,56 @@ defmodule SymphonyElixir.LiveE2ETest do
 
   defp maybe_put_project_id(variables, nil), do: variables
 
-  # Reuses the team's own running cycle when it has one. Linear rejects cycles that overlap an
-  # existing one, and a scenario that creates a cycle it did not need would leak it into a real
-  # workspace on every run. The returned function is the cleanup for the cycle this call is
-  # responsible for, so a borrowed cycle is never archived.
-  defp ensure_active_cycle!(team) do
-    @team_active_cycle_query
-    |> graphql_data!(%{id: team["id"]})
-    |> get_in(["team", "activeCycle"])
+  defp fetch_team_cycles!(team_id) when is_binary(team_id) do
+    @team_cycles_query
+    |> graphql_data!(%{id: team_id})
+    |> get_in(["team"])
     |> case do
-      %{"id" => cycle_id} = cycle when is_binary(cycle_id) ->
-        {cycle, fn -> :ok end}
-
-      _no_active_cycle ->
-        cycle = create_active_cycle!(team["id"])
-        {cycle, fn -> archive_cycle(cycle["id"]) end}
+      %{"cycles" => %{"nodes" => nodes}} = team_cycles when is_list(nodes) -> team_cycles
+      payload -> flunk("expected a team cycles payload for #{inspect(team_id)}, got: #{inspect(payload)}")
     end
   end
 
-  defp create_active_cycle!(team_id) when is_binary(team_id) do
-    now = DateTime.utc_now() |> DateTime.truncate(:second)
+  # Borrows the team's own running cycle when it has one. Linear rejects cycles that overlap an
+  # existing one, and a scenario that minted a cycle it did not need would leak one into a real
+  # workspace on every run. Only a cycle this call creates gets an archive registered, so a borrowed
+  # cycle — a real team's running sprint — is never archived.
+  defp ensure_active_cycle!(team_cycles) do
+    case team_cycles["activeCycle"] do
+      %{"id" => cycle_id} = cycle when is_binary(cycle_id) ->
+        cycle
 
-    create_cycle!(team_id, DateTime.add(now, -1, :day), DateTime.add(now, 13, :day), "active")
+      _no_active_cycle ->
+        now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+        create_and_discard_cycle!(team_cycles["id"], DateTime.add(now, -1, :day), DateTime.add(now, 13, :day), "active")
+    end
   end
 
-  # Starts a full day after the active cycle ends so the two windows cannot overlap: Linear rejects
-  # overlapping cycles for a team. A cycle that has not started yet is the only fixture that can tell
-  # `isActive` apart from "belongs to some cycle".
-  defp create_future_cycle!(team_id, active_cycle) when is_binary(team_id) do
-    starts_at = active_cycle |> cycle_ends_at!() |> DateTime.add(1, :day)
+  # Same borrow-first rule, and it matters more here than for the active cycle. A team with a cycle
+  # cadence — precisely the audience for a current_cycle selector — already has Linear's auto-scheduled
+  # upcoming cycle sitting in the window just after the active one, so minting one there would be
+  # rejected as an overlap and flunk at the very first fixture, before any assertion runs.
+  defp ensure_future_cycle!(team_cycles, active_cycle) do
+    case get_in(team_cycles, ["cycles", "nodes"]) do
+      [%{"id" => cycle_id} = cycle | _rest] when is_binary(cycle_id) ->
+        cycle
 
-    create_cycle!(team_id, starts_at, DateTime.add(starts_at, 14, :day), "future")
+      _no_future_cycle ->
+        # A full day after the active cycle ends, so the two windows cannot overlap. Reached only when
+        # the team has no future cycle at all, so there is nothing else to collide with either.
+        starts_at = active_cycle |> cycle_ends_at!() |> DateTime.add(1, :day)
+
+        create_and_discard_cycle!(team_cycles["id"], starts_at, DateTime.add(starts_at, 14, :day), "future")
+    end
+  end
+
+  defp create_and_discard_cycle!(team_id, %DateTime{} = starts_at, %DateTime{} = ends_at, label) do
+    cycle = create_cycle!(team_id, starts_at, ends_at, label)
+
+    on_exit(fn -> archive_cycle(cycle["id"]) end)
+
+    cycle
   end
 
   defp create_cycle!(team_id, %DateTime{} = starts_at, %DateTime{} = ends_at, label) do
