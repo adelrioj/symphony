@@ -98,6 +98,8 @@ defmodule SymphonyElixir.TestSupport do
           tracker_project_slug: "project",
           tracker_assignee: nil,
           tracker_required_labels: [],
+          tracker_any_labels: [],
+          tracker_provider: %{},
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           poll_interval_ms: 30_000,
@@ -144,6 +146,8 @@ defmodule SymphonyElixir.TestSupport do
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_required_labels = Keyword.get(config, :tracker_required_labels)
+    tracker_any_labels = Keyword.get(config, :tracker_any_labels)
+    tracker_provider = Keyword.get(config, :tracker_provider)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
@@ -191,8 +195,10 @@ defmodule SymphonyElixir.TestSupport do
         "  project_slug: #{yaml_value(tracker_project_slug)}",
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  required_labels: #{yaml_value(tracker_required_labels)}",
+        tracker_any_labels_yaml(tracker_any_labels),
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
+        tracker_provider_yaml(tracker_provider),
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
@@ -252,6 +258,16 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value), do: yaml_value(to_string(value))
+
+  defp tracker_any_labels_yaml([]), do: nil
+  defp tracker_any_labels_yaml(labels), do: "  any_labels: #{yaml_value(labels)}"
+
+  defp tracker_provider_yaml(provider) when map_size(provider) == 0, do: nil
+
+  defp tracker_provider_yaml(provider) do
+    "  provider:\n" <>
+      Enum.map_join(provider, "\n", fn {key, value} -> "    #{yaml_value(to_string(key))}: #{yaml_value(value)}" end)
+  end
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 

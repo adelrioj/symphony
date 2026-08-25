@@ -428,16 +428,79 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute issue.dispatchable
   end
 
-  test "tracker issue routing requires every configured label" do
+  test "tracker issue routing requires every required label" do
     issue = %Issue{labels: [" Symphony ", "JavaScript"], dispatchable: true}
 
-    assert Issue.routable?(issue, [])
-    assert Issue.routable?(issue, ["symphony"])
-    assert Issue.routable?(issue, ["SYMPHONY", "javascript"])
-    refute Issue.routable?(issue, ["symph"])
-    refute Issue.routable?(issue, [" "])
-    refute Issue.routable?(issue, ["symphony", "security"])
-    refute Issue.routable?(%{issue | dispatchable: false}, ["symphony"])
+    assert Issue.routable?(issue, %{})
+    assert Issue.routable?(issue, %{required_labels: []})
+    assert Issue.routable?(issue, %{required_labels: ["symphony"]})
+    assert Issue.routable?(issue, %{required_labels: ["SYMPHONY", "javascript"]})
+    refute Issue.routable?(issue, %{required_labels: ["symph"]})
+    refute Issue.routable?(issue, %{required_labels: [" "]})
+    refute Issue.routable?(issue, %{required_labels: ["symphony", "security"]})
+    refute Issue.routable?(%{issue | dispatchable: false}, %{required_labels: ["symphony"]})
+  end
+
+  test "tracker issue routing requires at least one any label when any are configured" do
+    issue = %Issue{labels: ["Feat-Symphony"], dispatchable: true}
+
+    assert Issue.routable?(issue, %{any_labels: []})
+    assert Issue.routable?(issue, %{any_labels: ["feat-symphony", "bug-symphony"]})
+    refute Issue.routable?(issue, %{any_labels: ["bug-symphony"]})
+    refute Issue.routable?(issue, %{any_labels: ["   "]})
+    refute Issue.routable?(%Issue{labels: [], dispatchable: true}, %{any_labels: ["feat-symphony"]})
+  end
+
+  test "tracker issue routing applies required and any label rules together" do
+    issue = %Issue{labels: ["migrated", "feat-symphony"], dispatchable: true}
+
+    assert Issue.routable?(issue, %{required_labels: ["migrated"], any_labels: ["feat-symphony", "bug-symphony"]})
+    refute Issue.routable?(issue, %{required_labels: ["migrated"], any_labels: ["bug-symphony"]})
+    refute Issue.routable?(issue, %{required_labels: ["ci"], any_labels: ["feat-symphony"]})
+  end
+
+  test "tracker issue routing treats missing label policy entries as no constraint" do
+    issue = %Issue{labels: [], dispatchable: true}
+
+    assert Issue.routable?(issue, %{required_labels: nil, any_labels: nil})
+  end
+
+  test "tracker issue routing raises for a label policy that is not a map" do
+    issue = %Issue{labels: ["migrated"], dispatchable: true}
+
+    assert_raise FunctionClauseError, fn -> Issue.routable?(issue, nil) end
+    assert_raise FunctionClauseError, fn -> Issue.routable?(issue, ["migrated"]) end
+  end
+
+  test "tracker any_labels defaults to an empty list" do
+    assert Config.settings!().tracker.any_labels == []
+  end
+
+  test "tracker any_labels is downcased and deduplicated" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_any_labels: ["Feat-Symphony", "feat-symphony", "BUG-Symphony"]
+    )
+
+    assert Config.settings!().tracker.any_labels == ["feat-symphony", "bug-symphony"]
+  end
+
+  test "tracker any_labels entries are trimmed" do
+    assert {:ok, settings} =
+             Schema.parse(%{tracker: %{kind: "linear", any_labels: ["  Feat-Symphony ", "feat-symphony"]}})
+
+    assert settings.tracker.any_labels == ["feat-symphony"]
+  end
+
+  test "tracker provider settings keep their yaml types through the workflow file" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_provider: %{team_keys: ["MDZ"], current_cycle: true, project_slug: "acme-web"}
+    )
+
+    provider = Config.settings!().tracker.provider
+
+    assert provider["team_keys"] == ["MDZ"]
+    assert provider["current_cycle"] == true
+    assert provider["project_slug"] == "acme-web"
   end
 
   test "linear client normalizes blockers from inverse relations" do
