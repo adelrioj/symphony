@@ -1131,15 +1131,16 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = wait_for_state(pid, &Map.has_key?(&1.retry_attempts, issue_id))
+    observed_at_ms = System.monotonic_time(:millisecond)
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_scheduled_between(due_at_ms, sent_at_ms, observed_at_ms, 1_000)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -1172,14 +1173,15 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = wait_for_state(pid, &Map.has_key?(&1.retry_attempts, issue_id))
+    observed_at_ms = System.monotonic_time(:millisecond)
 
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_scheduled_between(due_at_ms, sent_at_ms, observed_at_ms, 40_000)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -1211,14 +1213,15 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = wait_for_state(pid, &Map.has_key?(&1.retry_attempts, issue_id))
+    observed_at_ms = System.monotonic_time(:millisecond)
 
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_scheduled_between(due_at_ms, sent_at_ms, observed_at_ms, 10_000)
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -1338,11 +1341,38 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+  # The orchestrator computes `due_at_ms` as `t + backoff` for a `t` that is at or after the
+  # trigger and at or before the state read, so bracketing the trigger makes BOTH bounds exact:
+  # the schedule can be neither sooner than `sent_at_ms + backoff` nor later than
+  # `observed_at_ms + backoff`. Reading a remainder after the fact instead needed slack for
+  # however long the scheduler took, which is what made these assertions race under load.
+  defp assert_scheduled_between(due_at_ms, sent_at_ms, observed_at_ms, backoff_ms) do
+    assert due_at_ms - sent_at_ms >= backoff_ms
+    assert due_at_ms - observed_at_ms <= backoff_ms
+  end
 
-    assert remaining_ms >= min_remaining_ms
-    assert remaining_ms <= max_remaining_ms
+  # A fixed sleep before `:sys.get_state` is the other half of the same fragility. The timeout is
+  # generous on purpose: both bounds above are exact however long the transition takes, so
+  # waiting longer costs nothing and never weakens an assertion.
+  defp wait_for_state(pid, predicate, timeout_ms \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_state(pid, predicate, deadline)
+  end
+
+  defp do_wait_for_state(pid, predicate, deadline) do
+    state = :sys.get_state(pid)
+
+    cond do
+      predicate.(state) ->
+        state
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("timed out waiting for orchestrator state")
+
+      true ->
+        Process.sleep(10)
+        do_wait_for_state(pid, predicate, deadline)
+    end
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
