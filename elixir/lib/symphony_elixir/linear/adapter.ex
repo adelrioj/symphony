@@ -346,6 +346,8 @@ defmodule SymphonyElixir.Linear.Adapter do
         &String.downcase(&1["name"] || "")
       )
 
+    full_page? = length(labels) >= @labels_page_size
+
     Enum.flat_map(preflight_labels(tracker_settings), fn {label, kind} ->
       teams_with_label =
         Enum.filter(team_keys, fn key ->
@@ -354,16 +356,24 @@ defmodule SymphonyElixir.Linear.Adapter do
           |> Enum.member?(String.downcase(label))
         end)
 
-      label_reason(label, kind, teams_with_label, team_keys)
+      label_reason(label, kind, teams_with_label, team_keys, full_page?)
     end)
   end
 
   # Labels are team-scoped in Linear, so the same name exists once per team. Missing from one
   # listed team narrows the scope and is a warning; missing from all of them means nothing can
-  # ever match and is an error.
-  defp label_reason(label, _kind, [], _team_keys), do: ["label #{inspect(label)} does not exist in any listed Linear team"]
+  # ever match and is an error. A full label page is the exception: like the nested `states`
+  # connection it is a single unpaginated read, so a listed team's copy of the label may sit
+  # beyond the cap and absence cannot be proven.
+  defp label_reason(label, _kind, [], _team_keys, false), do: ["label #{inspect(label)} does not exist in any listed Linear team"]
 
-  defp label_reason(label, kind, teams_with_label, team_keys) do
+  defp label_reason(label, _kind, [], _team_keys, true) do
+    Logger.warning("Linear label #{inspect(label)} was not found, and the label query returned a full page of #{@labels_page_size} labels, so its absence cannot be proven")
+
+    []
+  end
+
+  defp label_reason(label, kind, teams_with_label, team_keys, _full_page?) do
     case team_keys -- teams_with_label do
       [] -> []
       missing -> warn_partial_label(label, kind, missing)
