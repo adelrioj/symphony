@@ -82,10 +82,12 @@ mise exec -- ./bin/symphony ./WORKFLOW.md --i-understand-that-this-will-be-runni
 
 ## Run in Docker (OrbStack-compatible)
 
-One Symphony instance is scoped to a **single** project: one `tracker.provider.project_slug`
-and one repo. To orchestrate several projects, run one container per project. Everything below
-works as-is with [OrbStack](https://orbstack.dev/) (native arm64, no platform pins) or Docker
-Desktop.
+One Symphony instance drives one repo. Its Linear read scope is selected by
+`tracker.provider.team_keys`, `tracker.provider.current_cycle`, `tracker.provider.project_slug`, or
+a combination, optionally narrowed by `tracker.required_labels` / `tracker.any_labels`; at least one
+of the three container selectors is required. You may still run one container per project if you
+want the isolation. Everything below works as-is with [OrbStack](https://orbstack.dev/) (native
+arm64, no platform pins) or Docker Desktop.
 
 ### Deploying a project
 
@@ -114,7 +116,8 @@ above, which leaves you in `symphony/elixir`.
    ```bash
    cp .env.example .env      # then edit LINEAR_API_KEY
    ```
-3. **Edit `workflows/example.md`** — at minimum `tracker.provider.project_slug` and the
+3. **Edit `workflows/example.md`** — at minimum a scope selector (`tracker.provider.project_slug`,
+   `tracker.provider.team_keys`, or `tracker.provider.current_cycle` with `team_keys`) and the
    `hooks.after_create` clone URL. Keep `workspace.root: /workspaces` (it must match the volume
    mount in compose) and `server.host: 0.0.0.0` (see the port note below).
 4. **Launch:**
@@ -228,10 +231,16 @@ Notes:
 - If a value is missing, defaults are used.
 - `tracker.kind` selects an adapter. Adapter-owned endpoint, scope, and auth settings belong under
   `tracker.provider`; the current Linear adapter still accepts the older flat `endpoint`,
-  `api_key`, `project_slug`, and `assignee` aliases for compatibility.
+  `api_key`, `project_slug`, and `assignee` aliases for compatibility. `team_keys` and
+  `current_cycle` have no flat aliases and are read only from `tracker.provider`.
 - `tracker.required_labels` is optional. When set, an issue must have every
-  configured label to dispatch or continue running. Label matching ignores
-  case and surrounding whitespace. A blank configured label matches no issue.
+  configured label to dispatch or continue running.
+- `tracker.any_labels` is optional. When set, an issue must have at least one
+  configured label to dispatch or continue running. It combines with
+  `required_labels` as a conjunction: an issue must satisfy both.
+- Both label lists are trimmed, lowercased, and deduplicated when the workflow is loaded, and
+  matching ignores case and surrounding whitespace. A blank configured label matches no issue, and
+  an empty list imposes no constraint.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
@@ -347,13 +356,27 @@ The helper mode can also be run directly when debugging MCP wiring:
 
 - Config: use `tracker.kind: linear` with `tracker.provider.endpoint` (default
   `https://api.linear.app/graphql`), `api_key` (defaults to `LINEAR_API_KEY` and accepts
-  `$VAR`), required `project_slug`, and optional `assignee` (a Linear user ID or `me`,
-  defaulting to `LINEAR_ASSIGNEE`).
+  `$VAR`), and optional `assignee` (a Linear user ID or `me`, defaulting to `LINEAR_ASSIGNEE`).
+  The read scope comes from `tracker.provider.team_keys` (list of Linear team keys),
+  `tracker.provider.current_cycle` (boolean; requires `team_keys`), and
+  `tracker.provider.project_slug` (string), plus the core `tracker.required_labels` /
+  `tracker.any_labels` lists. At least one of those three container selectors is required —
+  labels narrow a container, they do not define one. `team_keys` must be a list of non-empty
+  strings and `current_cycle` must be a boolean; `current_cycle: true` without `team_keys` is
+  rejected, because an unqualified active-cycle filter would match the active cycle of every team
+  the token can see.
   The legacy flat `tracker.endpoint`, `api_key`, `project_slug`, and `assignee` aliases remain
-  supported. `required_labels`, `active_states`, and `terminal_states` stay under `tracker`.
-- Scope and paging: candidate reads filter the configured project slug and requested state names,
-  following Linear pages of 50. ID refreshes are also project-scoped and batch up to 50 IDs. Empty
-  state/ID lists return `{:ok, []}` without a Linear request.
+  supported; `team_keys` and `current_cycle` have none. `required_labels`, `any_labels`,
+  `active_states`, and `terminal_states` stay under `tracker`.
+- Scope and paging: candidate reads filter the configured scope and the requested state names,
+  following Linear pages of 50 (nested relation pages of 50, attachment pages of 25). ID refreshes
+  apply no scope at all — they filter on the requested IDs only — and batch up to 50 IDs per
+  request. Empty state/ID lists return `{:ok, []}` without a Linear request. Team keys, label
+  names, and state names are matched case-insensitively (`eqIgnoreCase`), several team keys are an
+  `or` list, `any_labels` is one `or` list, and each `required_labels` entry is its own mandatory
+  conjunct. `project_slug` is trimmed before it is queried and before it is displayed, so a
+  configured slug with stray whitespace resolves to the trimmed value instead of silently matching
+  nothing.
 - Identity and normalization: `issue.id` is the Linear issue ID and `issue.native_ref` is currently
   `nil`. Records missing a nonblank ID, identifier, title, or state are dropped from candidate
   pages and fail ID refreshes. State keeps Linear's spelling; integer priorities are preserved and
@@ -362,12 +385,12 @@ The helper mode can also be run directly when debugging MCP wiring:
   inverse `blocks` relations.
 - Dispatchability: the adapter marks an issue dispatchable only when optional assignee routing
   matches and a `Todo` issue has no non-terminal blocker. The generic scheduler then applies
-  active/terminal states, required labels, claims, retries, and concurrency.
+  active/terminal states, the label policy, claims, retries, and concurrency.
 - Tool: the Linear adapter advertises `linear_graphql`, accepting either a raw query string or an
   object with nonblank `query` and optional object `variables`. Symphony executes it host-side
   with the session-bound endpoint/token and strips declared token environment variables from the
-  Codex child. `project_slug` scopes scheduler reads, not raw tool calls; the tool can access
-  whatever the configured Linear token can access.
+  Codex child. The configured scope governs scheduler reads, not raw tool calls; the tool can
+  access whatever the configured Linear token can access.
 - Attachments: the poll query also fetches issue `attachments` (title + url) onto the normalized
   `Issue`, and the default prompt lists them. The adapter advertises `linear_fetch_attachment`,
   which downloads an `https://uploads.linear.app/...` attachment with the configured token and
@@ -378,7 +401,9 @@ The helper mode can also be run directly when debugging MCP wiring:
   `{:error, {:linear_api_request, reason}}`).
 - Responsibility and errors: `linear_graphql` adds no idempotency key, retry, scope guard, or
   rate-limit policy, so workflows own idempotent mutations and handling provider errors. Read/config
-  failures use `{:error, :missing_linear_api_token}`, `{:error, :missing_linear_project_slug}`,
+  failures use `{:error, :missing_linear_api_token}`, `{:error, :missing_linear_scope}`,
+  `{:error, :missing_linear_team_keys}`, `{:error, :invalid_linear_team_keys}`,
+  `{:error, :invalid_linear_current_cycle}`, `{:error, {:linear_preflight_failed, reasons}}`,
   `{:error, :invalid_linear_endpoint}`, `{:error, :invalid_linear_assignee}`,
   `{:error, :missing_linear_viewer_identity}`, `{:error, {:linear_api_status, status}}`,
   `{:error, {:linear_api_request, reason}}`, `{:error, {:linear_graphql_errors, errors}}`,
@@ -387,11 +412,46 @@ The helper mode can also be run directly when debugging MCP wiring:
   arguments, missing auth, and transport failures return `"success" => false` with
   `{"error": {"message": ...}}`, while top-level GraphQL errors preserve the response body with
   `"success" => false`.
-  For portable reporting, map missing/invalid token, project, endpoint, assignee, or viewer errors
-  to `tracker_config` or `tracker_auth`, request failures to `tracker_transport`, non-200 responses to
-  `tracker_response` (`429` is `tracker_rate_limited`), GraphQL/unknown payload failures to
-  `tracker_payload`, and missing cursors to `tracker_pagination`; logs and tool responses carry the
-  human-readable provider detail.
+  For portable reporting, map missing/invalid token, scope, team keys, current cycle, endpoint,
+  assignee, or viewer errors to `tracker_config` or `tracker_auth` — `:missing_linear_scope`,
+  `:missing_linear_team_keys`, `:invalid_linear_team_keys`, `:invalid_linear_current_cycle`, and
+  `{:linear_preflight_failed, reasons}` are all `tracker_config` — request failures to
+  `tracker_transport`, non-200 responses to `tracker_response` (`429` is `tracker_rate_limited`),
+  GraphQL/unknown payload failures to `tracker_payload`, and missing cursors to
+  `tracker_pagination`; logs and tool responses carry the human-readable provider detail.
+- Startup preflight: when `team_keys` is configured, the adapter resolves the scope against Linear
+  once before the scheduling loop starts, in at most two requests regardless of how many values are
+  configured — one `teams` query carrying each team's `activeCycle` and workflow states, and, only
+  when a label list is non-empty, one `issueLabels` query filtered by the configured label names.
+  `activeCycle` is a single object rather than a connection, so selecting it is free against
+  Linear's complexity budget; only its `id` is read, purely as a presence marker.
+  Every unresolved value is reported together in one `{:linear_preflight_failed, reasons}` error
+  rather than one per boot. The one exception: when *no* configured team key resolves at all, the
+  error lists only the team keys, because every state and label would then be reported absent too
+  and would bury the single actionable reason.
+  An unresolvable team key fails the boot, because that is a typo rather
+  than a state. A configured state name or label absent from *all* listed teams also fails the boot,
+  because it can never match; absent from only *some* listed teams is a warning naming those teams,
+  because those conjuncts are ANDed with the team conjunct and the remaining teams still match. A
+  `required_labels` warning says explicitly that the named teams will contribute no issues at all,
+  since a required label is a mandatory conjunct; an `any_labels` warning says only that those
+  teams match nothing for it. A team whose workflow-states page comes back full — the page size is
+  pinned by a named module attribute, currently 50, because Linear's query complexity is
+  multiplicative across nested connections — makes absence unprovable, so that warns instead of
+  failing. A listed team with no active cycle warns and boots: an absent active cycle is a normal
+  Linear state during sprint cooldown, and refusing to start would turn a routine condition into an
+  outage. With `project_slug` as the only selector there is nothing to resolve and preflight makes
+  no request — an unknown slug still fails silently, because Linear returns zero issues for it.
+- No active cycle at runtime: the poll simply returns zero issues and the instance idles. No
+  per-tick probe is spent and no repeated warning is emitted, because cycles legitimately end.
+  Operator visibility is the boot warning plus the status board's `Scope:` line.
+- Scope on the status board: the adapter implements the optional `Tracker.scope_summary/1`
+  callback, so the board renders an unconditional `Scope:` line — for example
+  `teams ENG, OPS · current cycle · required labels agent`. Label names render lowercase because
+  both label lists are normalized when the workflow is loaded. A tracker that reports no scope
+  renders the sentinel `n/a`. There is no project link: a real Linear project URL is
+  workspace-prefixed and no workspace slug exists anywhere in the config, so the old
+  `https://linear.app/project/<slug>/issues` line was always broken and has been removed.
 
 ### GitHub Issues adapter
 

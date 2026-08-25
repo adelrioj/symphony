@@ -6,7 +6,12 @@ tracker:
   kind: linear
   provider:
     project_slug: "REPLACE-with-your-linear-project-slug"   # <-- this project's Linear project
+    # Or scope by team instead, so epics can come and go without a config change:
+    # team_keys: ["REPLACE-with-your-team-key"]
+    # current_cycle: true       # requires team_keys; the team's sprint becomes the queue
+    # At least one of project_slug / team_keys / current_cycle is required.
   required_labels: []
+  # any_labels: []              # when non-empty, an issue needs at least one of these
   active_states:
     - Todo
     - In Progress

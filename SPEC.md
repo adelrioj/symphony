@@ -165,6 +165,9 @@ Fields:
 
 - `id` (string)
   - REQUIRED stable dispatch identity within the configured tracker scope.
+  - An ID refresh applies no scope filter (Section 11.1), so for an adapter whose IDs are not
+    container-bound this identity MUST remain resolvable after the issue leaves the configured
+    scope.
   - Opaque to the orchestrator. It MAY be a project-item or board-entry ID instead of the
     provider's underlying ticket ID.
 - `native_ref` (object or null)
@@ -390,9 +393,10 @@ Fields:
   - Selects one implementation-supported tracker adapter.
 - `provider` (object)
   - Default: `{}`.
-  - Adapter-owned configuration such as endpoint, scope/project selector, and credentials.
+  - Adapter-owned configuration such as endpoint, scope selectors, and credentials.
   - Core Symphony MUST preserve unknown keys and MUST NOT prescribe one cross-provider credential
-    or scope schema.
+    or scope schema. Which keys select scope, and how many of them are REQUIRED, is named by the
+    adapter profile and never by core.
   - Each adapter MUST document its required keys, defaults, secret keys, `$VAR_NAME` support, and
     validation errors.
   - If a documented secret `$VAR_NAME` resolves to an empty string, treat that secret as missing.
@@ -401,6 +405,15 @@ Fields:
   - An issue MUST contain every configured label to dispatch or continue.
   - Matching ignores case and surrounding whitespace.
   - A blank configured label matches no issue.
+  - An empty list imposes no constraint.
+- `any_labels` (list of strings)
+  - Default: `[]`.
+  - An issue MUST carry at least one configured label to dispatch or continue.
+  - Matching ignores case and surrounding whitespace.
+  - A blank configured label matches no issue.
+  - An empty list imposes no constraint.
+  - `required_labels` and `any_labels` are independent constraints that combine as a conjunction:
+    when both are configured an issue MUST satisfy both.
 - `active_states` (list of strings)
   - REQUIRED unless the selected adapter profile documents a default.
   - Values are provider-native state names compared case-insensitively by the scheduler.
@@ -655,6 +668,11 @@ Validation checks:
   resolution.
 - The command for any backend that can be selected is present and non-empty.
 
+Startup validation is offline: it checks shape, not existence. An implementation MAY additionally
+resolve adapter-owned scope selectors against the live provider before the scheduling loop starts
+(see Section 11.6), because a selector that is merely wrong usually reads as an empty result set
+rather than an error.
+
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
 
 This section is intentionally redundant so a coding agent can implement the config layer quickly.
@@ -664,6 +682,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.kind`: string, REQUIRED, selects one supported adapter
 - `tracker.provider`: object, default `{}`, adapter-owned endpoint/scope/auth settings
 - `tracker.required_labels`: list of strings, default `[]`
+- `tracker.any_labels`: list of strings, default `[]`
 - `tracker.active_states`: list of provider-native state names, adapter-defined default
 - `tracker.terminal_states`: list of provider-native state names, adapter-defined default
 - `polling.interval_ms`: integer, default `30000`
@@ -820,14 +839,16 @@ An issue is dispatch-eligible only if all are true:
 - Its state is in `active_states` and not in `terminal_states`.
 - Its adapter-provided `dispatchable` value is `true`.
 - It contains every label in `tracker.required_labels`.
+- It carries at least one label in `tracker.any_labels`, unless that list is empty.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
 
 For refresh and continuation checks, `issue_routable(issue)` means only that adapter-provided
-`dispatchable` is true and all `tracker.required_labels` match. State, claims, and concurrency are
-checked separately by the surrounding algorithm.
+`dispatchable` is true and that the configured label policy — `tracker.required_labels` and
+`tracker.any_labels` together — is satisfied. State, claims, and concurrency are checked separately
+by the surrounding algorithm.
 
 Sorting order (stable intent):
 
@@ -1262,16 +1283,24 @@ An implementation MUST support these adapter operations:
      cleanup.
    - When used for candidate polling, include active scoped issues even when
      `dispatchable=false`; the scheduler owns that final filter.
-   - The orchestrator applies `required_labels`, `dispatchable`, claims, retries, and concurrency
-     after normalization.
+   - The orchestrator applies the configured label policy (`required_labels`, `any_labels`),
+     `dispatchable`, claims, retries, and concurrency after normalization.
    - An empty `state_names` list MUST return an empty result without a provider request.
 
 2. `fetch_issues_by_ids(issue_ids)`
    - Return current normalized issue snapshots for the supplied opaque dispatch IDs.
    - Used for active-run reconciliation and stale-dispatch revalidation.
    - An empty `issue_ids` list MUST return an empty result without a provider request.
-   - IDs no longer visible in the configured scope are omitted; the orchestrator treats omission as
-     "no longer visible" rather than inventing a synthetic state.
+   - `fetch_issues_by_ids` MUST NOT apply configured scope selection as a filter. An adapter whose
+     IDs are only meaningful inside a container MAY remain container-bound; this is REQUIRED for
+     GitHub and GitLab, where an ID is `#N` within a repository.
+   - Omission MUST mean the ID is not retrievable — deleted, inaccessible, or foreign to the
+     credential's workspace — never "outside the configured scope". An issue that merely left the
+     configured scope MUST NOT be reported as missing. When an ID is genuinely omitted, the
+     orchestrator still treats omission as "no longer visible" and invents no synthetic state.
+   - Candidate admission is governed by `fetch_issues_by_states` and configured scope; lifecycle
+     continuation is governed by issue state. A running issue that is moved out of scope mid-run
+     therefore keeps running until its state says otherwise.
 
 Both operations return either `ok(list<Issue>)` or an adapter error. For portability, an adapter
 error SHOULD expose a stable category and human-readable message. An implementation MAY use a
@@ -1301,7 +1330,8 @@ Each adapter owns:
 
 - construction from the current effective tracker configuration, including active/terminal states;
 - endpoint, authentication, transport, timeouts, pagination, and rate-limit handling;
-- provider-specific scope selection (project, board, team, repository, query, or equivalent);
+- provider-specific scope selection (project, board, team, cycle/sprint, repository, query, or
+  equivalent), applied to candidate reads and never to an ID refresh;
 - mapping provider payloads into the normalized Issue fields in Section 4.1.1;
 - choosing a stable dispatch identity and preserving any distinct underlying IDs in `native_ref`;
 - deriving `dispatchable` from provider-specific routing rules;
@@ -1316,13 +1346,17 @@ containing:
 
 - exact supported `tracker.kind` value;
 - exact `tracker.provider` keys, defaults, secret keys/environment names, and validation errors;
-- scope selection, pagination behavior, and provider request limits;
+- scope selection, which selectors are REQUIRED and in what combination, pagination behavior, and
+  provider request limits;
 - `id` and `native_ref` mapping;
 - state, label, priority, timestamp, `dispatchable`, malformed-record, and optional-field
   normalization;
 - provider-native tool names/schemas, mutation capability, scope, and result/error behavior if any;
 - mapping from public language-native error forms to portable transport/auth/rate-limit error
-  categories and human-readable messages.
+  categories and human-readable messages;
+- OPTIONAL startup scope resolution: which selectors are resolved, the request cost, and which
+  unresolved values are boot failures versus warnings, if implemented;
+- the OPTIONAL operator-facing scope description, if implemented.
 
 ### 11.3 Normalization Rules
 
@@ -1393,6 +1427,44 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
   blocked comment followed by a state update to `agent.blocked_state`, so denied permissions or
   required operator input are parked consistently. Implementations that support this extension
   SHOULD route those writes through the selected tracker adapter.
+
+### 11.6 OPTIONAL Startup Scope Resolution and Scope Reporting
+
+A configured scope selector that does not exist is usually indistinguishable from an empty queue:
+the provider answers a well-formed query with zero issues, so the service starts, logs nothing
+unusual, and idles forever. Two OPTIONAL adapter capabilities exist to close that gap. Neither is
+REQUIRED for conformance, and an adapter that implements neither MUST keep working.
+
+Startup scope resolution:
+
+- An adapter MAY resolve its configured scope selectors, state names, and label names against the
+  live provider once, before the scheduling loop starts. Failure MUST fail startup with an
+  operator-visible error, per Section 6.3.
+- Resolution MUST report every unresolved value in one error rather than the first, so an operator
+  fixes one boot's worth of mistakes at a time. It MAY suppress reasons that are merely derived
+  from an earlier one — for example every configured state and label when no container resolved at
+  all — so the one actionable reason is not buried.
+- Resolution MUST distinguish a typo from a legitimate provider state. A selector that cannot
+  exist — an unknown container key — is a boot failure. A selector that exists but is currently
+  empty — for example a team between sprints with no active cycle — is a warning, and the service
+  MUST still boot: refusing to start would turn a routine tracker state into an outage.
+- When a scope names several containers, a state or label name absent from ALL of them can never
+  match and MUST be a boot failure. Absent from only SOME of them narrows the scope rather than
+  emptying it, and MUST be a warning that names the containers concerned.
+- When the provider cannot prove absence — for example a non-paginated nested result that came back
+  full — the adapter MUST warn rather than fail.
+- Resolution SHOULD cost a bounded number of requests independent of how many values are
+  configured.
+
+Scope reporting:
+
+- An adapter MAY expose a short human-readable description of its configured read scope, for the
+  status surface in Section 13.4.
+- An adapter that reports no scope MUST be renderable: the surface shows an explicit sentinel
+  rather than omitting the line, so "no scope configured" and "scope line not implemented" are not
+  confusable.
+- The description MUST NOT contain credentials, and SHOULD NOT contain a synthesized provider URL
+  unless the adapter can build one that is known to resolve.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -1486,8 +1558,11 @@ RECOMMENDED snapshot error modes:
 A human-readable status surface (terminal output, dashboard, etc.) is OPTIONAL and
 implementation-defined.
 
-If present, it SHOULD draw from orchestrator state/metrics only and MUST NOT be REQUIRED for
-correctness.
+If present, it SHOULD draw from orchestrator state/metrics plus the effective configuration, and
+MUST NOT be REQUIRED for correctness. It MAY render the adapter's OPTIONAL scope description from
+Section 11.6, so an operator can see what the instance is actually reading; it MUST NOT render
+credentials, and any provider link it renders MUST be one the implementation can construct
+correctly rather than guess.
 
 ### 13.5 Session Metrics and Token Accounting
 
@@ -1895,6 +1970,13 @@ function start_service():
     log_validation_error(validation)
     fail_startup(validation)
 
+  # OPTIONAL, Section 11.6: resolve adapter scope selectors against the live provider before any
+  # dispatch can create a workspace or launch an agent.
+  resolution = tracker.resolve_scope_if_supported()
+  if resolution is not ok:
+    log_validation_error(resolution)
+    fail_startup(resolution)
+
   startup_terminal_workspace_cleanup()
   schedule_tick(delay_ms=0)
 
@@ -2196,19 +2278,26 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Unusable optional provider metadata normalizes to null/empty without hiding valid required fields
 - State-list reads log omitted malformed required records; ID refresh fails malformed requested
   records instead of treating them as invisible
-- Refresh by opaque dispatch ID returns full normalized issue snapshots
+- Refresh by opaque dispatch ID returns full normalized issue snapshots and applies no configured
+  scope selection as a filter
 - A distinct provider ticket ID or project-item ID is preserved in `native_ref` when needed
 - Provider-specific routing/blocker/assignment rules become explicit `dispatchable`
 - The adapter publishes the required compact profile for config, scope, normalization, tools, and
   portable error mapping
 - Error mapping covers config, request, non-success response, malformed payload, pagination, and
   rate limiting, including documented category/message mappings for language-native errors
+- If startup scope resolution is implemented: every unresolved value is reported in one error, an
+  unknown container key fails the boot, an existing-but-empty container only warns, and a state or
+  label absent from some but not all containers only warns
+- If a scope description is implemented: an adapter with no configured scope renders an explicit
+  sentinel rather than an omitted line
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
 - Dispatch sort order is priority then oldest creation time
 - `dispatchable=false` issues are not eligible
-- Required-label filtering is case-insensitive and applies after adapter normalization
+- Label-policy filtering covers `required_labels` and `any_labels`, is case-insensitive, and
+  applies after adapter normalization
 - Active-state issue refresh updates running entry state
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace
@@ -2339,6 +2428,8 @@ Use the same validation profiles as Section 17:
 - The `linear_fetch_attachment` provider tool can download a Linear file attachment's contents
   (for example a design spec) through the same broker using configured Symphony auth, returning
   the file to the agent without exposing the token.
+- Startup scope resolution and the operator-facing scope description in Section 11.6, when shipped,
+  fail the boot only on values that cannot exist and warn on values that are merely empty.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.

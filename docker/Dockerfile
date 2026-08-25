@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
-# Symphony runtime image: one container runs `bin/symphony <WORKFLOW.md>` for one project.
+# Symphony runtime image: one container runs `bin/symphony <WORKFLOW.md>` for one repo plus one
+# tracker scope.
 # node base gives us the Codex CLI prerequisite; mise pins Erlang/Elixir from the repo's mise.toml.
 FROM node:20-bookworm-slim
 
@@ -43,5 +44,5 @@ RUN mix escript.build
 # Workspaces (per-issue clones) and logs are runtime volumes, not baked into the image.
 VOLUME ["/workspaces", "/app/elixir/log"]
 
-# WORKFLOW.md is mounted per project; compose `command` passes its path + flags.
+# WORKFLOW.md is mounted per deployment; compose `command` passes its path + flags.
 ENTRYPOINT ["./bin/symphony"]

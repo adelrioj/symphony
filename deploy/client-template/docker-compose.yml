@@ -1,4 +1,4 @@
-# One Symphony container for one project (one Linear project + one repo).
+# One Symphony container for one scope (one repo + one Linear scope: team, cycle, or project).
 #
 #   cp .env.example .env     # then edit LINEAR_API_KEY
 #   docker compose up -d
