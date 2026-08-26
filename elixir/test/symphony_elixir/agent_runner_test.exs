@@ -161,6 +161,22 @@ defmodule SymphonyElixir.AgentRunnerTest do
              end)
   end
 
+  test "exhausting the turn budget on a still-active issue notifies the orchestrator" do
+    issue = build_issue(state: "In Progress")
+
+    assert :ok = run_stub!(issue, max_turns: 1)
+
+    assert_received {:agent_turns_exhausted, "issue-blocked", "In Progress"}
+  end
+
+  test "an issue that leaves its active state does not notify the orchestrator" do
+    issue = build_issue(state: "Done")
+
+    assert :ok = run_stub!(issue, max_turns: 1)
+
+    refute_received {:agent_turns_exhausted, _issue_id, _state}
+  end
+
   test "blocked result posts a comment then sets the blocked state, in order" do
     issue = build_issue(state: "Implemented")
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())

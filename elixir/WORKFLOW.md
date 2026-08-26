@@ -35,6 +35,7 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  max_turn_exhaustions: 3
   backend: codex
   backend_by_state:
     implemented: claude

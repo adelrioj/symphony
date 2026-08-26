@@ -5,11 +5,10 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Agent.Result
-  alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{BlockedIssue, Config, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
-  @blocked_comment_detail_limit 4_000
 
   @doc false
   @spec continue_with_issue_for_test(Issue.t(), ([String.t()] -> term())) ::
@@ -63,39 +62,9 @@ defmodule SymphonyElixir.AgentRunner do
   defp handle_run_outcome(other, _issue), do: other
 
   defp post_blocked_state(%Issue{} = issue, result) do
-    body = blocked_comment_body(issue, result)
-
-    case Tracker.create_comment(issue.id, body) do
-      :ok ->
-        blocked_state = Config.settings!().agent.blocked_state
-
-        case Tracker.update_issue_state(issue.id, blocked_state) do
-          :ok ->
-            Logger.info("Parked blocked issue #{issue_context(issue)} state=#{blocked_state}")
-
-          {:error, reason} ->
-            Logger.error("Blocked state update failed for #{issue_context(issue)}: #{inspect(reason)} (comment posted; will retry on next poll)")
-        end
-
-      {:error, reason} ->
-        Logger.error("Blocked comment failed for #{issue_context(issue)}: #{inspect(reason)} (state NOT changed; will retry on next poll)")
-    end
-
-    :ok
-  end
-
-  defp blocked_comment_body(%Issue{} = _issue, result) do
     detail = result.blocked_action || result.summary || "No blocked action detail was provided."
-    truncated = String.slice(detail, 0, @blocked_comment_detail_limit)
-    suffix = if String.length(detail) > @blocked_comment_detail_limit, do: "\n... (truncated)", else: ""
 
-    """
-    **Symphony: blocked**
-
-    session_id: #{result.session_id || "unknown"}
-
-    #{truncated}#{suffix}
-    """
+    BlockedIssue.park(issue.id, issue.identifier, detail, result.session_id)
   end
 
   defp agent_message_handler(recipient, issue) do
@@ -127,6 +96,14 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
+
+  defp send_turns_exhausted(recipient, %Issue{id: issue_id, state: state_name})
+       when is_binary(issue_id) and is_binary(state_name) and is_pid(recipient) do
+    send(recipient, {:agent_turns_exhausted, issue_id, state_name})
+    :ok
+  end
+
+  defp send_turns_exhausted(_recipient, _issue), do: :ok
 
   defp run_agent_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
@@ -177,7 +154,7 @@ defmodule SymphonyElixir.AgentRunner do
       {:continue, refreshed_issue} ->
         Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
 
-        :ok
+        send_turns_exhausted(context.recipient, refreshed_issue)
 
       {:done, _refreshed_issue} ->
         :ok

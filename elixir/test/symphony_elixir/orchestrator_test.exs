@@ -233,6 +233,69 @@ defmodule SymphonyElixir.OrchestratorTest do
     end
   end
 
+  test "a dispatched worker that exhausts its turn budget is parked as blocked" do
+    tmp = Path.join(System.tmp_dir!(), "symphony-orchestrator-exhaustion-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(tmp, "workspaces")
+    fake_claude = Path.join(tmp, "fake_claude")
+    File.mkdir_p!(workspace_root)
+
+    File.write!(fake_claude, """
+    #!/bin/sh
+    printf '%s\\n' '{"type":"system","subtype":"init","session_id":"orch-exhausted"}'
+    printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":10,"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"result":"done"}'
+    """)
+
+    File.chmod!(fake_claude, 0o700)
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    write_claude_dispatch_workflow!(workspace_root, fake_claude, 1)
+
+    issue = %Issue{
+      id: "issue-claude-exhausted",
+      identifier: "MT-EXHAUST",
+      title: "Never finishes",
+      description: "Stays in the same active state after every run",
+      state: "Implemented",
+      url: "https://example.org/issues/MT-EXHAUST",
+      labels: [],
+      dispatchable: true
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_recipient) end)
+
+    orchestrator_name = Module.concat(__MODULE__, :ExhaustionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn -> stop_orchestrator(pid) end)
+
+    wait_for_state(pid, fn state ->
+      state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    :sys.replace_state(pid, fn state ->
+      %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    state = wait_for_state(pid, fn state -> Map.has_key?(state.blocked, issue.id) end, 20_000)
+
+    assert %{identifier: "MT-EXHAUST", error: error} = state.blocked[issue.id]
+    assert error == "reached agent.max_turns (1) 1 runs in a row without leaving state=Implemented"
+    refute Map.has_key?(state.retry_attempts, issue.id)
+    refute Map.has_key?(state.running, issue.id)
+
+    assert_receive {:memory_tracker_comment, "issue-claude-exhausted", body}, 5_000
+    assert body =~ "Symphony parked this work item"
+    assert_receive {:memory_tracker_state_update, "issue-claude-exhausted", "Blocked / Needs Attention"}, 5_000
+  end
+
   defp wait_for_state(pid, predicate, timeout_ms \\ 1_000) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_state(pid, predicate, deadline)
@@ -293,7 +356,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     end)
   end
 
-  defp write_claude_dispatch_workflow!(workspace_root, fake_claude) do
+  defp write_claude_dispatch_workflow!(workspace_root, fake_claude, max_turn_exhaustions \\ 3) do
     File.write!(Workflow.workflow_file_path(), """
     ---
     tracker:
@@ -307,6 +370,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     agent:
       max_concurrent_agents: 1
       max_turns: 1
+      max_turn_exhaustions: #{max_turn_exhaustions}
       backend: codex
       backend_by_state: {"implemented": "claude"}
       blocked_state: "Blocked / Needs Attention"

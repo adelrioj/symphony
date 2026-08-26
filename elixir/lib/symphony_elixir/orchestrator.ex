@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, BlockedIssue, Config, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -39,6 +39,7 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      turn_exhaustions: %{},
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -187,6 +188,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
+  def handle_info({:agent_turns_exhausted, issue_id, state_name}, %{running: running} = state)
+      when is_binary(issue_id) and is_binary(state_name) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        running_entry = Map.put(running_entry, :turns_exhausted_state, state_name)
+        {:noreply, %{state | running: Map.put(running, issue_id, running_entry)}}
+    end
+  end
+
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
       case pop_retry_attempt_state(state, issue_id, retry_token) do
@@ -209,17 +222,7 @@ defmodule SymphonyElixir.Orchestrator do
     if input_required_blocker?(running_entry) do
       block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
     else
-      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
-
-      state
-      |> complete_issue(issue_id)
-      |> schedule_issue_retry(issue_id, 1, %{
-        identifier: running_entry.identifier,
-        issue_url: running_entry.issue.url,
-        delay_type: :continuation,
-        worker_host: Map.get(running_entry, :worker_host),
-        workspace_path: Map.get(running_entry, :workspace_path)
-      })
+      handle_agent_completion(state, issue_id, running_entry, session_id)
     end
   end
 
@@ -251,6 +254,91 @@ defmodule SymphonyElixir.Orchestrator do
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path)
     })
+  end
+
+  # A worker that exits normally without leaving its tracker state has burned its whole
+  # turn budget without progress. Retrying such a run forever is a token furnace, so the
+  # issue is parked as blocked once it exhausts agent.max_turn_exhaustions in a row.
+  defp handle_agent_completion(state, issue_id, running_entry, session_id) do
+    case record_turn_exhaustion(state, issue_id, running_entry) do
+      {:exhausted, count, state} ->
+        block_exhausted_agent_down(state, issue_id, running_entry, session_id, count)
+
+      {:continue, state} ->
+        Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+        state
+        |> complete_issue(issue_id)
+        |> schedule_issue_retry(issue_id, 1, %{
+          identifier: running_entry.identifier,
+          issue_url: running_entry.issue.url,
+          delay_type: :continuation,
+          worker_host: Map.get(running_entry, :worker_host),
+          workspace_path: Map.get(running_entry, :workspace_path)
+        })
+    end
+  end
+
+  defp record_turn_exhaustion(%State{} = state, issue_id, running_entry) do
+    case Map.get(running_entry, :turns_exhausted_state) do
+      state_name when is_binary(state_name) ->
+        count = next_turn_exhaustion_count(state, issue_id, state_name)
+
+        state = %{
+          state
+          | turn_exhaustions:
+              Map.put(state.turn_exhaustions, issue_id, %{
+                state: normalize_issue_state(state_name),
+                count: count
+              })
+        }
+
+        if count >= Config.settings!().agent.max_turn_exhaustions do
+          {:exhausted, count, state}
+        else
+          {:continue, state}
+        end
+
+      _ ->
+        {:continue, clear_turn_exhaustions(state, issue_id)}
+    end
+  end
+
+  defp next_turn_exhaustion_count(%State{} = state, issue_id, state_name) do
+    normalized_state = normalize_issue_state(state_name)
+
+    case Map.get(state.turn_exhaustions, issue_id) do
+      %{state: ^normalized_state, count: count} -> count + 1
+      _ -> 1
+    end
+  end
+
+  defp clear_turn_exhaustions(%State{} = state, issue_id) do
+    %{state | turn_exhaustions: Map.delete(state.turn_exhaustions, issue_id)}
+  end
+
+  defp block_exhausted_agent_down(%State{} = state, issue_id, running_entry, session_id, count) do
+    identifier = Map.get(running_entry, :identifier, issue_id)
+    issue_state = Map.get(running_entry, :turns_exhausted_state)
+    max_turns = Config.settings!().agent.max_turns
+
+    error = "reached agent.max_turns (#{max_turns}) #{count} runs in a row without leaving state=#{issue_state}"
+
+    Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id}: #{error}")
+
+    BlockedIssue.park(issue_id, identifier, blocked_park_detail(error, count, max_turns), session_id)
+
+    block_issue_from_entry(state, issue_id, running_entry, error)
+  end
+
+  defp blocked_park_detail(error, count, max_turns) do
+    """
+    Symphony parked this work item: #{error}.
+
+    Each of the last #{count} agent runs used all #{max_turns} of its turns and left the work item in the
+    same state, so Symphony stopped restarting it. Split the remaining work into smaller items, raise
+    `agent.max_turns`, or move this item back to an active state once it is workable again.
+    """
   end
 
   defp maybe_dispatch(%State{} = state) do
@@ -582,7 +670,8 @@ defmodule SymphonyElixir.Orchestrator do
           | running: Map.delete(state.running, issue_id),
             claimed: MapSet.delete(state.claimed, issue_id),
             blocked: Map.delete(state.blocked, issue_id),
-            retry_attempts: Map.delete(state.retry_attempts, issue_id)
+            retry_attempts: Map.delete(state.retry_attempts, issue_id),
+            turn_exhaustions: Map.delete(state.turn_exhaustions, issue_id)
         }
 
       _ ->
@@ -785,6 +874,7 @@ defmodule SymphonyElixir.Orchestrator do
       state
       | running: Map.delete(state.running, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        turn_exhaustions: Map.delete(state.turn_exhaustions, issue_id),
         claimed: MapSet.put(state.claimed, issue_id),
         blocked: Map.put(state.blocked, issue_id, blocked_entry)
     }
@@ -1283,7 +1373,8 @@ defmodule SymphonyElixir.Orchestrator do
       state
       | claimed: MapSet.delete(state.claimed, issue_id),
         blocked: Map.delete(state.blocked, issue_id),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+        retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        turn_exhaustions: Map.delete(state.turn_exhaustions, issue_id)
     }
   end
 

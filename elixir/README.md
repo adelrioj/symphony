@@ -217,6 +217,7 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  max_turn_exhaustions: 3
 codex:
   command: codex app-server
 ---
@@ -257,6 +258,10 @@ Notes:
   by the Codex turn sandbox.
 - `agent.max_turns` caps how many back-to-back agent turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `agent.max_turn_exhaustions` caps how many agent invocations in a row may end at `agent.max_turns`
+  while the issue stays in the same active state. When the cap is hit, Symphony posts a comment and
+  moves the issue to `agent.blocked_state` instead of restarting the agent again. This is what stops
+  an issue that is too large for its turn budget from looping forever. Default: `3`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

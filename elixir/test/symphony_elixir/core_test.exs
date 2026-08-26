@@ -9,7 +9,8 @@ defmodule SymphonyElixir.CoreTest do
       poll_interval_ms: nil,
       tracker_active_states: nil,
       tracker_terminal_states: nil,
-      codex_command: nil
+      codex_command: nil,
+      max_turn_exhaustions: nil
     )
 
     config = Config.settings!()
@@ -18,6 +19,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.agent.max_turn_exhaustions == 3
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -33,6 +35,13 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
     assert Config.settings!().agent.max_turns == 5
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_turn_exhaustions: 0)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.max_turn_exhaustions"
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_turn_exhaustions: 4)
+    assert Config.settings!().agent.max_turn_exhaustions == 4
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -1143,6 +1152,78 @@ defmodule SymphonyElixir.CoreTest do
     assert_scheduled_between(due_at_ms, sent_at_ms, observed_at_ms, 1_000)
   end
 
+  test "consecutive turn budget exhaustions park the issue as blocked" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_turns: 3,
+      max_turn_exhaustions: 2
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_recipient) end)
+
+    issue = %Issue{id: "issue-turn-budget", identifier: "MT-561", state: "In Progress"}
+    pid = start_orchestrator!(:TurnBudgetOrchestrator)
+
+    state = exhaust_turn_budget!(pid, issue)
+
+    assert %{state: "in progress", count: 1} = state.turn_exhaustions[issue.id]
+    assert %{attempt: 1} = state.retry_attempts[issue.id]
+    refute Map.has_key?(state.blocked, issue.id)
+
+    state = exhaust_turn_budget!(pid, issue)
+
+    refute Map.has_key?(state.running, issue.id)
+    refute Map.has_key?(state.retry_attempts, issue.id)
+    refute Map.has_key?(state.turn_exhaustions, issue.id)
+    assert MapSet.member?(state.claimed, issue.id)
+
+    assert %{identifier: "MT-561", error: error} = state.blocked[issue.id]
+    assert error == "reached agent.max_turns (3) 2 runs in a row without leaving state=In Progress"
+
+    assert_receive {:memory_tracker_comment, "issue-turn-budget", body}
+    assert body =~ "**Symphony: blocked**"
+    assert body =~ "session_id: thread-turn-budget"
+    assert body =~ "Symphony parked this work item"
+    assert_receive {:memory_tracker_state_update, "issue-turn-budget", "Blocked / Needs Attention"}
+  end
+
+  test "turn budget exhaustions in a new state restart the count" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["In Progress", "In Review"],
+      max_turn_exhaustions: 2
+    )
+
+    issue = %Issue{id: "issue-turn-budget-advance", identifier: "MT-562", state: "In Progress"}
+    pid = start_orchestrator!(:TurnBudgetAdvanceOrchestrator)
+
+    state = exhaust_turn_budget!(pid, issue)
+    assert %{state: "in progress", count: 1} = state.turn_exhaustions[issue.id]
+
+    state = exhaust_turn_budget!(pid, %{issue | state: "In Review"})
+
+    assert %{state: "in review", count: 1} = state.turn_exhaustions[issue.id]
+    assert %{attempt: 1} = state.retry_attempts[issue.id]
+    refute Map.has_key?(state.blocked, issue.id)
+  end
+
+  test "a worker exit that did not exhaust its turn budget clears the count" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", max_turn_exhaustions: 2)
+
+    issue = %Issue{id: "issue-turn-budget-reset", identifier: "MT-563", state: "In Progress"}
+    pid = start_orchestrator!(:TurnBudgetResetOrchestrator)
+
+    state = exhaust_turn_budget!(pid, issue)
+    assert %{count: 1} = state.turn_exhaustions[issue.id]
+
+    state = complete_worker_run!(pid, issue, false)
+
+    refute Map.has_key?(state.turn_exhaustions, issue.id)
+    refute Map.has_key?(state.blocked, issue.id)
+    assert %{attempt: 1} = state.retry_attempts[issue.id]
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()
@@ -1339,6 +1420,50 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
+  end
+
+  defp start_orchestrator!(name) do
+    {:ok, pid} = Orchestrator.start_link(name: Module.concat(__MODULE__, name))
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    pid
+  end
+
+  defp exhaust_turn_budget!(pid, issue), do: complete_worker_run!(pid, issue, true)
+
+  defp complete_worker_run!(pid, issue, turns_exhausted?) do
+    ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "thread-turn-budget",
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | running: Map.put(state.running, issue.id, running_entry),
+          claimed: MapSet.put(state.claimed, issue.id)
+      }
+    end)
+
+    if turns_exhausted? do
+      send(pid, {:agent_turns_exhausted, issue.id, issue.state})
+    end
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+
+    :sys.get_state(pid)
   end
 
   # The orchestrator computes `due_at_ms` as `t + backoff` for a `t` that is at or after the
