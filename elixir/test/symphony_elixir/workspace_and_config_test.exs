@@ -428,16 +428,79 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute issue.dispatchable
   end
 
-  test "tracker issue routing requires every configured label" do
+  test "tracker issue routing requires every required label" do
     issue = %Issue{labels: [" Symphony ", "JavaScript"], dispatchable: true}
 
-    assert Issue.routable?(issue, [])
-    assert Issue.routable?(issue, ["symphony"])
-    assert Issue.routable?(issue, ["SYMPHONY", "javascript"])
-    refute Issue.routable?(issue, ["symph"])
-    refute Issue.routable?(issue, [" "])
-    refute Issue.routable?(issue, ["symphony", "security"])
-    refute Issue.routable?(%{issue | dispatchable: false}, ["symphony"])
+    assert Issue.routable?(issue, %{})
+    assert Issue.routable?(issue, %{required_labels: []})
+    assert Issue.routable?(issue, %{required_labels: ["symphony"]})
+    assert Issue.routable?(issue, %{required_labels: ["SYMPHONY", "javascript"]})
+    refute Issue.routable?(issue, %{required_labels: ["symph"]})
+    refute Issue.routable?(issue, %{required_labels: [" "]})
+    refute Issue.routable?(issue, %{required_labels: ["symphony", "security"]})
+    refute Issue.routable?(%{issue | dispatchable: false}, %{required_labels: ["symphony"]})
+  end
+
+  test "tracker issue routing requires at least one any label when any are configured" do
+    issue = %Issue{labels: ["Feat-Symphony"], dispatchable: true}
+
+    assert Issue.routable?(issue, %{any_labels: []})
+    assert Issue.routable?(issue, %{any_labels: ["feat-symphony", "bug-symphony"]})
+    refute Issue.routable?(issue, %{any_labels: ["bug-symphony"]})
+    refute Issue.routable?(issue, %{any_labels: ["   "]})
+    refute Issue.routable?(%Issue{labels: [], dispatchable: true}, %{any_labels: ["feat-symphony"]})
+  end
+
+  test "tracker issue routing applies required and any label rules together" do
+    issue = %Issue{labels: ["migrated", "feat-symphony"], dispatchable: true}
+
+    assert Issue.routable?(issue, %{required_labels: ["migrated"], any_labels: ["feat-symphony", "bug-symphony"]})
+    refute Issue.routable?(issue, %{required_labels: ["migrated"], any_labels: ["bug-symphony"]})
+    refute Issue.routable?(issue, %{required_labels: ["ci"], any_labels: ["feat-symphony"]})
+  end
+
+  test "tracker issue routing treats missing label policy entries as no constraint" do
+    issue = %Issue{labels: [], dispatchable: true}
+
+    assert Issue.routable?(issue, %{required_labels: nil, any_labels: nil})
+  end
+
+  test "tracker issue routing raises for a label policy that is not a map" do
+    issue = %Issue{labels: ["migrated"], dispatchable: true}
+
+    assert_raise FunctionClauseError, fn -> Issue.routable?(issue, nil) end
+    assert_raise FunctionClauseError, fn -> Issue.routable?(issue, ["migrated"]) end
+  end
+
+  test "tracker any_labels defaults to an empty list" do
+    assert Config.settings!().tracker.any_labels == []
+  end
+
+  test "tracker any_labels is downcased and deduplicated" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_any_labels: ["Feat-Symphony", "feat-symphony", "BUG-Symphony"]
+    )
+
+    assert Config.settings!().tracker.any_labels == ["feat-symphony", "bug-symphony"]
+  end
+
+  test "tracker any_labels entries are trimmed" do
+    assert {:ok, settings} =
+             Schema.parse(%{tracker: %{kind: "linear", any_labels: ["  Feat-Symphony ", "feat-symphony"]}})
+
+    assert settings.tracker.any_labels == ["feat-symphony"]
+  end
+
+  test "tracker provider settings keep their yaml types through the workflow file" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_provider: %{team_keys: ["MDZ"], current_cycle: true, project_slug: "acme-web"}
+    )
+
+    provider = Config.settings!().tracker.provider
+
+    assert provider["team_keys"] == ["MDZ"]
+    assert provider["current_cycle"] == true
+    assert provider["project_slug"] == "acme-web"
   end
 
   test "linear client normalizes blockers from inverse relations" do
@@ -593,7 +656,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       body = %{
         "data" => %{
           "issues" => %{
-            "nodes" => Enum.map(variables.ids, raw_issue)
+            "nodes" => Enum.map(variables.filter.id.in, raw_issue)
           }
         }
       }
@@ -605,25 +668,105 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Enum.map(issues, & &1.id) == issue_ids
 
-    assert_receive {:fetch_issue_states_page, query,
-                    %{
-                      ids: ^first_batch_ids,
-                      projectSlug: "test-project",
-                      first: 50,
-                      relationFirst: 50
-                    }}
+    assert_receive {:fetch_issue_states_page, query, first_page_variables}
+
+    # Exact equality, not a subset pattern. Elixir map patterns are non-exact, so
+    # `%{filter: %{id: %{in: ids}}}` also matches a filter carrying `and: [project…]`,
+    # and asserting on document text proves nothing once the filter is a variable.
+    assert first_page_variables.filter == %{id: %{in: first_batch_ids}}
+
+    assert first_page_variables.first == 50
+    assert first_page_variables.relationFirst == 50
 
     assert query =~ "SymphonyLinearIssuesById"
-    assert query =~ "projectSlug"
-    assert query =~ "slugId"
+    assert query =~ "$filter: IssueFilter!"
 
-    assert_receive {:fetch_issue_states_page, ^query,
-                    %{
-                      ids: ^second_batch_ids,
-                      projectSlug: "test-project",
-                      first: 5,
-                      relationFirst: 50
-                    }}
+    assert_receive {:fetch_issue_states_page, ^query, second_page_variables}
+
+    assert second_page_variables.filter == %{id: %{in: second_batch_ids}}
+
+    assert second_page_variables.first == 5
+    assert second_page_variables.relationFirst == 50
+  end
+
+  # The property is proven by the emitted filter, which both entry points build in
+  # `do_fetch_issue_states_page/5`, so this setup is not what makes the assertion hold:
+  # `fetch_issues_by_ids_for_test/2` reads no config today. It is a forward guard, so that the day
+  # the by-IDs path does read the configured scope, a scope is already configured here for it to
+  # wrongly apply.
+  test "linear id refresh applies no scope filter even when scope is configured" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: "acme-web",
+      tracker_any_labels: ["feat-symphony"],
+      tracker_provider: %{"team_keys" => ["MDZ"], "current_cycle" => true}
+    )
+
+    graphql_fun = fn _query, variables ->
+      send(self(), {:by_ids, variables})
+      {:ok, %{"data" => %{"issues" => %{"nodes" => []}}}}
+    end
+
+    assert {:ok, []} = Client.fetch_issues_by_ids_for_test(["issue-1"], graphql_fun)
+
+    assert_receive {:by_ids, variables}
+    assert variables.filter == %{id: %{in: ["issue-1"]}}
+  end
+
+  test "linear poll sends the configured scope as one filter variable" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_project_slug: "acme-web")
+
+    graphql_fun = fn query, variables ->
+      send(self(), {:poll_page, query, variables})
+
+      {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}
+    end
+
+    assert {:ok, []} = Client.fetch_issues_by_states_for_test(["Todo", "In Progress"], graphql_fun)
+
+    assert_receive {:poll_page, query, variables}
+
+    assert variables.filter == %{
+             state: %{or: [%{name: %{eqIgnoreCase: "Todo"}}, %{name: %{eqIgnoreCase: "In Progress"}}]},
+             and: [%{project: %{slugId: %{eq: "acme-web"}}}]
+           }
+
+    assert variables.first == 50
+    assert variables.relationFirst == 50
+    assert variables.attachmentFirst == 25
+
+    assert query =~ "SymphonyLinearPoll"
+    assert query =~ "$filter: IssueFilter!"
+    refute query =~ "$projectSlug"
+    refute query =~ "$stateNames"
+  end
+
+  test "linear poll resends the identical filter on the next page with the cursor advanced" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_project_slug: "acme-web")
+
+    graphql_fun = fn query, variables ->
+      send(self(), {:poll_page, query, variables})
+
+      # Counts pages as well as matching the cursor: a regression that dropped the cursor would
+      # re-enter the first-page clause forever and hang the test until ExUnit's timeout, so an
+      # unexpected (page, cursor) pair has to fail loudly and name the value it saw.
+      page_number = Process.get(:poll_page_number, 0) + 1
+      Process.put(:poll_page_number, page_number)
+
+      page_info =
+        case {page_number, variables.after} do
+          {1, nil} -> %{"hasNextPage" => true, "endCursor" => "cursor-1"}
+          {2, "cursor-1"} -> %{"hasNextPage" => false, "endCursor" => nil}
+          {number, cursor} -> raise "unexpected poll page #{number} with after cursor #{inspect(cursor)}"
+        end
+
+      {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => page_info}}}}
+    end
+
+    assert {:ok, []} = Client.fetch_issues_by_states_for_test(["Todo"], graphql_fun)
+
+    assert_receive {:poll_page, _query, %{filter: first_filter, after: nil}}
+    assert_receive {:poll_page, _query, %{filter: second_filter, after: "cursor-1"}}
+    assert first_filter == second_filter
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do

@@ -180,6 +180,59 @@ defmodule SymphonyElixir.OrchestratorTest do
     refute "/bin/false" in args
   end
 
+  # Pins every atom `Linear.Scope.validate/1` can emit to its own actionable message. Without this,
+  # a typo in one of the four branch heads would silently demote a precise config error into the
+  # generic "Failed to fetch from issue tracker" clause, which is the degradation those dedicated
+  # branches exist to prevent.
+  test "each linear scope config error is logged by its own branch, not the generic tracker failure" do
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", tracker_api_token: nil)
+
+    orchestrator_name = Module.concat(__MODULE__, :ScopeErrorOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn -> stop_orchestrator(pid) end)
+
+    wait_for_state(pid, fn state ->
+      state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
+    end)
+
+    scope_errors = [
+      {:missing_linear_scope, %{}, "Tracker scope missing in WORKFLOW.md: set tracker.provider.team_keys, tracker.provider.current_cycle, or tracker.provider.project_slug"},
+      {:missing_linear_team_keys, %{"current_cycle" => true}, "Tracker scope invalid in WORKFLOW.md: tracker.provider.current_cycle requires tracker.provider.team_keys"},
+      {:invalid_linear_team_keys, %{"team_keys" => "MDZ"}, "Tracker scope invalid in WORKFLOW.md: tracker.provider.team_keys must be a list of non-empty team keys"},
+      {:invalid_linear_current_cycle, %{"team_keys" => ["MDZ"], "current_cycle" => "yes"}, "Tracker scope invalid in WORKFLOW.md: tracker.provider.current_cycle must be true or false"}
+    ]
+
+    for {expected_atom, provider, expected_message} <- scope_errors do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_project_slug: nil,
+        tracker_provider: provider
+      )
+
+      # Confirms the config under test really produces the atom it is paired with, so a message
+      # assertion can never pass against a different error than the one it names.
+      assert {:error, ^expected_atom} = Config.validate!()
+
+      :sys.replace_state(pid, fn state ->
+        %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
+      end)
+
+      log =
+        capture_log(fn ->
+          send(pid, :run_poll_cycle)
+
+          wait_for_state(pid, fn state ->
+            state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
+          end)
+        end)
+
+      assert log =~ expected_message
+      refute log =~ "Failed to fetch from issue tracker"
+    end
+  end
+
   test "a dispatched worker that exhausts its turn budget is parked as blocked" do
     tmp = Path.join(System.tmp_dir!(), "symphony-orchestrator-exhaustion-#{System.unique_integer([:positive])}")
     workspace_root = Path.join(tmp, "workspaces")

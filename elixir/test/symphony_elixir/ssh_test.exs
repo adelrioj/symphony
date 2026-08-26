@@ -198,7 +198,11 @@ defmodule SymphonyElixir.SSHTest do
     System.put_env("PATH", fake_bin_dir <> ":" <> (System.get_env("PATH") || ""))
   end
 
-  defp wait_for_trace!(trace_file, attempts \\ 20)
+  # 5s, not the 500ms this used to allow: the wait is for an external `/bin/sh` to spawn and
+  # write, and under a cover-compiled full suite that routinely takes longer. The assertions on
+  # the trace's contents are what this test proves, so waiting longer costs a fast run nothing
+  # and only stops a slow one from failing for the wrong reason.
+  defp wait_for_trace!(trace_file, attempts \\ 200)
   defp wait_for_trace!(trace_file, 0), do: flunk("timed out waiting for fake ssh trace at #{trace_file}")
 
   defp wait_for_trace!(trace_file, attempts) do

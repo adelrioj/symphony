@@ -2,6 +2,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   use SymphonyElixir.TestSupport
 
   require Logger
+  alias SymphonyElixir.Linear.Scope
   alias SymphonyElixir.SSH
 
   @moduletag :live_e2e
@@ -12,6 +13,18 @@ defmodule SymphonyElixir.LiveE2ETest do
   @docker_support_dir Path.expand("../support/live_e2e_docker", __DIR__)
   @docker_compose_file Path.join(@docker_support_dir, "docker-compose.yml")
   @result_file "LIVE_E2E_RESULT.txt"
+  @scope_read_deadline_ms 30_000
+  @scope_read_poll_interval_ms 1_000
+  # A borrowed future cycle must not be able to START during the run. `Cycle.isFuture` is evaluated
+  # server-side at read time, but the decisive refute lands much later: after seeding, several round
+  # trips, and up to @scope_read_deadline_ms of polling. A cycle that rolled over mid-run would become
+  # the active cycle, its issue would appear in the scoped read, and the run would flunk with
+  # "cycle.isActive matches cycle membership rather than the running cycle" — the exact wrong
+  # conclusion this scenario exists to rule out. One hour is more than ten times the 300s moduletag
+  # that hard-caps the whole test, and deliberately no larger: the window in which this refuses to
+  # borrow is also the window in which it falls through to minting a cycle, and minting is what can
+  # collide with a cadence team's already-scheduled next cycle.
+  @future_cycle_start_margin_seconds 3_600
   @live_e2e_skip_reason if(System.get_env("SYMPHONY_RUN_LIVE_E2E") != "1",
                           do: "set SYMPHONY_RUN_LIVE_E2E=1 to enable the real Linear/Codex end-to-end test"
                         )
@@ -52,7 +65,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   @create_issue_mutation """
   mutation SymphonyLiveE2ECreateIssue(
     $teamId: String!
-    $projectId: String!
+    $projectId: String
     $title: String!
     $description: String!
     $stateId: String
@@ -119,6 +132,69 @@ defmodule SymphonyElixir.LiveE2ETest do
   }
   """
 
+  @team_cycles_query """
+  query SymphonyLiveE2ETeamCycles($id: String!, $futureCycleNotBefore: DateTimeOrDuration!) {
+    team(id: $id) {
+      id
+      activeCycle {
+        id
+        name
+        endsAt
+      }
+      cycles(filter: {isFuture: {eq: true}, startsAt: {gt: $futureCycleNotBefore}}, first: 1) {
+        nodes {
+          id
+          name
+          startsAt
+          endsAt
+        }
+      }
+    }
+  }
+  """
+
+  @create_cycle_mutation """
+  mutation SymphonyLiveE2ECreateCycle($teamId: String!, $startsAt: DateTime!, $endsAt: DateTime!, $name: String) {
+    cycleCreate(input: {teamId: $teamId, startsAt: $startsAt, endsAt: $endsAt, name: $name}) {
+      success
+      cycle {
+        id
+        name
+        endsAt
+      }
+    }
+  }
+  """
+
+  @archive_cycle_mutation """
+  mutation SymphonyLiveE2EArchiveCycle($id: String!) {
+    cycleArchive(id: $id) {
+      success
+    }
+  }
+  """
+
+  # `$cycleId` is nullable on purpose: passing it as nil clears the issue's cycle, which is how the
+  # out-of-cycle issue is forced out of a team that auto-adds new issues to the running cycle.
+  @set_issue_cycle_mutation """
+  mutation SymphonyLiveE2ESetIssueCycle($id: String!, $cycleId: String) {
+    issueUpdate(id: $id, input: {cycleId: $cycleId}) {
+      success
+      issue {
+        id
+      }
+    }
+  }
+  """
+
+  @archive_issue_mutation """
+  mutation SymphonyLiveE2EArchiveIssue($id: String!) {
+    issueArchive(id: $id) {
+      success
+    }
+  }
+  """
+
   @tag skip: @live_e2e_skip_reason
   test "creates a real Linear project and issue with a local worker" do
     run_live_issue_flow!(:local)
@@ -127,6 +203,173 @@ defmodule SymphonyElixir.LiveE2ETest do
   @tag skip: @live_e2e_skip_reason
   test "creates a real Linear project and issue with an ssh worker" do
     run_live_issue_flow!(:ssh)
+  end
+
+  @tag skip: @live_e2e_skip_reason
+  test "a team plus current-cycle scope reads only the active cycle while the id refresh ignores scope" do
+    run_live_cycle_scope_flow!()
+  end
+
+  defp run_live_cycle_scope_flow! do
+    team_key = System.get_env("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key
+    runtime_pid = Process.whereis(SymphonyElixir.AgentRuntimeSupervisor)
+
+    # Cleanup is on_exit/1 rather than try/after because ExUnit kills the test process when the 300s
+    # moduletag expires, and an untrappable kill skips every `after` — which would strand up to five
+    # real entities in a real workspace. ExUnit.OnExitHandler holds these outside the test process, so
+    # they still run. Registered first means LIFO runs it last: every entity discard below still sees
+    # the live token, and TestSupport's setup on_exit was registered earlier still, so it deletes the
+    # workflow root after this one.
+    on_exit(fn ->
+      write_workflow_file!(Workflow.workflow_file_path())
+      restart_agent_runtime_if_needed()
+    end)
+
+    # The Orchestrator under AgentRuntimeSupervisor re-reads the active workflow file on every tick,
+    # and write_workflow_file!/2 forces a WorkflowStore reload, so the live scope written below would
+    # make it poll the real workspace with the real token and dispatch Codex agents against every
+    # dispatchable issue in the active cycle, not just the ones seeded here. Both neighbouring live
+    # tests stop the runtime for exactly this reason.
+    if is_pid(runtime_pid) do
+      assert :ok =
+               Supervisor.terminate_child(
+                 SymphonyElixir.Supervisor,
+                 SymphonyElixir.AgentRuntimeSupervisor
+               )
+    end
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "$LINEAR_API_KEY",
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => [team_key], "current_cycle" => true},
+      observability_enabled: false
+    )
+
+    assert_cycle_scope_loaded!(team_key)
+
+    team = fetch_team!(team_key)
+    active_state = active_state!(team)
+    state_names = active_state_names(team)
+    team_cycles = fetch_team_cycles!(team["id"])
+
+    # Bound one at a time rather than inline in the map below: Elixir does not guarantee the evaluation
+    # order of a map literal's values, and each of these registers its own discard as it is created, so
+    # this order is what fixes the LIFO cleanup order.
+    active_cycle = ensure_active_cycle!(team_cycles)
+    future_cycle = ensure_future_cycle!(team_cycles, active_cycle)
+    in_cycle_issue = create_scope_issue!(team, active_state, "in cycle")
+    out_of_cycle_issue = create_scope_issue!(team, active_state, "out of cycle")
+    future_cycle_issue = create_scope_issue!(team, active_state, "future cycle")
+
+    fixtures = %{
+      active_cycle: active_cycle,
+      future_cycle: future_cycle,
+      in_cycle_issue: in_cycle_issue,
+      out_of_cycle_issue: out_of_cycle_issue,
+      future_cycle_issue: future_cycle_issue
+    }
+
+    seed_cycle_membership!(fixtures)
+    assert_cycle_scope!(fixtures, state_names)
+  end
+
+  # A provider map that stopped round-tripping through YAML would make Scope.filter/2 silently drop
+  # the cycle key, and the run would then fail as "returned an issue that belongs to no cycle" — a
+  # config bug wearing the costume of a Linear semantics bug, which is the misdiagnosis this scenario
+  # exists to prevent. Prove the scope loaded before trusting any read built from it.
+  defp assert_cycle_scope_loaded!(team_key) do
+    tracker = Config.settings!().tracker
+    filter = Scope.filter(tracker)
+
+    assert match?(%{cycle: %{isActive: %{eq: true}}}, filter),
+           "the workflow did not load as a current-cycle scope, so a scope failure below would be a config bug rather than a Linear one: #{inspect(filter)}"
+
+    assert Scope.team_keys(tracker) == [team_key],
+           "the workflow did not load tracker.provider.team_keys: #{inspect(Scope.team_keys(tracker))}"
+  end
+
+  # Seeding lives outside assert_cycle_scope!/2 on purpose: set_issue_cycle!/2 is strict, and a failed
+  # attachment raising from inside a function named for assertions would read as a scope failure.
+  defp seed_cycle_membership!(fixtures) do
+    set_issue_cycle!(fixtures.in_cycle_issue.id, fixtures.active_cycle["id"])
+    set_issue_cycle!(fixtures.future_cycle_issue.id, fixtures.future_cycle["id"])
+
+    # Teams that auto-add new issues to the running cycle would otherwise put this issue in the cycle
+    # too, and the no-cycle claim below would then hold for the wrong reason.
+    set_issue_cycle!(fixtures.out_of_cycle_issue.id, nil)
+  end
+
+  defp assert_cycle_scope!(fixtures, state_names) do
+    # The three cycle-scope claims are settled together by await_cycle_scope_claims!/2, which polls to
+    # a deadline and flunks naming whichever one did not hold; unmet_cycle_scope_claim/2 states them.
+    await_cycle_scope_claims!(fixtures, state_names)
+
+    # Production-path guard: this is the only test in the suite that drives the real
+    # fetch_issues_by_ids/1 wrapper, because the unit-level regression enters at the
+    # fetch_issues_by_ids_for_test/2 seam instead. It catches a reintroduced cycle or foreign-project
+    # conjunct. It does NOT catch a reintroduced team conjunct: this issue belongs to the scoped team,
+    # so a team-filtered refresh would still return it. Admission is scope-gated; continuation is
+    # state-gated, so an issue that left the cycle must still be refreshable by id.
+    assert {:ok, refreshed} = Client.fetch_issues_by_ids([fixtures.out_of_cycle_issue.id])
+
+    assert Enum.any?(refreshed, &(&1.id == fixtures.out_of_cycle_issue.id)),
+           "the by-ids refresh dropped an out-of-scope issue, so it is applying the configured scope"
+  end
+
+  # Linear is not documented to reflect a cycle attachment in its issue index on the very next read,
+  # and a cold miss would flunk as "cycle.isActive does not select the running cycle" — the exact
+  # wrong conclusion, and the one this scenario exists to rule out. Poll to a deadline first, with the
+  # same idiom as wait_for_ssh_host!/2.
+  defp await_cycle_scope_claims!(fixtures, state_names) do
+    await_cycle_scope_claims!(fixtures, state_names, System.monotonic_time(:millisecond) + @scope_read_deadline_ms)
+  end
+
+  defp await_cycle_scope_claims!(fixtures, state_names, deadline_ms) do
+    assert {:ok, scoped_issues} = Client.fetch_issues_by_states(state_names)
+    scoped_ids = MapSet.new(scoped_issues, & &1.id)
+
+    case unmet_cycle_scope_claim(scoped_ids, fixtures) do
+      nil ->
+        :ok
+
+      claim ->
+        if System.monotonic_time(:millisecond) < deadline_ms do
+          Process.sleep(@scope_read_poll_interval_ms)
+          await_cycle_scope_claims!(fixtures, state_names, deadline_ms)
+        else
+          flunk("#{claim} (still true after #{@scope_read_deadline_ms}ms of polling)")
+        end
+    end
+  end
+
+  # The three claims a team + current_cycle scope has to satisfy, in the order that makes a failure
+  # readable. The future-cycle claim is the decisive one: without it the other two would still hold if
+  # `cycle.isActive` merely meant "belongs to some cycle", because only that issue sits in a real,
+  # non-overlapping cycle that has not started yet.
+  defp unmet_cycle_scope_claim(scoped_ids, fixtures) do
+    cond do
+      not MapSet.member?(scoped_ids, fixtures.in_cycle_issue.id) ->
+        "team + current_cycle did not return the issue seeded into the active cycle, so cycle.isActive does not select the running cycle"
+
+      MapSet.member?(scoped_ids, fixtures.out_of_cycle_issue.id) ->
+        "team + current_cycle returned an issue that belongs to no cycle"
+
+      MapSet.member?(scoped_ids, fixtures.future_cycle_issue.id) ->
+        "team + current_cycle returned an issue from a cycle that has not started, so cycle.isActive matches cycle membership rather than the running cycle"
+
+      true ->
+        nil
+    end
+  end
+
+  # Registers its own archive the moment the issue exists, so a scope issue can never be created
+  # without a discard attached to it.
+  defp create_scope_issue!(team, state, label) do
+    issue = create_issue!(team["id"], nil, state["id"], "Symphony live cycle scope #{label} #{System.unique_integer([:positive])}")
+
+    on_exit(fn -> archive_issue(issue.id) end)
+
+    issue
   end
 
   defp fetch_team!(team_key) do
@@ -190,15 +433,18 @@ defmodule SymphonyElixir.LiveE2ETest do
   end
 
   defp create_issue!(team_id, project_id, state_id, title) do
-    issue =
-      @create_issue_mutation
-      |> graphql_data!(%{
+    variables =
+      %{
         teamId: team_id,
-        projectId: project_id,
         title: title,
         description: title,
         stateId: state_id
-      })
+      }
+      |> maybe_put_project_id(project_id)
+
+    issue =
+      @create_issue_mutation
+      |> graphql_data!(variables)
       |> fetch_successful_entity!("issueCreate", "issue")
 
     %Issue{
@@ -211,6 +457,109 @@ defmodule SymphonyElixir.LiveE2ETest do
       labels: [],
       blocked_by: []
     }
+  end
+
+  # A nil project id is dropped from the variables map rather than sent as an explicit null: a
+  # GraphQL variable that is absent at runtime is omitted from the input object entirely, so Linear
+  # sees an issueCreate with no projectId key at all.
+  defp maybe_put_project_id(variables, project_id) when is_binary(project_id) do
+    Map.put(variables, :projectId, project_id)
+  end
+
+  defp maybe_put_project_id(variables, nil), do: variables
+
+  defp fetch_team_cycles!(team_id) when is_binary(team_id) do
+    future_cycle_not_before =
+      DateTime.utc_now()
+      |> DateTime.truncate(:second)
+      |> DateTime.add(@future_cycle_start_margin_seconds, :second)
+      |> DateTime.to_iso8601()
+
+    @team_cycles_query
+    |> graphql_data!(%{id: team_id, futureCycleNotBefore: future_cycle_not_before})
+    |> get_in(["team"])
+    |> case do
+      %{"cycles" => %{"nodes" => nodes}} = team_cycles when is_list(nodes) -> team_cycles
+      payload -> flunk("expected a team cycles payload for #{inspect(team_id)}, got: #{inspect(payload)}")
+    end
+  end
+
+  # Borrows the team's own running cycle when it has one. Linear rejects cycles that overlap an
+  # existing one, and a scenario that minted a cycle it did not need would leak one into a real
+  # workspace on every run. Only a cycle this call creates gets an archive registered, so a borrowed
+  # cycle — a real team's running sprint — is never archived.
+  defp ensure_active_cycle!(team_cycles) do
+    case team_cycles["activeCycle"] do
+      %{"id" => cycle_id} = cycle when is_binary(cycle_id) ->
+        cycle
+
+      _no_active_cycle ->
+        now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+        create_and_discard_cycle!(team_cycles["id"], DateTime.add(now, -1, :day), DateTime.add(now, 13, :day), "active")
+    end
+  end
+
+  # Same borrow-first rule, and it matters more here than for the active cycle. A team with a cycle
+  # cadence — precisely the audience for a current_cycle selector — already has Linear's auto-scheduled
+  # upcoming cycle sitting in the window just after the active one, so minting one there would be
+  # rejected as an overlap and flunk at the very first fixture, before any assertion runs.
+  defp ensure_future_cycle!(team_cycles, active_cycle) do
+    case get_in(team_cycles, ["cycles", "nodes"]) do
+      [%{"id" => cycle_id} = cycle | _rest] when is_binary(cycle_id) ->
+        cycle
+
+      _no_future_cycle ->
+        # A full day after the active cycle ends, so the two windows cannot overlap. Reached only when
+        # the team has no future cycle at all, so there is nothing else to collide with either.
+        starts_at = active_cycle |> cycle_ends_at!() |> DateTime.add(1, :day)
+
+        create_and_discard_cycle!(team_cycles["id"], starts_at, DateTime.add(starts_at, 14, :day), "future")
+    end
+  end
+
+  defp create_and_discard_cycle!(team_id, %DateTime{} = starts_at, %DateTime{} = ends_at, label) do
+    cycle = create_cycle!(team_id, starts_at, ends_at, label)
+
+    on_exit(fn -> archive_cycle(cycle["id"]) end)
+
+    cycle
+  end
+
+  defp create_cycle!(team_id, %DateTime{} = starts_at, %DateTime{} = ends_at, label) do
+    @create_cycle_mutation
+    |> graphql_data!(%{
+      teamId: team_id,
+      startsAt: DateTime.to_iso8601(starts_at),
+      endsAt: DateTime.to_iso8601(ends_at),
+      name: "symphony-live-#{label}-cycle-#{System.unique_integer([:positive])}"
+    })
+    |> fetch_successful_entity!("cycleCreate", "cycle")
+  end
+
+  defp cycle_ends_at!(%{"endsAt" => ends_at}) when is_binary(ends_at) do
+    case DateTime.from_iso8601(ends_at) do
+      {:ok, datetime, _utc_offset} -> DateTime.truncate(datetime, :second)
+      {:error, reason} -> flunk("expected an ISO8601 endsAt on the active cycle, got #{inspect(ends_at)}: #{inspect(reason)}")
+    end
+  end
+
+  defp cycle_ends_at!(cycle), do: flunk("expected the active cycle to expose endsAt, got: #{inspect(cycle)}")
+
+  # Strict, unlike the cleanup mutations: a silently failed cycle attachment would surface as the
+  # scope assertion failing, which reads as "cycle.isActive is broken" when it is not.
+  defp set_issue_cycle!(issue_id, cycle_id) when is_binary(issue_id) and (is_binary(cycle_id) or is_nil(cycle_id)) do
+    @set_issue_cycle_mutation
+    |> graphql_data!(%{id: issue_id, cycleId: cycle_id})
+    |> fetch_successful_entity!("issueUpdate", "issue")
+  end
+
+  defp archive_cycle(cycle_id) when is_binary(cycle_id) do
+    update_entity(@archive_cycle_mutation, %{id: cycle_id}, "cycleArchive", "cycle")
+  end
+
+  defp archive_issue(issue_id) when is_binary(issue_id) do
+    update_entity(@archive_issue_mutation, %{id: issue_id}, "issueArchive", "issue")
   end
 
   defp complete_project(project_id, completed_status_id)

@@ -3,8 +3,10 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
   """
 
+  alias SymphonyElixir.Config
   alias SymphonyElixir.LogFile
   alias SymphonyElixir.MCP.LinearServer
+  alias SymphonyElixir.Tracker
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @switches [
@@ -22,6 +24,7 @@ defmodule SymphonyElixir.CLI do
           required(:set_logs_root) => (String.t() -> :ok | {:error, term()}),
           required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
           required(:ensure_all_started) => (-> ensure_started_result()),
+          required(:preflight) => (-> :ok | {:error, term()}),
           optional(:ensure_linear_mcp_started) => (-> ensure_started_result()),
           optional(:configure_linear_mcp_logger) => (-> :ok),
           optional(:serve_linear_mcp) => (-> :ok)
@@ -84,15 +87,66 @@ defmodule SymphonyElixir.CLI do
     if deps.file_regular?.(expanded_path) do
       :ok = deps.set_workflow_file_path.(expanded_path)
 
-      case deps.ensure_all_started.() do
-        {:ok, _started_apps} ->
-          :ok
-
-        {:error, reason} ->
-          {:error, "Failed to start Symphony with workflow #{expanded_path}: #{inspect(reason)}"}
-      end
+      # Resolve the scope before starting the scheduling loop: a bad scope would otherwise
+      # dispatch work (workspace, clone, agent) before preflight could halt the VM.
+      with :ok <- handle_preflight(expanded_path, deps), do: start_application(expanded_path, deps)
     else
       {:error, "Workflow file not found: #{expanded_path}"}
+    end
+  end
+
+  defp handle_preflight(expanded_path, deps) do
+    case deps.preflight.() do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Tracker preflight failed for workflow #{expanded_path}: #{format_preflight_error(reason)}"}
+    end
+  end
+
+  # Runs before the supervision tree, so it starts only the HTTP client it needs.
+  defp run_tracker_preflight do
+    # The rotating disk handler is installed by `SymphonyElixir.start_runtime/0`, which has not run
+    # yet, so without this every preflight warning would reach stdout only and never the durable
+    # log file operators are told to read. `configure/0` removes the handler it owns before adding
+    # it again, so `start_runtime/0`'s later call stays correct.
+    :ok = LogFile.configure()
+
+    case offline_tracker_settings() do
+      {:ok, settings} ->
+        with {:ok, _started_apps} <- Application.ensure_all_started(:req) do
+          Tracker.preflight(settings.tracker)
+        end
+
+      # An unloadable or invalid workflow is left to application start, which stops on the same
+      # reason and reports it with the message that names the real problem. Preflighting first
+      # would replace that message with whatever Linear said, and would issue a live request for
+      # a configuration about to be rejected offline.
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  # `Config.validate!/0` reloads and validates `WORKFLOW.md` entirely offline, so the whole gate
+  # runs before the supervision tree and before any tracker request.
+  defp offline_tracker_settings do
+    with :ok <- Config.validate!(), do: Config.settings()
+  end
+
+  defp format_preflight_error({:linear_preflight_failed, reasons}) when is_list(reasons) do
+    Enum.join(reasons, "; ")
+  end
+
+  defp format_preflight_error(reason), do: inspect(reason)
+
+  defp start_application(expanded_path, deps) do
+    case deps.ensure_all_started.() do
+      {:ok, _started_apps} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Failed to start Symphony with workflow #{expanded_path}: #{inspect(reason)}"}
     end
   end
 
@@ -109,6 +163,7 @@ defmodule SymphonyElixir.CLI do
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
       ensure_all_started: ensure_all_started,
+      preflight: &run_tracker_preflight/0,
       ensure_linear_mcp_started: fn -> Application.ensure_all_started(:req) end,
       configure_linear_mcp_logger: &configure_linear_mcp_logger/0,
       serve_linear_mcp: &serve_linear_mcp/0

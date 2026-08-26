@@ -8,7 +8,20 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     workspace = Path.join(System.tmp_dir!(), "some-workspace-#{System.unique_integer([:positive])}")
     File.mkdir_p!(workspace)
 
-    {:ok, session} = Claude.start_session(workspace, [])
+    # Injected rather than read from the real environment: `secret_environment_names` always lists
+    # `LINEAR_API_KEY` for a Linear tracker, so on a machine that exports one for the live e2e tests
+    # the ambient token would be what these assertions ran against — and would be printed verbatim
+    # by any failure diff.
+    secret_name = "LINEAR_API_KEY"
+    secret_value = "test-only-tracker-secret"
+
+    {:ok, session} =
+      Claude.start_session(workspace,
+        env_reader: fn
+          ^secret_name -> secret_value
+          _name -> nil
+        end
+      )
 
     on_exit(fn ->
       _ = Claude.stop_session(session)
@@ -29,9 +42,16 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
       |> File.read!()
       |> Jason.decode!()
 
-    encoded_config = Jason.encode!(config)
-    refute encoded_config =~ "LINEAR_API_KEY"
-    refute encoded_config =~ "token"
+    # The 0600 file asserted above is the only channel by which the tracker secret reaches the MCP
+    # server: `drive_port/6` unsets these same names in the agent's own environment. So an absent
+    # env map would leave the MCP server unauthenticated, and any key beyond the captured ones
+    # would widen what the file carries — hence equality rather than a substring refute.
+    assert session.secret_environment_names == [secret_name]
+    assert get_in(config, ["mcpServers", "symphony", "env"]) == %{secret_name => secret_value}
+
+    # The snapshot is a copy of the workflow file, which holds an unresolved `$LINEAR_API_KEY`
+    # reference in production. A resolved value landing here would put the secret in a second file.
+    refute File.read!(session.workflow_snapshot_path) =~ secret_value
 
     args = get_in(config, ["mcpServers", "symphony", "args"])
     assert "--linear-mcp" in args

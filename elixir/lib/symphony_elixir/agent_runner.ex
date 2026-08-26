@@ -232,7 +232,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp same_issue_state?(_current_state, _refreshed_state), do: false
 
   defp issue_routable?(%Issue{} = issue) do
-    Issue.routable?(issue, Config.settings!().tracker.required_labels)
+    Issue.routable?(issue, Map.take(Config.settings!().tracker, [:required_labels, :any_labels]))
   end
 
   defp selected_worker_host(nil, []), do: nil

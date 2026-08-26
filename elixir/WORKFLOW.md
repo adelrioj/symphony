@@ -2,8 +2,13 @@
 tracker:
   kind: linear
   provider:
+    # This repo scopes by project. The alternatives, documented in elixir/README.md:
+    #   team_keys: ["ENG"]      # one or more Linear team keys
+    #   current_cycle: true     # the team's active sprint; requires team_keys
+    # At least one of team_keys / current_cycle / project_slug is required.
     project_slug: "symphony-0c79b11b75ea"
   required_labels: []
+  # any_labels: []              # an issue must carry at least one of these, when non-empty
   active_states:
     - Todo
     - In Progress
@@ -107,9 +112,10 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - When meaningful out-of-scope improvements are discovered during execution,
   file a separate Linear issue instead of expanding scope. The follow-up issue
   must include a clear title, description, and acceptance criteria, be placed in
-  `Backlog`, be assigned to the same project as the current issue, link the
-  current issue as `related`, and use `blockedBy` when the follow-up depends on
-  the current issue.
+  `Backlog`, sit in the same tracker scope as the current issue (the same project
+  when a project is configured, otherwise the same team), link the current issue
+  as `related`, and use `blockedBy` when the follow-up depends on the current
+  issue.
 - Move status only when the matching quality bar is met.
 - Operate autonomously end-to-end unless blocked by missing requirements, secrets, or permissions.
 - Use the blocked-access escape hatch only for true external blockers (missing required tools/auth) after exhausting documented fallbacks.
@@ -303,7 +309,8 @@ Use this only when completion is blocked by missing required tools or missing au
 - Temporary proof edits are allowed only for local verification and must be reverted before commit.
 - If out-of-scope improvements are found, create a separate Backlog issue rather
   than expanding current scope, and include a clear
-  title/description/acceptance criteria, same-project assignment, a `related`
+  title/description/acceptance criteria, placement in the same tracker scope as
+  the current issue (the same project when one is configured), a `related`
   link to the current issue, and `blockedBy` when the follow-up depends on the
   current issue.
 - Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.

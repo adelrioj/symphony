@@ -52,7 +52,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_project_slug: nil
     )
 
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+    assert {:error, :missing_linear_scope} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: "   ",
@@ -66,7 +66,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_project_slug: ""
     )
 
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+    assert {:error, :missing_linear_scope} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_project_slug: "project",
@@ -108,6 +108,86 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+  end
+
+  # The two gates used to disagree: config-time validation demanded a project slug via
+  # `present_string?`, and the request-time read demanded one via `is_nil`. A team-only config was
+  # rejected by both; a config that satisfied only one of them would boot clean and then refuse
+  # every poll. Both gates now delegate to `Linear.Scope.validate/1`, so each accept case below
+  # drives both gates in one test.
+  test "a team_keys-only linear config is accepted by the config gate and the request gate" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => ["MDZ"]}
+    )
+
+    # Config gate: Config.validate!/0 -> Tracker.validate_config/1 -> Linear.Adapter.validate_config/1.
+    assert :ok = Config.validate!()
+
+    graphql_fun = fn _query, variables ->
+      send(self(), {:poll_page, variables.filter})
+
+      {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}
+    end
+
+    # Request gate: Linear.Client.configured_tracker_for_read/0, reached through the poll read.
+    assert {:ok, []} = Client.fetch_issues_by_states_for_test(["Todo"], graphql_fun)
+
+    # Asserting the emitted filter, not merely that the read was allowed: a request gate that fell
+    # back to the last-known-good settings would send a project conjunct instead of a team one.
+    assert_receive {:poll_page, filter}
+    assert filter[:and] == [%{or: [%{team: %{key: %{eqIgnoreCase: "MDZ"}}}]}]
+    refute Map.has_key?(filter, :cycle)
+  end
+
+  test "a team_keys plus current_cycle linear config is accepted by the config gate and the request gate" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => ["MDZ"], "current_cycle" => true}
+    )
+
+    # Config gate: Config.validate!/0 -> Tracker.validate_config/1 -> Linear.Adapter.validate_config/1.
+    assert :ok = Config.validate!()
+
+    graphql_fun = fn _query, variables ->
+      send(self(), {:poll_page, variables.filter})
+
+      {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}
+    end
+
+    # Request gate: Linear.Client.configured_tracker_for_read/0, reached through the poll read.
+    assert {:ok, []} = Client.fetch_issues_by_states_for_test(["Todo"], graphql_fun)
+
+    assert_receive {:poll_page, filter}
+    assert filter[:cycle] == %{isActive: %{eq: true}}
+    assert filter[:and] == [%{or: [%{team: %{key: %{eqIgnoreCase: "MDZ"}}}]}]
+  end
+
+  test "current_cycle without team_keys is rejected" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"current_cycle" => true}
+    )
+
+    assert {:error, :missing_linear_team_keys} = Config.validate!()
+  end
+
+  test "a non-boolean current_cycle is rejected" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => ["MDZ"], "current_cycle" => "yes"}
+    )
+
+    assert {:error, :invalid_linear_current_cycle} = Config.validate!()
+  end
+
+  test "a scalar team_keys is rejected" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_provider: %{"team_keys" => "MDZ"}
+    )
+
+    assert {:error, :invalid_linear_team_keys} = Config.validate!()
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -296,7 +376,7 @@ defmodule SymphonyElixir.CoreTest do
 
     previous_trap_exit = Process.flag(:trap_exit, true)
 
-    assert {:error, :missing_linear_project_slug} =
+    assert {:error, :missing_linear_scope} =
              Orchestrator.start_link(name: orchestrator_name)
 
     Process.flag(:trap_exit, previous_trap_exit)
@@ -334,7 +414,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_project_slug: nil
     )
 
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+    assert {:error, :missing_linear_scope} = Config.validate!()
     assert Config.settings!().tracker.kind == "memory"
 
     Process.exit(original_orchestrator_pid, :kill)
@@ -1060,15 +1140,16 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = wait_for_state(pid, &Map.has_key?(&1.retry_attempts, issue_id))
+    observed_at_ms = System.monotonic_time(:millisecond)
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_scheduled_between(due_at_ms, sent_at_ms, observed_at_ms, 1_000)
   end
 
   test "consecutive turn budget exhaustions park the issue as blocked" do
@@ -1173,14 +1254,15 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = wait_for_state(pid, &Map.has_key?(&1.retry_attempts, issue_id))
+    observed_at_ms = System.monotonic_time(:millisecond)
 
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_scheduled_between(due_at_ms, sent_at_ms, observed_at_ms, 40_000)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -1212,14 +1294,15 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = wait_for_state(pid, &Map.has_key?(&1.retry_attempts, issue_id))
+    observed_at_ms = System.monotonic_time(:millisecond)
 
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_scheduled_between(due_at_ms, sent_at_ms, observed_at_ms, 10_000)
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -1383,11 +1466,38 @@ defmodule SymphonyElixir.CoreTest do
     :sys.get_state(pid)
   end
 
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+  # The orchestrator computes `due_at_ms` as `t + backoff` for a `t` that is at or after the
+  # trigger and at or before the state read, so bracketing the trigger makes BOTH bounds exact:
+  # the schedule can be neither sooner than `sent_at_ms + backoff` nor later than
+  # `observed_at_ms + backoff`. Reading a remainder after the fact instead needed slack for
+  # however long the scheduler took, which is what made these assertions race under load.
+  defp assert_scheduled_between(due_at_ms, sent_at_ms, observed_at_ms, backoff_ms) do
+    assert due_at_ms - sent_at_ms >= backoff_ms
+    assert due_at_ms - observed_at_ms <= backoff_ms
+  end
 
-    assert remaining_ms >= min_remaining_ms
-    assert remaining_ms <= max_remaining_ms
+  # A fixed sleep before `:sys.get_state` is the other half of the same fragility. The timeout is
+  # generous on purpose: both bounds above are exact however long the transition takes, so
+  # waiting longer costs nothing and never weakens an assertion.
+  defp wait_for_state(pid, predicate, timeout_ms \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_state(pid, predicate, deadline)
+  end
+
+  defp do_wait_for_state(pid, predicate, deadline) do
+    state = :sys.get_state(pid)
+
+    cond do
+      predicate.(state) ->
+        state
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("timed out waiting for orchestrator state")
+
+      true ->
+        Process.sleep(10)
+        do_wait_for_state(pid, predicate, deadline)
+    end
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

@@ -40,7 +40,8 @@ defmodule SymphonyElixir.CLITest do
       ensure_all_started: fn ->
         send(parent, :started)
         {:ok, [:symphony_elixir]}
-      end
+      end,
+      preflight: fn -> :ok end
     }
 
     assert {:error, banner} = CLI.evaluate(["WORKFLOW.md"], deps)
@@ -61,7 +62,8 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      preflight: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag], deps)
@@ -83,7 +85,8 @@ defmodule SymphonyElixir.CLITest do
       end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      preflight: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag, workflow_path], deps)
@@ -102,7 +105,8 @@ defmodule SymphonyElixir.CLITest do
         :ok
       end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      preflight: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "--logs-root", "tmp/custom-logs", "WORKFLOW.md"], deps)
@@ -116,7 +120,8 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      preflight: fn -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
@@ -129,7 +134,8 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:error, :boom} end
+      ensure_all_started: fn -> {:error, :boom} end,
+      preflight: fn -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
@@ -143,10 +149,116 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+      preflight: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+  end
+
+  test "a failing preflight prevents the supervision tree from starting" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> flunk("application must not start when preflight fails") end,
+      preflight: fn -> {:error, {:linear_preflight_failed, ["unknown Linear team key \"NOPE\""]}} end
+    }
+
+    assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+    assert message =~ "Tracker preflight failed"
+    assert message =~ "NOPE"
+  end
+
+  test "a passing preflight starts the supervision tree" do
+    parent = self()
+
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn ->
+        send(parent, :started)
+        {:ok, [:symphony_elixir]}
+      end,
+      preflight: fn ->
+        send(parent, :preflighted)
+        :ok
+      end
+    }
+
+    assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+
+    # Drained in mailbox order: preflight must run before the supervision tree starts.
+    markers =
+      Enum.map(1..2, fn _ ->
+        receive do
+          marker -> marker
+        after
+          0 -> :no_message
+        end
+      end)
+
+    assert markers == [:preflighted, :started]
+  end
+
+  defmodule NeverCalledLinearClient do
+    def graphql(query, variables) do
+      send(self(), {:linear_request, query, variables})
+
+      # Also breaks the `:ok` assertion below if it is ever reached: an empty team page makes
+      # preflight fail, so a reintroduced ordering bug cannot pass quietly.
+      {:ok, %{"data" => %{"teams" => %{"nodes" => []}}}}
+    end
+  end
+
+  # `run/2` preflights before `deps.ensure_all_started` reaches `WorkflowStore.init/1`, where
+  # `Config.validate!/0` runs. Without an explicit offline gate, an operator with a blank endpoint
+  # got a Linear error instead of the config error that names the real problem, and Symphony
+  # issued a live request for a configuration it was about to reject offline.
+  test "an offline-invalid tracker config is never preflighted" do
+    previous_client = Application.get_env(:symphony_elixir, :linear_client_module)
+    Application.put_env(:symphony_elixir, :linear_client_module, NeverCalledLinearClient)
+
+    on_exit(fn ->
+      if is_nil(previous_client) do
+        Application.delete_env(:symphony_elixir, :linear_client_module)
+      else
+        Application.put_env(:symphony_elixir, :linear_client_module, previous_client)
+      end
+    end)
+
+    workflow_path = Workflow.workflow_file_path()
+
+    # Seeded valid first: `WorkflowStore` runs during tests, so `Config.settings/0` answers with
+    # the last known good config even after the file goes bad. Seeding a team-scoped config makes
+    # those stale settings the ones that DO query Linear, so only a real offline gate can keep the
+    # request from happening.
+    write_workflow_file!(workflow_path, tracker_project_slug: nil, tracker_provider: %{"team_keys" => ["MDZ"]})
+    assert :ok = Config.validate!()
+
+    log =
+      capture_log(fn ->
+        # Blank endpoint: rejected by `Linear.Adapter.validate_config/1` with no request at all,
+        # while `team_keys` stays non-empty so preflight would otherwise query Linear.
+        write_workflow_file!(workflow_path,
+          tracker_endpoint: "",
+          tracker_project_slug: nil,
+          tracker_provider: %{"team_keys" => ["MDZ"]}
+        )
+
+        assert {:error, :invalid_linear_endpoint} = Config.validate!()
+        assert :ok = CLI.evaluate([@ack_flag, workflow_path])
+      end)
+
+    refute_received {:linear_request, _query, _variables}
+
+    # Deferred, not swallowed: `WorkflowStore.init/1` is the boot step `deps.ensure_all_started`
+    # reaches, and it stops on the reason the CLI then reports verbatim.
+    assert {:stop, :invalid_linear_endpoint} = WorkflowStore.init([])
+    assert log =~ "invalid_linear_endpoint"
   end
 
   test "evaluate/2 with --linear-mcp loads the workflow and enters mcp mode" do
@@ -168,7 +280,8 @@ defmodule SymphonyElixir.CLITest do
       serve_linear_mcp: fn ->
         send(test_pid, :served)
         :ok
-      end
+      end,
+      preflight: fn -> :ok end
     }
 
     assert :ok = CLI.evaluate(["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"], deps)
@@ -194,7 +307,8 @@ defmodule SymphonyElixir.CLITest do
         Logger.error("Linear GraphQL request failed: :timeout")
         IO.write(protocol_output)
         :ok
-      end
+      end,
+      preflight: fn -> :ok end
     }
 
     stdout =
@@ -220,7 +334,8 @@ defmodule SymphonyElixir.CLITest do
       serve_linear_mcp: fn ->
         send(test_pid, :served)
         :ok
-      end
+      end,
+      preflight: fn -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate(["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"], deps)
