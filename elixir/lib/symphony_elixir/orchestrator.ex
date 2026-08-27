@@ -282,14 +282,16 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_turn_exhaustion(%State{} = state, issue_id, running_entry) do
     case Map.get(running_entry, :turns_exhausted_state) do
       state_name when is_binary(state_name) ->
-        count = next_turn_exhaustion_count(state, issue_id, state_name)
+        head = workspace_head(running_entry)
+        count = next_turn_exhaustion_count(state, issue_id, state_name, head)
 
         state = %{
           state
           | turn_exhaustions:
               Map.put(state.turn_exhaustions, issue_id, %{
                 state: normalize_issue_state(state_name),
-                count: count
+                count: count,
+                head: head
               })
         }
 
@@ -304,12 +306,40 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp next_turn_exhaustion_count(%State{} = state, issue_id, state_name) do
+  # Exhausting the turn budget is not by itself a wedge. A stage that only leaves its
+  # state once every task is done (subagent-driven development) ALWAYS burns its whole
+  # budget, so counting exhaustions alone parks tickets that are advancing normally.
+  # The distinguishing signal is the workspace HEAD: a run that exhausted its budget
+  # and left HEAD exactly where the previous exhausted run left it did no committed
+  # work, and only those runs accumulate toward max_turn_exhaustions.
+  #
+  # HEAD is nil when it cannot be read (no workspace recorded, a remote worker_host,
+  # or git failing): unreadable falls back to the old exhaustion-only counting rather
+  # than to never parking, so a wedge is still bounded.
+  defp next_turn_exhaustion_count(%State{} = state, issue_id, state_name, head) do
     normalized_state = normalize_issue_state(state_name)
 
     case Map.get(state.turn_exhaustions, issue_id) do
-      %{state: ^normalized_state, count: count} -> count + 1
-      _ -> 1
+      %{state: ^normalized_state, count: count, head: previous_head} when previous_head == head ->
+        count + 1
+
+      %{state: ^normalized_state, count: count} ->
+        Logger.info("Turn budget exhausted for issue_id=#{issue_id} but the workspace advanced (#{inspect(head)}); resetting the exhaustion count from #{count}")
+
+        1
+
+      _ ->
+        1
+    end
+  end
+
+  defp workspace_head(running_entry) do
+    with nil <- Map.get(running_entry, :worker_host),
+         path when is_binary(path) and path != "" <- Map.get(running_entry, :workspace_path),
+         {output, 0} <- System.cmd("git", ["-C", path, "rev-parse", "HEAD"], stderr_to_stdout: true) do
+      String.trim(output)
+    else
+      _ -> nil
     end
   end
 
@@ -335,8 +365,9 @@ defmodule SymphonyElixir.Orchestrator do
     """
     Symphony parked this work item: #{error}.
 
-    Each of the last #{count} agent runs used all #{max_turns} of its turns and left the work item in the
-    same state, so Symphony stopped restarting it. Split the remaining work into smaller items, raise
+    Each of the last #{count} agent runs used all #{max_turns} of its turns, left the work item in the
+    same state, and ended with the workspace on the same commit as the run before it — no committed
+    work, so Symphony stopped restarting it. Split the remaining work into smaller items, raise
     `agent.max_turns`, or move this item back to an active state once it is workable again.
     """
   end

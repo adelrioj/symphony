@@ -1127,6 +1127,53 @@ defmodule SymphonyElixir.CoreTest do
     refute Map.has_key?(state.blocked, issue.id)
   end
 
+  test "an exhausted run that advanced the workspace restarts the count" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", max_turn_exhaustions: 2)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-turn-budget-head-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+    git!(workspace, ["init", "--quiet"])
+    git!(workspace, ["config", "user.email", "test@example.com"])
+    git!(workspace, ["config", "user.name", "test"])
+    commit!(workspace, "one")
+
+    issue = %Issue{id: "issue-turn-budget-head", identifier: "MT-564", state: "In Progress"}
+    pid = start_orchestrator!(:TurnBudgetHeadOrchestrator)
+
+    state = exhaust_turn_budget!(pid, issue, workspace)
+    assert %{count: 1, head: first_head} = state.turn_exhaustions[issue.id]
+    assert is_binary(first_head)
+
+    commit!(workspace, "two")
+
+    # Burned the whole budget again, but it committed: a healthy long stage, not a wedge.
+    state = exhaust_turn_budget!(pid, issue, workspace)
+    assert %{count: 1, head: second_head} = state.turn_exhaustions[issue.id]
+    assert second_head != first_head
+    refute Map.has_key?(state.blocked, issue.id)
+
+    # Exhausted with HEAD unchanged: that is the wedge the cap exists for.
+    state = exhaust_turn_budget!(pid, issue, workspace)
+    assert %{identifier: "MT-564"} = state.blocked[issue.id]
+  end
+
+  defp git!(workspace, args) do
+    {output, 0} = System.cmd("git", ["-C", workspace | args], stderr_to_stdout: true)
+    output
+  end
+
+  defp commit!(workspace, message) do
+    File.write!(Path.join(workspace, message), message)
+    git!(workspace, ["add", "."])
+    git!(workspace, ["commit", "--quiet", "-m", message])
+  end
+
   test "a worker exit that did not exhaust its turn budget clears the count" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", max_turn_exhaustions: 2)
 
@@ -1351,9 +1398,10 @@ defmodule SymphonyElixir.CoreTest do
     pid
   end
 
-  defp exhaust_turn_budget!(pid, issue), do: complete_worker_run!(pid, issue, true)
+  defp exhaust_turn_budget!(pid, issue, workspace_path \\ nil),
+    do: complete_worker_run!(pid, issue, true, workspace_path)
 
-  defp complete_worker_run!(pid, issue, turns_exhausted?) do
+  defp complete_worker_run!(pid, issue, turns_exhausted?, workspace_path \\ nil) do
     ref = make_ref()
 
     running_entry = %{
@@ -1362,7 +1410,8 @@ defmodule SymphonyElixir.CoreTest do
       identifier: issue.identifier,
       issue: issue,
       session_id: "thread-turn-budget",
-      started_at: DateTime.utc_now()
+      started_at: DateTime.utc_now(),
+      workspace_path: workspace_path
     }
 
     :sys.replace_state(pid, fn state ->
