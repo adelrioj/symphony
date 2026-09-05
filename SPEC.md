@@ -562,6 +562,18 @@ This object configures the Claude backend only. The Codex path remains behavior-
     required by the workflow.
   - The non-interactive `approval_prompt` MCP tool SHOULD be supplied through Claude's
     permission-prompt tool mechanism, not the normal allowed-tool list.
+- `extra_mcp_servers` (map of server name to server object, OPTIONAL)
+  - Default: `{}`.
+  - Additional MCP servers merged into the generated Claude MCP config. Each value is passed
+    through unchanged, so it uses Claude's own server object shape (`command`, `args`, `env`).
+  - Symphony's own `symphony` server MUST win a name collision. A workflow file cannot replace
+    the tracker server the agent runs on.
+  - Symphony launches the agent with `--strict-mcp-config`, so a server that is absent from this
+    map and from Symphony's own entry is unavailable to the agent.
+  - Tools from these servers MUST also appear in `allowed_tools`, which is passed as
+    `--allowedTools` and is therefore an access control, not a record.
+  - `WORKFLOW.md` is the agent's prompt. A credential MUST NOT be written here; supply it to the
+    server through a wrapper script or the environment instead.
 
 ### 5.4 Prompt Template Contract
 
@@ -719,6 +731,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `claude.linear_mcp_command`: executable path/name or null
 - `claude.linear_mcp_args`: list of strings, default `[]`
 - `claude.allowed_tools`: list of strings or null
+- `claude.extra_mcp_servers`: map of MCP server name to server object, default `{}`
 
 ## 7. Orchestration State Machine
 

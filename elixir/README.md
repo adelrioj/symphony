@@ -330,7 +330,16 @@ claude:
     - Bash
     - Edit
     - Write
+  extra_mcp_servers: {}
 ```
+
+`extra_mcp_servers` merges additional MCP servers into the generated config, keyed by server name
+and holding Claude's own server object (`command`, `args`, `env`). Symphony passes
+`--strict-mcp-config`, so this block is the only way to reach a second server and `~/.claude.json`
+is ignored. The `symphony` key wins a name collision, so this block cannot displace the tracker
+server. Tools from an added server must also be listed in `allowed_tools`, because that list is
+passed as `--allowedTools`. `WORKFLOW.md` is the prompt itself, so pass a credential to an added
+server through a wrapper script rather than writing it here.
 
 `linear_mcp_command` is an executable path only. Symphony appends the required
 `--linear-mcp --workflow <absolute WORKFLOW.md>` flags itself. Claude permission prompts are routed
