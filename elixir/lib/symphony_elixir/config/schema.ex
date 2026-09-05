@@ -251,11 +251,14 @@ defmodule SymphonyElixir.Config.Schema do
       field(:linear_mcp_command, :string)
       field(:linear_mcp_args, {:array, :string}, default: [])
       field(:allowed_tools, {:array, :string})
+      field(:extra_mcp_servers, :map, default: %{})
     end
+
+    @cast_fields [:command, :args, :linear_mcp_command, :linear_mcp_args, :allowed_tools, :extra_mcp_servers]
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
-      cast(schema, attrs, [:command, :args, :linear_mcp_command, :linear_mcp_args, :allowed_tools], empty_values: [])
+      cast(schema, attrs, @cast_fields, empty_values: [])
     end
   end
 

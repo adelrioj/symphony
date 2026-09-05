@@ -163,14 +163,18 @@ defmodule SymphonyElixir.Agent.Claude do
   end
 
   defp mcp_config(workflow_path, command, claude, tracker_env) do
+    # `argv/3` passes `--strict-mcp-config`, so this map is the agent's entire server list and
+    # `~/.claude.json` is ignored. Configured servers are merged in on the left, which leaves
+    # `symphony` winning any name collision: a workflow file cannot displace the tracker server.
     %{
-      "mcpServers" => %{
-        "symphony" => %{
-          "command" => command || claude.linear_mcp_command || default_mcp_command(),
-          "args" => claude.linear_mcp_args ++ ["--linear-mcp", "--workflow", workflow_path],
-          "env" => tracker_env
-        }
-      }
+      "mcpServers" =>
+        Map.merge(claude.extra_mcp_servers || %{}, %{
+          "symphony" => %{
+            "command" => command || claude.linear_mcp_command || default_mcp_command(),
+            "args" => claude.linear_mcp_args ++ ["--linear-mcp", "--workflow", workflow_path],
+            "env" => tracker_env
+          }
+        })
     }
   end
 

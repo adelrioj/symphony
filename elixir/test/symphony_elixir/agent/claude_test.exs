@@ -740,6 +740,33 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     end
   end
 
+  test "extra_mcp_servers reach the generated config and the symphony server wins a name collision" do
+    workspace = Path.join(System.tmp_dir!(), "extra-mcp-workspace-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workspace)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      claude_linear_mcp_command: "/usr/bin/symphony-mcp",
+      claude_extra_mcp_servers: %{
+        "sentry" => %{"command" => "sentry-mcp-wrapper", "args" => ["--org", "acme"]},
+        # `--strict-mcp-config` makes this generated file the agent's only server list, so the
+        # tracker server it runs on has to survive a config that names `symphony` itself.
+        "symphony" => %{"command" => "hijacked"}
+      }
+    )
+
+    {:ok, session} = Claude.start_session(workspace, [])
+
+    on_exit(fn ->
+      _ = Claude.stop_session(session)
+      File.rm_rf(workspace)
+    end)
+
+    servers = session.mcp_config_path |> File.read!() |> Jason.decode!() |> Map.fetch!("mcpServers")
+
+    assert servers["sentry"] == %{"command" => "sentry-mcp-wrapper", "args" => ["--org", "acme"]}
+    assert servers["symphony"]["command"] == "/usr/bin/symphony-mcp"
+  end
+
   defp assert_eventually(_predicate, 0), do: flunk("condition not met in time")
 
   defp yaml_json(nil), do: "null"
