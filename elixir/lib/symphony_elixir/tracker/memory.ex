@@ -8,7 +8,7 @@ defmodule SymphonyElixir.Tracker.Memory do
   alias SymphonyElixir.Tracker.Issue
 
   @calls_key {__MODULE__, :calls}
-  @failures_key {__MODULE__, :failures}
+  @failures_key :memory_tracker_failures
 
   @type operation :: :create_comment | :update_issue_state
 
@@ -26,14 +26,16 @@ defmodule SymphonyElixir.Tracker.Memory do
   @spec reset() :: :ok
   def reset do
     Process.delete(@calls_key)
-    Process.delete(@failures_key)
+    Application.delete_env(:symphony_elixir, @failures_key)
     :ok
   end
 
+  # The application env, not the process dictionary: the caller under test may be another process
+  # (the orchestrator makes its own tracker calls), so a test process cannot inject a failure into
+  # a dictionary of its own. The env is global, so `TestSupport` calls `reset/0` after every test.
   @spec fail(operation()) :: :ok
   def fail(operation) when operation in [:create_comment, :update_issue_state] do
-    failures = Process.get(@failures_key, MapSet.new())
-    Process.put(@failures_key, MapSet.put(failures, operation))
+    Application.put_env(:symphony_elixir, @failures_key, MapSet.put(failures(), operation))
     :ok
   end
 
@@ -106,11 +108,9 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
-  defp failed?(operation) do
-    @failures_key
-    |> Process.get(MapSet.new())
-    |> MapSet.member?(operation)
-  end
+  defp failed?(operation), do: MapSet.member?(failures(), operation)
+
+  defp failures, do: Application.get_env(:symphony_elixir, @failures_key, MapSet.new())
 
   defp send_event(message) do
     case Application.get_env(:symphony_elixir, :memory_tracker_recipient) do
