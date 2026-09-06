@@ -296,6 +296,105 @@ defmodule SymphonyElixir.OrchestratorTest do
     assert_receive {:memory_tracker_state_update, "issue-claude-exhausted", "Blocked / Needs Attention"}, 5_000
   end
 
+  # Symphony moves a claimed work item itself. The prompt used to ask the agent to do it in
+  # step 1, and on 2026-09-05 an agent ran for 25 minutes without ever making the move, so a
+  # human reading the board saw an untouched work item. The orchestrator already knows it
+  # dispatched; bookkeeping it can do deterministically does not belong to a model.
+  test "a claimed work item is moved to In Progress by the orchestrator" do
+    {issue, pid} = start_claim_dispatch("issue-claim-todo", "MT-CLAIM-TODO", "Todo")
+
+    send(pid, :run_poll_cycle)
+
+    assert_receive {:memory_tracker_state_update, "issue-claim-todo", "In Progress"}, 5_000
+    assert issue.state == "Todo"
+  end
+
+  # A retry and a resume both re-dispatch a work item that is already In Progress. Neither may
+  # spend a tracker write saying what is already true.
+  test "a claimed work item already In Progress is not moved again" do
+    {_issue, pid} = start_claim_dispatch("issue-claim-active", "MT-CLAIM-ACTIVE", "In Progress")
+
+    log =
+      capture_log(fn ->
+        send(pid, :run_poll_cycle)
+
+        wait_for_state(pid, fn state -> MapSet.member?(state.claimed, "issue-claim-active") end, 10_000)
+      end)
+
+    assert log =~ "Dispatching issue to agent"
+    refute_receive {:memory_tracker_state_update, "issue-claim-active", _state}, 2_000
+  end
+
+  # The move is bookkeeping, not a precondition. Linear was unreachable from the host earlier on
+  # the same day the move was written; a tracker outage must not cost the run.
+  test "a failed claim state move is logged and the agent still runs" do
+    {_issue, pid} = start_claim_dispatch("issue-claim-fails", "MT-CLAIM-FAILS", "Todo")
+
+    Tracker.Memory.fail(:update_issue_state)
+
+    log =
+      capture_log(fn ->
+        send(pid, :run_poll_cycle)
+
+        wait_for_state(pid, fn state -> MapSet.member?(state.claimed, "issue-claim-fails") end, 10_000)
+      end)
+
+    assert log =~ "Claim state move failed"
+    assert log =~ "MT-CLAIM-FAILS"
+    assert log =~ "Dispatching issue to agent"
+  end
+
+  defp start_claim_dispatch(issue_id, identifier, state) do
+    tmp = Path.join(System.tmp_dir!(), "symphony-orchestrator-claim-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(tmp, "workspaces")
+    fake_claude = Path.join(tmp, "fake_claude")
+    File.mkdir_p!(workspace_root)
+
+    File.write!(fake_claude, """
+    #!/bin/sh
+    printf '%s\\n' '{"type":"system","subtype":"init","session_id":"orch-claim"}'
+    printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":10,"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"result":"done"}'
+    """)
+
+    File.chmod!(fake_claude, 0o700)
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    write_claude_dispatch_workflow!(workspace_root, fake_claude, 3,
+      active_states: ["Todo", "In Progress"],
+      backend_by_state: ~s({"todo": "claude", "in progress": "claude"})
+    )
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: identifier,
+      title: "Claim bookkeeping",
+      description: "The orchestrator owns the state move",
+      state: state,
+      url: "https://example.org/issues/#{identifier}",
+      labels: [],
+      dispatchable: true
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :"ClaimOrchestrator#{System.unique_integer([:positive])}")
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    on_exit(fn -> stop_orchestrator(pid) end)
+
+    wait_for_state(pid, fn state ->
+      state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    :sys.replace_state(pid, fn state ->
+      %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
+    end)
+
+    {issue, pid}
+  end
+
   defp wait_for_state(pid, predicate, timeout_ms \\ 1_000) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_state(pid, predicate, deadline)
@@ -356,12 +455,15 @@ defmodule SymphonyElixir.OrchestratorTest do
     end)
   end
 
-  defp write_claude_dispatch_workflow!(workspace_root, fake_claude, max_turn_exhaustions \\ 3) do
+  defp write_claude_dispatch_workflow!(workspace_root, fake_claude, max_turn_exhaustions \\ 3, opts \\ []) do
+    active_states = Keyword.get(opts, :active_states, ["Implemented"])
+    backend_by_state = Keyword.get(opts, :backend_by_state, ~s({"implemented": "claude"}))
+
     File.write!(Workflow.workflow_file_path(), """
     ---
     tracker:
       kind: memory
-      active_states: ["Implemented"]
+      active_states: #{Jason.encode!(active_states)}
       terminal_states: ["Done"]
     polling:
       interval_ms: 30000
@@ -372,7 +474,7 @@ defmodule SymphonyElixir.OrchestratorTest do
       max_turns: 1
       max_turn_exhaustions: #{max_turn_exhaustions}
       backend: codex
-      backend_by_state: {"implemented": "claude"}
+      backend_by_state: #{backend_by_state}
       blocked_state: "Blocked / Needs Attention"
     codex:
       command: "/bin/false"

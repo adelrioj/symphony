@@ -1089,6 +1089,34 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  # Symphony owns this move, not the agent. The prompt asked for it and an agent that spent its turn
+  # budget elsewhere simply never made it, so a work item sat in the intake state for 25 minutes
+  # while that agent built and tested a fix. Do not put it back in the prompt.
+  #
+  # It runs after the spawn succeeds, so a failed spawn leaves no item showing progress with nothing
+  # behind it. A failed move is logged and nothing more: it is bookkeeping, not a precondition, and
+  # no later poll retries it because the item is already claimed.
+  #
+  # ponytail: the state name is fixed. Promote it to `agent.in_progress_state` if a deployment
+  # renames it; `agent.blocked_state` is the shape to copy.
+  @in_progress_state "In Progress"
+
+  defp claim_issue_state(%Issue{} = issue) do
+    if issue.state == @in_progress_state do
+      :ok
+    else
+      case Tracker.update_issue_state(issue.id, @in_progress_state) do
+        :ok ->
+          Logger.info("Moved claimed issue to #{@in_progress_state}: #{issue_context(issue)}")
+
+        {:error, reason} ->
+          Logger.warning("Claim state move failed for #{issue_context(issue)}: #{inspect(reason)} (issue stays in state=#{issue.state}; the agent runs anyway)")
+      end
+
+      :ok
+    end
+  end
+
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host, backend_module) do
     recipient = self()
 
@@ -1114,6 +1142,8 @@ defmodule SymphonyElixir.Orchestrator do
         ref = Process.monitor(pid)
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
+
+        claim_issue_state(issue)
 
         running =
           Map.put(state.running, issue.id, %{
