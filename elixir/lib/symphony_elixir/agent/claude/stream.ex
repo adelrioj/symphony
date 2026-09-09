@@ -15,6 +15,8 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
 
   defstruct session_id: nil,
             tokens: %{input: 0, output: 0, total: 0},
+            message_tokens: %{},
+            activity: nil,
             seconds_running: 0,
             summary: nil,
             blocked_action: nil,
@@ -24,6 +26,8 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   @type t :: %__MODULE__{
           session_id: String.t() | nil,
           tokens: %{input: non_neg_integer(), output: non_neg_integer(), total: non_neg_integer()},
+          message_tokens: %{optional(String.t()) => map()},
+          activity: String.t() | nil,
           seconds_running: non_neg_integer(),
           summary: String.t() | nil,
           blocked_action: String.t() | nil,
@@ -35,6 +39,8 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
           event: atom(),
           timestamp: DateTime.t(),
           session_id: String.t() | nil,
+          usage_scope: :turn,
+          payload: String.t(),
           usage: %{input_tokens: non_neg_integer(), output_tokens: non_neg_integer(), total_tokens: non_neg_integer()}
         }
 
@@ -63,7 +69,7 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   def step(%{"type" => type, "message" => message}, acc) when type in ["assistant", "user"] and is_map(message) do
     updated_acc =
       acc
-      |> apply_usage(Map.get(message, "usage"))
+      |> apply_usage(message)
       |> apply_content(Map.get(message, "content", []))
 
     update =
@@ -73,6 +79,9 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
 
         is_map(Map.get(message, "usage")) ->
           worker_update(:usage_updated, updated_acc)
+
+        updated_acc.activity != acc.activity ->
+          worker_update(:notification, updated_acc)
 
         true ->
           nil
@@ -88,6 +97,7 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
         seconds_running: div(Map.get(event, "duration_ms", acc.seconds_running * 1000), 1000),
         tokens: merge_tokens(acc.tokens, Map.get(event, "usage")),
         summary: Map.get(event, "result", acc.summary),
+        activity: result_activity(event, acc.activity),
         result_status: result_status(event)
     }
 
@@ -152,17 +162,33 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
 
   defp log_discarded_error(_acc), do: :ok
 
-  defp apply_usage(acc, nil), do: acc
-  defp apply_usage(acc, usage) when is_map(usage), do: %{acc | tokens: merge_tokens(acc.tokens, usage)}
-  defp apply_usage(acc, _usage), do: acc
+  defp apply_usage(acc, %{"usage" => usage} = message) when is_map(usage) do
+    id = Map.get(message, "id")
+    previous = Map.get(acc.message_tokens, id, %{input: 0, output: 0, total: 0})
+    current = Map.merge(previous, merge_tokens(previous, usage), fn _key, old, new -> max(old, new) end)
+    tokens = Map.new(acc.tokens, fn {key, value} -> {key, value + max(current[key] - previous[key], 0)} end)
+
+    # Claude can emit several content blocks for one message ID. Its usage is
+    # per message, whereas the final result carries the whole invocation total.
+    message_tokens =
+      if is_binary(id), do: Map.put(acc.message_tokens, id, current), else: acc.message_tokens
+
+    %{acc | tokens: tokens, message_tokens: message_tokens}
+  end
+
+  defp apply_usage(acc, _message), do: acc
 
   defp apply_content(acc, content) when is_list(content) do
     Enum.reduce(content, acc, fn
       %{"type" => "tool_use", "name" => @approval_tool, "input" => input}, inner ->
-        %{inner | blocked_action: blocked_action_text(input)}
+        action = blocked_action_text(input)
+        %{inner | blocked_action: action, activity: "Awaiting approval"}
 
       %{"type" => "text", "text" => text}, inner when is_binary(text) ->
-        %{inner | summary: append_text(inner.summary, text)}
+        %{inner | summary: append_text(inner.summary, text), activity: String.slice(text, 0, 500)}
+
+      %{"type" => "tool_use", "name" => name}, inner when is_binary(name) ->
+        %{inner | activity: "Using tool: " <> String.slice(name, 0, 200)}
 
       _content, inner ->
         inner
@@ -174,7 +200,11 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   defp merge_tokens(current, nil), do: current
 
   defp merge_tokens(current, usage) when is_map(usage) do
-    input = Map.get(usage, "input_tokens", current.input)
+    input =
+      Map.get(usage, "input_tokens", current.input) +
+        Map.get(usage, "cache_creation_input_tokens", 0) +
+        Map.get(usage, "cache_read_input_tokens", 0)
+
     output = Map.get(usage, "output_tokens", current.output)
     total = Map.get(usage, "total_tokens", input + output)
     %{input: input, output: output, total: total}
@@ -193,11 +223,20 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   defp blocked_action_text(input) when is_map(input), do: Map.get(input, "action") || Jason.encode!(input)
   defp blocked_action_text(input), do: to_string(input)
 
+  defp result_activity(event, previous) do
+    case result_status(event) do
+      {:error, subtype} -> "Claude failed: #{subtype}"
+      :done -> "Completed: " <> String.slice(Map.get(event, "result") || previous || "Claude turn", 0, 500)
+    end
+  end
+
   defp worker_update(kind, acc) do
     %{
       event: kind,
       timestamp: DateTime.utc_now(),
       session_id: acc.session_id,
+      usage_scope: :turn,
+      payload: acc.activity || "Claude #{kind}",
       usage: %{
         input_tokens: Map.get(acc.tokens, :input, 0),
         output_tokens: Map.get(acc.tokens, :output, 0),

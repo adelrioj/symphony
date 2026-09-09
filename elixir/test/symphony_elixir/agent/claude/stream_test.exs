@@ -88,6 +88,17 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
     assert {:ok, %Result{status: :blocked, blocked_action: "approve me"}} = Stream.fold(events, 0)
   end
 
+  test "failure activity reports the outcome instead of retaining the last successful action" do
+    {acc, _} =
+      Stream.step(%{"type" => "assistant", "message" => %{"content" => [%{"type" => "text", "text" => "Reading code"}]}})
+
+    {_, update} = Stream.step(%{"type" => "result", "is_error" => true, "subtype" => "error_max_turns"}, acc)
+
+    message = SymphonyElixir.StatusDashboard.humanize_codex_message(%{event: update.event, message: update.payload})
+    assert message =~ "error_max_turns"
+    refute message =~ "Reading code"
+  end
+
   test "empty successful stream still reports a stream error" do
     assert {:error, {:claude_stream, "stream ended without a result event"}} = Stream.fold([], 0)
     assert {:error, {:claude_stream, "stream ended without a result event"}} = Stream.fold([], nil)
