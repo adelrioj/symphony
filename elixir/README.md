@@ -349,6 +349,14 @@ through `--permission-prompt-tool mcp__symphony__approval_prompt`, not through t
 Claude currently uses the shared `codex.turn_timeout_ms` and `codex.stall_timeout_ms` settings for
 turn and stall timeouts.
 
+Claude telemetry uses the existing dashboard and JSON token fields (including the legacy
+`codex_totals` name). Input totals include uncached, cache-write, and cache-read tokens; they
+measure usage, not billing cost. Message IDs prevent repeated content blocks from counting
+twice, and the final invocation total reconciles live estimates. Each fresh Claude turn starts
+its usage baseline at zero while the worker and process totals continue accumulating.
+Activity shows bounded assistant text, tool names without arguments, and completion/failure
+outcomes. These counters are in memory: a service restart clears them.
+
 For SSH workers, each worker must be able to resolve `claude.command` and either
 `claude.linear_mcp_command` or `symphony` on `PATH`; worker-side tracker environment variables are
 not required. At session start the orchestrator captures adapter-declared tracker secret values and

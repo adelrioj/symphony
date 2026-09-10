@@ -1716,6 +1716,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp blocked_issue_url(_metadata), do: nil
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
+    running_entry = reset_turn_token_usage(running_entry, update)
     token_delta = extract_token_delta(running_entry, update)
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
     codex_output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
@@ -1744,6 +1745,18 @@ defmodule SymphonyElixir.Orchestrator do
       token_delta
     }
   end
+
+  defp reset_turn_token_usage(entry, %{event: :session_started, usage_scope: :turn}) do
+    # Claude starts a fresh invocation each turn. Keep the worker's accumulated
+    # totals, but measure this invocation from zero rather than the previous one.
+    Map.merge(entry, %{
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0
+    })
+  end
+
+  defp reset_turn_token_usage(entry, _update), do: entry
 
   defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
        when is_binary(pid),
@@ -1947,6 +1960,10 @@ defmodule SymphonyElixir.Orchestrator do
       delta: max(delta, 0),
       reported: if(is_integer(next_total), do: next_total, else: prev_reported)
     }
+  end
+
+  defp extract_token_usage(%{usage_scope: :turn, usage: usage}) when is_map(usage) do
+    if integer_token_map?(usage), do: usage, else: %{}
   end
 
   defp extract_token_usage(update) do

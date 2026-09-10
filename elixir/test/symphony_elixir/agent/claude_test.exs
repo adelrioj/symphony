@@ -630,7 +630,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     assert :ok = Claude.stop_session(session)
 
     usage = %{input_tokens: 7, output_tokens: 8, total_tokens: 15}
-    blocked_usage = %{input_tokens: 1, output_tokens: 1, total_tokens: 2}
+    blocked_usage = %{input_tokens: 8, output_tokens: 9, total_tokens: 17}
 
     assert_received {:claude_update, %{event: :session_started, session_id: "event-run"}}
     assert_received {:claude_update, %{event: :usage_updated, usage: ^usage}}

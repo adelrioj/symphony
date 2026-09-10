@@ -200,6 +200,114 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(completed_state.codex_totals.seconds_running)
   end
 
+  test "Claude stream usage reaches snapshots without double-counting messages, results or later turns" do
+    alias SymphonyElixir.Agent.Claude.Stream
+
+    issue = %Issue{id: "claude-usage", identifier: "MT-203", state: "In Progress"}
+    {:ok, pid} = start_supervised({Orchestrator, name: Module.concat(__MODULE__, ClaudeUsage)})
+    process_ref = make_ref()
+
+    :sys.replace_state(pid, fn state ->
+      entry = %{
+        pid: self(),
+        ref: process_ref,
+        identifier: issue.identifier,
+        issue: issue,
+        session_id: nil,
+        turn_count: 0,
+        last_codex_message: nil,
+        last_codex_timestamp: nil,
+        last_codex_event: nil,
+        started_at: DateTime.utc_now()
+      }
+
+      %{state | running: %{issue.id => entry}, claimed: MapSet.new([issue.id])}
+    end)
+
+    events = [
+      %{"type" => "system", "subtype" => "init", "session_id" => "claude-first"},
+      %{
+        "type" => "assistant",
+        "message" => %{
+          "id" => "msg-1",
+          "usage" => %{"input_tokens" => 10, "cache_creation_input_tokens" => 20, "cache_read_input_tokens" => 30, "output_tokens" => 4},
+          "content" => [%{"type" => "text", "text" => "Inspecting failure"}]
+        }
+      },
+      %{
+        "type" => "assistant",
+        "message" => %{
+          "id" => "msg-1",
+          "usage" => %{"input_tokens" => 10, "cache_creation_input_tokens" => 20, "cache_read_input_tokens" => 30, "output_tokens" => 6},
+          "content" => [%{"type" => "tool_use", "name" => "Read", "input" => %{"file_path" => "/private/path"}}]
+        }
+      },
+      %{
+        "type" => "assistant",
+        "message" => %{
+          "id" => "msg-2",
+          "usage" => %{"input_tokens" => 2, "cache_read_input_tokens" => 60, "output_tokens" => 3}
+        }
+      }
+    ]
+
+    # Replaying an older block and then the newest one must not charge twice.
+    events = List.insert_at(events, 3, Enum.at(events, 1)) |> List.insert_at(4, Enum.at(events, 2))
+
+    acc =
+      Enum.reduce(events, Stream.new(), fn event, acc ->
+        {acc, update} = Stream.step(event, acc)
+        if update, do: send(pid, {:codex_worker_update, issue.id, update})
+        acc
+      end)
+
+    assert %{running: [live]} = GenServer.call(pid, :snapshot)
+    assert {live.codex_input_tokens, live.codex_output_tokens, live.codex_total_tokens} == {122, 9, 131}
+    assert SymphonyElixir.StatusDashboard.humanize_codex_message(live.last_codex_message) =~ "Read"
+    refute SymphonyElixir.StatusDashboard.humanize_codex_message(live.last_codex_message) =~ "/private/path"
+
+    {_, completed} =
+      Stream.step(
+        %{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "usage" => %{"input_tokens" => 12, "cache_creation_input_tokens" => 20, "cache_read_input_tokens" => 90, "output_tokens" => 9},
+          "result" => "Verified repair"
+        },
+        acc
+      )
+
+    send(pid, {:codex_worker_update, issue.id, completed})
+    assert %{running: [finished]} = GenServer.call(pid, :snapshot)
+    assert finished.codex_total_tokens == 131
+    assert SymphonyElixir.StatusDashboard.humanize_codex_message(finished.last_codex_message) =~ "Verified repair"
+
+    Enum.reduce(
+      [
+        %{"type" => "system", "subtype" => "init", "session_id" => "claude-second"},
+        %{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "usage" => %{"input_tokens" => 1, "cache_creation_input_tokens" => 2, "cache_read_input_tokens" => 3, "output_tokens" => 2},
+          "result" => "Finished follow-up"
+        }
+      ],
+      Stream.new(),
+      fn event, acc ->
+        {acc, update} = Stream.step(event, acc)
+        send(pid, {:codex_worker_update, issue.id, update})
+        acc
+      end
+    )
+
+    assert %{running: [resumed], codex_totals: totals} = GenServer.call(pid, :snapshot)
+    assert {resumed.codex_input_tokens, resumed.codex_output_tokens, resumed.codex_total_tokens} == {128, 11, 139}
+    assert totals.total_tokens == 139
+    assert resumed.turn_count == 2
+  end
+
   test "orchestrator snapshot tracks turn completed usage when present" do
     issue_id = "issue-turn-completed-usage"
 
