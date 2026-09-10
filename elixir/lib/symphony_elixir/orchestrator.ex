@@ -1097,23 +1097,29 @@ defmodule SymphonyElixir.Orchestrator do
   # behind it. A failed move is logged and nothing more: it is bookkeeping, not a precondition, and
   # no later poll retries it because the item is already claimed.
   #
-  # ponytail: the state name is fixed. Promote it to `agent.in_progress_state` if a deployment
-  # renames it; `agent.blocked_state` is the shape to copy.
-  @in_progress_state "In Progress"
-
+  # `agent.in_progress_state` names the state. An empty value turns the move off: a lane that
+  # dispatches from a review state must not hand its work item back to the lanes that poll
+  # `In Progress`.
   defp claim_issue_state(%Issue{} = issue) do
-    if issue.state == @in_progress_state do
-      :ok
-    else
-      case Tracker.update_issue_state(issue.id, @in_progress_state) do
-        :ok ->
-          Logger.info("Moved claimed issue to #{@in_progress_state}: #{issue_context(issue)}")
+    target = Config.settings!().agent.in_progress_state
 
-        {:error, reason} ->
-          Logger.warning("Claim state move failed for #{issue_context(issue)}: #{inspect(reason)} (issue stays in state=#{issue.state}; the agent runs anyway)")
-      end
+    cond do
+      target in [nil, ""] ->
+        :ok
 
-      :ok
+      issue.state == target ->
+        :ok
+
+      true ->
+        case Tracker.update_issue_state(issue.id, target) do
+          :ok ->
+            Logger.info("Moved claimed issue to #{target}: #{issue_context(issue)}")
+
+          {:error, reason} ->
+            Logger.warning("Claim state move failed for #{issue_context(issue)}: #{inspect(reason)} (issue stays in state=#{issue.state}; the agent runs anyway)")
+        end
+
+        :ok
     end
   end
 

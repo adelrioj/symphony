@@ -344,7 +344,32 @@ defmodule SymphonyElixir.OrchestratorTest do
     assert log =~ "Dispatching issue to agent"
   end
 
-  defp start_claim_dispatch(issue_id, identifier, state) do
+  # The QA lane dispatches from `In Review`. `In Progress` is an active state of the two
+  # other lanes, so a move there would hand the ticket back to them. An empty
+  # `agent.in_progress_state` turns the move off for that instance.
+  test "an empty agent.in_progress_state leaves a claimed work item in its state" do
+    {_issue, pid} = start_claim_dispatch("issue-claim-qa", "MT-CLAIM-QA", "In Review", in_progress_state: "")
+
+    log =
+      capture_log(fn ->
+        send(pid, :run_poll_cycle)
+
+        wait_for_state(pid, fn state -> MapSet.member?(state.claimed, "issue-claim-qa") end, 10_000)
+      end)
+
+    assert log =~ "Dispatching issue to agent"
+    refute_receive {:memory_tracker_state_update, "issue-claim-qa", _state}, 2_000
+  end
+
+  test "a configured agent.in_progress_state is the state a claimed work item moves to" do
+    {_issue, pid} = start_claim_dispatch("issue-claim-named", "MT-CLAIM-NAMED", "Todo", in_progress_state: "Doing")
+
+    send(pid, :run_poll_cycle)
+
+    assert_receive {:memory_tracker_state_update, "issue-claim-named", "Doing"}, 5_000
+  end
+
+  defp start_claim_dispatch(issue_id, identifier, state, opts \\ []) do
     tmp = Path.join(System.tmp_dir!(), "symphony-orchestrator-claim-#{System.unique_integer([:positive])}")
     workspace_root = Path.join(tmp, "workspaces")
     fake_claude = Path.join(tmp, "fake_claude")
@@ -359,9 +384,17 @@ defmodule SymphonyElixir.OrchestratorTest do
     File.chmod!(fake_claude, 0o700)
     on_exit(fn -> File.rm_rf(tmp) end)
 
-    write_claude_dispatch_workflow!(workspace_root, fake_claude, 3,
-      active_states: ["Todo", "In Progress"],
-      backend_by_state: ~s({"todo": "claude", "in progress": "claude"})
+    write_claude_dispatch_workflow!(
+      workspace_root,
+      fake_claude,
+      3,
+      Keyword.merge(
+        [
+          active_states: ["Todo", "In Progress", "In Review"],
+          backend_by_state: ~s({"todo": "claude", "in progress": "claude", "in review": "claude"})
+        ],
+        opts
+      )
     )
 
     issue = %Issue{
@@ -458,6 +491,7 @@ defmodule SymphonyElixir.OrchestratorTest do
   defp write_claude_dispatch_workflow!(workspace_root, fake_claude, max_turn_exhaustions \\ 3, opts \\ []) do
     active_states = Keyword.get(opts, :active_states, ["Implemented"])
     backend_by_state = Keyword.get(opts, :backend_by_state, ~s({"implemented": "claude"}))
+    in_progress_state = Keyword.get(opts, :in_progress_state, "In Progress")
 
     File.write!(Workflow.workflow_file_path(), """
     ---
@@ -476,6 +510,7 @@ defmodule SymphonyElixir.OrchestratorTest do
       backend: codex
       backend_by_state: #{backend_by_state}
       blocked_state: "Blocked / Needs Attention"
+      in_progress_state: #{Jason.encode!(in_progress_state)}
     codex:
       command: "/bin/false"
       turn_timeout_ms: 2000

@@ -162,6 +162,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:backend, :string, default: "codex")
       field(:backend_by_state, :map, default: %{})
       field(:blocked_state, :string, default: "Blocked / Needs Attention")
+      field(:in_progress_state, :string, default: "In Progress")
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -177,7 +178,8 @@ defmodule SymphonyElixir.Config.Schema do
           :max_concurrent_agents_by_state,
           :backend,
           :backend_by_state,
-          :blocked_state
+          :blocked_state,
+          :in_progress_state
         ],
         empty_values: []
       )
