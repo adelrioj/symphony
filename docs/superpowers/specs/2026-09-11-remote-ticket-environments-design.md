@@ -378,6 +378,33 @@ between independent deployments. If Cloud Workstations fails qualification, chan
 another Google-hosted product requires review; a local or self-managed VM fallback is
 not silently substituted for the approved managed profile.
 
+### GKE adoption does not change the default worker choice
+
+Cloud Workstations remains the preferred Google-managed worker provider to qualify,
+even if the deployment moves Symphony, application services, or review apps to GKE.
+Those placement decisions are independent: GKE can host the orchestrator and deployed
+applications while per-ticket development compute runs in Workstations. Any connection
+between them requires explicit network and permission configuration; workers do not
+receive broad cluster access merely because they belong to the same deployment.
+
+This is a compatibility-first choice for the initial five-execution target.
+Workstations documents an in-environment Docker daemon and persistent Docker data.
+That makes it the first candidate to validate, not proof that the complete Symphony
+execution lifecycle already works or that it will be cheaper than GKE workers.
+
+GKE Agent Sandbox is a stronger Kubernetes alternative when a deployment already
+operates GKE: Google manages the sandbox controller's lifecycle. That does not make
+every sandbox runtime equivalent to a complete Linux development machine. The usual
+gVisor runtime has compatibility restrictions, including privileged containers, so
+safe private-Docker operation must be demonstrated rather than assumed. Kata is an
+alternative, but Google explicitly excludes Kata management and troubleshooting from
+its product support and SLAs.
+
+Reconsider worker placement on GKE only after its chosen runtime passes the same
+compatibility, isolation, persistence, and recovery qualification, and an operational
+or cost comparison justifies the change. GKE adoption alone is not that evidence.
+This preference does not remove the customer-managed Kubernetes provider from scope.
+
 ### Other approaches considered
 
 - Commercial sandboxes such as Daytona and E2B remain alternatives, not additional
