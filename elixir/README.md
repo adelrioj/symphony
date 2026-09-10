@@ -303,6 +303,9 @@ codex:
 is `codex`. `agent.backend_by_state` overrides the backend for a tracker state after trimming and
 lowercasing the state key. `agent.blocked_state` is where Symphony parks a blocked backend result
 after posting the blocked comment when the selected adapter supports tracker writes.
+`agent.in_progress_state` is the state the orchestrator moves a claimed issue to right
+after a successful spawn (default `In Progress`). Set it to `""` for an instance that
+dispatches from a review state and must leave the issue where it found it.
 
 ```yaml
 agent:
@@ -310,6 +313,7 @@ agent:
   backend_by_state:
     implemented: claude
   blocked_state: "Blocked / Needs Attention"
+  in_progress_state: "In Progress"
 ```
 
 The Claude backend is optional. Install and authenticate the `claude` CLI on the orchestrator host
