@@ -1,7 +1,8 @@
 # Remote ticket execution environments
 
 Date: 2026-09-11
-Status: design sections approved; written specification awaiting user review
+Status: approved; implementation planning completed
+Implementation plan: [Remote ticket execution environments](../plans/2026-09-11-remote-ticket-environments.md)
 
 ## Problem and decision
 
