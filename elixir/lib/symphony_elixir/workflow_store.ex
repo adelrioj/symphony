@@ -15,7 +15,7 @@ defmodule SymphonyElixir.WorkflowStore do
   defmodule State do
     @moduledoc false
 
-    defstruct [:path, :stamp, :workflow, :settings]
+    defstruct [:path, :stamp, :workflow, :settings, :environment_guard]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -62,6 +62,16 @@ defmodule SymphonyElixir.WorkflowStore do
     end
   end
 
+  @spec protect_environment(binary() | nil) :: {:ok, reference()} | {:error, term()}
+  def protect_environment(identity) do
+    GenServer.call(__MODULE__, {:protect_environment, identity})
+  end
+
+  @spec release_environment(reference(), :empty_inventory) :: :ok | {:error, term()}
+  def release_environment(token, :empty_inventory) when is_reference(token) do
+    GenServer.call(__MODULE__, {:release_environment, token, :empty_inventory})
+  end
+
   @impl true
   def init(_opts) do
     case load_state(Workflow.workflow_file_path()) do
@@ -105,6 +115,25 @@ defmodule SymphonyElixir.WorkflowStore do
     end
   end
 
+  def handle_call({:protect_environment, identity}, _from, %State{} = state) do
+    current_identity = SymphonyElixir.ExecutionEnvironment.Config.identity(state.settings)
+
+    if identity == current_identity and (is_nil(state.environment_guard) or state.environment_guard.identity == identity) do
+      token = make_ref()
+      {:reply, {:ok, token}, %{state | environment_guard: %{identity: identity, token: token}}}
+    else
+      {:reply, {:error, :environment_identity_in_use}, state}
+    end
+  end
+
+  def handle_call({:release_environment, token, :empty_inventory}, _from, %State{environment_guard: %{token: token}} = state) do
+    {:reply, :ok, %{state | environment_guard: nil}}
+  end
+
+  def handle_call({:release_environment, _token, :empty_inventory}, _from, %State{} = state) do
+    {:reply, {:error, :invalid_environment_guard}, state}
+  end
+
   @impl true
   def handle_info(:poll, %State{} = state) do
     schedule_poll()
@@ -132,11 +161,22 @@ defmodule SymphonyElixir.WorkflowStore do
   defp reload_path(path, state) do
     case load_state(path) do
       {:ok, new_state} ->
-        {:ok, new_state}
+        publish_candidate(state, new_state)
 
       {:error, reason} ->
         log_reload_error(path, reason)
         {:error, reason, state}
+    end
+  end
+
+  defp publish_candidate(%State{environment_guard: nil}, new_state), do: {:ok, new_state}
+
+  defp publish_candidate(%State{environment_guard: guard} = state, new_state) do
+    if SymphonyElixir.ExecutionEnvironment.Config.identity(new_state.settings) == guard.identity do
+      {:ok, %{new_state | environment_guard: guard}}
+    else
+      log_reload_error(new_state.path, :environment_identity_in_use)
+      {:error, :environment_identity_in_use, state}
     end
   end
 
@@ -159,7 +199,9 @@ defmodule SymphonyElixir.WorkflowStore do
          {:ok, settings} <- Schema.parse(workflow.config),
          :ok <- Config.validate_settings(settings),
          {:ok, stamp} <- current_stamp(path) do
-      {:ok, %State{path: path, stamp: stamp, workflow: workflow, settings: settings}}
+      identity = SymphonyElixir.ExecutionEnvironment.Config.identity(settings)
+      guard = if is_nil(identity), do: nil, else: %{identity: identity, token: make_ref()}
+      {:ok, %State{path: path, stamp: stamp, workflow: workflow, settings: settings, environment_guard: guard}}
     else
       {:error, reason} ->
         {:error, reason}
