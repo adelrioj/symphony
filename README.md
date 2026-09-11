@@ -65,12 +65,13 @@ frozen dispatch queue from an idle deployment without exposing provider credenti
 
 See [managed operation and configuration](elixir/README.md#managed-ticket-environments) and
 [SPEC Appendix B](SPEC.md#appendix-b-managed-ticket-environments-optional) before enabling it.
-Neither provider has been live/production-qualified by this change. In particular, upstream Agent
-Sandbox v1.0.1 lacks authoritative child-create cleanup ordering acknowledgment: final Sandbox
-absence cannot currently be certified, and its cleanup finalizer and deployment guard remain held.
-Ordinary production startup also rejects this profile before ticket admission, so preparing the
-infrastructure cannot enable Kubernetes allocation while the ordering guarantee remains unresolved.
-Examples are references to operator-created infrastructure, not provisioning or live-use approval.
+Neither provider has been live/production-qualified by this change. The pinned upstream Agent Sandbox
+v1.0.1 baseline lacks authoritative child-create cleanup ordering acknowledgment. A candidate controller
+extension and Symphony consumer implement the `symphony-create-drain-v1` journal and durable cleanup
+receipts; unknown creates remain retained rather than being replayed or treated as absent.
+Production Kubernetes allocation remains unconditionally blocked. This implementation does not approve
+a replacement controller image/schema baseline, qualify infrastructure, or authorize deployment.
+Examples reference operator-created infrastructure; the existing VM remains independent of this gate.
 
 ---
 

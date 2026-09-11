@@ -22,6 +22,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
     _ -> {:error, {:unknown, :kubernetes_command_failed}}
   end
 
+  defp invoke(provider, :post, path, file, opts) do
+    timeout = max(1, min(20_000, remaining(opts)))
+    command = Keyword.get(opts, :command_fun, &Command.run/3)
+    args = ["--kubeconfig", provider["kubeconfig"], "--context", provider["context"], "--path", path, "--file", file, "--timeout-ms", to_string(timeout)]
+
+    case command.(System.find_executable("symphony-kubernetes-create") || "symphony-kubernetes-create", args, Keyword.merge(opts, timeout_ms: remaining(opts), max_output_bytes: 8_388_608)) do
+      {:ok, %{output: output, status: status}} -> decode(output, status, :post)
+      _ -> {:error, {:unknown, :kubernetes_command_failed}}
+    end
+  end
+
   defp invoke(provider, method, path, file, opts) do
     timeout = max(1, min(20_000, remaining(opts)))
     args = ["--kubeconfig", provider["kubeconfig"], "--context", provider["context"], "--request-timeout=#{timeout}ms"]
@@ -105,7 +116,6 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
 
   defp arguments(:get, path, _file), do: {:ok, ["get", "--raw", path]}
   defp arguments(:watch, path, _file), do: {:ok, ["get", "--raw", path]}
-  defp arguments(:post, path, file), do: {:ok, ["create", "--raw", query(path, %{"fieldValidation" => "Strict"}), "-f", file]}
   defp arguments(:delete, path, file), do: {:ok, ["delete", "--raw", path, "-f", file]}
 
   defp arguments(:patch, path, file) do

@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.KubernetesEnvironmentTest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.ExecutionEnvironment.{Config, Kubernetes, Operations, Record}
-  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Client
+  alias SymphonyElixir.ExecutionEnvironment.{Config, Kubernetes, Lifecycle, Operations, Record}
+  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Guard}
 
   test "a suspended sandbox with no visible pod is not physical stop evidence" do
     record = record(%{"authorized_pod_uids" => ["pod-before-partition"]})
@@ -88,6 +88,1040 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert api_state() == inventory
   end
 
+  test "cleanup retains storage before authoritative create-drain acknowledgement" do
+    {config, record, opts} = api_fixture(missing_ack: true)
+    assert {:ok, created} = Kubernetes.ensure(config, record, opts)
+    assert {:error, _, _} = Kubernetes.destroy(config, created, opts)
+    assert Map.has_key?(api_state()["persistentvolumeclaims"], "workspace-se-ticket")
+  end
+
+  test "ordinary destroy operation resumes a live ReadyToFinalize parent without rewriting its receipt" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+
+    command = fn exe, args, options ->
+      blocked =
+        "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes") and
+          Enum.any?(Jason.decode!(File.read!(arg(args, "--patch-file"))), &(&1["path"] == "/metadata/finalizers"))
+
+      if blocked, do: {:error, :timeout}, else: api_command(exe, args, options)
+    end
+
+    entry = Lifecycle.new(created, "cleanup", :cleanup)
+    assert {:error, _, retained} = Operations.run(Kubernetes, config, entry, :destroy, Keyword.put(opts, :command_fun, command))
+    ready = guard_data(record)
+    assert ready["phase"] == "ReadyToFinalize"
+    assert api_state()["sandboxes"][record.key]
+    assert {:ok, deleted} = Operations.run(Kubernetes, config, Lifecycle.new(retained, "retry", :cleanup), :destroy, opts)
+    assert deleted.absent?
+    complete = guard_data(record)
+    assert complete["phase"] == "Complete"
+    assert complete["record"] == ready["record"]
+    assert complete["evidence"] == ready["evidence"]
+    assert {:ok, []} = Kubernetes.discover(config, opts)
+    assert {:error, _, _} = Kubernetes.ensure(config, record, opts)
+  end
+
+  test "ordinary destroy operation resumes after parent deletion and does not rediscover completed ownership" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+
+    command = fn exe, args, options ->
+      target = guard_patch_target(args)
+      if target && target["phase"] == "Complete", do: {:error, :timeout}, else: api_command(exe, args, options)
+    end
+
+    assert {:error, _, _} = Operations.run(Kubernetes, config, Lifecycle.new(created, "cleanup", :cleanup), :destroy, Keyword.put(opts, :command_fun, command))
+    assert api_state()["sandboxes"] == %{}
+    assert {:ok, [recovered]} = Kubernetes.discover(config, opts)
+    assert {:ok, deleted} = Operations.run(Kubernetes, config, Lifecycle.new(recovered, "restart", :cleanup), :destroy, opts)
+    assert deleted.absent?
+    assert {:ok, []} = Kubernetes.discover(config, opts)
+  end
+
+  test "inspect keeps guard absent intent after a split guard and parent annotation write" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, captured} = Kubernetes.inspect(config, created, opts)
+    original = api_state()["sandboxes"][record.key]["metadata"]["annotations"]["symphony.dev/record"]
+
+    command = fn exe, args, options ->
+      if "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes") do
+        {:error, :timeout}
+      else
+        api_command(exe, args, options)
+      end
+    end
+
+    assert {:error, _, closing} = Kubernetes.put_intent(config, captured, %{desired: :absent}, Keyword.put(opts, :command_fun, command))
+    assert api_state()["sandboxes"][record.key]["metadata"]["annotations"]["symphony.dev/record"] == original
+    assert guard_data(record)["record"]["desired"] == "absent"
+    assert {:ok, observed} = Operations.run(Kubernetes, config, Lifecycle.new(closing, "inspect", :cleanup), :inspect, opts)
+    assert observed.desired == :absent
+    assert observed.metadata["volumes"] == guard_data(record)["record"]["metadata"]["volumes"]
+    assert {:error, _, _} = Kubernetes.start(config, observed, opts)
+  end
+
+  test "guard-only execution authorization survives stale parent annotations and unrelated parent status changes" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+
+    command = fn exe, args, options ->
+      blocked =
+        if "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes") do
+          Enum.any?(Jason.decode!(File.read!(arg(args, "--patch-file"))), fn op ->
+            if op["path"] == "/metadata/annotations" do
+              saved = Jason.decode!(op["value"]["symphony.dev/record"])
+              "pod-uid" in (saved["metadata"]["authorized_pod_uids"] || [])
+            else
+              false
+            end
+          end)
+        else
+          false
+        end
+
+      if blocked, do: {:error, :timeout}, else: api_command(exe, args, options)
+    end
+
+    assert {:error, _, unresolved} = Kubernetes.start(config, intended, Keyword.put(opts, :command_fun, command))
+    assert guard_data(record)["record"]["metadata"]["authorized_pod_uids"] == ["pod-uid"]
+    annotation = Jason.decode!(api_state()["sandboxes"][record.key]["metadata"]["annotations"]["symphony.dev/record"])
+    refute "pod-uid" in annotation["metadata"]["authorized_pod_uids"]
+    assert {:ok, ensured} = Kubernetes.ensure(config, created, opts)
+    assert ensured.metadata["authorized_pod_uids"] == ["pod-uid"]
+
+    command = fn exe, args, options ->
+      response = api_command(exe, args, options)
+
+      if "get" in args and String.contains?(arg(args, "--raw"), "/pods?") do
+        parent = api_state()["sandboxes"][record.key]
+        put_object("sandboxes", update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1)))
+      end
+
+      response
+    end
+
+    assert {:ok, observed} = Operations.run(Kubernetes, config, Lifecycle.new(unresolved, "inspect", :agent), :inspect, Keyword.put(opts, :command_fun, command))
+    assert observed.metadata["authorized_pod_uids"] == ["pod-uid"]
+    assert {:compute_unknown, _} = observed.proof
+  end
+
+  test "a committed unclassified missing Pod keeps capacity through inspect and stop" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    assert {:ok, observed} = Operations.run(Kubernetes, config, Lifecycle.new(created, "inspect", :agent), :inspect, opts)
+    assert {:compute_unknown, _} = observed.proof
+    assert Lifecycle.occupied?(%{Lifecycle.new(observed, "inspect", :cleanup) | phase: :stopped})
+    assert {:ok, stopped} = Kubernetes.stop(config, observed, opts)
+    assert {:compute_unknown, _} = stopped.proof
+    assert Lifecycle.occupied?(%{Lifecycle.new(stopped, "stop", :cleanup) | phase: :stopped})
+  end
+
+  test "a late committed missing Pod invalidates prior quiescence on an ordinary deletion failure" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:quiescent, _} = stopped.proof
+    entry = %{Lifecycle.new(stopped, "cleanup", :cleanup) | phase: :stopped}
+    {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(entry, :destroy, 0)
+
+    command = late_missing_pod_after_close(record, :none)
+
+    assert {:error, failure, unresolved} = Operations.run(Kubernetes, config, deleting, :destroy, Keyword.put(opts, :command_fun, command))
+    assert {:compute_unknown, _} = unresolved.proof
+    {retained, []} = Lifecycle.step(deleting, {:failed, id, failure, unresolved}, 1)
+    assert Lifecycle.occupied?(retained)
+    assert retained.record.proof == unresolved.proof
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+  end
+
+  test "a stale cleanup intent cannot restore old quiescence after a newly committed Pod vanishes" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:quiescent, _} = stopped.proof
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    parent = api_state()["sandboxes"][record.key]
+    put_object("sandboxes", update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1)))
+    entry = %{Lifecycle.new(stopped, "cleanup", :cleanup) | phase: :stopped}
+    {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(entry, :destroy, 0)
+
+    assert {:error, {:retryable, :kubernetes_cas_conflict} = failure, unresolved} = Operations.run(Kubernetes, config, deleting, :destroy, opts)
+    assert {:compute_unknown, _} = unresolved.proof
+    {retained, []} = Lifecycle.step(deleting, {:failed, id, failure, unresolved}, 1)
+    assert Lifecycle.occupied?(retained)
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+    assert guard_data(record)["phase"] == "Closing"
+  end
+
+  test "an intent write failure preserves newly observed physical uncertainty before cleanup begins" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+
+    command = fn exe, args, options ->
+      if "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes"),
+        do: {:error, :timeout},
+        else: api_command(exe, args, options)
+    end
+
+    entry = %{Lifecycle.new(stopped, "cleanup", :cleanup) | phase: :stopped}
+    assert {:error, _, unresolved} = Operations.run(Kubernetes, config, entry, :destroy, Keyword.put(opts, :command_fun, command))
+    assert {:compute_unknown, _} = unresolved.proof
+    assert Lifecycle.occupied?(%{entry | record: unresolved})
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+  end
+
+  test "a guard reread failure cannot discard the newly observed owned parent journal" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+
+    command = fn exe, args, options ->
+      path = if "get" in args, do: arg(args, "--raw"), else: ""
+      if String.contains?(path, "/sandboxes?"), do: Process.put(:intent_parent_observed, true)
+
+      if String.contains?(path, "/configmaps?") and Process.get(:intent_parent_observed),
+        do: {:error, :timeout},
+        else: api_command(exe, args, options)
+    end
+
+    entry = %{Lifecycle.new(stopped, "cleanup", :cleanup) | phase: :stopped}
+    assert {:error, _, unresolved} = Operations.run(Kubernetes, config, entry, :destroy, Keyword.put(opts, :command_fun, command))
+    assert {:compute_unknown, _} = unresolved.proof
+    assert Lifecycle.occupied?(%{entry | record: unresolved})
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+  end
+
+  for storage_failure <- [:missing_pv, :missing_pvc] do
+    test "a #{storage_failure} failure cannot mask a late committed missing Pod during deletion" do
+      {config, record, opts} = api_fixture()
+      {:ok, created} = Kubernetes.ensure(config, record, opts)
+      {:ok, stopped} = Kubernetes.stop(config, created, opts)
+      assert {:quiescent, _} = stopped.proof
+      entry = %{Lifecycle.new(stopped, "cleanup", :cleanup) | phase: :stopped}
+      {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(entry, :destroy, 0)
+      command = late_missing_pod_after_close(record, unquote(storage_failure))
+
+      assert {:error, failure, unresolved} = Operations.run(Kubernetes, config, deleting, :destroy, Keyword.put(opts, :command_fun, command))
+
+      expected =
+        case unquote(storage_failure) do
+          :missing_pv -> {:unknown, :bound_pv_missing}
+          :missing_pvc -> {:unknown, {:kubernetes_storage_obligation_missing, "late-pvc-uid"}}
+        end
+
+      assert failure == expected
+      assert {:compute_unknown, _} = unresolved.proof
+      {retained, []} = Lifecycle.step(deleting, {:failed, id, failure, unresolved}, 1)
+      assert Lifecycle.occupied?(retained)
+      assert retained.record.proof == unresolved.proof
+      assert api_state()["sandboxes"][record.key]
+    end
+  end
+
+  test "inspect reports newly unresolved compute despite an earlier storage capture failure" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:quiescent, _} = stopped.proof
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    remove_object("persistentvolumes", "pv-ticket")
+    entry = %{Lifecycle.new(stopped, "inspect", :cleanup) | phase: :stopped}
+
+    assert {:error, {:unknown, :bound_pv_missing}, unresolved} = Operations.run(Kubernetes, config, entry, :inspect, opts)
+    assert {:compute_unknown, _} = unresolved.proof
+    assert Lifecycle.occupied?(%{entry | record: unresolved})
+  end
+
+  test "lost bootstrap response requires observing the exact initial guard before parent creation" do
+    {config, record, opts} = api_fixture()
+
+    command = fn exe, args, options ->
+      response = api_command(exe, args, options)
+      if "--path" in args and String.contains?(arg(args, "--path"), "/configmaps"), do: {:error, :timeout}, else: response
+    end
+
+    assert {:ok, created} = Kubernetes.ensure(config, record, Keyword.put(opts, :command_fun, command))
+    assert created.provider_ref == "sandbox-uid"
+    assert [{"sandboxes", _}, {"configmaps", _}] = Process.get(:post_attempts)
+    assert [%{"state" => "Committed", "guardUID" => "guard-uid"}] = guard_data(record)["operations"]
+  end
+
+  test "a changed previously accepted drained journal cannot replace durable cleanup evidence" do
+    {config, record, opts} = api_fixture(delay_pv: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    assert {:error, {:unknown, :kubernetes_cleanup_pending}, retained} = Kubernetes.destroy(config, created, opts)
+    parent = api_state()["sandboxes"][record.key]
+    journal = parent["status"]["creationJournal"]
+    journal = journal |> Map.update!("revision", &(&1 + 1)) |> update_in(["acknowledgement", "revision"], &(&1 + 1))
+    put_object("sandboxes", put_in(parent, ["status", "creationJournal"], journal))
+    assert {:error, {:unknown, :kubernetes_controller_journal_changed}, _} = Kubernetes.destroy(config, retained, opts)
+    assert guard_data(record)["phase"] == "Closing"
+    assert api_state()["persistentvolumes"]["pv-ticket"]
+  end
+
+  test "running compute cleanup records termination for every committed Pod before completion" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, running} = Kubernetes.start(config, intended, opts)
+    outcome = Kubernetes.destroy(config, running, opts)
+    assert {:ok, deleted} = outcome
+    assert deleted.absent?
+    evidence = guard_data(record)["evidence"]
+    assert evidence["physical"]["pod-uid"]["kind"] == "terminated"
+    assert evidence["termination"]["pod-uid"]["kind"] == "kubelet_terminated"
+    assert api_state()["pods"] == %{}
+    assert api_state()["secrets"] == %{}
+  end
+
+  test "forged controller attempt attribution cannot authorize a Pod or cleanup storage" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+
+    command = fn exe, args, options ->
+      response = api_command(exe, args, options)
+
+      case api_state()["pods"][record.key] do
+        nil -> :ok
+        pod -> put_object("pods", put_in(pod, ["metadata", "annotations", "agents.x-k8s.io/create-attempt-id"], "forged"))
+      end
+
+      response
+    end
+
+    assert {:error, {:unknown, :kubernetes_unjournaled_child}, unresolved} =
+             Kubernetes.start(config, intended, Keyword.put(opts, :command_fun, command))
+
+    assert {:error, {:unknown, :kubernetes_unjournaled_child}, _} = Kubernetes.destroy(config, unresolved, opts)
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+    assert %{"name" => "symphony.dev/start-authorized"} in api_state()["pods"][record.key]["spec"]["schedulingGates"]
+  end
+
+  test "unknown guard protocol remains discoverable uncertainty and cannot be reused" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    guard = api_state()["configmaps"][Guard.name(record)]
+    data = Map.put(guard_data(record), "protocol", "unsupported-v2")
+    put_object("configmaps", put_in(guard, ["data", "guard.json"], Jason.encode!(data)))
+    assert {:error, _, _} = Kubernetes.ensure(config, created, opts)
+    assert {:error, _} = Kubernetes.discover(config, opts)
+    assert {:error, _, _} = Kubernetes.destroy(config, created, opts)
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+  end
+
+  test "lost issuance append never authorizes a parent POST on recovery" do
+    {config, record, opts} = api_fixture()
+
+    command = fn exe, args, options ->
+      target = guard_patch_target(args)
+      response = api_command(exe, args, options)
+      if target && Enum.any?(target["operations"], &(&1["state"] == "Issued")), do: {:error, :timeout}, else: response
+    end
+
+    assert {:error, _, _} = Kubernetes.ensure(config, record, Keyword.put(opts, :command_fun, command))
+    assert api_state()["sandboxes"] == %{}
+    assert [%{"state" => "Issued"}] = guard_data(record)["operations"]
+    assert {:ok, [recovered]} = Kubernetes.discover(config, opts)
+    assert {:error, _, _} = Kubernetes.ensure(config, recovered, opts)
+    assert {:error, _, _} = Kubernetes.destroy(config, recovered, opts)
+    assert api_state()["sandboxes"] == %{}
+  end
+
+  test "a delayed issuance CAS loses to closure and cannot append afterwards" do
+    {config, record, opts} = api_fixture()
+
+    command = fn exe, args, options ->
+      target = guard_patch_target(args)
+
+      if target && Enum.any?(target["operations"], &(&1["state"] == "Issued")) do
+        Process.put(:delayed_guard_patch, {args, Jason.decode!(File.read!(arg(args, "--patch-file")))})
+        {:error, :timeout}
+      else
+        api_command(exe, args, options)
+      end
+    end
+
+    assert {:error, _, unresolved} = Kubernetes.ensure(config, record, Keyword.put(opts, :command_fun, command))
+    assert {:error, _, _} = Kubernetes.destroy(config, unresolved, opts)
+    {_args, patch} = Process.get(:delayed_guard_patch)
+    assert {:ok, %{status: 409}} = Client.request(config, :patch, "/api/v1/namespaces/test/configmaps/" <> Guard.name(record), patch, opts)
+    assert guard_data(record)["phase"] == "Closing"
+    assert guard_data(record)["operations"] == []
+    assert api_state()["sandboxes"] == %{}
+  end
+
+  test "late parent commit settles its original guarded attempt after close" do
+    {config, record, opts} = api_fixture(timeout_create: true)
+    assert {:error, _, unresolved} = Kubernetes.ensure(config, record, opts)
+    result = Kubernetes.destroy(config, unresolved, opts)
+    assert {:error, {:unknown, :kubernetes_provider_issuance_unresolved}, _} = result
+    [{"sandboxes", body}] = Enum.filter(Process.get(:post_attempts), fn {resource, _} -> resource == "sandboxes" end)
+    create_object("sandboxes", body)
+    Process.put(:kubernetes_options, [])
+    assert {:ok, deleted} = Kubernetes.destroy(config, unresolved, opts)
+    assert deleted.absent?
+    assert guard_data(record)["phase"] == "Complete"
+    assert Enum.count(Process.get(:post_attempts), fn {resource, _} -> resource == "sandboxes" end) == 1
+  end
+
+  test "late Secret commit remains owned across closure and is never replayed" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+
+    command = fn exe, args, options ->
+      if "--path" in args and String.contains?(arg(args, "--path"), "/secrets") do
+        Process.put(:late_secret, Jason.decode!(File.read!(arg(args, "--file"))))
+        {:error, :timeout}
+      else
+        api_command(exe, args, options)
+      end
+    end
+
+    assert {:error, _, unresolved} = Kubernetes.start(config, intended, Keyword.put(opts, :command_fun, command))
+    result = Kubernetes.destroy(config, unresolved, opts)
+    assert {:error, {:unknown, :kubernetes_provider_issuance_unresolved}, _} = result
+    refute api_state()["sandboxes"][record.key]["metadata"]["deletionTimestamp"]
+    create_object("secrets", Process.get(:late_secret))
+    assert {:ok, deleted} = Kubernetes.destroy(config, unresolved, opts)
+    assert deleted.absent?
+    assert api_state()["secrets"] == %{}
+    assert Enum.count(guard_data(record)["operations"], &(&1["resource"] == "secrets")) == 1
+  end
+
+  for target_phase <- ["ReadyToFinalize", "Complete"] do
+    test "lost #{target_phase} update with unchanged guard cannot claim completion" do
+      {config, record, opts} = api_fixture()
+      {:ok, created} = Kubernetes.ensure(config, record, opts)
+      target_phase = unquote(target_phase)
+
+      command = fn exe, args, options ->
+        target = guard_patch_target(args)
+        if target && target["phase"] == target_phase, do: {:error, :timeout}, else: api_command(exe, args, options)
+      end
+
+      assert {:error, _, unresolved} = Kubernetes.destroy(config, created, Keyword.put(opts, :command_fun, command))
+      refute unresolved.absent?
+      assert guard_data(record)["phase"] == if(target_phase == "Complete", do: "ReadyToFinalize", else: "Closing")
+
+      if target_phase == "ReadyToFinalize" do
+        assert "symphony.dev/environment-cleanup" in api_state()["sandboxes"][record.key]["metadata"]["finalizers"]
+      else
+        assert api_state()["sandboxes"] == %{}
+      end
+
+      assert {:ok, [recovered]} = Kubernetes.discover(config, opts)
+      refute recovered.absent?
+      assert {:ok, deleted} = Kubernetes.destroy(config, recovered, opts)
+      assert deleted.absent?
+      assert guard_data(record)["phase"] == "Complete"
+    end
+  end
+
+  test "lost receipt update responses recover only exact durable target payloads" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+
+    command = fn exe, args, options ->
+      target = guard_patch_target(args)
+      response = api_command(exe, args, options)
+      if target && target["phase"] in ["ReadyToFinalize", "Complete"], do: {:error, :timeout}, else: response
+    end
+
+    assert {:ok, deleted} = Kubernetes.destroy(config, created, Keyword.put(opts, :command_fun, command))
+    assert deleted.absent?
+    assert guard_data(record)["phase"] == "Complete"
+  end
+
+  for {field, value} <- [{"protocol", "unknown-v2"}, {"parentUID", "other-parent"}, {"closeRequestId", "old-close"}, {"revision", 0}, {"operationCount", 0}] do
+    test "wrong controller acknowledgement #{field} retains finalizer and storage" do
+      {config, record, opts} = api_fixture()
+      {:ok, created} = Kubernetes.ensure(config, record, opts)
+
+      command = fn exe, args, options ->
+        response = api_command(exe, args, options)
+
+        if close_patch?(args) do
+          parent = api_state()["sandboxes"][record.key]
+          put_object("sandboxes", put_in(parent, ["status", "creationJournal", "acknowledgement", unquote(field)], unquote(value)))
+        end
+
+        response
+      end
+
+      assert {:error, {:unknown, :kubernetes_controller_acknowledgement_invalid}, _} =
+               Kubernetes.destroy(config, created, Keyword.put(opts, :command_fun, command))
+
+      assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+      assert "symphony.dev/environment-cleanup" in api_state()["sandboxes"][record.key]["metadata"]["finalizers"]
+    end
+  end
+
+  test "drained envelope with an outstanding controller attempt is rejected" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+
+    command = fn exe, args, options ->
+      response = api_command(exe, args, options)
+
+      if close_patch?(args) do
+        parent = api_state()["sandboxes"][record.key]
+        put_object("sandboxes", update_in(parent, ["status", "creationJournal", "operations"], &Enum.map(&1, fn op -> Map.put(op, "state", "Issued") end)))
+      end
+
+      response
+    end
+
+    assert {:error, _, _} = Kubernetes.destroy(config, created, Keyword.put(opts, :command_fun, command))
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+  end
+
+  test "committed Pod disappearance before physical classification remains unresolved" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    assert {:error, {:unknown, {:kubernetes_pod_safety_unresolved, "pod-uid"}}, _} = Kubernetes.destroy(config, created, opts)
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+  end
+
+  test "committed PVC disappearance before PV capture remains a storage obligation" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    remove_object("persistentvolumeclaims", "workspace-se-ticket")
+    result = Kubernetes.destroy(config, created, opts)
+    assert {:error, {:unknown, {:kubernetes_storage_obligation_missing, "pvc-uid"}}, _} = result
+    assert api_state()["persistentvolumes"]["pv-ticket"]
+    assert api_state()["sandboxes"][record.key]
+  end
+
+  test "forged provider attribution cannot settle a late same-name parent" do
+    {config, record, opts} = api_fixture(timeout_create: true)
+    assert {:error, _, unresolved} = Kubernetes.ensure(config, record, opts)
+    [{"sandboxes", body}] = Enum.filter(Process.get(:post_attempts), fn {resource, _} -> resource == "sandboxes" end)
+    body = put_in(body, ["metadata", "annotations", "symphony.dev/create-attempt-id"], "forged")
+    create_object("sandboxes", body)
+    assert {:error, _, _} = Kubernetes.destroy(config, unresolved, opts)
+    assert [%{"state" => "Issued"}] = guard_data(record)["operations"]
+    assert api_state()["sandboxes"][record.key]
+  end
+
+  test "missing guard beside a live parent is never recreated" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    remove_object("configmaps", Guard.name(record))
+    assert {:error, {:unknown, :kubernetes_guard_missing}, _} = Kubernetes.ensure(config, created, opts)
+    assert {:error, _, _} = Kubernetes.destroy(config, created, opts)
+    assert {:error, _, _} = Kubernetes.stop(config, created, opts)
+    assert {:error, _, _} = Kubernetes.put_intent(config, created, %{desired: :absent}, opts)
+    refute api_state()["configmaps"][Guard.name(record)]
+    assert api_state()["sandboxes"][record.key]
+  end
+
+  test "an owned Secret with forged attempt attribution cannot be reused for startup" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, running} = Kubernetes.start(config, intended, opts)
+    [secret] = Map.values(api_state()["secrets"])
+    put_object("secrets", put_in(secret, ["metadata", "annotations", "symphony.dev/create-attempt-id"], "forged"))
+    attempts = Process.get(:post_attempts)
+    assert {:error, {:unknown, :kubernetes_create_attribution_conflict}, _} = Kubernetes.start(config, running, opts)
+    assert Process.get(:post_attempts) == attempts
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+  end
+
+  test "uncommitted Pod membership cannot authorize gate release" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+
+    command = fn exe, args, options ->
+      response = api_command(exe, args, options)
+      if "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes"), do: uncommit_fixture_pod(record)
+      response
+    end
+
+    assert {:error, {:unknown, :kubernetes_unjournaled_child}, _} =
+             Kubernetes.start(config, intended, Keyword.put(opts, :command_fun, command))
+
+    assert %{"name" => "symphony.dev/start-authorized"} in api_state()["pods"][record.key]["spec"]["schedulingGates"]
+  end
+
+  defp uncommit_fixture_pod(record) do
+    parent = api_state()["sandboxes"][record.key]
+    operations = parent["status"]["creationJournal"]["operations"]
+
+    changed =
+      Enum.map(operations, fn operation ->
+        if operation["resource"] == "pods",
+          do: operation |> Map.put("state", "Issued") |> Map.delete("objectUID"),
+          else: operation
+      end)
+
+    put_object("sandboxes", put_in(parent, ["status", "creationJournal", "operations"], changed))
+  end
+
+  test "a terminated Pod retained by API deletion does not prevent exact cleanup" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, running} = Kubernetes.start(config, intended, opts)
+
+    command = fn exe, args, options ->
+      response = api_command(exe, args, options)
+
+      if "delete" in args and String.contains?(arg(args, "--raw"), "/pods/"),
+        do: retain_first_terminated_pod(record)
+
+      response
+    end
+
+    assert {:ok, deleted} = Kubernetes.destroy(config, running, Keyword.put(opts, :command_fun, command))
+    assert deleted.absent?
+    assert api_state()["pods"] == %{}
+    assert guard_data(record)["evidence"]["termination"]["pod-uid"]["kind"] == "kubelet_terminated"
+  end
+
+  defp retain_first_terminated_pod(record) do
+    unless Process.get(:retained_terminal_pod) do
+      Process.put(:retained_terminal_pod, true)
+      event = Process.get(:kubernetes_events)[{"pods", record.key}] |> List.last()
+      put_object("pods", put_in(event["object"], ["metadata", "deletionTimestamp"], "2026-09-11T00:00:00Z"))
+    end
+  end
+
+  test "inventory failure after proven stop preserves quiescence while retaining storage" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, running} = Kubernetes.start(config, intended, opts)
+    command = fn exe, args, options -> stopped_inventory_failure(exe, args, options) end
+    result = Kubernetes.destroy(config, running, Keyword.put(opts, :command_fun, command))
+    assert {:error, {:denied, :kubernetes_inventory}, retained} = result
+    assert {:quiescent, _} = retained.proof
+    refute retained.absent?
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+    assert api_state()["sandboxes"][record.key]
+  end
+
+  for {scenario, storage_failure} <- [{"alone", false}, {"before a storage failure", true}] do
+    test "a fresh ungated Pod #{scenario} invalidates earlier never-executable proof" do
+      {config, record, opts} = api_fixture()
+      {:ok, created} = Kubernetes.ensure(config, record, opts)
+      create_pod(api_state()["sandboxes"][record.key])
+      {:ok, observed} = Kubernetes.inspect(config, created, opts)
+      assert {:quiescent, _} = observed.proof
+      pod = api_state()["pods"][record.key]
+      remove_object("pods", record.key)
+
+      command = fn exe, args, options ->
+        expose_changed_pod_after_stop(args, pod, unquote(storage_failure))
+        api_command(exe, args, options)
+      end
+
+      assert {:error, failure, unresolved} = Kubernetes.destroy(config, observed, Keyword.put(opts, :command_fun, command))
+      if unquote(storage_failure), do: assert(failure == {:unknown, :bound_pv_missing})
+      assert {:compute_unknown, _} = unresolved.proof
+      assert Lifecycle.occupied?(Lifecycle.new(unresolved, "cleanup", :cleanup))
+      assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+      assert api_state()["sandboxes"][record.key]
+    end
+  end
+
+  defp expose_changed_pod_after_stop(args, pod, storage_failure) do
+    if close_patch?(args), do: Process.put(:closed_inventory_count, 0)
+    count = Process.get(:closed_inventory_count)
+
+    cond do
+      is_integer(count) and get_resource?(args, "persistentvolumeclaims") ->
+        Process.put(:closed_inventory_count, count + 1)
+
+      count == 2 and get_resource?(args, "pods") ->
+        put_object("pods", put_in(pod, ["spec", "schedulingGates"], []))
+        if storage_failure, do: remove_object("persistentvolumes", "pv-ticket")
+
+      true ->
+        :ok
+    end
+  end
+
+  defp get_resource?(args, resource) do
+    "get" in args and String.contains?(arg(args, "--raw"), "/" <> resource <> "?")
+  end
+
+  defp stopped_inventory_failure(exe, args, options) do
+    path = if "--raw" in args, do: arg(args, "--raw"), else: ""
+
+    if String.contains?(path, "/pods?") and String.contains?(path, "watch=true"),
+      do: Process.put(:terminal_watch_observed, true)
+
+    count = Process.get(:post_stop_inventory, 0)
+
+    if Process.get(:terminal_watch_observed, false) and "get" in args and String.contains?(path, "/persistentvolumeclaims?") do
+      Process.put(:post_stop_inventory, count + 1)
+      if count == 1, do: json(%{"kind" => "Status", "code" => 403}), else: api_command(exe, args, options)
+    else
+      api_command(exe, args, options)
+    end
+  end
+
+  test "absent intent closes credentials permanently and survives stop and inspect" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, closing} = Kubernetes.put_intent(config, created, %{desired: :absent}, opts)
+    assert {:ok, stopped} = Kubernetes.stop(config, closing, opts)
+    assert stopped.desired == :absent
+    assert {:ok, inspected} = Kubernetes.inspect(config, stopped, opts)
+    assert inspected.desired == :absent
+    assert {:error, _, _} = Kubernetes.put_intent(config, inspected, %{desired: :running}, opts)
+    assert {:error, _, _} = Kubernetes.start(config, inspected, opts)
+    assert api_state()["secrets"] == %{}
+  end
+
+  test "discovery ignores another deployment guard but rejects undecodable local guard candidates" do
+    {config, record, opts} = api_fixture()
+    {:ok, _} = Kubernetes.ensure(config, record, opts)
+
+    foreign = %{
+      "metadata" => meta("symphony-guard-foreign", "foreign-uid"),
+      "data" => %{"guard.json" => Jason.encode!(%{"identity" => %{"deploymentID" => "another-deployment"}})}
+    }
+
+    put_object("configmaps", foreign)
+    assert {:ok, [discovered]} = Kubernetes.discover(config, opts)
+    assert discovered.key == record.key
+    put_object("configmaps", put_in(foreign, ["data", "guard.json"], "private-invalid-guard"))
+    assert {:error, {:unknown, :kubernetes_guard_invalid}} = Kubernetes.discover(config, opts)
+    assert api_state()["sandboxes"][record.key]
+  end
+
+  test "missing guard diagnostics preserve references but never serialize malformed durable volume contents" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    remove_object("configmaps", Guard.name(record))
+    parent = api_state()["sandboxes"][record.key]
+    saved = Jason.decode!(parent["metadata"]["annotations"]["symphony.dev/record"])
+
+    for volumes <- [["private-volume-body"], %{"invalid" => "private-volume-body"}] do
+      changed = put_in(saved, ["metadata", "volumes"], volumes)
+      put_object("sandboxes", put_in(parent, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(changed)))
+      assert {:error, {:unknown, {:kubernetes_invalid_owned_record, references}}} = Kubernetes.discover(config, opts)
+      assert "sandbox-uid" in references
+      refute inspect(references) =~ "private-volume-body"
+      assert {:error, {:unknown, :kubernetes_guard_missing}, _} = Kubernetes.ensure(config, created, opts)
+    end
+
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+    refute api_state()["configmaps"][Guard.name(record)]
+  end
+
+  test "a closed retained parent cannot be adopted for another execution" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, closing} = Kubernetes.put_intent(config, created, %{desired: :absent}, opts)
+    assert {:error, {:unknown, :kubernetes_issuance_closed}, _} = Kubernetes.ensure(config, closing, opts)
+    assert Process.get(:sandbox_creates) == 1
+    assert {:ok, deleted} = Kubernetes.destroy(config, closing, opts)
+    assert deleted.absent?
+    assert {:ok, still_deleted} = Kubernetes.destroy(config, deleted, opts)
+    assert still_deleted.absent?
+  end
+
+  test "parent loss during intent cannot turn a retained obligation into successful cleanup" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    remove_object("sandboxes", record.key)
+    result = Kubernetes.put_intent(config, created, %{desired: :absent}, opts)
+    assert {:error, {:unknown, :kubernetes_parent_missing}, unresolved} = result
+    refute unresolved.absent?
+    assert {:error, {:unknown, :kubernetes_parent_missing}, _} = Kubernetes.stop(config, unresolved, opts)
+    assert api_state()["persistentvolumes"]["pv-ticket"]
+  end
+
+  test "a completed tombstone cannot hide an owner-only child that reappears" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    parent = api_state()["sandboxes"][record.key]
+    {:ok, deleted} = Kubernetes.destroy(config, created, opts)
+    child = %{"metadata" => child_meta(parent, "late-secret", "late-secret-uid")}
+    put_object("secrets", child)
+
+    assert {:ok, [orphan]} = Kubernetes.discover(config, opts)
+    refute orphan.absent?
+    assert {:error, {:unknown, :kubernetes_parent_missing}, unresolved} = Kubernetes.destroy(config, deleted, opts)
+    refute unresolved.absent?
+    assert api_state()["secrets"]["late-secret"] == child
+    remove_object("secrets", "late-secret")
+    assert {:ok, recovered} = Kubernetes.destroy(config, unresolved, opts)
+    assert recovered.absent?
+  end
+
+  test "an unrecorded backing claim with the retained environment name blocks tombstone absence" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, deleted} = Kubernetes.destroy(config, created, opts)
+    pv = %{"metadata" => meta("late-pv", "late-pv-uid"), "spec" => %{"claimRef" => %{"namespace" => "test", "name" => "late-" <> record.key}}}
+    put_object("persistentvolumes", pv)
+
+    assert {:ok, [orphan]} = Kubernetes.discover(config, opts)
+    refute orphan.absent?
+    assert {:error, {:unknown, :kubernetes_parent_missing}, _} = Kubernetes.destroy(config, deleted, opts)
+    assert api_state()["persistentvolumes"]["late-pv"] == pv
+  end
+
+  for {boundary, malformed} <- [{"missing journal", nil}, {"non-list operations", %{}}, {"non-object operation", [nil]}] do
+    test "#{boundary} cannot authorize controller drain or storage deletion" do
+      {config, record, opts} = api_fixture()
+      {:ok, created} = Kubernetes.ensure(config, record, opts)
+
+      command = fn exe, args, options ->
+        response = api_command(exe, args, options)
+
+        if close_patch?(args) do
+          parent = api_state()["sandboxes"][record.key]
+          journal = parent["status"]["creationJournal"]
+          Process.put(:valid_drained_journal, journal)
+          changed = journal_with_invalid_operations(journal, unquote(Macro.escape(malformed)))
+          put_object("sandboxes", put_in(parent, ["status", "creationJournal"], changed))
+        end
+
+        response
+      end
+
+      assert {:error, {:unknown, :kubernetes_controller_acknowledgement_invalid}, unresolved} =
+               Kubernetes.destroy(config, created, Keyword.put(opts, :command_fun, command))
+
+      assert {:compute_unknown, _} = unresolved.proof
+      assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+      parent = api_state()["sandboxes"][record.key]
+      put_object("sandboxes", put_in(parent, ["status", "creationJournal"], Process.get(:valid_drained_journal)))
+      assert {:ok, deleted} = Kubernetes.destroy(config, unresolved, opts)
+      assert deleted.absent?
+    end
+  end
+
+  test "issued Pod obligations remain uncertain until committed and cannot disappear from later journals" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    parent = api_state()["sandboxes"][record.key]
+    operations = parent["status"]["creationJournal"]["operations"]
+    committed = Enum.find(operations, &(&1["resource"] == "pods"))
+    issued = committed |> Map.put("state", "Issued") |> Map.delete("objectUID")
+    changed = Enum.map(operations, &if(&1["id"] == committed["id"], do: issued, else: &1))
+    put_object("sandboxes", put_in(parent, ["status", "creationJournal", "operations"], changed))
+
+    assert {:ok, unresolved} = Kubernetes.inspect(config, created, opts)
+    assert {:compute_unknown, _} = unresolved.proof
+    parent = api_state()["sandboxes"][record.key]
+    put_object("sandboxes", put_in(parent, ["status", "creationJournal", "operations"], operations))
+    assert {:ok, stopped} = Kubernetes.inspect(config, unresolved, opts)
+    assert {:quiescent, _} = stopped.proof
+    parent = api_state()["sandboxes"][record.key]
+    put_object("sandboxes", update_in(parent, ["status", "creationJournal", "operations"], &Enum.reject(&1, fn op -> op["resource"] == "pods" end)))
+    result = Kubernetes.inspect(config, stopped, opts)
+    assert {:error, {:unknown, :kubernetes_controller_journal_invalid}, lost} = result
+    assert {:compute_unknown, _} = lost.proof
+  end
+
+  test "a malformed open journal cannot preserve prior suspension proof" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    parent = api_state()["sandboxes"][record.key]
+    put_object("sandboxes", put_in(parent, ["status", "creationJournal", "operations"], %{}))
+    result = Kubernetes.inspect(config, stopped, opts)
+    assert {:error, {:unknown, :kubernetes_controller_journal_invalid}, unresolved} = result
+    assert {:compute_unknown, _} = unresolved.proof
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+  end
+
+  defp journal_with_invalid_operations(_journal, nil), do: nil
+  defp journal_with_invalid_operations(journal, operations), do: Map.put(journal, "operations", operations)
+
+  test "inspect rejects a revised accepted drain without overwriting its saved journal" do
+    {config, record, opts} = api_fixture(delay_pv: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:error, {:unknown, :kubernetes_cleanup_pending}, retained} = Kubernetes.destroy(config, created, opts)
+    saved = guard_data(record)["record"]["metadata"]["creation_journal"]
+    parent = api_state()["sandboxes"][record.key]
+    changed = saved |> Map.update!("revision", &(&1 + 1)) |> update_in(["acknowledgement", "revision"], &(&1 + 1))
+    put_object("sandboxes", put_in(parent, ["status", "creationJournal"], changed))
+
+    assert {:error, {:unknown, :kubernetes_controller_journal_changed}, _} = Kubernetes.inspect(config, retained, opts)
+    assert guard_data(record)["record"]["metadata"]["creation_journal"] == saved
+    assert api_state()["persistentvolumes"]["pv-ticket"]
+  end
+
+  test "ReadyToFinalize receipt cannot substitute another parent or a different saved physical payload" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    retained = retain_ready_parent(config, created, opts)
+    ready = guard_data(record)
+    put_guard_data(record, put_in(ready, ["evidence", "parentUID"], "other-parent"))
+    assert {:error, {:unknown, :kubernetes_finalization_unconfirmed}, _} = Kubernetes.destroy(config, retained, opts)
+    refute api_state()["sandboxes"][record.key]["metadata"]["deletionTimestamp"]
+
+    put_guard_data(record, put_in(ready, ["evidence", "physical"], %{"unrelated-pod" => %{}}))
+    result = Kubernetes.put_intent(config, retained, %{desired: :absent}, opts)
+    assert {:error, {:unknown, :kubernetes_finalization_unconfirmed}, _} = result
+    assert api_state()["sandboxes"][record.key]
+    put_guard_data(record, ready)
+    assert {:ok, deleted} = Kubernetes.destroy(config, retained, opts)
+    assert deleted.absent?
+  end
+
+  test "a replacement parent cannot inherit a valid ReadyToFinalize receipt" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    retained = retain_ready_parent(config, created, opts)
+    parent = api_state()["sandboxes"][record.key]
+    replacement = put_in(parent, ["metadata", "uid"], "replacement-uid")
+    put_object("sandboxes", replacement)
+    assert {:error, {:unknown, :kubernetes_ownership_changed}, _} = Kubernetes.destroy(config, retained, opts)
+    result = Kubernetes.put_intent(config, retained, %{desired: :absent}, opts)
+    assert {:error, {:unknown, :kubernetes_ownership_changed}, _} = result
+    assert api_state()["sandboxes"][record.key] == replacement
+    assert guard_data(record)["phase"] == "ReadyToFinalize"
+  end
+
+  test "parent reread loss after DELETE preserves its cleanup finalizer until a successful retry" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+
+    command = fn exe, args, options ->
+      blocked =
+        "get" in args and String.contains?(arg(args, "--raw"), "/sandboxes?") and
+          get_in(api_state(), ["sandboxes", record.key, "metadata", "deletionTimestamp"]) != nil
+
+      if blocked, do: {:error, :timeout}, else: api_command(exe, args, options)
+    end
+
+    assert {:error, {:unknown, :kubernetes_finalization_unconfirmed}, retained} =
+             Kubernetes.destroy(config, created, Keyword.put(opts, :command_fun, command))
+
+    refute retained.absent?
+    assert "symphony.dev/environment-cleanup" in api_state()["sandboxes"][record.key]["metadata"]["finalizers"]
+    assert guard_data(record)["phase"] == "ReadyToFinalize"
+    assert {:ok, deleted} = Kubernetes.destroy(config, retained, opts)
+    assert deleted.absent?
+  end
+
+  test "a journaled Service delete failure retains cleanup authority and retries the exact child" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    parent = api_state()["sandboxes"][record.key]
+    service = %{"kind" => "Service", "metadata" => child_meta(parent, "worker-service", "service-uid")}
+    service = journal_child(parent, "services", service)
+    put_object("services", service)
+
+    command = fn exe, args, options ->
+      if "delete" in args and String.contains?(arg(args, "--raw"), "/services/"),
+        do: {:error, :timeout},
+        else: api_command(exe, args, options)
+    end
+
+    assert {:error, _, retained} = Kubernetes.destroy(config, created, Keyword.put(opts, :command_fun, command))
+    assert api_state()["services"]["worker-service"] == service
+    assert guard_data(record)["phase"] == "Closing"
+    assert {:ok, deleted} = Kubernetes.destroy(config, retained, opts)
+    assert deleted.absent?
+    assert api_state()["services"] == %{}
+  end
+
+  test "destroy cannot delete storage when its stop observation still lacks kubelet termination" do
+    {config, record, opts} = api_fixture(missing_termination: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, running} = Kubernetes.start(config, intended, opts)
+    assert {:error, {:unknown, :kubernetes_cleanup_pending}, unresolved} = Kubernetes.destroy(config, running, opts)
+    assert {:compute_unknown, _} = unresolved.proof
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+    assert api_state()["persistentvolumes"]["pv-ticket"]
+    assert guard_data(record)["phase"] == "Closing"
+  end
+
+  test "inspect refuses a damaged closed acknowledgement without losing retained disk authority" do
+    {config, record, opts} = api_fixture(delay_pv: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:error, {:unknown, :kubernetes_cleanup_pending}, retained} = Kubernetes.destroy(config, created, opts)
+    parent = api_state()["sandboxes"][record.key]
+    put_object("sandboxes", put_in(parent, ["status", "creationJournal", "acknowledgement", "closeRequestId"], "stale-close"))
+    result = Kubernetes.inspect(config, retained, opts)
+    assert {:error, {:unknown, :kubernetes_controller_acknowledgement_invalid}, _} = result
+    assert api_state()["persistentvolumes"]["pv-ticket"]
+    assert "symphony.dev/environment-cleanup" in api_state()["sandboxes"][record.key]["metadata"]["finalizers"]
+  end
+
+  test "a server CAS conflict cannot remove the parent cleanup finalizer or certify absence" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+
+    command = fn exe, args, options ->
+      blocked =
+        "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes") and
+          Enum.any?(Jason.decode!(File.read!(arg(args, "--patch-file"))), &(&1["path"] == "/metadata/finalizers"))
+
+      if blocked, do: json(%{"kind" => "Status", "code" => 409}), else: api_command(exe, args, options)
+    end
+
+    assert {:error, {:unknown, :kubernetes_parent_deletion_pending}, retained} =
+             Kubernetes.destroy(config, created, Keyword.put(opts, :command_fun, command))
+
+    refute retained.absent?
+    assert "symphony.dev/environment-cleanup" in api_state()["sandboxes"][record.key]["metadata"]["finalizers"]
+    assert {:ok, deleted} = Kubernetes.destroy(config, retained, opts)
+    assert deleted.absent?
+  end
+
+  defp retain_ready_parent(config, record, opts) do
+    command = fn exe, args, options ->
+      if "delete" in args and String.contains?(arg(args, "--raw"), "/sandboxes/"),
+        do: {:error, :timeout},
+        else: api_command(exe, args, options)
+    end
+
+    assert {:error, {:unknown, :kubernetes_finalization_unconfirmed}, retained} =
+             Kubernetes.destroy(config, record, Keyword.put(opts, :command_fun, command))
+
+    assert guard_data(record)["phase"] == "ReadyToFinalize"
+    retained
+  end
+
+  defp put_guard_data(record, data) do
+    guard = api_state()["configmaps"][Guard.name(record)]
+    put_object("configmaps", put_in(guard, ["data", "guard.json"], Jason.encode!(data)))
+  end
+
+  defp guard_patch_target(args) do
+    if "patch" in args and arg(args, "patch") == "configmaps" do
+      patch = Jason.decode!(File.read!(arg(args, "--patch-file")))
+      Enum.find_value(patch, &guard_patch_value/1)
+    end
+  end
+
+  defp guard_patch_value(%{"path" => "/data/guard.json", "op" => "add", "value" => value}), do: Jason.decode!(value)
+  defp guard_patch_value(_), do: nil
+
+  defp close_patch?(args) do
+    "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes") and
+      Enum.any?(Jason.decode!(File.read!(arg(args, "--patch-file"))), &(&1["path"] == "/spec/creationControl/closeRequestId"))
+  end
+
   test "lost Sandbox create response is recovered without duplicating retained PVCs" do
     {config, record, opts} = api_fixture(lost_create: true)
     assert {:ok, created} = Kubernetes.ensure(config, record, opts)
@@ -135,27 +1169,27 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, started} = Kubernetes.start(config, intended, opts)
     assert {:ok, stopped} = Kubernetes.stop(config, started, opts)
     assert api_state()["pods"] == %{}
-    assert stopped.proof == :unknown
+    assert {:compute_unknown, _} = stopped.proof
     refute stopped.phase == :stopped
   end
 
-  test "CSI backing deletion evidence is persisted but parent finalizer survives absent ordering proof" do
+  test "CSI backing deletion and both drained journals permit durable completion" do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)
-    result = Kubernetes.destroy(config, created, opts)
-    assert {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}, deleting} = result
-    assert get_in(deleting.metadata, ["volumes", "workspace-se-ticket", "deleted"]) == true
-    refute deleting.absent?
-    parent = api_state()["sandboxes"][record.key]
-    assert parent["metadata"]["deletionTimestamp"] != nil
-    assert "symphony.dev/environment-cleanup" in parent["metadata"]["finalizers"]
+    assert {:ok, deleted} = Kubernetes.destroy(config, created, opts)
+    assert get_in(deleted.metadata, ["volumes", "workspace-se-ticket", "deleted"]) == true
+    assert deleted.absent?
+    assert api_state()["sandboxes"] == %{}
+    assert guard_data(record)["phase"] == "Complete"
+    assert {:ok, []} = Kubernetes.discover(config, opts)
+    assert {:error, _, _} = Kubernetes.ensure(config, record, opts)
   end
 
   test "delayed PV deletion never becomes disk absence" do
     {config, record, opts} = api_fixture(delay_pv: true)
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     result = Kubernetes.destroy(config, created, opts)
-    assert {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}, deleting} = result
+    assert {:error, {:unknown, :kubernetes_cleanup_pending}, deleting} = result
     refute get_in(deleting.metadata, ["volumes", "workspace-se-ticket", "deleted"]) == true
     refute deleting.absent?
     assert map_size(api_state()["persistentvolumes"]) == 1
@@ -326,8 +1360,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     state = Jason.decode!(parent["metadata"]["annotations"]["symphony.dev/record"])
     state = Map.put(state, "pending", [%{"verb" => "unrecognized-provider-action", "id" => "unknown", "outcome" => "unknown"}])
     put_object("sandboxes", put_in(parent, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(state)))
-    assert {:error, {:unknown, {:kubernetes_invalid_owned_record, resource_ids}}} = Kubernetes.discover(config, opts)
-    assert record.key in resource_ids
+    assert {:error, {:unknown, :kubernetes_guard_discovery_conflict}} = Kubernetes.discover(config, opts)
     assert {:error, {:unknown, :kubernetes_ownership_changed}, _} = Kubernetes.ensure(config, record, opts)
   end
 
@@ -430,22 +1463,19 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert api_state()["sandboxes"] == %{}
   end
 
-  test "definitively denied initial create releases compute and supports ordinary stop intent and retry" do
+  test "denied initial POST retains its guard and never grants replay after restart" do
     {config, record, opts} = api_fixture(deny_create: true)
-    assert {:error, {:denied, :kubernetes_api}, denied} = Kubernetes.ensure(config, record, opts)
-    assert {:quiescent, _} = denied.proof
-    assert denied.absent?
-    assert {:ok, stopped} = Kubernetes.stop(config, denied, opts)
-    assert {:quiescent, _} = stopped.proof
-    assert {:ok, inspected} = Kubernetes.inspect(config, stopped, opts)
-    assert inspected.absent?
-    assert {:ok, intended} = Kubernetes.put_intent(config, inspected, %{desired: :running}, opts)
-    assert {:ok, []} = Kubernetes.discover(config, opts)
+    assert {:error, {:unknown, :kubernetes_create_outcome}, denied} = Kubernetes.ensure(config, record, opts)
+    assert denied.proof == :unknown
+    refute denied.absent?
+    assert {:error, _, _} = Kubernetes.stop(config, denied, opts)
+    assert {:ok, [recovered]} = Kubernetes.discover(config, opts)
+    assert recovered.proof == :unknown
     Process.put(:kubernetes_options, [])
-    assert {:ok, created} = Kubernetes.ensure(config, intended, opts)
-    assert {:ok, started} = Kubernetes.start(config, created, opts)
-    assert started.provider_ref == "sandbox-uid"
-    assert get_in(api_state(), ["pods", record.key, "status", "phase"]) == "Running"
+    assert {:error, _, _} = Kubernetes.ensure(config, record, opts)
+    assert {:error, _, _} = Kubernetes.destroy(config, recovered, opts)
+    assert api_state()["sandboxes"] == %{}
+    assert [%{"state" => "Issued"}] = guard_data(record)["operations"]
   end
 
   test "denied initial create never erases earlier ambiguous mutation evidence" do
@@ -461,22 +1491,22 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   test "denied create with incomplete post-denial inventory retains the reservation" do
     {config, record, opts} = api_fixture(deny_create: true, deny_post_create_inventory: true)
-    assert {:error, {:denied, :kubernetes_api}, denied} = Kubernetes.ensure(config, record, opts)
+    assert {:error, {:unknown, :kubernetes_create_outcome}, denied} = Kubernetes.ensure(config, record, opts)
     assert denied.proof == :unknown
     refute denied.absent?
     assert {:error, _, unresolved} = Kubernetes.inspect(config, denied, opts)
     assert unresolved.proof == :unknown
     Process.put(:kubernetes_options, [])
-    assert {:ok, stopped} = Kubernetes.stop(config, unresolved, opts)
-    assert {:quiescent, _} = stopped.proof
+    assert {:error, _, stopped} = Kubernetes.stop(config, unresolved, opts)
+    assert stopped.proof == :unknown
   end
 
   test "denied create tracks a remaining owned artifact without inventing parent absence" do
     {config, record, opts} = api_fixture(deny_create: true, denied_artifact: true)
-    assert {:error, {:denied, :kubernetes_api}, denied} = Kubernetes.ensure(config, record, opts)
+    assert {:error, {:unknown, :kubernetes_create_outcome}, denied} = Kubernetes.ensure(config, record, opts)
     assert denied.proof == :unknown
     refute denied.absent?
-    assert %{"name" => "partial-secret", "uid" => "partial-secret-uid"} in denied.metadata["cleanup_remaining"]["secrets"]
+    assert [%{"state" => "Issued"}] = guard_data(record)["operations"]
     assert {:ok, [orphan]} = Kubernetes.discover(config, opts)
     assert orphan.proof == :unknown
     assert {:error, _, _} = Kubernetes.ensure(config, orphan, opts)
@@ -571,7 +1601,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     pod = put_in(pod, ["spec", "initContainers"], [%{"name" => "init"}])
     put_object("pods", pod)
     assert {:ok, stopped} = Kubernetes.stop(config, started, opts)
-    assert stopped.proof == :unknown
+    assert {:compute_unknown, _} = stopped.proof
     refute stopped.phase == :stopped
   end
 
@@ -600,34 +1630,16 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert api_state()["secrets"][record.key <> "-ssh"]["data"]["ssh_host_ed25519_key.pub"] == host
   end
 
-  test "repeated definitive denial remains recoverable and never-created destroy needs no controller barrier" do
-    {config, record, opts} = api_fixture(deny_create: true)
-    {:error, {:denied, _}, denied} = Kubernetes.ensure(config, record, opts)
-    {:ok, stopped} = Kubernetes.stop(config, denied, opts)
-    {:ok, intended} = Kubernetes.put_intent(config, stopped, %{desired: :running}, opts)
-    assert {:error, {:denied, _}, denied_again} = Kubernetes.ensure(config, intended, opts)
-    assert {:quiescent, _} = denied_again.proof
-    assert {:ok, absent} = Kubernetes.destroy(config, denied_again, opts)
-    assert absent.absent?
-    assert absent.desired == :absent
-    Process.put(:kubernetes_options, [])
-    assert {:ok, fresh} = Kubernetes.ensure(config, record, opts)
-    assert fresh.provider_ref == "sandbox-uid"
-    refute fresh.absent?
-  end
-
-  test "observed post-denial artifacts and backing references cannot disappear into an absence proof" do
+  test "denied POST remains unresolved after owned artifacts vanish" do
     {config, record, opts} = api_fixture(deny_create: true, denied_artifact: true)
-    {:error, {:denied, _}, denied} = Kubernetes.ensure(config, record, opts)
+    {:error, {:unknown, _}, denied} = Kubernetes.ensure(config, record, opts)
     remove_object("secrets", "partial-secret")
     assert {:error, _, unresolved} = Kubernetes.inspect(config, denied, opts)
     assert unresolved.proof == :unknown
     refute unresolved.absent?
-    assert %{"name" => "partial-secret", "uid" => "partial-secret-uid"} in unresolved.metadata["cleanup_remaining"]["secrets"]
-    pv = %{"metadata" => meta("orphan-pv", "orphan-pv-uid"), "spec" => %{"claimRef" => %{"name" => "workspace-" <> record.key, "namespace" => "test"}}}
-    put_object("persistentvolumes", pv)
-    assert {:error, _, captured} = Kubernetes.inspect(config, denied, opts)
-    assert %{"name" => "orphan-pv", "uid" => "orphan-pv-uid"} in captured.metadata["cleanup_remaining"]["persistentvolumes"]
+    assert {:error, _, _} = Kubernetes.destroy(config, unresolved, opts)
+    assert guard_data(record)["phase"] == "Closing"
+    assert [%{"state" => "Issued"}] = guard_data(record)["operations"]
   end
 
   test "a lost parent never permits stale absence or connection readiness" do
@@ -748,12 +1760,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     blocked_opts = Keyword.put(opts, :command_fun, command)
     assert {:ok, unresolved} = Kubernetes.stop(config, started, blocked_opts)
-    assert unresolved.proof == :unknown
-    assert {:error, {:unknown, :kubernetes_cleanup_pending}, _} = Kubernetes.destroy(config, unresolved, blocked_opts)
+    assert {:compute_unknown, _} = unresolved.proof
+    result = Kubernetes.destroy(config, unresolved, blocked_opts)
+    assert {:error, {:unknown, {:kubernetes_pod_safety_unresolved, "pod-uid"}}, _} = result
     assert {:ok, stopped} = Kubernetes.inspect(config, unresolved, opts)
     assert {:quiescent, _} = stopped.proof
 
-    assert {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}, deleting} =
+    assert {:error, {:unknown, :kubernetes_cleanup_pending}, deleting} =
              Kubernetes.destroy(config, stopped, blocked_opts)
 
     refute get_in(deleting.metadata, ["volumes", "workspace-se-ticket", "deleted"]) == true
@@ -848,7 +1861,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       if "patch" in args, do: json(%{"kind" => "Status", "code" => 403}), else: api_command(exe, args, options)
     end
 
-    assert {:error, {:denied, :kubernetes_api}, denied} =
+    assert {:error, {:unknown, :kubernetes_guard_update_unconfirmed}, denied} =
              Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, command))
 
     assert denied.proof == :unknown
@@ -862,13 +1875,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     durable = Jason.decode!(parent["metadata"]["annotations"]["symphony.dev/record"])
     parent = put_in(parent, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(%{durable | "pending" => %{}}))
     put_object("sandboxes", parent)
-    assert {:error, {:unknown, {:kubernetes_invalid_owned_record, _}}} = Kubernetes.discover(config, opts)
+    assert {:error, {:unknown, :kubernetes_guard_discovery_conflict}} = Kubernetes.discover(config, opts)
     assert {:error, {:unknown, :kubernetes_ownership_changed}, _} = Kubernetes.start(config, created, opts)
     assert api_state()["pods"] == %{}
   end
 
   defp cancel_at_boundary(args, :credentials) do
-    if "create" in args and String.contains?(arg(args, "--raw"), "/secrets"), do: cancel_saved_intent()
+    if "--path" in args and String.contains?(arg(args, "--path"), "/secrets"), do: cancel_saved_intent()
   end
 
   defp cancel_at_boundary(args, :running) do
@@ -880,6 +1893,16 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     sandbox = api_state()["sandboxes"]["se-ticket"]
     saved = Jason.decode!(sandbox["metadata"]["annotations"]["symphony.dev/record"])
     sandbox = put_in(sandbox, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(%{saved | "desired" => "stopped"}))
+    {guard_name, guard} = Enum.find(api_state()["configmaps"], fn {_, object} -> get_in(object, ["data", "guard.json"]) != nil end)
+    data = Jason.decode!(guard["data"]["guard.json"])
+    data = put_in(data, ["record", "desired"], "stopped")
+
+    patch_object("configmaps", guard_name, [
+      %{"op" => "test", "path" => "/metadata/uid", "value" => guard["metadata"]["uid"]},
+      %{"op" => "test", "path" => "/metadata/resourceVersion", "value" => guard["metadata"]["resourceVersion"]},
+      %{"op" => "add", "path" => "/data/guard.json", "value" => Jason.encode!(data)}
+    ])
+
     put_object("sandboxes", sandbox)
   end
 
@@ -928,7 +1951,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     parent = api_state()["sandboxes"][record.key]
     put_object("sandboxes", put_in(parent, ["metadata", "labels", "symphony.dev/environment"], "foreign"))
-    assert {:error, {:unknown, :kubernetes_ownership_changed}} = Kubernetes.discover(config, opts)
+    assert {:error, {:unknown, :kubernetes_guard_discovery_conflict}} = Kubernetes.discover(config, opts)
     assert {:error, {:unknown, :kubernetes_ownership_changed}, _} = Kubernetes.inspect(config, created, opts)
 
     assert {:error, {:unknown, :kubernetes_ownership_changed}, _} =
@@ -959,13 +1982,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       response
     end
 
-    assert {:error, {:denied, _}, denied} =
+    assert {:error, {:unknown, _}, denied} =
              Kubernetes.ensure(config, record, Keyword.put(opts, :command_fun, command))
 
     assert denied.proof == :unknown
     refute denied.absent?
-    assert %{"name" => record.key, "uid" => "concurrent-parent"} in denied.metadata["cleanup_remaining"]["sandboxes"]
-    assert %{"name" => "owner-only", "uid" => "owner-service"} in denied.metadata["cleanup_remaining"]["services"]
+    assert api_state()["sandboxes"][record.key]["metadata"]["uid"] == "concurrent-parent"
+    assert api_state()["services"]["owner-only"]["metadata"]["uid"] == "owner-service"
+    assert [%{"state" => "Issued"}] = guard_data(record)["operations"]
   end
 
   test "storage-free templates and missing selected network policies are not qualified" do
@@ -1014,7 +2038,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     command = fn exe, args, options ->
       response = api_command(exe, args, options)
 
-      if "create" in args and String.contains?(arg(args, "--raw"), "/secrets"),
+      if "--path" in args and String.contains?(arg(args, "--path"), "/secrets"),
         do: remove_object("sandboxes", record.key)
 
       response
@@ -1113,24 +2137,19 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert api_state()["pods"] == %{}
   end
 
-  test "late gated children are safely deleted but still do not settle controller ordering" do
+  test "late committed gated Pod is physically classified before complete cleanup" do
     {config, record, opts} = api_fixture(late_cleanup_pod: :gated)
     {:ok, created} = Kubernetes.ensure(config, record, opts)
-    result = Kubernetes.destroy(config, created, opts)
-    assert {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}, deleting} = result
+    assert {:ok, deleted} = Kubernetes.destroy(config, created, opts)
+    assert deleted.absent?
     assert api_state()["pods"] == %{}
-    refute deleting.absent?
-    Process.put(:kubernetes_options, [])
-    result = Kubernetes.destroy(config, deleting, opts)
-    assert {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}, retained} = result
-    assert retained.metadata["volumes"]["workspace-se-ticket"]["deleted"]
-    refute retained.absent?
+    assert guard_data(record)["evidence"]["physical"]["pod-uid"]["kind"] == "terminated"
   end
 
-  test "late ungated children block destructive cleanup without physical termination evidence" do
+  test "late committed ungated Pod blocks cleanup without physical evidence" do
     {config, record, opts} = api_fixture(late_cleanup_pod: :ungated)
     {:ok, created} = Kubernetes.ensure(config, record, opts)
-    assert {:error, {:unknown, :kubernetes_child_termination_unresolved}, _} = Kubernetes.destroy(config, created, opts)
+    assert {:error, {:unknown, {:kubernetes_pod_safety_unresolved, "pod-uid"}}, _} = Kubernetes.destroy(config, created, opts)
     assert api_state()["pods"][record.key] != nil
     assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"] != nil
   end
@@ -1153,9 +2172,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     parent = api_state()["sandboxes"][record.key]
-    put_object("sandboxes", Map.put(parent, "status", %{"conditions" => []}))
+    put_object("sandboxes", put_in(parent, ["status", "conditions"], []))
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
-    put_object("sandboxes", Map.put(api_state()["sandboxes"][record.key], "status", %{"conditions" => []}))
+    put_object("sandboxes", put_in(api_state()["sandboxes"][record.key], ["status", "conditions"], []))
     sleep = fn _ -> put_object("sandboxes", suspend_status(api_state()["sandboxes"][record.key])) end
     assert {:ok, started} = Kubernetes.start(config, intended, Keyword.put(opts, :sleep_fun, sleep))
     assert {:ok, stopped} = Kubernetes.stop(config, started, opts)
@@ -1181,11 +2200,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       if "patch" in args, do: json(%{"kind" => "Status", "code" => 409}), else: api_command(exe, args, options)
     end
 
-    assert {:error, {:retryable, :kubernetes_cas_conflict}, _} =
+    assert {:error, {:unknown, :kubernetes_guard_update_unconfirmed}, _} =
              Kubernetes.put_intent(config, intended, %{desired: :stopped}, Keyword.put(opts, :command_fun, conflict))
   end
 
-  test "a malformed successful create observation never grants execution proof" do
+  test "malformed create response is recovered only by a matching authoritative object" do
     {config, record, opts} = api_fixture()
 
     command = fn exe, args, options ->
@@ -1193,14 +2212,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       malformed_create_response(args, response)
     end
 
-    assert {:ok, unresolved} = Kubernetes.ensure(config, record, Keyword.put(opts, :command_fun, command))
-    assert unresolved.proof == :unknown
-    assert unresolved.phase == :unknown
-    assert Enum.any?(unresolved.pending, &(&1.outcome == :unknown))
+    assert {:ok, recovered} = Kubernetes.ensure(config, record, Keyword.put(opts, :command_fun, command))
+    assert recovered.provider_ref == "sandbox-uid"
+    assert [%{"state" => "Committed", "objectUID" => "sandbox-uid"}] = guard_data(record)["operations"]
+    assert Process.get(:sandbox_creates) == 1
   end
 
   defp malformed_create_response(args, response) do
-    if "create" in args and String.contains?(arg(args, "--raw"), "/sandboxes") do
+    if "--path" in args and String.contains?(arg(args, "--path"), "/sandboxes") do
       {:ok, %{output: output}} = response
       body = output |> Jason.decode!() |> put_in(["metadata", "annotations", "symphony.dev/record"], "invalid")
       json(body)
@@ -1210,7 +2229,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   end
 
   defp concurrent_denial_artifacts(args, record) do
-    if "create" in args and String.contains?(arg(args, "--raw"), "/sandboxes") do
+    if "--path" in args and String.contains?(arg(args, "--path"), "/sandboxes") do
       parent = %{"metadata" => meta(record.key, "concurrent-parent")}
       put_object("sandboxes", parent)
       refs = [%{"kind" => "Sandbox", "name" => record.key, "uid" => "concurrent-parent"}]
@@ -1333,6 +2352,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     Process.put(:kubernetes_options, options)
     Process.put(:kubernetes_events, %{})
     Process.put(:sandbox_creates, 0)
+    Process.put(:post_attempts, [])
     Process.put(:pod_incarnation, 0)
     Process.delete(:denied_create_seen)
     Process.delete(:delayed_release)
@@ -1356,6 +2376,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
       "kubectl" ->
         api_kubectl(args)
+
+      "symphony-kubernetes-create" ->
+        path = arg(args, "--path")
+        assert URI.parse(path).query == nil
+        resource = path |> String.split("/", trim: true) |> List.last()
+        body = args |> arg("--file") |> File.read!() |> Jason.decode!()
+        Process.put(:post_attempts, [{resource, body} | Process.get(:post_attempts, [])])
+        create_response(resource, body)
     end
   end
 
@@ -1395,10 +2423,6 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
       "get" in args ->
         inventory_response(resource)
-
-      "create" in args ->
-        body = args |> arg("-f") |> File.read!() |> Jason.decode!()
-        create_response(resource, body)
 
       "delete" in args ->
         resource = Enum.at(parts, -2)
@@ -1441,7 +2465,16 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp create_object(resource, body) do
     name = body["metadata"]["name"]
-    object = Map.put(body, "metadata", Map.merge(body["metadata"], meta(name, if(resource == "sandboxes", do: "sandbox-uid", else: "secret-uid"))))
+
+    object_uid =
+      case resource do
+        "sandboxes" -> "sandbox-uid"
+        "configmaps" -> "guard-uid"
+        "secrets" -> "secret-uid"
+      end
+
+    object = Map.put(body, "metadata", Map.merge(body["metadata"], meta(name, object_uid)))
+    if api_state()[resource][name], do: raise("fixture attempted duplicate POST")
     put_object(resource, object)
 
     if resource == "sandboxes" do
@@ -1449,7 +2482,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       object = suspend_status(object)
       put_object(resource, object)
       claim_template = hd(object["spec"]["volumeClaimTemplates"])
-      pvc = %{"metadata" => Map.merge(claim_template["metadata"], child_meta(object, "workspace-" <> name, "pvc-uid")), "spec" => %{"storageClassName" => "private", "volumeName" => "pv-ticket"}}
+
+      pvc = %{
+        "kind" => "PersistentVolumeClaim",
+        "metadata" => Map.merge(claim_template["metadata"], child_meta(object, "workspace-" <> name, "pvc-uid")),
+        "spec" => %{"storageClassName" => "private", "volumeName" => "pv-ticket"}
+      }
+
+      pvc = journal_child(object, "persistentvolumeclaims", pvc)
 
       pv = %{
         "metadata" => Map.put(meta("pv-ticket", "pv-uid"), "finalizers", ["external-provisioner.volume.kubernetes.io/finalizer"]),
@@ -1462,7 +2502,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
       put_object("persistentvolumeclaims", pvc)
       put_object("persistentvolumes", pv)
-      if option(:lost_create), do: {:error, {:unknown, :lost_create_response}}, else: json(object)
+      if option(:lost_create), do: {:error, {:unknown, :lost_create_response}}, else: json(api_state()["sandboxes"][name])
     else
       json(object)
     end
@@ -1478,7 +2518,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
         reconcile_patch(resource, updated, patch)
 
-        json(api_state()[resource][name])
+        json(api_state()[resource][name] || %{"kind" => "Status", "code" => 200})
 
       :conflict ->
         json(%{"kind" => "Status", "code" => 409})
@@ -1487,6 +2527,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp reconcile_patch("sandboxes", updated, _patch) do
     cond do
+      get_in(updated, ["metadata", "deletionTimestamp"]) != nil and get_in(updated, ["metadata", "finalizers"]) == [] ->
+        remove_object("sandboxes", updated["metadata"]["name"])
+
+      get_in(updated, ["spec", "creationControl", "closeRequestId"]) != nil ->
+        reconcile_closed_parent(updated)
+
       get_in(updated, ["spec", "operatingMode"]) == "Running" and api_state()["pods"] == %{} and not option(:delay_pod) ->
         create_pod(updated)
 
@@ -1508,12 +2554,18 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp reconcile_patch(_resource, _updated, _patch), do: :ok
 
+  defp reconcile_closed_parent(updated) do
+    if get_in(updated, ["status", "creationJournal", "phase"]) == "Open", do: late_cleanup_pod(updated)
+    close_fixture_journal(api_state()["sandboxes"][updated["metadata"]["name"]])
+  end
+
   defp create_pod(parent) do
     incarnation = Process.get(:pod_incarnation, 0) + 1
     Process.put(:pod_incarnation, incarnation)
     uid = if incarnation == 1, do: "pod-uid", else: "pod-uid-#{incarnation}"
     metadata = Map.merge(parent["spec"]["podTemplate"]["metadata"], child_meta(parent, parent["metadata"]["name"], uid))
-    pod = Map.put(parent["spec"]["podTemplate"], "metadata", metadata)
+    pod = Map.put(parent["spec"]["podTemplate"], "metadata", metadata) |> Map.put("kind", "Pod")
+    pod = journal_child(parent, "pods", pod)
     pod = if option(:strip_network_profile), do: update_in(pod, ["metadata", "labels"], &Map.delete(&1, "profile")), else: pod
     put_object("pods", pod)
     mutate_pvc_admission()
@@ -1535,7 +2587,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     put_object("pods", Map.put(updated, "status", status))
     parent = api_state()["sandboxes"]["se-ticket"]
     condition = %{"type" => "Ready", "status" => "True", "observedGeneration" => parent["metadata"]["generation"]}
-    put_object("sandboxes", Map.put(parent, "status", %{"conditions" => [condition]}))
+    put_object("sandboxes", Map.update(parent, "status", %{"conditions" => [condition]}, &Map.put(&1, "conditions", [condition])))
   end
 
   defp apply_patch(nil, _patch), do: :conflict
@@ -1579,7 +2631,6 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp delete_effect("sandboxes", _name, object) do
     put_object("sandboxes", put_in(object, ["metadata", "deletionTimestamp"], "2026-09-11T00:00:00Z"))
-    late_cleanup_pod(object)
   end
 
   defp delete_effect("pods", name, object) do
@@ -1610,7 +2661,85 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp delete_effect(resource, name, _object), do: remove_object(resource, name)
 
-  defp suspend_status(object), do: Map.put(object, "status", %{"conditions" => [%{"type" => "Suspended", "status" => "True", "observedGeneration" => object["metadata"]["generation"]}]})
+  defp suspend_status(object) do
+    condition = %{"type" => "Suspended", "status" => "True", "observedGeneration" => object["metadata"]["generation"]}
+    Map.update(object, "status", %{"conditions" => [condition]}, &Map.put(&1, "conditions", [condition]))
+  end
+
+  defp late_missing_pod_after_close(record, storage_failure) do
+    fn exe, args, options ->
+      response = api_command(exe, args, options)
+
+      if "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes") and
+           guard_data(record)["phase"] == "Closing" and Process.get(:late_missing_pod) != true do
+        Process.put(:late_missing_pod, true)
+        parent = api_state()["sandboxes"][record.key]
+        inject_missing_storage(storage_failure, parent)
+        create_pod(api_state()["sandboxes"][record.key])
+        remove_object("pods", record.key)
+      end
+
+      response
+    end
+  end
+
+  defp inject_missing_storage(:none, _parent), do: :ok
+  defp inject_missing_storage(:missing_pv, _parent), do: remove_object("persistentvolumes", "pv-ticket")
+
+  defp inject_missing_storage(:missing_pvc, parent) do
+    pvc = api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+    late = %{pvc | "metadata" => child_meta(parent, "late-workspace-se-ticket", "late-pvc-uid")}
+    journal_child(parent, "persistentvolumeclaims", late)
+  end
+
+  defp journal_child(parent, resource, object) do
+    parent = api_state()["sandboxes"][parent["metadata"]["name"]]
+
+    operation = %{
+      "id" => "attempt-" <> object["metadata"]["uid"],
+      "issuerId" => "fixture-controller",
+      "group" => "",
+      "resource" => resource,
+      "namespace" => "test",
+      "name" => object["metadata"]["name"],
+      "parentUID" => parent["metadata"]["uid"],
+      "state" => "Committed",
+      "objectUID" => object["metadata"]["uid"]
+    }
+
+    journal = get_in(parent, ["status", "creationJournal"]) || %{"parentUID" => parent["metadata"]["uid"], "phase" => "Open", "revision" => 1, "operations" => []}
+    journal = journal |> Map.update!("operations", &(&1 ++ [operation])) |> Map.update!("revision", &(&1 + 1))
+    put_object("sandboxes", put_in(parent, ["status", "creationJournal"], journal))
+
+    annotations = %{
+      "agents.x-k8s.io/create-protocol" => "symphony-create-drain-v1",
+      "agents.x-k8s.io/create-parent-uid" => parent["metadata"]["uid"],
+      "agents.x-k8s.io/create-attempt-id" => operation["id"]
+    }
+
+    update_in(object, ["metadata", "annotations"], &Map.merge(&1 || %{}, annotations))
+  end
+
+  defp close_fixture_journal(parent) do
+    journal = get_in(parent, ["status", "creationJournal"])
+
+    if journal["phase"] != "Drained" and not option(:missing_ack) do
+      revision = journal["revision"] + 1
+
+      ack = %{
+        "protocol" => "symphony-create-drain-v1",
+        "parentUID" => parent["metadata"]["uid"],
+        "closeRequestId" => parent["spec"]["creationControl"]["closeRequestId"],
+        "revision" => revision,
+        "operationCount" => length(journal["operations"])
+      }
+
+      journal = Map.merge(journal, %{"phase" => "Drained", "revision" => revision, "acknowledgement" => ack})
+      put_object("sandboxes", put_in(parent, ["status", "creationJournal"], journal))
+    end
+  end
+
+  defp guard_data(record), do: Jason.decode!(api_state()["configmaps"][Guard.name(record)]["data"]["guard.json"])
 
   defp child_meta(parent, name, uid),
     do:

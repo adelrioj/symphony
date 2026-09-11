@@ -2653,6 +2653,8 @@ charges independently of five active executions.
 Only qualified provider quiescence, including ordering of earlier mutations, may release possibly
 executing capacity. Agent completion/cancellation/stall, local process death, SSH closure, request
 timeout, a stop request, or a missing API object MUST NOT independently establish quiescence.
+Newly observed possible execution MUST invalidate an older quiescence proof and occupy capacity again.
+A cleanup-only storage or ownership uncertainty MUST NOT by itself revoke qualified compute quiescence.
 A failed stop MUST NOT become successful cancellation. Provider operations and hooks run in bounded
 supervised jobs outside the scheduling callback, carrying one monotonic-millisecond deadline.
 Opaque attempt and operation generations MUST fence stale launch/results; stale connection leases
@@ -2755,16 +2757,60 @@ resource bindings, permissions and operational restrictions are documented in
 [the reference operator contract](elixir/README.md#kubernetes-agent-sandbox-qualification-contract).
 Symphony MUST NOT create that qualification evidence or treat it as an operation fence.
 
-Production Kubernetes preflight MUST reject allocation while the cleanup-ordering guarantee below
-remains unresolved, even if all other profile and inventory checks succeed. Ordinary managed
-discovery MUST remain blocked and admit no tickets. The qualification harness MUST enforce the
-same stop; no workflow field or operator assertion may bypass it.
+Production Kubernetes preflight MUST remain unconditionally blocked in this implementation, even if
+all other profile and inventory checks succeed. Ordinary managed discovery MUST admit no tickets.
+The qualification harness MUST enforce the same stop; no workflow field or operator assertion may
+bypass it. Implementing a candidate protocol does not approve its controller image/schema baseline
+or authorize infrastructure deployment, live qualification, or migration of an existing VM.
 
-**Baseline Kubernetes final absence remains blocked:** upstream v1.0.1 lacks authoritative
-per-Sandbox acknowledgment ordering earlier child-create operations before final cleanup. Its
+The pinned upstream v1.0.1 baseline lacks authoritative per-Sandbox acknowledgment ordering earlier
+child-create operations before final cleanup. Its
 [deletionTimestamp branch](https://github.com/kubernetes-sigs/agent-sandbox/blob/v1.0.1/controllers/sandbox_controller.go#L303-L308)
-does not provide that witness. Timeout, ConfigMap assertions, empty inventory, and parent 404 cannot
-substitute. After reachable cleanup, the deleting parent and `symphony.dev/environment-cleanup`
-finalizer MUST remain discoverable; `kubernetes_controller_cleanup_ordering_unproven` stays unknown
-and the identity guard MUST NOT release. Neither provider has live/production qualification from
-this implementation. Examples confer no authorization for external mutation or paid qualification.
+does not provide that witness. Timeout, ConfigMap assertions, empty inventory and parent 404 cannot
+substitute. Missing acknowledgment MUST retain cleanup ownership and the parent cleanup finalizer;
+destructive storage cleanup MUST NOT precede the witness. Neither provider has live/production
+qualification from this implementation.
+
+### B.6 Authoritative Kubernetes Create Drain
+
+The candidate protocol is `symphony-create-drain-v1`. A parent MUST opt in at creation through
+`spec.creationControl.protocol`, with the cleanup finalizer already present. Protocol presence and
+identity are immutable; the provider's first `closeRequestId` is irreversible. Legacy parents without
+the opt-in retain legacy controller behavior and MUST NOT be admitted into a protocol-managed namespace.
+
+The UID-bound `status.creationJournal` has monotonically versioned `Open`, `Closed` and `Drained`
+phases. Appending an `Issued` operation and accepting closure MUST use the same authoritative
+UID/resourceVersion CAS boundary. Only the invocation whose issuance CAS positively succeeded may
+transmit that create, at most once. Recovered issuance MUST NOT authorize replay. Ambiguous responses,
+rejections, timeouts and negative inventory MUST remain unresolved; only exact originally attributed
+resource identity and object UID evidence may commit an operation. Count and serialized-byte limits
+MUST reserve completion space and retain history rather than evicting it.
+
+Provider Sandbox and Secret creates obey the same issuance rule through a deterministic ConfigMap
+guard established before the parent POST. Its versioned `guard.json` owns lifecycle state even when a
+parent annotation update fails. The guard has no garbage-collection owner and is never deleted or
+reopened; its phases are `Open`, `Closing`, `ReadyToFinalize` and `Complete`. Completed identities
+cannot be implicitly reused. Every POST uses the shared audited single-attempt transport/helper;
+unsupported transport/authentication profiles fail closed without a fallback create path.
+
+Cleanup MUST close provider issuance, settle every provider operation, and validate the controller's
+complete drained acknowledgement against the exact parent UID, close request, revision, operation
+count and immutable committed membership before destructive cleanup. Every committed Pod UID needs
+durable physical safety classification, including never-authorized or now-missing Pods. Every
+committed PVC retains an explicit backing-storage obligation. Newly discovered physical uncertainty
+invalidates prior compute quiescence; storage-only uncertainty remains a separate ownership obligation.
+After drain, cleanup MUST NOT depend on a new normal-reconciliation suspension acknowledgement.
+
+A complete `ReadyToFinalize` receipt MUST be durably persisted and exactly read back before removing
+the exact parent's cleanup finalizer. Parent, child and backing absence precede durable `Complete`
+readback and successful ownership release. Lost write responses require exact payload/state readback,
+not identity alone. Idempotent absent intent and normal operation-layer recovery MUST resume these
+receipts without changing their frozen evidence. Fully validated Complete receipts are excluded from
+active ownership inventory, while their retained guards still prevent identity reuse.
+
+Admission protects original attribution and the separate provider/controller writers; it MUST NOT be
+treated as a commit-time fence. The candidate namespace selector is
+`symphony.dev/create-drain=symphony-create-drain-v1`; namespace annotations
+`symphony.dev/creation-controller` and `symphony.dev/creation-provider` bind distinct exact
+service-account usernames. Workers MUST NOT modify these identities, admission configuration,
+journals, cleanup receipts or protected creation attribution.

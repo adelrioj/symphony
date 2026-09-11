@@ -150,11 +150,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   defp quiescent?(_record), do: false
   defp unresolved?(record), do: Enum.any?(record.pending, &(&1.outcome in [:pending, :unknown]))
   defp unresolved_start?(record), do: Enum.any?(record.pending, &(&1.verb in [:create, :start] and &1.outcome in [:pending, :unknown]))
+  defp invalidate_start_proof(%Record{proof: {:compute_unknown, _}} = record), do: record
   defp invalidate_start_proof(record), do: if(unresolved_start?(record), do: %{record | proof: :unknown}, else: record)
 
   defp retain_delete_proof(%Entry{phase: phase, record: old}, record) when phase in [:deleting, :unknown] do
     if old.desired == :absent or phase == :deleting do
-      %{record | proof: if(quiescent?(old), do: old.proof, else: record.proof), desired: :absent}
+      proof = if quiescent?(old) and not match?({:compute_unknown, _}, record.proof), do: old.proof, else: record.proof
+      %{record | proof: proof, desired: :absent}
     else
       record
     end

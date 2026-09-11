@@ -66,6 +66,20 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
     refute occupied.record.proof == proof.proof
   end
 
+  test "new physical obligations invalidate an older stop proof across repeated cleanup failures" do
+    stopped = %{record() | phase: :stopped, proof: {:quiescent, %{uid: "earlier-worker"}}}
+    {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(%{Lifecycle.new(stopped, "a", :cleanup) | phase: :stopped}, :destroy, 0)
+    unresolved = %{stopped | phase: :unknown, proof: {:compute_unknown, %{worker_uid: "late-worker"}}}
+    {retained, []} = Lifecycle.step(deleting, {:failed, id, {:unknown, :physical_outcome}, unresolved}, 1)
+    assert Lifecycle.occupied?(retained)
+    assert retained.record.desired == :absent
+    assert retained.record.proof == unresolved.proof
+    disk_unknown = %{retained.record | proof: :unknown}
+    {still_occupied, []} = Lifecycle.step(retained, {:failed, id, {:unknown, :disk_outcome}, disk_unknown}, 2)
+    assert Lifecycle.occupied?(still_occupied)
+    assert still_occupied.record.proof != stopped.proof
+  end
+
   test "only confirmed complete absence forgets retained resources" do
     proof = %{record() | phase: :stopped, proof: {:quiescent, %{uid: "pod"}}}
     {entry, _} = Lifecycle.step(%{Lifecycle.new(proof, "a", :cleanup) | phase: :stopped}, :destroy, 0)

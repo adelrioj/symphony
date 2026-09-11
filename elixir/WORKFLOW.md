@@ -87,8 +87,11 @@ workspace:
 # Kubernetes pins Agent Sandbox v1.0.1 and an immutable qualification ConfigMap referenced
 # by Template annotation symphony.dev/qualification; it requires qualified Kata guest
 # storage, admission/gates, enforcing NetworkPolicy, private SSH and kubelet/CSI evidence.
-# Upstream lacks authoritative child-create cleanup ordering acknowledgment: final
-# Sandbox absence stays unknown, cleanup finalizer/identity guard remain held.
+# The candidate create-drain controller and consumer do not change those baseline pins:
+# production Kubernetes allocation remains unconditionally blocked pending separate approval.
+# Runtime requires kubectl and the same-source symphony-kubernetes-create helper on PATH.
+# Retained per-environment ConfigMap guards precede creates and are never deleted/reopened.
+# Namespace controller/provider service-account identities belong in annotations, not labels.
 # Neither profile is live/production-qualified here. No external mutation is authorized.
 # Full operator/ConfigMap/API field contract: README.md#managed-ticket-environments.
 # Image requires real GNU realpath -m --, Bash/Git/findmnt, agent/Compose/browser tools and

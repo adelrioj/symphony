@@ -14,6 +14,9 @@ defmodule SymphonyElixir.ExecutionEnvironment do
     `outcome` (`:pending`, `:unknown`, `:succeeded`, or `:failed`). A missing resource
     cannot clear an unresolved create.
     Only adapters establish quiescence proof; agent-writable metadata is not evidence.
+    `{:compute_unknown, evidence}` identifies unresolved physical obligations and
+    invalidates any earlier quiescence proof. Bare `:unknown` may instead describe
+    cleanup-only uncertainty without contradicting previously established physical stop.
     `absent?` is true only after both owned compute and disk absence are established.
     """
 
@@ -59,7 +62,7 @@ defmodule SymphonyElixir.ExecutionEnvironment do
             phase: SymphonyElixir.ExecutionEnvironment.phase(),
             desired: :running | :stopped | :absent,
             pending: [pending_operation()],
-            proof: :unknown | {:quiescent, term()},
+            proof: :unknown | {:quiescent, term()} | {:compute_unknown, map()},
             absent?: boolean(),
             metadata: map()
           }

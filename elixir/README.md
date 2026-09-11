@@ -411,6 +411,8 @@ slots. Five active executions are independent of how many stopped environments a
 Qualified remote quiescence releases execution capacity; closing SSH, losing a local holder, killing
 an agent, cancellation, or a stop request alone does not. A quiescent environment with unresolved
 disk deletion can release its execution slot but still holds the identity guard and may incur charges.
+Newly observed possible execution invalidates an older stop proof and occupies capacity again;
+cleanup-only storage uncertainty does not invalidate qualified compute quiescence.
 Existing agent `running`, `retrying`, and `blocked` status meanings do not change.
 
 Terminal observation is persisted once as UTC Unix milliseconds and survives restart. An expired
@@ -535,9 +537,10 @@ The permanent blueprint gate remains in the Template-derived Sandbox; only a rev
 UID/resourceVersion may have Symphony's gate removed after durable release authorization.
 
 The orchestrator needs read-only Template/qualification/CRD/controller/RuntimeClass/StorageClass/
-NetworkPolicy access, complete Sandbox/Pod/PVC/Service/Secret/PV inventory, conditional Sandbox
-intent and finalizer writes, exact Pod CAS/gate/stop-fence writes, normal conditional child deletion,
-owned SSH Secret lifecycle, and Pod/PV watch permissions. Keep this separate from workload RBAC.
+NetworkPolicy access, complete Sandbox/Pod/PVC/Service/Secret/PV and guard ConfigMap inventory,
+conditional Sandbox intent and finalizer writes, exact Pod CAS/gate/stop-fence writes, normal
+conditional child deletion, owned SSH Secret lifecycle, and Pod/PV watch permissions. It also owns
+CAS updates to its retained create guards, but never deletes them. Keep this separate from workload RBAC.
 No broad node mutation or automated node-fencing permission is part of this implementation.
 
 Stop requires qualified kubelet termination for every regular/init/ephemeral container of every
@@ -552,16 +555,12 @@ before deletion; a complete exact-UID PV deletion watch must show finalizer remo
 missing PVs, unbound claims with unknown provisioning, denied inventory, or compacted watch history
 do not establish disk absence. Never strip protection finalizers to force progress.
 
-**Allocation and final-cleanup blocker:** upstream v1.0.1 has no authoritative per-Sandbox acknowledgment ordering
-all earlier child-create requests before final cleanup. Its
+**Pinned baseline and production stop:** upstream v1.0.1 has no authoritative per-Sandbox acknowledgment
+ordering all earlier child-create requests before final cleanup. Its
 [deletionTimestamp branch](https://github.com/kubernetes-sigs/agent-sandbox/blob/v1.0.1/controllers/sandbox_controller.go#L303-L308)
-only logs, clears a local deferral clock, and returns. An elapsed timeout, qualification ConfigMap,
-empty child inventory, or parent 404 cannot supply the missing evidence. After reachable child/CSI
-cleanup Symphony leaves the deleting parent discoverable with `symphony.dev/environment-cleanup`,
-retains remaining identities, and reports `kubernetes_controller_cleanup_ordering_unproven`.
-Final absence is **unknown**, the identity guard cannot release, and no full Kubernetes production
-qualification is claimed. Resolving this needs authoritative upstream evidence or an approved design
-change, not a workflow flag.
+does not supply that witness. Timeout, qualification ConfigMaps, empty inventory and parent 404 are
+not substitutes. The candidate controller extension and consumer described below do not change the
+approved source/image/schema pins above or qualify a replacement baseline.
 
 Production `Kubernetes.preflight/2` returns
 `{:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}}` even when every
@@ -569,6 +568,53 @@ read-only profile and inventory check succeeds. The normal discovery path remain
 the scheduler admits no Kubernetes tickets; this is not merely a qualification-harness restriction.
 The harness preserves the same blocker. No workflow field or operator ConfigMap can override it.
 Local/static SSH operation and the existing VM deployment do not depend on this managed-provider gate.
+
+##### Candidate create-drain protocol
+
+The controller extension opts in through `spec.creationControl.protocol: symphony-create-drain-v1`
+at Sandbox creation, with `symphony.dev/environment-cleanup` already present. Its UID-bound
+`status.creationJournal` serializes child issuance and irreversible closure with resourceVersion CAS.
+Only a positively acknowledged issuance permits one POST; a recovered `Issued` entry is never replayed.
+Timeouts, API rejections and missing objects leave it unresolved until exact attributed commitment is
+positively observed. History is retained, bounded to 128 operations and 128 KiB with completion space
+reserved. Exhaustion blocks further issuance rather than pruning evidence.
+
+Symphony creates a deterministic `symphony-guard-<identity digest>` ConfigMap before any parent POST,
+then journals its Sandbox and Secret attempts in `data["guard.json"]`. The guard, not the parent
+annotation, owns durable lifecycle state. Guards progress through `Open`, `Closing`, `ReadyToFinalize`
+and `Complete`; they have no garbage-collection owner and are never deleted or reopened. Completed
+receipts do not count as active inventory, but still reject reuse of that environment identity.
+
+Cleanup closes provider issuance and validates the controller's complete `Drained` acknowledgement:
+exact parent UID, close-request ID, revision, operation count and immutable committed membership.
+It retains storage before that acknowledgement. Every committed Pod needs durable physical safety
+classification, including Pods never authorized to start; missing/unclassified Pods remain unknown.
+Every committed PVC retains its qualified backing-storage obligation. Newly discovered physical
+uncertainty invalidates any older compute-stop proof. Closure cleanup uses these proofs rather than
+waiting for a new `Suspended` condition from a controller that has already drained.
+
+The full `ReadyToFinalize` receipt must be CAS-persisted and exactly read back before finalizer
+removal. Exact parent, child and backing absence precedes the durable `Complete` readback. Recovery
+can resume finalization through the normal operation path even if the parent disappeared; bare parent
+absence never proves cleanup. Genuinely unknown issuance can retain the guard indefinitely.
+
+The candidate controller checkout supplies `k8s/symphony-create-drain-policy.yaml`, installed separately
+only after approval. It selects the namespace label `symphony.dev/create-drain=symphony-create-drain-v1`.
+Namespace **annotations** `symphony.dev/creation-controller` and `symphony.dev/creation-provider` hold
+distinct exact `system:serviceaccount:<namespace>:<name>` identities. They are not label values.
+Protect namespace configuration, original attribution, journals and guards from workers; admission
+authenticates writers and attribution but is not a commit-time create fence.
+
+The Symphony runtime needs both `kubectl` and `symphony-kubernetes-create` on `PATH`. Build the helper
+from the same reviewed controller source with `make build-symphony-kubernetes-create`; the output is
+`bin/symphony-kubernetes-create`. The generic Symphony Dockerfile does not bundle these tools.
+All POSTs use that helper; there is no `kubectl create` fallback. GET/watch/CAS/delete retain kubectl.
+The helper requires the configured explicit kubeconfig/context and private JSON request file. It uses
+verified HTTPS over one fresh HTTP/1.1 connection, with no redirect, proxy, authentication-refresh or
+client-go retry path. Static bearer/token-file snapshots, basic auth and client certificates are
+supported; exec/auth-provider plugins, impersonation, custom transports and insecure TLS are rejected.
+Controller token files are snapshotted at client construction, not refreshed after rejection.
+The helper accepts a bare API path; the shared transport always adds `fieldValidation=Strict`.
 
 #### Managed observability API
 
