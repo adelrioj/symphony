@@ -922,6 +922,126 @@ export SYMPHONY_LIVE_GITLAB_PROJECT_ID=...
 SYMPHONY_RUN_GITLAB_LIVE_E2E=1 mix test test/symphony_elixir/gitlab_live_e2e_test.exs
 ```
 
+### Opt-in managed-worker provider qualification
+
+`managed_environment_live_e2e_test.exs` is a **real, billable qualification harness**, not
+a simulated provider test. Ordinary test loading skips it and does not read its live
+workflow, credentials, or evidence path. It uses a Memory tracker (no production issue
+mutations), the real Orchestrator and provider adapters, and separate real Codex and
+Claude runs under the workflow's existing approval/sandbox policies. Do not weaken those
+policies to obtain a pass.
+
+Neither provider has a live qualification result from this change. **Kubernetes Agent
+Sandbox v1.0.1 remains blocked before allocation by unproven controller cleanup
+ordering.** No `qualification` flag bypasses that production preflight blocker. The
+gate-hold and dedicated-node fault protocols are implemented for qualification, not
+permission to exercise a currently unqualified cluster. Workstations also remains
+blocked until an operator supplies and authorizes every prerequisite below.
+
+Obtain explicit authorization for the selected disposable project/region/cluster or
+Kubernetes context/namespace, five concurrent workers, at least six retained
+environments, paid model sessions, deletion, and the specified physical fault scope.
+Possession of credentials is not authorization. Use a separately scoped workflow and
+fresh output directory for each provider/run. The selected provider comes exclusively
+from `worker.environment.kind`, through Config; there is no provider override variable.
+
+From `elixir/`, invoke with these **exact three opt-in variables**:
+
+```bash
+# AUTHORIZED_WORKFLOW must name the reviewed absolute workflow path.
+# Resolve symlinks in the output parent (including macOS /var and /tmp aliases).
+umask 077
+EVIDENCE_DIR="$(mktemp -d)"
+EVIDENCE_DIR="$(cd "$EVIDENCE_DIR" && pwd -P)"
+EVIDENCE_JSON="$EVIDENCE_DIR/evidence.json"
+env SYMPHONY_RUN_MANAGED_E2E=1 \
+  SYMPHONY_MANAGED_E2E_WORKFLOW="$AUTHORIZED_WORKFLOW" \
+  SYMPHONY_MANAGED_E2E_OUTPUT="$EVIDENCE_JSON" \
+  mise exec -- mix test test/symphony_elixir/managed_environment_live_e2e_test.exs \
+  --include live_e2e --timeout 1800000
+```
+
+The output must be a **new absolute file in an empty, private temporary directory**,
+not a repository path, symlink, or an existing evidence file. The harness rejects
+symlink ancestors and group/world-accessible output directories. Evidence and its
+staged recovery workflow are written privately and atomically. Allocation intent is
+persisted before publishing Memory issues; interruption recovery gets a separate
+bounded cleanup deadline. Keep the private directory if cleanup is unresolved and
+use its deployment/resource IDs for authorized remediation. Successful cleanup removes
+the staged workflow; never commit evidence, credentials, or generated infrastructure IDs.
+
+Supply the following **test-only** map at
+`worker.environment.provider.qualification` in the selected workflow. This is not a new
+production provider mode or an authorization bypass:
+
+| Field | Required operator input |
+| --- | --- |
+| `paid_model_calls_authorized` | Literal `true`, covering real Codex and Claude calls. |
+| `max_concurrent_workers` | Exactly `5`; the harness also queues a sixth ticket. |
+| `max_retained_environments` | Integer at least `6`. |
+| `max_backend_sessions` | Integer at least `20`; an enforced ceiling including recovery/restarts. |
+| `qualification_report` | Non-secret reference to the operator's authorization, runtime/controller evidence, quota assessment and cleanup plan. |
+| `quota_evidence` | Numeric `concurrent_workers >= 5`, `retained_environments >= 6`, and optional nonnegative `persistent_disk_gib`. Only these fields enter evidence. |
+| `runtime_version` | Operator-qualified worker/runtime version; recorded as operator-reported, separately from versions actually observed over SSH. |
+| `worker_image` | Exact digest-pinned image matching the actual provider template/config, including `@sha256:` and 64 lowercase hex digits. |
+| `node_modules_path` | Absolute **remote** directory containing the pinned compatible Playwright installation. No dependency-path fallback is supplied. |
+| `review_app_url` | Independently deployed deterministic HTTPS health endpoint, with no URL credentials, query or fragment; redirects are not followed. Its response must remain available and identical while **all** disposable workers are physically stopped. |
+| `unrelated_resource_paths` | Nonempty list of existing, unrelated negative-control API resource paths in the selected scope. Exact immutable identities are compared after cleanup too. |
+| `fault_driver` | Absolute local path to the operator's audited, self-contained physical-fault executable. |
+| `fault_driver_sha256` | SHA-256 of that executable's bytes. The helper executes a private snapshot of precisely those bytes; do not depend on sibling files beside the executable. |
+| `storage_fault_authorized` | Literal `true`, authorizing scoped physical storage-deletion delay and restoration. |
+| `node_fault_authorized` | Kubernetes only: literal `true` for the dedicated-node disconnection scenario. |
+| `authorized_node_uids` | Kubernetes only: explicit nonempty allowlist of dedicated node UIDs; unrelated workload sharing is rejected. |
+| `denied_identity` | Kubernetes only: deliberately denied, non-`system:` Kubernetes username that the authorized caller can impersonate for the real stop-rejection probe, without impersonated groups. |
+
+The rest of the workflow must satisfy the normal provider configuration and credential
+requirements documented above. Its `hooks.after_create` must clone an authorized
+disposable Git repository into the managed checkout. Supply functional real backend
+installations/authentication on the worker without mounting cloud/cluster administrative
+credentials into it. Pin compatible Python Testcontainers, Node Playwright and Chromium
+dependencies in the qualified worker image; install Docker Engine, Compose, Python 3,
+Node, Git, SSH and the fixture-required command-line tools. The three workload fixtures
+already bind PostgreSQL 16, Alpine 3.20 and Ryuk 0.8.1 to exact image digests. Review those
+digests and architecture availability before authorizing the run; do not silently
+substitute tags, disable Ryuk, or download changing dependencies between comparisons.
+Evidence records fixture hashes/images and actual worker tool versions. A local fixture
+smoke run is not evidence that either real backend can invoke Docker under its policy.
+
+Isolation checks use bounded concurrent probes to the other owned workers' private
+Docker/SSH endpoints and to narrowly scoped credential endpoints: GCP metadata DNS and
+link-local IP, AWS IMDSv2/instance-role credentials, and Azure managed-identity tokens.
+Returned tokens are never printed. A denied connection/authorization is distinct from
+an unexpected usable credential response; ambiguous successful responses fail the check.
+Workstations prerequisite reads also require Compute regional quota visibility and an
+installed `gcloud` CLI whose JSON version output can be observed.
+
+The physical-fault helper protocol is `fault_driver --request <private-json-file>`.
+Its JSON contains `scenario` (`storage_deletion`, `node_disconnection`, or `all`),
+`phase` (`apply` or `restore`), the generated `deployment_id`, selected `scope`,
+`resource` (safe backing-storage/volume/node identities, or `null` for `all/restore`),
+and `credential_references`. References select the operator's existing credential
+configuration/impersonation identity or kubeconfig/context; they are **not credential
+values** and must never be printed or copied into public evidence. Emit only
+`{"applied":true}` on stdout after successful application/restoration. This acknowledgment
+and the executable hash are **not physical-effect proof**. `all/restore` must be
+idempotent, confined to this deployment/scope, and work even after the original provider
+record is lost.
+
+The harness observes accepted deletion followed by a real failed/uncertain deletion
+operation with the captured physical storage still present, restarts the runtime, then
+requires eventual provider-certified absence after restoration. Merely withholding a
+client DELETE or observing ordinary asynchronous deletion latency does not qualify.
+Node `NotReady`, a closed SSH connection, CLI success prose and absent parent objects
+are never substitutes for physical-stop/deletion proof. Never force-delete an unverified
+node or invent broad IAM changes to make the test proceed.
+
+Every required check is individually recorded. A blocked, failed or unrun check makes
+`qualified?` false, as does incomplete inventory, interruption or any remaining owned
+resource. Missing service-managed disk evidence requires operator action, not a successful
+summary. Unavailable authorization, audited fault helper, scoped infrastructure,
+quota/image/dependency evidence, real backend access, physical deletion evidence, or
+the Kubernetes cleanup-ordering guarantee remain explicit qualification blockers.
+
 ## FAQ
 
 ### Why Elixir?
