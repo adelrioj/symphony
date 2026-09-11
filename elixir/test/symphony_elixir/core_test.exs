@@ -303,37 +303,33 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, :workflow_front_matter_not_a_map} = Workflow.load(workflow_path)
   end
 
+  @tag :owns_default_runtime
   test "SymphonyElixir.start_link starts the agent runtime" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
-    runtime_pid = Process.whereis(SymphonyElixir.AgentRuntimeSupervisor)
-
-    on_exit(fn ->
-      if is_nil(Process.whereis(SymphonyElixir.AgentRuntimeSupervisor)) do
-        case Supervisor.restart_child(
-               SymphonyElixir.Supervisor,
-               SymphonyElixir.AgentRuntimeSupervisor
-             ) do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
-        end
-      end
-    end)
-
-    if is_pid(runtime_pid) do
-      assert :ok =
-               Supervisor.terminate_child(
-                 SymphonyElixir.Supervisor,
-                 SymphonyElixir.AgentRuntimeSupervisor
-               )
-    end
-
-    assert {:ok, pid} = SymphonyElixir.start_link()
+    pid = start_supervised!(%{
+      id: SymphonyElixir.AgentRuntimeSupervisor,
+      start: {SymphonyElixir, :start_link, []},
+      type: :supervisor
+    })
     assert Process.whereis(SymphonyElixir.AgentRuntimeSupervisor) == pid
     assert is_pid(Process.whereis(SymphonyElixir.TaskSupervisor))
     assert is_pid(Process.whereis(SymphonyElixir.Orchestrator))
 
-    GenServer.stop(pid)
+    stop_supervised!(SymphonyElixir.AgentRuntimeSupervisor)
+  end
+
+  test "scheduler fixture teardown terminates its private workers" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    name = Module.concat(__MODULE__, OwnedFixtureOrchestrator)
+    {:ok, pid} = start_test_orchestrator(name: name)
+    task_supervisor = :sys.get_state(pid).task_supervisor
+    {:ok, worker} = Task.Supervisor.start_child(task_supervisor, fn -> receive do :stop -> :ok end end)
+    monitor = Process.monitor(worker)
+    stop_supervised!(Module.concat(name, RuntimeSupervisor))
+    assert_receive {:DOWN, ^monitor, :process, ^worker, :shutdown}
+    refute Process.whereis(name)
+    refute Process.whereis(task_supervisor)
   end
 
   test "orchestrator fails startup when semantic preflight fails" do
@@ -352,20 +348,7 @@ defmodule SymphonyElixir.CoreTest do
         assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
       end
 
-      if is_nil(Process.whereis(SymphonyElixir.AgentRuntimeSupervisor)) do
-        assert {:ok, _pid} =
-                 Supervisor.restart_child(
-                   SymphonyElixir.Supervisor,
-                   SymphonyElixir.AgentRuntimeSupervisor
-                 )
-      end
     end)
-
-    assert :ok =
-             Supervisor.terminate_child(
-               SymphonyElixir.Supervisor,
-               SymphonyElixir.AgentRuntimeSupervisor
-             )
 
     assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
 
@@ -390,22 +373,15 @@ defmodule SymphonyElixir.CoreTest do
     task_supervisor_name = Module.concat(__MODULE__, "ReloadTaskSupervisor#{issue_suffix}")
     orchestrator_name = Module.concat(__MODULE__, "ReloadOrchestrator#{issue_suffix}")
 
-    on_exit(fn ->
-      if pid = Process.whereis(runtime_supervisor_name) do
-        GenServer.stop(pid)
-      end
-    end)
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
-    assert {:ok, runtime_pid} =
-             SymphonyElixir.AgentRuntimeSupervisor.start_link(
-               name: runtime_supervisor_name,
-               task_supervisor_name: task_supervisor_name,
-               orchestrator_name: orchestrator_name
-             )
-
-    Process.unlink(runtime_pid)
+    runtime_pid =
+      start_supervised!({SymphonyElixir.AgentRuntimeSupervisor,
+        name: runtime_supervisor_name,
+        task_supervisor_name: task_supervisor_name,
+        orchestrator_name: orchestrator_name
+      })
     original_orchestrator_pid = Process.whereis(orchestrator_name)
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -467,22 +443,10 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     on_exit(fn ->
-      if pid = Process.whereis(runtime_supervisor_name) do
-        GenServer.stop(pid)
-      end
-
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
-      restart_default_runtime!()
       File.rm_rf(test_root)
     end)
 
-    if Process.whereis(SymphonyElixir.AgentRuntimeSupervisor) do
-      assert :ok =
-               Supervisor.terminate_child(
-                 SymphonyElixir.Supervisor,
-                 SymphonyElixir.AgentRuntimeSupervisor
-               )
-    end
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -494,14 +458,11 @@ defmodule SymphonyElixir.CoreTest do
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
-    assert {:ok, runtime_supervisor_pid} =
-             SymphonyElixir.AgentRuntimeSupervisor.start_link(
-               name: runtime_supervisor_name,
-               task_supervisor_name: task_supervisor_name,
-               orchestrator_name: orchestrator_name
-             )
-
-    Process.unlink(runtime_supervisor_pid)
+      start_supervised!({SymphonyElixir.AgentRuntimeSupervisor,
+        name: runtime_supervisor_name,
+        task_supervisor_name: task_supervisor_name,
+        orchestrator_name: orchestrator_name
+      })
 
     orchestrator_pid = Process.whereis(orchestrator_name)
     task_supervisor_pid = Process.whereis(task_supervisor_name)
@@ -795,14 +756,11 @@ defmodule SymphonyElixir.CoreTest do
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
       orchestrator_name = Module.concat(__MODULE__, :MissingRunningIssueOrchestrator)
-      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+      {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
       on_exit(fn ->
         restore_app_env(:memory_tracker_issues, previous_memory_issues)
 
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
-        end
       end)
 
       Process.sleep(50)
@@ -1115,19 +1073,15 @@ defmodule SymphonyElixir.CoreTest do
     issue_id = "issue-resume"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
 
     running_entry = %{
       pid: self(),
       ref: ref,
+      attempt_id: "test-attempt",
       identifier: "MT-558",
       issue: %Issue{id: issue_id, identifier: "MT-558", state: "In Progress"},
       started_at: DateTime.utc_now()
@@ -1244,6 +1198,22 @@ defmodule SymphonyElixir.CoreTest do
     assert %{identifier: "MT-564"} = state.blocked[issue.id]
   end
 
+  test "managed workspace HEAD never reads a same-named local repository even without a host label" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", max_turn_exhaustions: 2)
+    workspace = Path.join(System.tmp_dir!(), "symphony-remote-head-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+    git!(workspace, ["init", "--quiet"])
+    git!(workspace, ["config", "user.email", "test@example.com"])
+    git!(workspace, ["config", "user.name", "test"])
+    commit!(workspace, "local-only")
+    context = %SymphonyElixir.ExecutionContext{mode: :managed, workspace_root: Path.dirname(workspace), workspace_path: workspace}
+    issue = %Issue{id: "managed-head", identifier: "MT-REMOTE-HEAD", state: "In Progress"}
+    pid = start_orchestrator!(:ManagedHeadOrchestrator)
+    state = complete_worker_run!(pid, issue, true, workspace, context)
+    assert %{count: 1, head: nil} = state.turn_exhaustions[issue.id]
+  end
+
   defp git!(workspace, args) do
     {output, 0} = System.cmd("git", ["-C", workspace | args], stderr_to_stdout: true)
     output
@@ -1275,19 +1245,15 @@ defmodule SymphonyElixir.CoreTest do
     issue_id = "issue-crash"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :CrashRetryOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
 
     running_entry = %{
       pid: self(),
       ref: ref,
+      attempt_id: "test-attempt",
       identifier: "MT-559",
       retry_attempt: 2,
       issue: %Issue{id: issue_id, identifier: "MT-559", state: "In Progress"},
@@ -1316,19 +1282,15 @@ defmodule SymphonyElixir.CoreTest do
     issue_id = "issue-crash-initial"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :InitialCrashRetryOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
 
     running_entry = %{
       pid: self(),
       ref: ref,
+      attempt_id: "test-attempt",
       identifier: "MT-560",
       issue: %Issue{id: issue_id, identifier: "MT-560", state: "In Progress"},
       started_at: DateTime.utc_now()
@@ -1355,13 +1317,8 @@ defmodule SymphonyElixir.CoreTest do
   test "stale retry timer messages do not consume newer retry entries" do
     issue_id = "issue-stale-retry"
     orchestrator_name = Module.concat(__MODULE__, :StaleRetryOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
     current_retry_token = make_ref()
@@ -1470,13 +1427,8 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   defp start_orchestrator!(name) do
-    {:ok, pid} = Orchestrator.start_link(name: Module.concat(__MODULE__, name))
+    {:ok, pid} = start_test_orchestrator(name: Module.concat(__MODULE__, name))
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     pid
   end
@@ -1484,17 +1436,19 @@ defmodule SymphonyElixir.CoreTest do
   defp exhaust_turn_budget!(pid, issue, workspace_path \\ nil),
     do: complete_worker_run!(pid, issue, true, workspace_path)
 
-  defp complete_worker_run!(pid, issue, turns_exhausted?, workspace_path \\ nil) do
+  defp complete_worker_run!(pid, issue, turns_exhausted?, workspace_path \\ nil, context \\ nil) do
     ref = make_ref()
 
     running_entry = %{
       pid: self(),
       ref: ref,
+      attempt_id: "test-attempt",
       identifier: issue.identifier,
       issue: issue,
       session_id: "thread-turn-budget",
       started_at: DateTime.utc_now(),
-      workspace_path: workspace_path
+      workspace_path: workspace_path,
+      execution_context: context || SymphonyElixir.ExecutionContext.local(if(is_binary(workspace_path), do: Path.dirname(workspace_path), else: SymphonyElixir.Config.local_workspace_root()))
     }
 
     :sys.replace_state(pid, fn state ->
@@ -1506,7 +1460,7 @@ defmodule SymphonyElixir.CoreTest do
     end)
 
     if turns_exhausted? do
-      send(pid, {:agent_turns_exhausted, issue.id, issue.state})
+      send(pid, {:agent_turns_exhausted, issue.id, "test-attempt", issue.state})
     end
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
@@ -1552,23 +1506,6 @@ defmodule SymphonyElixir.CoreTest do
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 
-  defp restart_default_runtime! do
-    if Process.whereis(SymphonyElixir.AgentRuntimeSupervisor) do
-      :ok =
-        Supervisor.terminate_child(
-          SymphonyElixir.Supervisor,
-          SymphonyElixir.AgentRuntimeSupervisor
-        )
-    end
-
-    case Supervisor.restart_child(
-           SymphonyElixir.Supervisor,
-           SymphonyElixir.AgentRuntimeSupervisor
-         ) do
-      {:ok, pid} -> pid
-      {:error, {:already_started, pid}} -> pid
-    end
-  end
 
   defp eventually_value(fun, attempts \\ 100)
 
@@ -1918,7 +1855,7 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       before = MapSet.new(File.ls!(workspace_root))
-      assert :ok = AgentRunner.run(issue)
+      assert :ok = AgentRunner.run(issue, nil, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
       entries_after = MapSet.new(File.ls!(workspace_root))
 
       created =
@@ -2009,10 +1946,11 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(
                  issue,
                  test_pid,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
                )
 
-      assert_receive {:codex_worker_update, "issue-live-updates",
+      assert_receive {:codex_worker_update, "issue-live-updates", _attempt_id,
                       %{
                         event: :session_started,
                         timestamp: %DateTime{},
@@ -2085,7 +2023,7 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       assert_raise RuntimeError, ~r/workspace_prepare_failed/, fn ->
-        AgentRunner.run(issue, nil, worker_host: "worker-a")
+        AgentRunner.run(issue, nil, execution_context: SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, "worker-a"))
       end
 
       trace = File.read!(trace_file)
@@ -2197,7 +2135,7 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok = AgentRunner.run(issue, nil, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()), issue_state_fetcher: state_fetcher)
       assert_receive {:issue_state_fetch, 1}
       assert_receive {:issue_state_fetch, 2}
 
@@ -2315,7 +2253,7 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok = AgentRunner.run(issue, nil, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()), issue_state_fetcher: state_fetcher)
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
@@ -2399,7 +2337,7 @@ defmodule SymphonyElixir.CoreTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue)
+      assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
       assert {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
 
       trace = File.read!(trace_file)
@@ -2543,7 +2481,7 @@ defmodule SymphonyElixir.CoreTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue)
+      assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
@@ -2638,7 +2576,7 @@ defmodule SymphonyElixir.CoreTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue)
+      assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
 
       lines = File.read!(trace_file) |> String.split("\n", trim: true)
 

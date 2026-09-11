@@ -22,9 +22,13 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0, start_test_orchestrator: 1]
 
-      setup do
+      setup context do
+        unless context[:owns_default_runtime] do
+          start_supervised!({Task.Supervisor, name: SymphonyElixir.TaskSupervisor})
+        end
+
         workflow_root =
           Path.join(
             System.tmp_dir!(),
@@ -50,6 +54,17 @@ defmodule SymphonyElixir.TestSupport do
         :ok
       end
     end
+  end
+
+  def start_test_orchestrator(opts) do
+    name = Keyword.fetch!(opts, :name)
+    runtime_name = Module.concat(name, RuntimeSupervisor)
+    task_name = Module.concat(name, TaskSupervisor)
+    ExUnit.Callbacks.start_supervised!(
+      {SymphonyElixir.AgentRuntimeSupervisor, name: runtime_name, task_supervisor_name: task_name, orchestrator_name: name},
+      id: runtime_name
+    )
+    {:ok, Process.whereis(name)}
   end
 
   def write_workflow_file!(path, overrides \\ []) do

@@ -16,7 +16,8 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     refute command =~ "symphony_prompt_file"
   end
 
-  test "run_turn over ssh delivers the prompt through stdin and folds the stream" do
+  for transport <- [:static, :structured] do
+  test "run_turn over #{transport} ssh delivers the prompt through stdin and folds the stream" do
     tmp = Path.join(System.tmp_dir!(), "symphony-claude-ssh-test-#{System.unique_integer([:positive])}")
     workspace = Path.join(tmp, "workspace")
     fake_claude = Path.join(tmp, "fake_claude")
@@ -55,7 +56,12 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     System.put_env("CLAUDE_MCP_CONFIG_CAPTURE", mcp_config_capture)
     System.put_env("CLAUDE_SECRET_CAPTURE", secret_capture)
     System.put_env(secret_name, secret_value)
-    {:ok, session} = Claude.start_session(workspace, worker_host: "localhost")
+    target =
+      case unquote(transport) do
+        :static -> "localhost"
+        :structured -> %SymphonyElixir.SSH.Target{executable: Path.join([tmp, "bin", "ssh"]), prefix: [], label: "fixture"}
+      end
+    {:ok, session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, target))
 
     on_exit(fn ->
       _ = Claude.stop_session(session)
@@ -118,6 +124,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
                        session_id: "ssh-run",
                        usage: %{input_tokens: 2, output_tokens: 3, total_tokens: 5}
                      }}
+  end
   end
 
   defp write_fake_ssh!(test_root, trace_file) do

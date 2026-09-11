@@ -3,6 +3,21 @@ defmodule SymphonyElixir.SSHTest do
 
   alias SymphonyElixir.SSH
 
+  test "structured targets preserve shell arguments without local interpolation" do
+    target = %SSH.Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture"}
+    assert {:ok, {"literal ' quote\n", 0}} =
+             SSH.run(target, "printf '%s\\n' \"literal ' quote\"")
+  end
+
+  test "structured target environment is process scoped and ignores global SSH configuration" do
+    previous = System.get_env("SYMPHONY_SSH_CONFIG")
+    on_exit(fn -> restore_env("SYMPHONY_SSH_CONFIG", previous) end)
+    System.put_env("SYMPHONY_SSH_CONFIG", "/nonexistent/global-config")
+    target = %SSH.Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture", env: [{"SYMPHONY_TARGET_VALUE", "private"}]}
+    assert {:ok, {"private", 0}} = SSH.run(target, "printf '%s' \"$SYMPHONY_TARGET_VALUE\"")
+    assert System.get_env("SYMPHONY_TARGET_VALUE") == nil
+  end
+
   test "run/3 keeps bracketed IPv6 host:port targets intact" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-ipv6-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")
@@ -102,59 +117,19 @@ defmodule SymphonyElixir.SSHTest do
     assert {:error, :ssh_not_found} = SSH.run("localhost", "printf ok")
   end
 
-  test "start_port/3 supports binary output without line mode" do
-    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-port-test-#{System.unique_integer([:positive])}")
-    trace_file = Path.join(test_root, "ssh.trace")
-    previous_path = System.get_env("PATH")
-    previous_ssh_config = System.get_env("SYMPHONY_SSH_CONFIG")
-
-    on_exit(fn ->
-      restore_env("PATH", previous_path)
-      restore_env("SYMPHONY_SSH_CONFIG", previous_ssh_config)
-      File.rm_rf(test_root)
-    end)
-
-    install_fake_ssh!(test_root, trace_file, """
-    #!/bin/sh
-    printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
-    printf 'ready\\n'
-    exit 0
-    """)
-
-    System.delete_env("SYMPHONY_SSH_CONFIG")
-
-    assert {:ok, port} = SSH.start_port("localhost", "printf ok")
-    assert is_port(port)
-    wait_for_trace!(trace_file)
-
-    trace = File.read!(trace_file)
-    assert trace =~ "-T localhost bash -lc"
-    refute trace =~ " -F "
+  test "start_port/3 carries binary stdin and exit status through a structured target" do
+    target = %SSH.Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture"}
+    assert {:ok, port} = SSH.start_port(target, "dd bs=1 count=5 2>/dev/null; exit 7")
+    assert :ok = SSH.write_stdin(port, <<0, 1, 2, 3, 255>>)
+    assert receive_binary(port, <<>>) == {<<0, 1, 2, 3, 255>>, 7}
   end
 
-  test "start_port/3 supports line mode" do
-    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-line-port-test-#{System.unique_integer([:positive])}")
-    trace_file = Path.join(test_root, "ssh.trace")
-    previous_path = System.get_env("PATH")
-
-    on_exit(fn ->
-      restore_env("PATH", previous_path)
-      File.rm_rf(test_root)
-    end)
-
-    install_fake_ssh!(test_root, trace_file, """
-    #!/bin/sh
-    printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
-    printf 'ready\\n'
-    exit 0
-    """)
-
-    assert {:ok, port} = SSH.start_port("localhost:2222", "printf ok", line: 256)
-    assert is_port(port)
-    wait_for_trace!(trace_file)
-
-    trace = File.read!(trace_file)
-    assert trace =~ "-T -p 2222 localhost bash -lc"
+  test "start_port/3 carries line-mode stdin and target environment" do
+    target = %SSH.Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture", env: [{"SYMPHONY_TARGET_VALUE", "remote"}]}
+    assert {:ok, port} = SSH.start_port(target, "read -r value; printf '%s:%s\\n' \"$SYMPHONY_TARGET_VALUE\" \"$value\"", line: 256)
+    assert :ok = SSH.write_stdin(port, "literal ' quote\n")
+    assert_receive {^port, {:data, {:eol, "remote:literal ' quote"}}}, 5_000
+    assert_receive {^port, {:exit_status, 0}}, 5_000
   end
 
   test "write_stdin/2 writes to live ports and reports closed ports" do
@@ -173,9 +148,13 @@ defmodule SymphonyElixir.SSHTest do
     assert SSH.write_stdin(closed_port, "hello") == {:error, :closed}
   end
 
-  test "remote_shell_command/1 escapes embedded single quotes" do
-    assert SSH.remote_shell_command("printf 'hello'") ==
-             "bash -lc 'printf '\"'\"'hello'\"'\"''"
+  defp receive_binary(port, output) do
+    receive do
+      {^port, {:data, chunk}} -> receive_binary(port, output <> chunk)
+      {^port, {:exit_status, status}} -> {output, status}
+    after
+      5_000 -> flunk("transport did not finish")
+    end
   end
 
   defp install_fake_ssh!(test_root, trace_file, script \\ nil) do
@@ -198,21 +177,6 @@ defmodule SymphonyElixir.SSHTest do
     System.put_env("PATH", fake_bin_dir <> ":" <> (System.get_env("PATH") || ""))
   end
 
-  # 5s, not the 500ms this used to allow: the wait is for an external `/bin/sh` to spawn and
-  # write, and under a cover-compiled full suite that routinely takes longer. The assertions on
-  # the trace's contents are what this test proves, so waiting longer costs a fast run nothing
-  # and only stops a slow one from failing for the wrong reason.
-  defp wait_for_trace!(trace_file, attempts \\ 200)
-  defp wait_for_trace!(trace_file, 0), do: flunk("timed out waiting for fake ssh trace at #{trace_file}")
-
-  defp wait_for_trace!(trace_file, attempts) do
-    if File.exists?(trace_file) and File.read!(trace_file) != "" do
-      :ok
-    else
-      Process.sleep(25)
-      wait_for_trace!(trace_file, attempts - 1)
-    end
-  end
 
   defp restore_env(key, nil), do: System.delete_env(key)
   defp restore_env(key, value), do: System.put_env(key, value)

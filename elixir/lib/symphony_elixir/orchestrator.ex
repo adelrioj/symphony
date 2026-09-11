@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, BlockedIssue, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, BlockedIssue, Config, ExecutionContext, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -148,10 +148,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  def handle_info({:worker_runtime_info, issue_id, runtime_info}, %{running: running} = state)
+  def handle_info({:worker_runtime_info, issue_id, attempt_id, runtime_info}, %{running: running} = state)
       when is_binary(issue_id) and is_map(runtime_info) do
     case Map.get(running, issue_id) do
-      nil ->
+      entry when not is_map(entry) or not is_map_key(entry, :attempt_id) or :erlang.map_get(:attempt_id, entry) != attempt_id ->
         {:noreply, state}
 
       running_entry ->
@@ -166,11 +166,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info(
-        {:codex_worker_update, issue_id, %{event: _, timestamp: _} = update},
+        {:codex_worker_update, issue_id, attempt_id, %{event: _, timestamp: _} = update},
         %{running: running} = state
       ) do
     case Map.get(running, issue_id) do
-      nil ->
+      entry when not is_map(entry) or not is_map_key(entry, :attempt_id) or :erlang.map_get(:attempt_id, entry) != attempt_id ->
         {:noreply, state}
 
       running_entry ->
@@ -186,12 +186,12 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
+  def handle_info({:codex_worker_update, _issue_id, _attempt_id, _update}, state), do: {:noreply, state}
 
-  def handle_info({:agent_turns_exhausted, issue_id, state_name}, %{running: running} = state)
+  def handle_info({:agent_turns_exhausted, issue_id, attempt_id, state_name}, %{running: running} = state)
       when is_binary(issue_id) and is_binary(state_name) do
     case Map.get(running, issue_id) do
-      nil ->
+      entry when not is_map(entry) or not is_map_key(entry, :attempt_id) or :erlang.map_get(:attempt_id, entry) != attempt_id ->
         {:noreply, state}
 
       running_entry ->
@@ -334,8 +334,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp workspace_head(running_entry) do
-    with nil <- Map.get(running_entry, :worker_host),
+    with %ExecutionContext{mode: :local} = context <- Map.get(running_entry, :execution_context),
          path when is_binary(path) and path != "" <- Map.get(running_entry, :workspace_path),
+         :ok <- Workspace.validate_workspace_path(path, context),
          {output, 0} <- System.cmd("git", ["-C", path, "rev-parse", "HEAD"], stderr_to_stdout: true) do
       String.trim(output)
     else
@@ -1137,10 +1138,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, backend_module) do
+    context = static_execution_context(worker_host)
+    attempt_id = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
            AgentRunner.run(issue, recipient,
              attempt: attempt,
-             worker_host: worker_host,
+             execution_context: context,
+             attempt_id: attempt_id,
              backend_module: backend_module
            )
          end) do
@@ -1155,6 +1159,8 @@ defmodule SymphonyElixir.Orchestrator do
           Map.put(state.running, issue.id, %{
             pid: pid,
             ref: ref,
+            attempt_id: attempt_id,
+            execution_context: context,
             identifier: issue.identifier,
             issue: issue,
             worker_host: worker_host,
@@ -1332,22 +1338,29 @@ defmodule SymphonyElixir.Orchestrator do
   defp cleanup_issue_workspace(issue_or_identifier, metadata) when is_map(metadata) do
     case Map.get(metadata, :workspace_path) do
       workspace_path when is_binary(workspace_path) and workspace_path != "" ->
-        Workspace.remove_recorded(workspace_path, Map.get(metadata, :worker_host))
+        context = Map.get(metadata, :execution_context) || static_execution_context(Map.get(metadata, :worker_host))
+        Workspace.remove_recorded(workspace_path, context)
 
       _ ->
         cleanup_issue_workspace(issue_or_identifier, Map.get(metadata, :worker_host))
     end
   end
 
-  defp cleanup_issue_workspace(%Issue{} = issue, worker_host) do
-    Workspace.remove_issue_workspaces(issue, worker_host)
+  defp cleanup_issue_workspace(issue_or_identifier, nil) do
+    case Config.settings!().worker.ssh_hosts do
+      [] -> Workspace.remove_issue_workspaces(issue_or_identifier, static_execution_context(nil))
+      hosts -> Enum.each(hosts, &cleanup_issue_workspace(issue_or_identifier, &1))
+    end
   end
 
-  defp cleanup_issue_workspace(identifier, worker_host) when is_binary(identifier) do
-    Workspace.remove_issue_workspaces(identifier, worker_host)
+  defp cleanup_issue_workspace(issue_or_identifier, worker_host) when is_binary(worker_host) do
+    Workspace.remove_issue_workspaces(issue_or_identifier, static_execution_context(worker_host))
   end
 
   defp cleanup_issue_workspace(_issue_or_identifier, _worker_host), do: :ok
+
+  defp static_execution_context(nil), do: ExecutionContext.local(Config.local_workspace_root())
+  defp static_execution_context(host), do: ExecutionContext.ssh(Config.settings!().workspace.root, host)
 
   defp run_terminal_workspace_cleanup do
     case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do

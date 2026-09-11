@@ -1,6 +1,22 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  test "stale attempt_ids cannot change replacement runtime, usage or exhaustion" do
+    attempt_id = make_ref()
+    replacement = %{attempt_id: attempt_id, workspace_path: "/replacement", session_id: "replacement", codex_total_tokens: 0}
+    state = %Orchestrator.State{running: %{"issue" => replacement}}
+    stale = make_ref()
+    update = %{event: :session_started, timestamp: DateTime.utc_now(), session_id: "stale", usage: %{total_tokens: 999}}
+    for message <- [
+      {:worker_runtime_info, "issue", stale, %{workspace_path: "/stale", worker_host: "old"}},
+      {:codex_worker_update, "issue", stale, update},
+      {:agent_turns_exhausted, "issue", stale, "In Progress"}
+    ] do
+      assert {:noreply, ^state} = Orchestrator.handle_info(message, state)
+    end
+    assert {:noreply, updated} = Orchestrator.handle_info({:worker_runtime_info, "issue", attempt_id, %{workspace_path: "/current"}}, state)
+    assert updated.running["issue"].workspace_path == "/current"
+  end
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -34,13 +50,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     orchestrator_name = Module.concat(__MODULE__, :SnapshotOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
     started_at = DateTime.utc_now()
@@ -48,6 +59,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: self(),
       ref: make_ref(),
+      attempt_id: "test-attempt",
       identifier: issue.identifier,
       issue: issue,
       session_id: nil,
@@ -69,7 +81,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, "test-attempt",
        %{
          event: :session_started,
          session_id: "thread-live-turn-live",
@@ -79,7 +91,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, "test-attempt",
        %{
          event: :notification,
          payload: %{method: "some-event"},
@@ -115,13 +127,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     orchestrator_name = Module.concat(__MODULE__, :UsageOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
@@ -130,6 +137,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: self(),
       ref: process_ref,
+      attempt_id: "test-attempt",
       identifier: issue.identifier,
       issue: issue,
       session_id: nil,
@@ -156,7 +164,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, "test-attempt",
        %{
          event: :session_started,
          session_id: "thread-usage-turn-usage",
@@ -166,7 +174,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, "test-attempt",
        %{
          event: :notification,
          payload: %{
@@ -204,13 +212,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     alias SymphonyElixir.Agent.Claude.Stream
 
     issue = %Issue{id: "claude-usage", identifier: "MT-203", state: "In Progress"}
-    {:ok, pid} = start_supervised({Orchestrator, name: Module.concat(__MODULE__, ClaudeUsage)})
+    {:ok, pid} = start_test_orchestrator(name: Module.concat(__MODULE__, ClaudeUsage))
     process_ref = make_ref()
 
     :sys.replace_state(pid, fn state ->
       entry = %{
         pid: self(),
         ref: process_ref,
+        attempt_id: "test-attempt",
         identifier: issue.identifier,
         issue: issue,
         session_id: nil,
@@ -257,7 +266,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     acc =
       Enum.reduce(events, Stream.new(), fn event, acc ->
         {acc, update} = Stream.step(event, acc)
-        if update, do: send(pid, {:codex_worker_update, issue.id, update})
+        if update, do: send(pid, {:codex_worker_update, issue.id, "test-attempt", update})
         acc
       end)
 
@@ -278,7 +287,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         acc
       )
 
-    send(pid, {:codex_worker_update, issue.id, completed})
+    send(pid, {:codex_worker_update, issue.id, "test-attempt", completed})
     assert %{running: [finished]} = GenServer.call(pid, :snapshot)
     assert finished.codex_total_tokens == 131
     assert SymphonyElixir.StatusDashboard.humanize_codex_message(finished.last_codex_message) =~ "Verified repair"
@@ -297,7 +306,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       Stream.new(),
       fn event, acc ->
         {acc, update} = Stream.step(event, acc)
-        send(pid, {:codex_worker_update, issue.id, update})
+        send(pid, {:codex_worker_update, issue.id, "test-attempt", update})
         acc
       end
     )
@@ -321,13 +330,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     orchestrator_name = Module.concat(__MODULE__, :TurnCompletedUsageOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
@@ -336,6 +340,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: self(),
       ref: process_ref,
+      attempt_id: "test-attempt",
       identifier: issue.identifier,
       issue: issue,
       session_id: nil,
@@ -359,7 +364,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, "test-attempt",
        %{
          event: :turn_completed,
          payload: %{
@@ -396,13 +401,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     orchestrator_name = Module.concat(__MODULE__, :TokenCountOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
@@ -411,6 +411,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: self(),
       ref: process_ref,
+      attempt_id: "test-attempt",
       identifier: issue.identifier,
       issue: issue,
       session_id: nil,
@@ -436,7 +437,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, "test-attempt",
        %{
          event: :notification,
          payload: %{
@@ -460,7 +461,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, "test-attempt",
        %{
          event: :notification,
          payload: %{
@@ -509,13 +510,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     orchestrator_name = Module.concat(__MODULE__, :RateLimitOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
@@ -524,6 +520,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: self(),
       ref: process_ref,
+      attempt_id: "test-attempt",
       identifier: issue.identifier,
       issue: issue,
       session_id: nil,
@@ -554,7 +551,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, "test-attempt",
        %{
          event: :notification,
          payload: %{
@@ -590,13 +587,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     orchestrator_name = Module.concat(__MODULE__, :TokenPrecedenceOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
@@ -605,6 +597,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: self(),
       ref: process_ref,
+      attempt_id: "test-attempt",
       identifier: issue.identifier,
       issue: issue,
       session_id: nil,
@@ -628,7 +621,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, "test-attempt",
        %{
          event: :notification,
          payload: %{
@@ -678,13 +671,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     orchestrator_name = Module.concat(__MODULE__, :ThreadTokenUsageOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
@@ -693,6 +681,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: self(),
       ref: process_ref,
+      attempt_id: "test-attempt",
       identifier: issue.identifier,
       issue: issue,
       session_id: nil,
@@ -720,7 +709,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         ] do
       send(
         pid,
-        {:codex_worker_update, issue_id,
+        {:codex_worker_update, issue_id, "test-attempt",
          %{
            event: :notification,
            payload: %{
@@ -752,13 +741,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     orchestrator_name = Module.concat(__MODULE__, :LastTokenIgnoredOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
@@ -767,6 +751,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: self(),
       ref: process_ref,
+      attempt_id: "test-attempt",
       identifier: issue.identifier,
       issue: issue,
       session_id: nil,
@@ -790,7 +775,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, "test-attempt",
        %{
          event: :notification,
          payload: %{
@@ -824,13 +809,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator snapshot includes retry backoff entries" do
     orchestrator_name = Module.concat(__MODULE__, :RetryOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     retry_entry = %{
       attempt: 2,
@@ -864,13 +844,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator snapshot includes poll countdown and checking status" do
     orchestrator_name = Module.concat(__MODULE__, :PollingSnapshotOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     now_ms = System.monotonic_time(:millisecond)
 
@@ -914,13 +889,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     )
 
     orchestrator_name = Module.concat(__MODULE__, :ImmediateStartupOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     assert %{polling: %{checking?: true}} =
              wait_for_snapshot(
@@ -966,13 +936,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     )
 
     orchestrator_name = Module.concat(__MODULE__, :PollCycleOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     :sys.replace_state(pid, fn state ->
       %{
@@ -1016,13 +981,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     issue_id = "issue-stall"
     orchestrator_name = Module.concat(__MODULE__, :StallOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     worker_pid =
       spawn(fn ->
@@ -1037,6 +997,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: worker_pid,
       ref: make_ref(),
+      attempt_id: "test-attempt",
       identifier: "MT-STALL",
       issue: %Issue{
         id: issue_id,
@@ -1088,13 +1049,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     issue_id = "issue-mcp-elicitation-stall"
     orchestrator_name = Module.concat(__MODULE__, :McpElicitationBlockOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     worker_pid =
       spawn(fn ->
@@ -1109,6 +1065,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: worker_pid,
       ref: make_ref(),
+      attempt_id: "test-attempt",
       identifier: "MT-MCP",
       issue: %Issue{
         id: issue_id,
@@ -1171,13 +1128,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     issue_id = "issue-input-required"
     orchestrator_name = Module.concat(__MODULE__, :InputRequiredBlockOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     ref = make_ref()
     started_at = DateTime.utc_now()
@@ -1186,6 +1138,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: self(),
       ref: ref,
+      attempt_id: "test-attempt",
       identifier: "MT-INPUT",
       issue: %Issue{id: issue_id, identifier: "MT-INPUT", state: "In Progress", dispatchable: true},
       session_id: "thread-input-turn-input",
@@ -1226,13 +1179,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     issue_id = "issue-input-required-normal"
     orchestrator_name = Module.concat(__MODULE__, :InputRequiredNormalBlockOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     ref = make_ref()
     initial_state = :sys.get_state(pid)
@@ -1240,6 +1188,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: self(),
       ref: ref,
+      attempt_id: "test-attempt",
       identifier: "MT-INPUT-NORMAL",
       issue: %Issue{
         id: issue_id,
@@ -1498,30 +1447,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   test "status dashboard coalesces rapid updates to one render per interval" do
     dashboard_name = Module.concat(__MODULE__, :RenderDashboard)
     parent = self()
-    runtime_pid = Process.whereis(SymphonyElixir.AgentRuntimeSupervisor)
 
-    on_exit(fn ->
-      if is_nil(Process.whereis(SymphonyElixir.AgentRuntimeSupervisor)) do
-        case Supervisor.restart_child(
-               SymphonyElixir.Supervisor,
-               SymphonyElixir.AgentRuntimeSupervisor
-             ) do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
-        end
-      end
-    end)
-
-    if is_pid(runtime_pid) do
-      assert :ok =
-               Supervisor.terminate_child(
-                 SymphonyElixir.Supervisor,
-                 SymphonyElixir.AgentRuntimeSupervisor
-               )
-    end
-
-    {:ok, pid} =
-      StatusDashboard.start_link(
+    pid =
+      start_supervised!({StatusDashboard,
         name: dashboard_name,
         enabled: true,
         refresh_ms: 60_000,
@@ -1529,13 +1457,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         render_fun: fn content ->
           send(parent, {:render, System.monotonic_time(:millisecond), content})
         end
-      )
+      })
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
 
     StatusDashboard.notify_update(dashboard_name)
     assert_receive {:render, first_render_ms, _content}, 200

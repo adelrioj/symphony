@@ -1,16 +1,29 @@
+defmodule SymphonyElixir.SSH.Target do
+  @moduledoc false
+  @enforce_keys [:executable, :prefix, :label]
+  @derive {Inspect, only: [:label]}
+  defstruct [:executable, :prefix, :label, env: []]
+  @type t :: %__MODULE__{
+          executable: String.t(), prefix: [String.t()],
+          label: String.t(), env: [{String.t(), String.t() | nil}]
+        }
+end
+
 defmodule SymphonyElixir.SSH do
   @moduledoc false
 
-  @spec run(String.t(), String.t(), keyword()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
-  def run(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
-    with {:ok, executable} <- ssh_executable() do
-      {:ok, System.cmd(executable, ssh_args(host, command), opts)}
+  alias SymphonyElixir.SSH.Target
+
+  @spec run(String.t() | Target.t(), String.t(), keyword()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
+  def run(target, command, opts \\ []) when is_binary(command) do
+    with {:ok, executable, args, env} <- invocation(target, command) do
+      {:ok, System.cmd(executable, args, Keyword.update(opts, :env, env, &(Map.merge(Map.new(&1), Map.new(env)) |> Map.to_list())))}
     end
   end
 
-  @spec start_port(String.t(), String.t(), keyword()) :: {:ok, port()} | {:error, term()}
-  def start_port(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
-    with {:ok, executable} <- ssh_executable() do
+  @spec start_port(String.t() | Target.t(), String.t(), keyword()) :: {:ok, port()} | {:error, term()}
+  def start_port(target, command, opts \\ []) when is_binary(command) do
+    with {:ok, executable, args, env} <- invocation(target, command) do
       line_bytes = Keyword.get(opts, :line)
 
       port_opts =
@@ -18,7 +31,8 @@ defmodule SymphonyElixir.SSH do
           :binary,
           :exit_status,
           :stderr_to_stdout,
-          args: Enum.map(ssh_args(host, command), &String.to_charlist/1)
+          args: Enum.map(args, &String.to_charlist/1),
+          env: Enum.map(env, fn {name, value} -> {String.to_charlist(name), if(is_nil(value), do: false, else: String.to_charlist(value))} end)
         ]
         |> maybe_put_line_option(line_bytes)
 
@@ -37,6 +51,16 @@ defmodule SymphonyElixir.SSH do
   @spec remote_shell_command(String.t()) :: String.t()
   def remote_shell_command(command) when is_binary(command) do
     "bash -lc " <> shell_escape(command)
+  end
+
+  defp invocation(%Target{executable: executable, prefix: prefix, env: env}, command) do
+    {:ok, executable, prefix ++ [remote_shell_command(command)], env}
+  end
+
+  defp invocation(host, command) when is_binary(host) do
+    with {:ok, executable} <- ssh_executable() do
+      {:ok, executable, ssh_args(host, command), []}
+    end
   end
 
   defp ssh_executable do

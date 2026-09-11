@@ -15,7 +15,7 @@ defmodule SymphonyElixir.Agent.Codex do
   @impl true
   @spec start_session(Path.t(), keyword()) :: {:ok, SymphonyElixir.Agent.session()} | {:error, term()}
   def start_session(workspace, opts) do
-    AppServer.start_session(workspace, Keyword.take(opts, [:worker_host]))
+    AppServer.start_session(workspace, Keyword.take(opts, [:execution_context]))
   end
 
   @impl true

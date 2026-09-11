@@ -17,6 +17,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
 
     {:ok, session} =
       Claude.start_session(workspace,
+        execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
         env_reader: fn
           ^secret_name -> secret_value
           _name -> nil
@@ -70,7 +71,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
 
     owner =
       spawn(fn ->
-        {:ok, session} = Claude.start_session(workspace, [])
+        {:ok, session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
         send(parent, {:owned_session, session})
         Process.sleep(:infinity)
       end)
@@ -89,7 +90,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
   end
 
   test "remote turn reports malformed private MCP JSON without leaking its contents" do
-    {:ok, session} = Claude.start_session(File.cwd!(), worker_host: "remote")
+    {:ok, session} = Claude.start_session(File.cwd!(), execution_context: SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, "remote"))
     leaked_token = "never-leak-malformed-token"
     File.write!(session.mcp_config_path, "{not-json #{leaked_token}")
 
@@ -109,7 +110,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     result =
       try do
         Claude.start_session(File.cwd!(),
-          worker_host: "remote",
+          execution_context: SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, "remote"),
           env_reader: fn
             ^secret_name -> secret_value
             _name -> nil
@@ -122,7 +123,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     refute inspect(result) =~ inspect(secret_value)
     assert {:error, {:invalid_tracker_secret_encoding, [^secret_name]}} = result
 
-    {:ok, session} = Claude.start_session(File.cwd!(), worker_host: "remote")
+    {:ok, session} = Claude.start_session(File.cwd!(), execution_context: SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, "remote"))
     File.write!(session.mcp_config_path, secret_value)
 
     remote_result =
@@ -162,7 +163,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     System.put_env("CLAUDE_STDIN_CAPTURE", stdin_capture)
     write_claude_workflow!(script)
 
-    {:ok, session} = Claude.start_session(workspace, [])
+    {:ok, session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
 
     on_exit(fn ->
       _ = Claude.stop_session(session)
@@ -225,7 +226,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
 
     System.put_env("TMPDIR", inner_tmp)
 
-    {:ok, session} = Claude.start_session(workspace, [])
+    {:ok, session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
 
     on_exit(fn -> _ = Claude.stop_session(session) end)
 
@@ -307,12 +308,12 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     on_exit(fn -> File.rm_rf(tmp) end)
 
     write_claude_workflow!(" ")
-    {:ok, blank_session} = Claude.start_session(workspace, [])
+    {:ok, blank_session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
     assert Claude.run_turn(blank_session, "prompt", %{}, []) == {:error, :claude_command_not_configured}
     assert :ok = Claude.stop_session(blank_session)
 
     write_claude_workflow!("definitely_missing_claude_for_symphony")
-    {:ok, missing_session} = Claude.start_session(workspace, [])
+    {:ok, missing_session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
 
     assert Claude.run_turn(missing_session, "prompt", %{}, []) ==
              {:error, {:executable_not_found, "definitely_missing_claude_for_symphony"}}
@@ -342,13 +343,13 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     end)
 
     write_claude_workflow!(relative_script, allowed_tools: nil)
-    {:ok, relative_session} = Claude.start_session(workspace, [])
+    {:ok, relative_session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
     assert {:ok, %Result{status: :done}} = Claude.run_turn(relative_session, "prompt", %{}, [])
     assert :ok = Claude.stop_session(relative_session)
 
     System.put_env("PATH", path_dir <> ":" <> (previous_path || ""))
     write_claude_workflow!("fake_claude_from_path", allowed_tools: nil)
-    {:ok, path_session} = Claude.start_session(workspace, [])
+    {:ok, path_session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
     assert {:ok, %Result{status: :done}} = Claude.run_turn(path_session, "prompt", %{}, [])
     assert :ok = Claude.stop_session(path_session)
   end
@@ -438,7 +439,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
       claude_command: script
     )
 
-    {:ok, session} = Claude.start_session(workspace, [])
+    {:ok, session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
     workflow_snapshot = File.read!(session.workflow_snapshot_path)
     mcp_config = session.mcp_config_path |> File.read!() |> Jason.decode!()
     server = get_in(mcp_config, ["mcpServers", "symphony"])
@@ -471,7 +472,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
   end
 
   test "run_turn reports ssh launch errors" do
-    {:ok, session} = Claude.start_session(File.cwd!(), worker_host: "remote")
+    {:ok, session} = Claude.start_session(File.cwd!(), execution_context: SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, "remote"))
 
     assert {:error, {:claude_ssh_port, _error}} =
              Claude.run_turn(%{session | workflow_snapshot_path: nil}, "prompt", %{}, [])
@@ -495,17 +496,17 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     on_exit(fn -> File.rm_rf(tmp) end)
 
     write_claude_workflow!(slow_script, codex_turn_timeout_ms: 1000, codex_stall_timeout_ms: 1)
-    {:ok, stall_session} = Claude.start_session(workspace, [])
+    {:ok, stall_session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
     assert Claude.run_turn(stall_session, "prompt", %{}, []) == {:error, :stall_timeout}
     assert :ok = Claude.stop_session(stall_session)
 
     write_claude_workflow!(slow_script, codex_turn_timeout_ms: 1, codex_stall_timeout_ms: 0)
-    {:ok, timeout_session} = Claude.start_session(workspace, [])
+    {:ok, timeout_session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
     assert Claude.run_turn(timeout_session, "prompt", %{}, []) == {:error, :turn_timeout}
     assert :ok = Claude.stop_session(timeout_session)
 
     write_claude_workflow!(long_script)
-    {:ok, long_session} = Claude.start_session(workspace, [])
+    {:ok, long_session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
     assert {:ok, %Result{summary: ^huge_summary}} = Claude.run_turn(long_session, "prompt", %{}, [])
     assert :ok = Claude.stop_session(long_session)
   end
@@ -576,7 +577,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     on_exit(fn -> File.rm_rf(tmp) end)
 
     write_claude_workflow!(script)
-    {:ok, session} = Claude.start_session(workspace, [])
+    {:ok, session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
 
     assert {:ok, %Result{status: :done, summary: "no-newline ok", tokens: %{input: 3, output: 4, total: 7}}} =
              Claude.run_turn(session, "prompt", %{}, [])
@@ -619,7 +620,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     on_exit(fn -> File.rm_rf(tmp) end)
 
     write_claude_workflow!(script)
-    {:ok, session} = Claude.start_session(workspace, [])
+    {:ok, session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
     parent = self()
     on_message = fn message -> send(parent, {:claude_update, message}) end
 
@@ -754,7 +755,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
       }
     )
 
-    {:ok, session} = Claude.start_session(workspace, [])
+    {:ok, session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
 
     on_exit(fn ->
       _ = Claude.stop_session(session)
