@@ -38,7 +38,7 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
     assert Config.settings!().agent.max_turns == 5
 
-    write_workflow_file!(Workflow.workflow_file_path(), max_turn_exhaustions: 0)
+    write_workflow_file!(Workflow.workflow_file_path(), max_turn_exhaustions: -1)
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "agent.max_turn_exhaustions"
 
@@ -1151,6 +1151,34 @@ defmodule SymphonyElixir.CoreTest do
     assert body =~ "session_id: thread-turn-budget"
     assert body =~ "Symphony parked this work item"
     assert_receive {:memory_tracker_state_update, "issue-turn-budget", "Blocked / Needs Attention"}
+  end
+
+  test "zero exhaustion limit keeps a waiting issue active and can be re-enabled" do
+    options = [tracker_kind: "memory", tracker_active_states: ["In Review"]]
+    write_workflow_file!(Workflow.workflow_file_path(), options ++ [max_turn_exhaustions: 2])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_recipient) end)
+
+    issue = %Issue{id: "qa-waiting", identifier: "MT-564", state: "In Review"}
+    pid = start_orchestrator!(:QaWaitOrchestrator)
+    exhaust_turn_budget!(pid, issue)
+
+    write_workflow_file!(Workflow.workflow_file_path(), options ++ [max_turn_exhaustions: 0])
+
+    for _attempt <- 1..4 do
+      state = exhaust_turn_budget!(pid, issue)
+      assert Map.has_key?(state.retry_attempts, issue.id)
+      refute Map.has_key?(state.blocked, issue.id)
+    end
+
+    refute_receive {:memory_tracker_comment, "qa-waiting", _}
+    refute_receive {:memory_tracker_state_update, "qa-waiting", _}
+
+    write_workflow_file!(Workflow.workflow_file_path(), options ++ [max_turn_exhaustions: 2])
+    state = exhaust_turn_budget!(pid, issue)
+    refute Map.has_key?(state.blocked, issue.id)
+    exhaust_turn_budget!(pid, issue)
+    assert_receive {:memory_tracker_state_update, "qa-waiting", "Blocked / Needs Attention"}
   end
 
   test "turn budget exhaustions in a new state restart the count" do

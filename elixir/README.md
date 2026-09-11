@@ -262,6 +262,10 @@ Notes:
   while the issue stays in the same active state. When the cap is hit, Symphony posts a comment and
   moves the issue to `agent.blocked_state` instead of restarting the agent again. This is what stops
   an issue that is too large for its turn budget from looping forever. Default: `3`.
+  Set `0` to disable this automatic parking limit for a lane, such as QA, whose
+  normal work includes waiting for external CI and reviews. This does not disable
+  explicit blocked results, human-stop rules, turn limits or timeouts. Keep a
+  positive limit for development lanes so work that makes no progress stops.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
