@@ -388,6 +388,9 @@ release, and protection is reacquired before subsequent allocation. Mutable poll
 deadlines and retention are not identity changes; in-flight work retains its captured configuration.
 Existing environments retain and validate their captured template identity rather than silently
 adopting edited infrastructure.
+A surviving orchestrator can reacquire its same accepted identity after a real WorkflowStore process
+replacement. A competing owner in the same live store remains fenced, and a previously rejected
+on-disk identity migration does not become accepted merely because the store restarted.
 
 #### Recovery, capacity, retention, and hooks
 
@@ -396,6 +399,11 @@ partial, malformed, or unknown inventory is not an empty deployment. Recovery re
 identity, paths, desired state, attempts, first terminal timestamp, and pending operations; it
 reconciles potentially running resources before reuse instead of trusting a lost local agent PID.
 Unknown create/start outcomes block duplicate allocation.
+Workstations metadata-only updates can be confirmed by their owned annotation payload without
+depending indefinitely on retained completed-operation history. This does not clear uncertain
+compute mutations. A definitively denied initial create can retry through ordinary stop/intent
+handling only after complete parent and backing/child absence evidence, with no earlier ambiguity;
+denial alone never releases a slot.
 
 The existing `agent.max_concurrent_agents` and per-state limits remain the execution budget.
 Reservations, preparation, running, stopping, and unresolved possibly executing environments occupy
@@ -414,6 +422,8 @@ does not suppress a new cleanup after a genuine reopen.
 
 `after_create` still bootstraps only a new checkout; `before_run`/`after_run` keep their existing
 failure policies. All run on the selected worker through the captured execution context.
+Ordinary backend exceptions/exits still attempt best-effort `after_run` before propagating the
+original failure. Explicit managed-execution uncertainty skips follow-on remote hooks.
 Cleanup needing `before_remove` prepares the retained environment under the same capacity budget,
 without launching an agent or `before_run`, runs that hook best-effort, persists a confirmed completion
 marker, stops remotely, then attempts destruction. A managed hook timeout is unknown execution:
@@ -555,7 +565,19 @@ change, not a workflow flag.
 
 #### Managed observability API
 
-Enable the existing service with `--port` or `server.port`; the dashboard layout is unchanged.
+Enable the existing service with `--port` or `server.port`.
+
+`GET /api/v1/state` also exposes `environment_discovery`: null for local/static execution, otherwise:
+
+```json
+{"provider_kind":"google_workstations","status":"blocked","error_code":"denied"}
+```
+
+`status` is `pending`, `ready`, or `blocked`. Pending/ready have a null error; blocked uses only
+`denied`, `invalid`, `retryable`, `unknown`, `authority_replaced`, or `unresolved`. The Phoenix
+dashboard and terminal status show this global discovery condition even with zero environment
+entries, so paused admission is distinguishable from an idle deployment. Agent counts are unchanged.
+
 `GET /api/v1/state` adds `environments` (an array, empty with no managed entries). Each entry is an
 explicit safe projection, never a serialized provider Record, config, SSH target, or CLI response:
 
@@ -970,6 +992,16 @@ bounded cleanup deadline. Keep the private directory if cleanup is unresolved an
 use its deployment/resource IDs for authorized remediation. Successful cleanup removes
 the staged workflow; never commit evidence, credentials, or generated infrastructure IDs.
 
+The private evidence keeps `captured_resources` separately from
+`remaining_owned_resources`. Captured environment, Workstations VM/disk, Kubernetes
+PVC/PV/CSI volume-handle and cleanup-child identifiers survive later inventory
+failure and interrupted recovery. They are historical remediation clues, **not**
+proof those resources remain present. Successful current inventory labels current
+resources `observed_present`; unresolved inventory labels retained clues `captured`
+and includes `inventory_unresolved`. Never treat a generic inventory error or missing
+parent as proof of absence. Only bounded, allowlisted non-secret identifiers are
+retained; provider/request bodies and credential material are not evidence.
+
 Supply the following **test-only** map at
 `worker.environment.provider.qualification` in the selected workflow. This is not a new
 production provider mode or an authorization bypass:
@@ -986,7 +1018,7 @@ production provider mode or an authorization bypass:
 | `worker_image` | Exact digest-pinned image matching the actual provider template/config, including `@sha256:` and 64 lowercase hex digits. |
 | `node_modules_path` | Absolute **remote** directory containing the pinned compatible Playwright installation. No dependency-path fallback is supplied. |
 | `review_app_url` | Independently deployed deterministic HTTPS health endpoint, with no URL credentials, query or fragment; redirects are not followed. Its response must remain available and identical while **all** disposable workers are physically stopped. |
-| `unrelated_resource_paths` | Nonempty list of existing, unrelated negative-control API resource paths in the selected scope. Exact immutable identities are compared after cleanup too. |
+| `unrelated_resource_paths` | Nonempty list of existing, unrelated negative-control API resource paths in the selected scope. Immutable identities and stable configuration/ownership/lifecycle fingerprints must remain unchanged after cleanup. |
 | `fault_driver` | Absolute local path to the operator's audited, self-contained physical-fault executable. |
 | `fault_driver_sha256` | SHA-256 of that executable's bytes. The helper executes a private snapshot of precisely those bytes; do not depend on sibling files beside the executable. |
 | `storage_fault_authorized` | Literal `true`, authorizing scoped physical storage-deletion delay and restoration. |
@@ -1037,9 +1069,25 @@ Node `NotReady`, a closed SSH connection, CLI success prose and absent parent ob
 are never substitutes for physical-stop/deletion proof. Never force-delete an unverified
 node or invent broad IAM changes to make the test proceed.
 
+Every runner invocation, including response-loss recovery and cleanup/restart paths,
+is checked before the real `AgentRunner` is called. The context must be a valid live
+managed lease for the selected deployment/scope and issue, with the matching attempt.
+Missing, local, static SSH, forged or stale contexts are rejected without starting
+that backend. Evidence records only safe mode/outcome enums and opaque issue/attempt
+IDs; targets, options and credentials are never serialized. `runner_rejected` latches
+permanently: later valid runs, successful checks or complete cleanup cannot erase it.
+Both this latch and invocation count are persisted for interruption recovery.
+
+Unrelated-resource baselines retain `{path, uid, fingerprint}`. The SHA-256 fingerprint
+covers stable non-secret configuration, ownership and meaningful lifecycle fields,
+not volatile versions, timestamps or heartbeats. In-place changes therefore fail even
+when the UID is unchanged. Recovery restores the fingerprint; legacy UID-only or
+invalid baselines fail closed rather than silently weakening the comparison.
+
 Every required check is individually recorded. A blocked, failed or unrun check makes
-`qualified?` false, as does incomplete inventory, interruption or any remaining owned
-resource. Missing service-managed disk evidence requires operator action, not a successful
+`qualified?` false, as does incomplete inventory, interruption, any rejected runner
+invocation or any remaining owned resource. Missing service-managed disk evidence
+requires operator action, not a successful
 summary. Unavailable authorization, audited fault helper, scoped infrastructure,
 quota/image/dependency evidence, real backend access, physical deletion evidence, or
 the Kubernetes cleanup-ordering guarantee remain explicit qualification blockers.

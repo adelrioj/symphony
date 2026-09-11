@@ -11,7 +11,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations.Client do
   @spec remaining(keyword()) :: non_neg_integer()
   def remaining(opts), do: max(Keyword.fetch!(opts, :deadline) - System.monotonic_time(:millisecond), 0)
 
-  @spec request(map(), atom(), String.t(), keyword(), term(), keyword()) :: {:ok, %{status: integer(), body: term()}} | {:error, term()}
+  @type response :: {:ok, %{status: integer(), body: term()}} | {:error, term()}
+  @spec request(map(), atom(), String.t(), keyword(), term(), keyword()) :: response()
   def request(config, method, path, query, body, opts) do
     opts = options(config, opts)
 
@@ -76,15 +77,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations.Client do
 
     case request_fun.(request_opts) do
       {:ok, %{status: 401}} ->
-        refresh_key = {__MODULE__, :refreshed, cache_key(config)}
-
-        if Process.get(refresh_key, false) do
-          {:ok, %{status: 401, body: %{}}}
-        else
-          Process.put(refresh_key, true)
-          Process.delete(cache_key(config))
-          with {:ok, refreshed} <- token(config, opts), do: perform(config, method, path, query, body, opts, refreshed)
-        end
+        refresh(config, method, path, query, body, opts)
 
       {:ok, %{status: status, body: response}} when is_integer(status) ->
         {:ok, %{status: status, body: response}}
@@ -94,6 +87,18 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations.Client do
     end
   rescue
     _ -> {:error, {:unknown, :workstations_transport}}
+  end
+
+  defp refresh(config, method, path, query, body, opts) do
+    refresh_key = {__MODULE__, :refreshed, cache_key(config)}
+
+    if Process.get(refresh_key, false) do
+      {:ok, %{status: 401, body: %{}}}
+    else
+      Process.put(refresh_key, true)
+      Process.delete(cache_key(config))
+      with {:ok, refreshed} <- token(config, opts), do: perform(config, method, path, query, body, opts, refreshed)
+    end
   end
 
   defp endpoint("/compute/v1/" <> _ = path), do: "https://compute.googleapis.com" <> path
@@ -107,8 +112,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations.Client do
       |> Keyword.merge(timeout_ms: remaining(opts), max_output_bytes: 16_384)
       |> Keyword.update(:env, [{"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}], &List.keystore(&1, "CLOUDSDK_CORE_DISABLE_PROMPTS", 0, {"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}))
 
-    with executable when is_binary(executable) <- Keyword.get_lazy(opts, :gcloud_executable, fn -> System.find_executable("gcloud") end),
-         {:ok, %{output: output, status: 0}} <- Command.run(executable, ["auth", "print-access-token", "--verbosity=error"] ++ auth_args(config), command_opts),
+    executable = Keyword.get_lazy(opts, :gcloud_executable, fn -> System.find_executable("gcloud") end)
+    args = ["auth", "print-access-token", "--verbosity=error"] ++ auth_args(config)
+
+    with executable when is_binary(executable) <- executable,
+         {:ok, %{output: output, status: 0}} <- Command.run(executable, args, command_opts),
          token <- String.trim(output),
          true <- token != "" and not String.contains?(token, ["\n", "\r", " "]) do
       {:ok, token}

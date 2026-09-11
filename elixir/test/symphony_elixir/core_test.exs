@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.{AgentRuntimeSupervisor, ExecutionContext}
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -384,8 +386,13 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
-    runtime_pid =
-      start_supervised!({SymphonyElixir.AgentRuntimeSupervisor, name: runtime_supervisor_name, task_supervisor_name: task_supervisor_name, orchestrator_name: orchestrator_name})
+    runtime_opts = [
+      name: runtime_supervisor_name,
+      task_supervisor_name: task_supervisor_name,
+      orchestrator_name: orchestrator_name
+    ]
+
+    runtime_pid = start_supervised!({AgentRuntimeSupervisor, runtime_opts})
 
     original_orchestrator_pid = Process.whereis(orchestrator_name)
 
@@ -462,7 +469,13 @@ defmodule SymphonyElixir.CoreTest do
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
-    start_supervised!({SymphonyElixir.AgentRuntimeSupervisor, name: runtime_supervisor_name, task_supervisor_name: task_supervisor_name, orchestrator_name: orchestrator_name})
+    runtime_opts = [
+      name: runtime_supervisor_name,
+      task_supervisor_name: task_supervisor_name,
+      orchestrator_name: orchestrator_name
+    ]
+
+    start_supervised!({AgentRuntimeSupervisor, runtime_opts})
 
     orchestrator_pid = Process.whereis(orchestrator_name)
     task_supervisor_pid = Process.whereis(task_supervisor_name)
@@ -1205,7 +1218,7 @@ defmodule SymphonyElixir.CoreTest do
     git!(workspace, ["config", "user.email", "test@example.com"])
     git!(workspace, ["config", "user.name", "test"])
     commit!(workspace, "local-only")
-    context = %SymphonyElixir.ExecutionContext{mode: :managed, workspace_root: Path.dirname(workspace), workspace_path: workspace}
+    context = %ExecutionContext{mode: :managed, workspace_root: Path.dirname(workspace), workspace_path: workspace}
     issue = %Issue{id: "managed-head", identifier: "MT-REMOTE-HEAD", state: "In Progress"}
     pid = start_orchestrator!(:ManagedHeadOrchestrator)
     state = complete_worker_run!(pid, issue, true, workspace, context)

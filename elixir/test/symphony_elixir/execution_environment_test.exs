@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.ExecutionEnvironmentTest do
   use ExUnit.Case, async: true
 
+  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.ExecutionEnvironment, as: Environment
   alias SymphonyElixir.ExecutionEnvironment.{Config, Connection, Record}
@@ -31,6 +32,13 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
 
   test "managed startup cannot have a zero deadline" do
     assert {:error, {:invalid_environment_config, _}} = Config.parse(Map.put(attributes(), "startup_timeout_ms", 0))
+  end
+
+  test "workflow parsing rejects invalid nonempty managed settings rather than retaining defaults" do
+    invalid = Map.put(attributes(), "shutdown_timeout_ms", 0)
+
+    assert {:error, {:invalid_workflow_config, _}} =
+             Schema.parse(%{"worker" => %{"environment" => invalid}})
   end
 
   test "managed configuration rejects missing required values and invalid boundaries" do
@@ -74,6 +82,8 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     assert Config.runtime(%{worker: %{}, workspace: %{root: "/unused"}}) == nil
     assert Config.identity(%{worker: %{}}) == nil
     assert_raise ArgumentError, fn -> Config.runtime(%{worker: %{environment: %{}}}) end
+    assert Config.runtime(%{}) == nil
+    assert_raise ArgumentError, fn -> Config.runtime(%{worker: %{environment: attributes()}, workspace: nil}) end
   end
 
   test "identity ignores mutable knobs and secrets but follows ownership and authentication references" do
@@ -171,6 +181,27 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     end
   end
 
+  test "managed contexts reject malformed transport environments and missing persisted paths" do
+    config = Config.runtime(settings())
+    record = record(config)
+    connection = connection()
+
+    assert_raise ArgumentError, fn ->
+      ExecutionContext.managed(config, %{record | workspace_path: nil}, connection)
+    end
+
+    assert_raise ArgumentError, fn ->
+      ExecutionContext.managed(config, record, %{connection | target: %{connection.target | env: ["not-a-pair"]}})
+    end
+
+    assert_raise ArgumentError, fn ->
+      ExecutionContext.managed(config, %{record | template_identity: %{}}, connection)
+    end
+
+    context = ExecutionContext.managed(config, %{record | template_identity: %{"revision" => "one"}}, connection)
+    assert ExecutionContext.remote?(context)
+  end
+
   test "managed construction rejects closed unresponsive and exiting connection holders without leaking the lease" do
     config = Config.runtime(settings())
     record = record(config)
@@ -189,8 +220,9 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     record = %{record(config) | metadata: %{"secret" => "metadata-secret"}, provider_ref: "provider-secret"}
     connection = connection()
     context = ExecutionContext.managed(config, record, connection)
+    {:ok, parsed} = Config.parse(attributes())
 
-    for value <- [record, connection, context] do
+    for value <- [parsed, connection.target, record, connection, context] do
       text = inspect(value)
       refute text =~ "metadata-secret"
       refute text =~ "provider-secret"
@@ -251,7 +283,8 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
   defp connection do
     target = %Target{executable: "/usr/bin/ssh", prefix: ["-i", "transport-secret", "worker@localhost"], label: "managed-worker", env: [{"SECRET", "transport-secret"}]}
     id = make_ref()
-    owner = start_supervised!(%{id: id, start: {GenServer, :start_link, [ConnectionHolder, {id, target}]}, restart: :temporary})
+    child = %{id: id, start: {GenServer, :start_link, [ConnectionHolder, {id, target}]}, restart: :temporary}
+    owner = start_supervised!(child)
     %Connection{target: target, owner: owner, id: id}
   end
 end

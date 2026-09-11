@@ -68,8 +68,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
     {%{entry | record: record, operation_id: nil, last_error: nil}, []}
   end
 
-  def step(%Entry{phase: :stopped} = entry, {:reserve, attempt_id, purpose}, _now) do
-    {%{entry | attempt_id: attempt_id, purpose: purpose, phase: :reserved, completion: nil, context: nil, last_error: nil}, []}
+  def step(%Entry{phase: :stopped} = entry, {:reserve, id, purpose}, _now) do
+    {%{entry | attempt_id: id, purpose: purpose, phase: :reserved, completion: nil, context: nil, last_error: nil}, []}
   end
 
   def step(%Entry{phase: :preparing, operation_id: id} = entry, {:prepared, id, %Record{phase: :running} = record}, _now) when not is_nil(id) do
@@ -110,10 +110,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   end
 
   def step(%Entry{phase: phase, operation_id: id} = entry, {:destroyed, id, %Record{absent?: true} = record}, _now) when phase in [:deleting, :unknown] and not is_nil(id) do
-    if not unresolved?(record) do
-      {%{entry | record: record, phase: :absent, context: nil, operation_id: nil}, [:forget]}
-    else
+    if unresolved?(record) do
       {entry, []}
+    else
+      {%{entry | record: record, phase: :absent, context: nil, operation_id: nil}, [:forget]}
     end
   end
 
@@ -132,7 +132,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
 
   def occupied?(%Entry{}), do: true
 
-  @spec deletion_due?(Record.t(), :terminal | :nonterminal | :missing | :error, non_neg_integer(), integer()) :: boolean()
+  @type terminal_observation :: :terminal | :nonterminal | :missing | :error
+  @spec deletion_due?(Record.t(), terminal_observation(), non_neg_integer(), integer()) :: boolean()
   def deletion_due?(%Record{terminal_observed_at: timestamp}, :terminal, retention_ms, now) when is_integer(timestamp) and is_integer(retention_ms) and retention_ms >= 0 do
     now >= timestamp and now - timestamp >= retention_ms
   end

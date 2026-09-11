@@ -23,7 +23,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   @spec preflight(map(), keyword()) :: :ok | {:error, term()}
   def preflight(config, opts) do
     opts = Client.options(config, opts)
-    with :ok <- validate_config(config.provider), {:ok, template} <- get(config, parent(config), opts), :ok <- compatible(template), {:ok, _} <- discover(config, opts), do: :ok
+
+    with :ok <- validate_config(config.provider),
+         {:ok, template} <- get(config, parent(config), opts),
+         :ok <- compatible(template),
+         {:ok, _} <- discover(config, opts) do
+      :ok
+    end
   end
 
   @impl true
@@ -48,29 +54,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   def ensure(config, record, opts) do
     opts = Client.options(config, opts)
 
-    with :ok <- identity(config, record) do
-      case get(config, resource_name(config, record), opts) do
-        {:ok, workstation} ->
-          with {:ok, owned} <- observe_owned(config, record, workstation),
-               {:ok, template} <- get(config, config_name(config, owned), opts),
-               :ok <- retained_config(owned, template),
-               {:ok, operations} <- operation_inventory(config, opts) do
-            {:ok, normalize(owned, workstation, operations)}
-          else
-            {:error, failure} -> fail(record, failure)
-          end
-
-        {:error, :not_found} ->
-          if record.pending != [] or record.provider_ref != nil do
-            fail(record, {:unknown, :unresolved_create})
-          else
-            create(config, record, opts)
-          end
-
-        {:error, failure} ->
-          fail(record, failure)
-      end
+    with :ok <- identity(config, record),
+         {:ok, workstation} <- get(config, resource_name(config, record), opts) do
+      ensure_existing(config, record, workstation, opts)
     else
+      {:error, :not_found} -> ensure_missing(config, record, opts)
       {:error, failure} -> fail(record, failure)
     end
   end
@@ -149,29 +137,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   def destroy(config, record, opts) do
     opts = Client.options(config, opts)
 
-    with :ok <- identity(config, record) do
-      case get(config, resource_name(config, record), opts) do
-        {:error, :not_found} ->
-          inspect_absence(config, record, opts)
-
-        {:error, failure} ->
-          fail(record, failure)
-
-        {:ok, workstation} ->
-          with {:ok, owned} <- observe_owned(config, record, workstation),
-               {:ok, stopped} <- stop(config, owned, opts),
-               {:ok, backing} <- backing_inventory(config, opts) do
-            if stopped.metadata["disk_reclaim_policy"] == "DELETE" and stopped.metadata["disk_archive_timeout"] == "0s" do
-              mutate(config, capture_backing(%{stopped | desired: :absent}, backing), :delete, opts)
-            else
-              fail(stopped, {:unknown, :uncaptured_disk_policy})
-            end
-          else
-            {:error, _, _} = error -> error
-            {:error, failure} -> fail(record, failure)
-          end
-      end
+    with :ok <- identity(config, record),
+         {:ok, workstation} <- get(config, resource_name(config, record), opts),
+         {:ok, owned} <- observe_owned(config, record, workstation) do
+      destroy_owned(config, owned, opts)
     else
+      {:error, :not_found} -> inspect_absence(config, record, opts)
       {:error, failure} -> fail(record, failure)
     end
   end
@@ -196,27 +167,74 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   @spec normalize(Record.t(), map(), [map()]) :: Record.t()
   def normalize(record, workstation, operations) do
     pending = observed_pending(record.pending, operations, ref_name(record))
-    same_uid = is_binary(workstation["uid"]) and workstation["uid"] != "" and ref_uid(record) == workstation["uid"]
-    unresolved = Enum.any?(pending, &(&1.outcome in [:pending, :unknown] or not valid_pending_evidence?(record.scope, &1)))
-    # Workstation.reconciling is an implicit-presence proto3 bool; omitted means false.
+    settled = same_workstation?(record, workstation) and not unresolved?(record.scope, pending)
     reconciling = Map.get(workstation, "reconciling", false)
-    stopped = same_uid and not unresolved and workstation["state"] == "STATE_STOPPED" and reconciling == false
-    latest = Enum.find(Enum.reverse(pending), &(&1.verb in [:create, :start, :stop, :delete]))
-    stop = if latest && latest.verb == :stop && latest.outcome == :succeeded && operation_name_in_scope?(record.scope, latest.id), do: latest, else: nil
-
-    phase =
-      cond do
-        not same_uid or unresolved or reconciling != false -> :unknown
-        workstation["state"] == "STATE_RUNNING" -> :running
-        stopped and stop != nil -> :stopped
-        workstation["state"] == "STATE_STARTING" -> :preparing
-        workstation["state"] == "STATE_STOPPING" -> :stopping
-        true -> :unknown
-      end
-
-    proof = if stopped and stop != nil, do: {:quiescent, %{uid: workstation["uid"], operation: stop.id}}, else: :unknown
+    stop = successful_stop(record.scope, pending)
+    phase = observed_phase(settled and reconciling == false, workstation["state"], stop)
+    proof = if phase == :stopped, do: {:quiescent, %{uid: workstation["uid"], operation: stop.id}}, else: :unknown
     %{record | pending: pending, version: workstation["etag"], phase: phase, proof: proof, absent?: false}
   end
+
+  defp ensure_existing(config, record, workstation, opts) do
+    with {:ok, owned} <- observe_owned(config, record, workstation),
+         {:ok, template} <- get(config, config_name(config, owned), opts),
+         :ok <- retained_config(owned, template),
+         {:ok, operations} <- operation_inventory(config, opts) do
+      {:ok, normalize(owned, workstation, operations)}
+    else
+      {:error, failure} -> fail(record, failure)
+    end
+  end
+
+  defp ensure_missing(config, record, opts) do
+    cond do
+      record.pending == [] and is_nil(record.provider_ref) ->
+        create(config, record, opts)
+
+      never_created?(record) ->
+        with {:ok, absent} <- inspect_absence(config, record, opts), do: create(config, absent, opts)
+
+      true ->
+        fail(record, {:unknown, :unresolved_create})
+    end
+  end
+
+  defp destroy_owned(config, record, opts) do
+    with {:ok, stopped} <- stop(config, record, opts),
+         {:ok, backing} <- backing_inventory(config, opts) do
+      if stopped.metadata["disk_reclaim_policy"] == "DELETE" and stopped.metadata["disk_archive_timeout"] == "0s" do
+        mutate(config, capture_backing(%{stopped | desired: :absent}, backing), :delete, opts)
+      else
+        fail(stopped, {:unknown, :uncaptured_disk_policy})
+      end
+    else
+      {:error, _, _} = error -> error
+      {:error, failure} -> fail(record, failure)
+    end
+  end
+
+  defp same_workstation?(record, workstation),
+    do: nonblank?(workstation["uid"]) and ref_uid(record) == workstation["uid"]
+
+  defp unresolved?(scope, pending),
+    do: Enum.any?(pending, &(&1.outcome in [:pending, :unknown] or not valid_pending_evidence?(scope, &1)))
+
+  defp successful_stop(scope, pending) do
+    case Enum.find(Enum.reverse(pending), &(&1.verb in [:create, :start, :stop, :delete])) do
+      %{verb: :stop, outcome: :succeeded, id: id} = entry ->
+        if operation_name_in_scope?(scope, id), do: entry
+
+      _ ->
+        nil
+    end
+  end
+
+  defp observed_phase(false, _state, _stop), do: :unknown
+  defp observed_phase(true, "STATE_RUNNING", _stop), do: :running
+  defp observed_phase(true, "STATE_STOPPED", stop) when not is_nil(stop), do: :stopped
+  defp observed_phase(true, "STATE_STARTING", _stop), do: :preparing
+  defp observed_phase(true, "STATE_STOPPING", _stop), do: :stopping
+  defp observed_phase(true, _state, _stop), do: :unknown
 
   defp create(config, record, opts) do
     with {:ok, template} <- get(config, parent(config), opts),
@@ -228,22 +246,40 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       }
 
       pending = marker(:create, opts)
-      creating = %{captured | pending: [pending], phase: :preparing}
+      journal = captured.pending ++ [pending]
+      creating = %{captured | pending: journal, phase: :preparing, proof: :unknown, absent?: false}
       body = Map.merge(metadata(creating), %{"name" => resource_name(config, creating)})
 
       case api(config, :post, parent(config) <> "/workstations", [workstationId: record.key], body, opts) do
-        {:ok, operation} -> finish_mutation(config, creating, :create, operation, opts)
-        {:error, {:retryable, {:conflict, _}}} -> ensure(config, replace_last(creating, :create, %{outcome: :failed}), opts)
-        {:error, failure} -> fail(creating, failure)
+        {:ok, operation} ->
+          finish_mutation(config, creating, :create, operation, opts)
+
+        {:error, {:retryable, {:conflict, _}}} ->
+          rejected = replace_last(creating, :create, %{outcome: :failed})
+          adopt_conflict(config, rejected, opts)
+
+        {:error, {:denied, _} = failure} ->
+          fail(replace_last(creating, :create, %{outcome: :failed}), failure)
+
+        {:error, failure} ->
+          fail(creating, failure)
       end
     else
       {:error, failure} -> fail(record, failure)
     end
   end
 
+  defp adopt_conflict(config, record, opts) do
+    case get(config, resource_name(config, record), opts) do
+      {:ok, workstation} -> ensure_existing(config, record, workstation, opts)
+      {:error, failure} -> fail(record, failure)
+    end
+  end
+
   defp mutate(config, record, verb, opts) do
     pending = marker(verb, opts)
-    candidate = %{record | pending: record.pending ++ [pending], proof: :unknown, phase: if(verb == :delete, do: :deleting, else: :unknown)}
+    phase = if verb == :delete, do: :deleting, else: :unknown
+    candidate = %{record | pending: record.pending ++ [pending], proof: :unknown, phase: phase}
 
     with {:ok, durable} <- persist(config, candidate, opts),
          {:ok, workstation} <- get(config, resource_name(config, durable), opts),
@@ -266,39 +302,54 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   defp finish_mutation(config, record, verb, operation, opts) do
     if valid_operation?(config, operation, resource_name(config, record), verb) do
       known = replace_last(record, verb, %{id: operation["name"], outcome: :pending})
-
-      case await_operation(config, operation, opts) do
-        {:ok, terminal} ->
-          resolved = replace_last(known, verb, operation_result(terminal))
-
-          cond do
-            Map.has_key?(terminal, "error") ->
-              fail(resolved, {:unknown, {:operation_failed, verb, get_in(terminal, ["error", "code"])}})
-
-            verb == :delete ->
-              case get(config, resource_name(config, resolved), opts) do
-                {:error, :not_found} -> inspect_absence(config, resolved, opts)
-                {:error, failure} -> fail(resolved, failure)
-                {:ok, _} -> fail(resolved, {:unknown, :delete_not_absent})
-              end
-
-            true ->
-              with {:ok, durable} <- persist(config, resolved, opts),
-                   {:ok, observed} <- inspect(config, durable, opts) do
-                cond do
-                  verb == :stop and not match?({:quiescent, _}, observed.proof) -> fail(observed, {:unknown, :stop_not_confirmed})
-                  verb == :start and observed.phase != :running -> fail(observed, {:unknown, :start_not_confirmed})
-                  verb == :start -> qualify_running(config, observed, opts)
-                  true -> {:ok, observed}
-                end
-              end
-          end
-
-        {:error, failure} ->
-          fail(known, failure)
-      end
+      await_mutation(config, known, verb, operation, opts)
     else
       fail(record, {:unknown, :invalid_operation_evidence})
+    end
+  end
+
+  defp await_mutation(config, record, verb, operation, opts) do
+    case await_operation(config, operation, opts) do
+      {:ok, terminal} ->
+        resolved = replace_last(record, verb, operation_result(terminal))
+        finish_terminal(config, resolved, verb, terminal, opts)
+
+      {:error, failure} ->
+        fail(record, failure)
+    end
+  end
+
+  defp finish_terminal(_config, record, verb, %{"error" => error}, _opts),
+    do: fail(record, {:unknown, {:operation_failed, verb, error["code"]}})
+
+  defp finish_terminal(config, record, :delete, _terminal, opts) do
+    case get(config, resource_name(config, record), opts) do
+      {:error, :not_found} -> inspect_absence(config, record, opts)
+      {:error, failure} -> fail(record, failure)
+      {:ok, _} -> fail(record, {:unknown, :delete_not_absent})
+    end
+  end
+
+  defp finish_terminal(config, record, verb, _terminal, opts) do
+    with {:ok, durable} <- persist(config, record, opts),
+         {:ok, observed} <- inspect(config, durable, opts) do
+      confirm_mutation(config, observed, verb, opts)
+    end
+  end
+
+  defp confirm_mutation(config, observed, verb, opts) do
+    cond do
+      verb == :stop and not match?({:quiescent, _}, observed.proof) ->
+        fail(observed, {:unknown, :stop_not_confirmed})
+
+      verb == :start and observed.phase != :running ->
+        fail(observed, {:unknown, :start_not_confirmed})
+
+      verb == :start ->
+        qualify_running(config, observed, opts)
+
+      true ->
+        {:ok, observed}
     end
   end
 
@@ -306,75 +357,112 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     with :ok <- identity(config, record),
          {:ok, workstation} <- get(config, resource_name(config, record), opts),
          {:ok, owned} <- observe_owned(config, record, workstation) do
-      candidate = %{record | provider_ref: owned.provider_ref, pending: record.pending ++ [marker(:update, opts)]}
-      expected = metadata(candidate)
+      patch_metadata(config, record, owned, workstation, opts)
+    else
+      {:error, :not_found} -> inspect_absence(config, record, opts)
+      {:error, failure} -> fail(record, failure)
+    end
+  end
 
-      body = %{
-        "name" => resource_name(config, owned),
-        "etag" => owned.version,
-        "annotations" => Map.merge(Map.get(workstation, "annotations", %{}), expected["annotations"]),
-        "labels" => Map.merge(Map.get(workstation, "labels", %{}), expected["labels"])
-      }
+  defp patch_metadata(config, record, owned, workstation, opts) do
+    candidate = %{record | provider_ref: owned.provider_ref, pending: owned.pending ++ [marker(:update, opts)]}
+    expected = metadata(candidate)
+    annotation = expected["annotations"][@annotation]
+    candidate = replace_last(candidate, :update, %{annotation_hash: annotation_hash(annotation)})
 
-      case api(config, :patch, resource_name(config, owned), [updateMask: "annotations,labels"], body, opts) do
-        {:ok, operation} ->
-          if valid_operation?(config, operation, resource_name(config, owned), :update) do
-            known = replace_last(candidate, :update, %{id: operation["name"], outcome: :pending})
+    body = %{
+      "name" => resource_name(config, owned),
+      "etag" => owned.version,
+      "annotations" => Map.merge(Map.get(workstation, "annotations", %{}), expected["annotations"]),
+      "labels" => Map.merge(Map.get(workstation, "labels", %{}), expected["labels"])
+    }
 
-            with {:ok, terminal} <- await_operation(config, operation, opts),
-                 false <- Map.has_key?(terminal, "error"),
-                 {:ok, readback} <- get(config, resource_name(config, owned), opts),
-                 true <- get_in(readback, ["annotations", @annotation]) == expected["annotations"][@annotation],
-                 {:ok, verified} <- observe_owned(config, known, readback) do
-              {:ok, replace_last(%{known | version: verified.version}, :update, operation_result(terminal))}
-            else
-              {:error, failure} -> fail(known, failure)
-              _ -> fail(known, {:unknown, :metadata_not_durable})
-            end
-          else
-            fail(candidate, {:unknown, :invalid_operation_evidence})
-          end
+    case api(config, :patch, resource_name(config, owned), [updateMask: "annotations,labels"], body, opts) do
+      {:ok, operation} -> finish_metadata(config, candidate, operation, annotation, opts)
+      {:error, failure} -> mutation_failure(config, candidate, :update, failure, opts)
+    end
+  end
 
-        {:error, failure} ->
-          mutation_failure(config, candidate, :update, failure, opts)
-      end
+  defp finish_metadata(config, record, operation, annotation, opts) do
+    if valid_operation?(config, operation, resource_name(config, record), :update) do
+      known = replace_last(record, :update, %{id: operation["name"], outcome: :pending})
+      verify_metadata(config, known, operation, annotation, opts)
+    else
+      fail(record, {:unknown, :invalid_operation_evidence})
+    end
+  end
+
+  defp verify_metadata(config, record, operation, annotation, opts) do
+    with {:ok, terminal} <- await_operation(config, operation, opts),
+         false <- Map.has_key?(terminal, "error"),
+         {:ok, readback} <- get(config, resource_name(config, record), opts),
+         true <- get_in(readback, ["annotations", @annotation]) == annotation,
+         {:ok, verified} <- observe_owned(config, record, readback) do
+      {:ok, verified}
     else
       {:error, failure} -> fail(record, failure)
+      _ -> fail(record, {:unknown, :metadata_not_durable})
     end
   end
 
   defp settle(config, record, opts) do
-    with {:ok, operations} <- operation_inventory(config, opts) do
-      pending = observed_pending(record.pending, operations, resource_name(config, record))
-
-      Enum.reduce_while(pending, {:ok, %{record | pending: pending}}, fn entry, {:ok, current} ->
-        cond do
-          not valid_pending_evidence?(record.scope, entry) ->
-            {:halt, fail(current, {:invalid, :workstations_operation_evidence})}
-
-          entry.outcome in [:succeeded, :failed] ->
-            {:cont, {:ok, current}}
-
-          is_nil(entry.id) ->
-            {:halt, fail(current, {:unknown, :uncorrelated_mutation})}
-
-          true ->
-            with true <- operation_name?(config, entry.id),
-                 {:ok, operation} <- get(config, entry.id, opts),
-                 true <- valid_operation?(config, operation, resource_name(config, record), entry.verb),
-                 {:ok, terminal} <- await_operation(config, operation, opts) do
-              updated = %{current | pending: Enum.map(current.pending, fn item -> if item == entry, do: Map.merge(item, operation_result(terminal)), else: item end)}
-              {:cont, {:ok, updated}}
-            else
-              {:error, failure} -> {:halt, fail(current, failure)}
-              _ -> {:halt, fail(current, {:unknown, :invalid_operation_evidence})}
-            end
-        end
-      end)
+    with {:ok, refreshed} <- refresh_metadata(config, record, opts),
+         {:ok, operations} <- operation_inventory(config, opts) do
+      pending = observed_pending(refreshed.pending, operations, resource_name(config, refreshed))
+      current = %{refreshed | pending: pending}
+      Enum.reduce_while(pending, {:ok, current}, &settle_entry(config, &1, &2, opts))
     else
       {:error, failure} -> fail(record, failure)
     end
   end
+
+  defp settle_entry(config, entry, {:ok, current}, opts) do
+    cond do
+      not valid_pending_evidence?(current.scope, entry) ->
+        {:halt, fail(current, {:invalid, :workstations_operation_evidence})}
+
+      entry.outcome in [:succeeded, :failed] ->
+        {:cont, {:ok, current}}
+
+      unconfirmed_metadata?(entry) ->
+        {:halt, fail(current, {:unknown, :metadata_not_durable})}
+
+      is_nil(entry.id) ->
+        {:halt, fail(current, {:unknown, :uncorrelated_mutation})}
+
+      true ->
+        settle_operation(config, current, entry, opts)
+    end
+  end
+
+  defp settle_operation(config, record, entry, opts) do
+    with true <- operation_name?(config, entry.id),
+         {:ok, operation} <- get(config, entry.id, opts),
+         true <- valid_operation?(config, operation, resource_name(config, record), entry.verb),
+         {:ok, terminal} <- await_operation(config, operation, opts) do
+      pending = Enum.map(record.pending, &resolve_entry(&1, entry, terminal))
+      {:cont, {:ok, %{record | pending: pending}}}
+    else
+      {:error, failure} -> {:halt, fail(record, failure)}
+      _ -> {:halt, fail(record, {:unknown, :invalid_operation_evidence})}
+    end
+  end
+
+  defp resolve_entry(entry, entry, terminal), do: Map.merge(entry, operation_result(terminal))
+  defp resolve_entry(other, _entry, _terminal), do: other
+
+  defp refresh_metadata(config, record, opts) do
+    if Enum.any?(record.pending, &unconfirmed_metadata?/1) do
+      with {:ok, workstation} <- get(config, resource_name(config, record), opts) do
+        observe_owned(config, record, workstation)
+      end
+    else
+      {:ok, record}
+    end
+  end
+
+  defp unconfirmed_metadata?(entry),
+    do: entry.outcome in [:pending, :unknown] and Map.has_key?(entry, :annotation_hash)
 
   defp await_operation(config, operation, opts) do
     cond do
@@ -397,8 +485,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     end
   end
 
-  defp same_operation?(left, right),
-    do: left["name"] == right["name"] and get_in(left, ["metadata", "target"]) == get_in(right, ["metadata", "target"]) and get_in(left, ["metadata", "verb"]) == get_in(right, ["metadata", "verb"])
+  defp same_operation?(left, right) do
+    left["name"] == right["name"] and
+      get_in(left, ["metadata", "target"]) == get_in(right, ["metadata", "target"]) and
+      get_in(left, ["metadata", "verb"]) == get_in(right, ["metadata", "verb"])
+  end
 
   defp mutation_failure(config, record, verb, {:retryable, {:conflict, _}} = failure, opts) do
     rejected = replace_last(record, verb, %{outcome: :failed})
@@ -419,17 +510,22 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
     Enum.reduce(operations, resolved, fn operation, acc ->
       if operation["done"] != true and get_in(operation, ["metadata", "target"]) == target and not Enum.any?(acc, &(&1.id == operation["name"])) do
-        case enum(get_in(operation, ["metadata", "verb"]), @verbs) do
-          {:ok, verb} -> acc ++ [%{verb: verb, id: operation["name"], outcome: :pending}]
-          _ -> acc ++ [%{verb: :update, id: nil, outcome: :unknown}]
-        end
+        acc ++ [unlisted_operation(operation)]
       else
         acc
       end
     end)
   end
 
+  defp unlisted_operation(operation) do
+    case enum(get_in(operation, ["metadata", "verb"]), @verbs) do
+      {:ok, verb} -> %{verb: verb, id: operation["name"], outcome: :pending}
+      _ -> %{verb: :update, id: nil, outcome: :unknown}
+    end
+  end
+
   defp resolve(%{outcome: outcome} = entry, _operations, _target) when outcome in [:succeeded, :failed], do: entry
+  defp resolve(%{verb: :update, annotation_hash: _} = entry, _operations, _target), do: entry
 
   defp resolve(entry, operations, target) do
     matches =
@@ -465,12 +561,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     %{id: operation["name"], outcome: outcome}
   end
 
-  defp valid_operation?(config, operation, target, verb) when is_map(operation) do
+  defp valid_operation?(config, operation, target, verb) do
     operation_name?(config, operation["name"]) and
       get_in(operation, ["metadata", "target"]) == target and get_in(operation, ["metadata", "verb"]) == Atom.to_string(verb)
   end
-
-  defp valid_operation?(_, _, _, _), do: false
 
   defp operation_name?(config, name), do: operation_name_in_scope?(config.provider, name)
 
@@ -501,10 +595,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     }
 
   defp replace_last(record, verb, attrs) do
-    case record.pending |> Enum.reverse() |> Enum.find_index(&(&1.verb == verb)) do
-      nil -> record
-      index -> %{record | pending: List.update_at(record.pending, length(record.pending) - 1 - index, &Map.merge(&1, attrs))}
-    end
+    index = Enum.find_index(Enum.reverse(record.pending), &(&1.verb == verb))
+    pending = List.update_at(record.pending, length(record.pending) - 1 - index, &Map.merge(&1, attrs))
+    %{record | pending: pending}
   end
 
   defp inspect_absence(config, record, opts) do
@@ -515,14 +608,26 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
       cond do
         leftovers != [] -> fail(captured, {:unknown, {:backing_resources_remaining, safe_ids(leftovers)}})
-        not Enum.any?(settled.pending, &(&1.verb == :delete and &1.outcome == :succeeded)) -> fail(captured, {:unknown, :absence_without_delete_evidence})
-        true -> {:ok, %{captured | absent?: true, phase: :stopped, proof: {:quiescent, %{deleted_uid: ref_uid(record), backing_absent: true}}}}
+        deleted?(settled) -> absent(captured, %{deleted_uid: ref_uid(record), backing_absent: true})
+        never_created?(settled) -> absent(captured, %{create_rejected: true, backing_absent: true})
+        true -> fail(captured, {:unknown, :absence_without_delete_evidence})
       end
     else
       {:error, _, _} = error -> error
       {:error, failure} -> fail(record, failure)
     end
   end
+
+  defp deleted?(record), do: Enum.any?(record.pending, &(&1.verb == :delete and &1.outcome == :succeeded))
+
+  defp never_created?(record) do
+    is_nil(record.provider_ref) and record.pending != [] and
+      Enum.all?(record.pending, &(&1.verb == :create and &1.outcome == :failed)) and
+      Map.get(record.metadata, "backing_resources", []) == []
+  end
+
+  defp absent(record, evidence),
+    do: {:ok, %{record | absent?: true, phase: :stopped, proof: {:quiescent, evidence}}}
 
   defp observe_owned(config, record, workstation) do
     with :ok <- identity(config, record),
@@ -531,8 +636,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
          true <- is_nil(record.provider_ref) or ref_uid(record) == workstation["uid"],
          true <- nonblank?(record.template_identity) and record.template_identity == durable.template_identity,
          true <- workstation["name"] == resource_name(config, record),
-         true <- is_binary(workstation["uid"]) and workstation["uid"] != "" and is_binary(workstation["etag"]) and workstation["etag"] != "" do
-      pending = merge_pending(durable.pending, record.pending)
+         true <- nonblank?(workstation["uid"]) and nonblank?(workstation["etag"]) do
+      local = confirmed_metadata(record.pending, workstation)
+      pending = merge_pending(durable.pending, local)
 
       {:ok,
        %{
@@ -550,9 +656,22 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp merge_pending(durable, local) do
     Enum.reduce(durable, local, fn item, acc ->
-      if Enum.any?(acc, fn known -> known.verb == item.verb and Map.get(known, :from) == Map.get(item, :from) end), do: acc, else: acc ++ [item]
+      if Enum.any?(acc, &same_pending?(&1, item)), do: acc, else: acc ++ [item]
     end)
   end
+
+  defp same_pending?(left, right),
+    do: left.verb == right.verb and Map.get(left, :from) == Map.get(right, :from)
+
+  defp confirmed_metadata(pending, workstation) do
+    hash = annotation_hash(get_in(workstation, ["annotations", @annotation]))
+    Enum.reject(pending, &confirmed_metadata?(&1, hash))
+  end
+
+  defp confirmed_metadata?(%{verb: :update, annotation_hash: hash}, hash), do: true
+  defp confirmed_metadata?(_entry, _hash), do: false
+
+  defp annotation_hash(annotation), do: :crypto.hash(:sha256, annotation) |> Base.encode16(case: :lower)
 
   defp identity(config, record) do
     valid =
@@ -611,7 +730,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
         workspace_path: data["workspace_path"],
         template_identity: data["template_identity"],
         desired: desired,
-        pending: pending,
+        pending: durable_pending(pending),
         metadata: data["metadata"],
         attempt_id: data["attempt_id"],
         issue_identifier: data["issue_identifier"],
@@ -633,6 +752,20 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     end
   end
 
+  # The final marker is contained in the very metadata write it journals. Reading
+  # that owned annotation proves this metadata-only write landed, not any earlier
+  # compute mutation or any other outstanding metadata write.
+  defp durable_pending(pending) do
+    case List.last(pending) do
+      %{verb: :update, id: nil, outcome: :unknown, from: first, until: last}
+      when is_binary(first) and is_binary(last) ->
+        Enum.drop(pending, -1)
+
+      _ ->
+        pending
+    end
+  end
+
   defp decode_pending(scope, entries) when is_list(entries) do
     Enum.reduce_while(entries, {:ok, []}, fn item, {:ok, acc} ->
       with true <- is_map(item),
@@ -640,7 +773,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
            {:ok, outcome} <- enum(item["outcome"], @outcomes),
            true <- valid_pending_evidence?(scope, %{id: item["id"], outcome: outcome}) do
         entry = %{verb: verb, outcome: outcome, id: item["id"]}
-        entry = Enum.reduce([:from, :until], entry, fn key, value -> if is_binary(item[Atom.to_string(key)]), do: Map.put(value, key, item[Atom.to_string(key)]), else: value end)
+        entry = Enum.reduce([:from, :until], entry, &decode_window(&1, &2, item))
         {:cont, {:ok, acc ++ [entry]}}
       else
         _ -> {:halt, {:error, {:invalid, :workstations_metadata}}}
@@ -649,6 +782,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   end
 
   defp decode_pending(_scope, _entries), do: {:error, {:invalid, :workstations_metadata}}
+
+  defp decode_window(key, entry, item) do
+    case item[Atom.to_string(key)] do
+      value when is_binary(value) -> Map.put(entry, key, value)
+      _ -> entry
+    end
+  end
 
   defp enum(value, allowed) do
     case Enum.find(allowed, &(Atom.to_string(&1) == value)) do
@@ -660,20 +800,33 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   defp nonblank?(value), do: is_binary(value) and String.trim(value) != ""
 
   defp compatible(template) do
-    dirs = Map.get(template, "persistentDirectories", [])
-    home = Enum.find(dirs, &(&1["mountPath"] == "/home"))
-    ports = Map.get(template, "allowedPorts", [%{"first" => 22, "last" => 22}])
+    valid = nonblank?(template["uid"]) and template["reconciling"] != true
+    safe = compatible_storage?(template) and compatible_runtime?(template) and compatible_network?(template)
+    if valid and safe, do: :ok, else: {:error, {:invalid, :workstations_profile}}
+  end
+
+  defp compatible_storage?(template) do
+    case Map.get(template, "persistentDirectories", []) do
+      [%{"mountPath" => "/home", "gcePd" => %{"reclaimPolicy" => "DELETE", "archiveTimeout" => "0s"}}] -> true
+      _ -> false
+    end
+  end
+
+  defp compatible_runtime?(template) do
     host = get_in(template, ["host", "gceInstance"]) || %{}
 
-    valid =
-      nonblank?(template["uid"]) and template["reconciling"] != true and Map.get(template, "disableTcpConnections", false) == false and home != nil and length(dirs) == 1 and
-        get_in(home || %{}, ["gcePd", "reclaimPolicy"]) == "DELETE" and get_in(home || %{}, ["gcePd", "archiveTimeout"]) == "0s" and
-        Map.get(host, "poolSize", 0) == 0 and Map.get(template, "idleTimeout", "1200s") == "0s" and Map.get(template, "runningTimeout", "43200s") == "0s" and
-        Enum.all?(Map.get(host, "boostConfigs", []), &(Map.get(&1, "poolSize", 0) == 0)) and
-        Map.get(template, "idleAction", "STOP") in ["STOP", "IDLE_ACTION_UNSPECIFIED"] and
-        Enum.any?(ports, &(Map.get(&1, "first", 0) <= 22 and Map.get(&1, "last", 0) >= 22))
+    Map.get(host, "poolSize", 0) == 0 and
+      Enum.all?(Map.get(host, "boostConfigs", []), &(Map.get(&1, "poolSize", 0) == 0)) and
+      Map.get(template, "idleTimeout", "1200s") == "0s" and
+      Map.get(template, "runningTimeout", "43200s") == "0s" and
+      Map.get(template, "idleAction", "STOP") in ["STOP", "IDLE_ACTION_UNSPECIFIED"]
+  end
 
-    if valid, do: :ok, else: {:error, {:invalid, :workstations_profile}}
+  defp compatible_network?(template) do
+    ports = Map.get(template, "allowedPorts", [%{"first" => 22, "last" => 22}])
+
+    Map.get(template, "disableTcpConnections", false) == false and
+      Enum.any?(ports, &(Map.get(&1, "first", 0) <= 22 and Map.get(&1, "last", 0) >= 22))
   end
 
   defp retained_config(record, template) do
@@ -694,16 +847,18 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   defp canonical(value), do: value
 
   defp list_templates(config, templates, opts) do
-    Enum.reduce_while(templates, {:ok, []}, fn template, {:ok, acc} ->
-      if is_binary(template["name"]) and String.starts_with?(template["name"], cluster(config) <> "/workstationConfigs/") do
-        case pages(config, template["name"] <> "/workstations", "workstations", opts) do
-          {:ok, items} -> {:cont, {:ok, acc ++ items}}
-          error -> {:halt, error}
-        end
-      else
-        {:halt, {:error, {:unknown, :invalid_inventory}}}
+    Enum.reduce_while(templates, {:ok, []}, &list_template(config, &1, &2, opts))
+  end
+
+  defp list_template(config, template, {:ok, acc}, opts) do
+    if is_binary(template["name"]) and String.starts_with?(template["name"], cluster(config) <> "/workstationConfigs/") do
+      case pages(config, template["name"] <> "/workstations", "workstations", opts) do
+        {:ok, items} -> {:cont, {:ok, acc ++ items}}
+        error -> {:halt, error}
       end
-    end)
+    else
+      {:halt, {:error, {:unknown, :invalid_inventory}}}
+    end
   end
 
   defp decode_owned(config, workstations, operations) do
@@ -719,7 +874,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp operation_inventory(config, opts), do: pages(config, region(config) <> "/operations", "operations", opts)
 
-  defp pages(config, path, field, opts, token \\ nil, seen \\ MapSet.new(), acc \\ []) do
+  defp pages(config, path, field, opts, token \\ nil, seen \\ %{}, acc \\ []) do
     query = [pageSize: 100] ++ if(token, do: [pageToken: token], else: [])
 
     with {:ok, body} <- api(config, :get, path, query, nil, opts),
@@ -729,8 +884,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
       cond do
         next in [nil, ""] -> {:ok, acc ++ items}
-        not is_binary(next) or MapSet.member?(seen, next) -> {:error, {:unknown, :invalid_pagination}}
-        true -> pages(config, path, field, opts, next, MapSet.put(seen, next), acc ++ items)
+        not is_binary(next) or Map.has_key?(seen, next) -> {:error, {:unknown, :invalid_pagination}}
+        true -> pages(config, path, field, opts, next, Map.put(seen, next, true), acc ++ items)
       end
     else
       {:error, _} = error -> error
@@ -745,9 +900,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     end
   end
 
-  defp compute_pages(config, kind, opts, token \\ nil, seen \\ MapSet.new(), acc \\ []) do
+  defp compute_pages(config, kind, opts, token \\ nil, seen \\ %{}, acc \\ []) do
     path = "/compute/v1/projects/" <> segment(config.provider["project"]) <> "/aggregated/" <> kind
-    query = [maxResults: 100, returnPartialSuccess: false, includeAllScopes: true] ++ if(token, do: [pageToken: token], else: [])
+    query = [maxResults: 100, returnPartialSuccess: false, includeAllScopes: true]
+    query = if token, do: Keyword.put(query, :pageToken, token), else: query
 
     with {:ok, body} <- api(config, :get, path, query, nil, opts),
          :ok <- complete(body),
@@ -758,8 +914,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
       cond do
         next in [nil, ""] -> {:ok, acc ++ items}
-        not is_binary(next) or MapSet.member?(seen, next) -> {:error, {:unknown, :invalid_pagination}}
-        true -> compute_pages(config, kind, opts, next, MapSet.put(seen, next), acc ++ items)
+        not is_binary(next) or Map.has_key?(seen, next) -> {:error, {:unknown, :invalid_pagination}}
+        true -> compute_pages(config, kind, opts, next, Map.put(seen, next, true), acc ++ items)
       end
     else
       {:error, _} = error -> error
@@ -792,31 +948,30 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   defp safe_ids(resources), do: Enum.map(resources, &Map.take(&1, ["id", "name", "selfLink", "zone", "region"]))
 
   defp qualify_running(config, record, opts) do
-    with {:ok, resources} <- backing_inventory(config, opts) do
-      related = related_backing(record, resources)
-
-      owned =
-        Enum.filter(related, fn resource ->
-          labels(record.deployment_id, record.key) |> Enum.all?(fn {key, value} -> get_in(resource, ["labels", key]) == value end)
-        end)
-
-      qualified =
-        length(owned) == length(related) and
-          Enum.all?(["/instances/", "/disks/"], fn kind ->
-            Enum.any?(owned, &(is_binary(&1["id"]) and is_binary(&1["selfLink"]) and String.contains?(&1["selfLink"], kind)))
-          end)
-
-      captured = capture_backing(record, resources)
-
-      if qualified do
-        persist(config, %{captured | metadata: Map.put(captured.metadata, "backing_qualified", true)}, opts)
-      else
-        fail(captured, {:unknown, :backing_ownership_unqualified})
-      end
-    else
+    case backing_inventory(config, opts) do
+      {:ok, resources} -> qualify_backing(config, record, resources, opts)
       {:error, failure} -> fail(record, failure)
     end
   end
+
+  defp qualify_backing(config, record, resources, opts) do
+    related = related_backing(record, resources)
+    owned = Enum.filter(related, &owned_backing?(record, &1))
+    qualified = length(owned) == length(related) and Enum.all?(["/instances/", "/disks/"], &has_backing?(owned, &1))
+    captured = capture_backing(record, resources)
+
+    if qualified do
+      persist(config, %{captured | metadata: Map.put(captured.metadata, "backing_qualified", true)}, opts)
+    else
+      fail(captured, {:unknown, :backing_ownership_unqualified})
+    end
+  end
+
+  defp owned_backing?(record, resource),
+    do: Enum.all?(labels(record.deployment_id, record.key), fn {key, value} -> get_in(resource, ["labels", key]) == value end)
+
+  defp has_backing?(owned, kind),
+    do: Enum.any?(owned, &(is_binary(&1["id"]) and is_binary(&1["selfLink"]) and String.contains?(&1["selfLink"], kind)))
 
   defp get(config, path, opts), do: api(config, :get, path, [], nil, opts)
 
@@ -849,34 +1004,40 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   defp fail(record, failure), do: {:error, failure, %{record | phase: :unknown, proof: :unknown, absent?: false}}
 
   defp connect_tunnel(config, record, supervisor, authority, opts) do
-    with gcloud when is_binary(gcloud) <- Keyword.get_lazy(opts, :gcloud_executable, fn -> System.find_executable("gcloud") end),
+    with gcloud when is_binary(gcloud) <- executable(opts, :gcloud_executable, "gcloud"),
          ssh when is_binary(ssh) <- Keyword.get_lazy(opts, :ssh_executable, fn -> System.find_executable("ssh") end) do
       directory = private_directory_path()
-
-      case Operations.stage_private_paths(supervisor, authority, self(), [directory]) do
-        {:ok, stage} ->
-          staged_opts = Keyword.put(opts, :staged_paths, stage)
-
-          result =
-            with :ok <- Operations.create_staged_directory(stage, directory) do
-              connect_staged(config, record, gcloud, ssh, directory, supervisor, authority, staged_opts)
-            end
-
-          case result do
-            {:ok, _} = connection ->
-              connection
-
-            error ->
-              Operations.release_staged_paths(stage)
-              error
-          end
-
-        error ->
-          error
-      end
+      connect_directory(config, record, gcloud, ssh, directory, supervisor, authority, opts)
     else
       _ -> {:error, {:invalid, :workstations_connection_prerequisite}}
     end
+  end
+
+  defp executable(opts, key, name), do: Keyword.get_lazy(opts, key, fn -> System.find_executable(name) end)
+
+  defp connect_directory(config, record, gcloud, ssh, directory, supervisor, authority, opts) do
+    case Operations.stage_private_paths(supervisor, authority, self(), [directory]) do
+      {:ok, stage} ->
+        staged_opts = Keyword.put(opts, :staged_paths, stage)
+        result = create_connection(config, record, gcloud, ssh, directory, supervisor, authority, staged_opts)
+        release_failed_stage(result, stage)
+
+      error ->
+        error
+    end
+  end
+
+  defp create_connection(config, record, gcloud, ssh, directory, supervisor, authority, opts) do
+    with :ok <- Operations.create_staged_directory(Keyword.fetch!(opts, :staged_paths), directory) do
+      connect_staged(config, record, gcloud, ssh, directory, supervisor, authority, opts)
+    end
+  end
+
+  defp release_failed_stage({:ok, _} = connection, _stage), do: connection
+
+  defp release_failed_stage(error, stage) do
+    Operations.release_staged_paths(stage)
+    error
   end
 
   defp connect_staged(config, record, gcloud, ssh, directory, supervisor, authority, opts) do
@@ -902,9 +1063,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   end
 
   defp establish_tunnel(config, port, ssh, directory, supervisor, authority, opts) do
+    timeout = max(Client.remaining(opts), 1)
+
     result =
       with {:ok, local_port} <- tunnel_ready(port, opts, ""),
-           {:ok, socket} <- :gen_tcp.connect({127, 0, 0, 1}, local_port, [:binary, active: false], max(Client.remaining(opts), 1)) do
+           {:ok, socket} <- :gen_tcp.connect({127, 0, 0, 1}, local_port, [:binary, active: false], timeout) do
         :gen_tcp.close(socket)
         known_hosts = Path.join(directory, "known_hosts")
 
@@ -977,7 +1140,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
             if value in 1..65_535, do: {:ok, value}, else: {:error, :invalid_port}
 
           _ ->
-            if byte_size(combined) > 65_536, do: {:error, :tunnel_output_limit}, else: tunnel_ready(port, opts, combined)
+            continue_tunnel(port, opts, combined)
         end
 
       {^port, {:exit_status, _}} ->
@@ -986,4 +1149,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       Client.remaining(opts) -> {:error, :tunnel_deadline}
     end
   end
+
+  defp continue_tunnel(port, opts, output) when byte_size(output) <= 65_536,
+    do: tunnel_ready(port, opts, output)
+
+  defp continue_tunnel(_port, _opts, _output), do: {:error, :tunnel_output_limit}
 end

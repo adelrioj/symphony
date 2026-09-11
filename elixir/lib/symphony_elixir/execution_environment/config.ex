@@ -41,14 +41,18 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
     |> changeset(config)
     |> apply_action(:validate)
     |> case do
-      {:ok, parsed} -> {:ok, parsed}
-      {:error, changeset} -> {:error, {:invalid_environment_config, traverse_errors(changeset, fn {message, _opts} -> message end)}}
+      {:ok, parsed} ->
+        {:ok, parsed}
+
+      {:error, changeset} ->
+        errors = traverse_errors(changeset, fn {message, _opts} -> message end)
+        {:error, {:invalid_environment_config, errors}}
     end
   end
 
   def parse(_config), do: {:error, {:invalid_environment_config, %{environment: ["must be a managed configuration map"]}}}
 
-  @spec changeset(t(), map()) :: Ecto.Changeset.t()
+  @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
   def changeset(schema, config) do
     schema
     |> cast(normalize_keys(config), @fields, empty_values: [])

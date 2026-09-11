@@ -19,7 +19,7 @@ defmodule SymphonyElixir.AgentRunner do
   @spec run(map(), pid() | nil, keyword()) :: :ok | {:error, term()} | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
     with {:ok, context} <- execution_context(Config.settings!(), opts) do
-      opts = Keyword.put_new_lazy(opts, :attempt_id, fn -> Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false) end)
+      opts = Keyword.put_new_lazy(opts, :attempt_id, &new_attempt_id/0)
       Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(context.worker_host)}")
 
       case run_on_worker_host(issue, codex_update_recipient, opts, context) do
@@ -35,6 +35,8 @@ defmodule SymphonyElixir.AgentRunner do
       end
     end
   end
+
+  defp new_attempt_id, do: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
 
   defp execution_context(settings, opts) do
     case {Map.get(settings.worker, :environment), Keyword.get(opts, :execution_context)} do
@@ -61,8 +63,16 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp run_with_workspace_hooks(workspace, issue, recipient, opts, %ExecutionContext{mode: :managed} = context) do
     outcome =
-      with :ok <- Workspace.run_before_run_hook(workspace, issue, context) do
-        run_agent_turns(workspace, issue, recipient, opts, context)
+      try do
+        with :ok <- Workspace.run_before_run_hook(workspace, issue, context) do
+          run_agent_turns(workspace, issue, recipient, opts, context)
+        end
+      catch
+        :exit, {:managed_execution_unknown, _detail} = reason ->
+          :erlang.raise(:exit, reason, __STACKTRACE__)
+
+        kind, reason ->
+          propagate_run_failure(workspace, issue, context, {kind, reason, __STACKTRACE__})
       end
 
     case outcome do
@@ -77,16 +87,21 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp run_with_workspace_hooks(workspace, issue, recipient, opts, context) do
-    try do
-      outcome =
-        with :ok <- Workspace.run_before_run_hook(workspace, issue, context) do
-          run_agent_turns(workspace, issue, recipient, opts, context)
-        end
+    outcome =
+      with :ok <- Workspace.run_before_run_hook(workspace, issue, context) do
+        run_agent_turns(workspace, issue, recipient, opts, context)
+      end
 
-      handle_run_outcome(outcome, issue)
-    after
-      Workspace.run_after_run_hook(workspace, issue, context)
-    end
+    handle_run_outcome(outcome, issue)
+  after
+    Workspace.run_after_run_hook(workspace, issue, context)
+  end
+
+  @spec propagate_run_failure(Path.t(), Issue.t(), ExecutionContext.t(), {atom(), term(), list()}) :: no_return()
+  defp propagate_run_failure(workspace, issue, context, {kind, reason, stacktrace}) do
+    Workspace.run_after_run_hook(workspace, issue, context)
+  after
+    :erlang.raise(kind, reason, stacktrace)
   end
 
   defp handle_run_outcome({:blocked, result}, issue), do: post_blocked_state(issue, result)

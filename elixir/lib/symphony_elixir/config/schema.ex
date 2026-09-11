@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   import Ecto.Changeset
 
+  alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixir.PathSafety
 
   @primary_key false
@@ -130,12 +131,13 @@ defmodule SymphonyElixir.Config.Schema do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
+    alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
 
     @primary_key false
     embedded_schema do
       field(:ssh_hosts, {:array, :string}, default: [])
       field(:max_concurrent_agents_per_host, :integer)
-      embeds_one(:environment, SymphonyElixir.ExecutionEnvironment.Config, on_replace: :update)
+      embeds_one(:environment, EnvironmentConfig, on_replace: :update)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -143,7 +145,7 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(attrs, [:ssh_hosts, :max_concurrent_agents_per_host], empty_values: [])
       |> validate_number(:max_concurrent_agents_per_host, greater_than: 0)
-      |> cast_embed(:environment, with: &SymphonyElixir.ExecutionEnvironment.Config.changeset/2)
+      |> cast_embed(:environment, with: &EnvironmentConfig.changeset/2)
     end
   end
 
@@ -357,27 +359,27 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp validate_worker_source(%{"worker" => worker}) when is_map(worker) do
-    if Map.has_key?(worker, "environment") do
-      cond do
-        Enum.any?(["ssh_hosts", "max_concurrent_agents_per_host"], &Map.has_key?(worker, &1)) ->
-          {:error, {:invalid_workflow_config, "managed and static worker settings conflict"}}
+  defp validate_worker_source(%{"worker" => %{"environment" => environment} = worker}) do
+    cond do
+      Enum.any?(["ssh_hosts", "max_concurrent_agents_per_host"], &Map.has_key?(worker, &1)) ->
+        {:error, {:invalid_workflow_config, "managed and static worker settings conflict"}}
 
-        not is_map(worker["environment"]) or map_size(worker["environment"]) == 0 ->
-          {:error, {:invalid_workflow_config, "worker.environment must be a nonempty managed configuration"}}
+      not is_map(environment) or map_size(environment) == 0 ->
+        {:error, {:invalid_workflow_config, "worker.environment must be a nonempty managed configuration"}}
 
-        true ->
-          case SymphonyElixir.ExecutionEnvironment.Config.parse(worker["environment"]) do
-            {:ok, _} -> :ok
-            {:error, _} -> {:error, {:invalid_workflow_config, "invalid worker.environment configuration"}}
-          end
-      end
-    else
-      :ok
+      true ->
+        validate_managed_environment(environment)
     end
   end
 
   defp validate_worker_source(_attrs), do: :ok
+
+  defp validate_managed_environment(environment) do
+    case EnvironmentConfig.parse(environment) do
+      {:ok, _} -> :ok
+      {:error, _} -> {:error, {:invalid_workflow_config, "invalid worker.environment configuration"}}
+    end
+  end
 
   @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil) :: map()
   def resolve_turn_sandbox_policy(settings, workspace \\ nil) do

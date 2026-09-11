@@ -27,7 +27,7 @@ defmodule SymphonyElixir.WorkflowStore do
   def current do
     case Process.whereis(__MODULE__) do
       pid when is_pid(pid) ->
-        GenServer.call(__MODULE__, :current)
+        call_store(pid, :current)
 
       _ ->
         Workflow.load()
@@ -38,13 +38,10 @@ defmodule SymphonyElixir.WorkflowStore do
   def settings do
     case Process.whereis(__MODULE__) do
       pid when is_pid(pid) ->
-        GenServer.call(__MODULE__, :settings)
+        call_store(pid, :settings)
 
       _ ->
-        case load_state(Workflow.workflow_file_path()) do
-          {:ok, %State{settings: settings}} -> {:ok, settings}
-          {:error, reason} -> {:error, reason}
-        end
+        load_settings()
     end
   end
 
@@ -52,13 +49,36 @@ defmodule SymphonyElixir.WorkflowStore do
   def force_reload do
     case Process.whereis(__MODULE__) do
       pid when is_pid(pid) ->
-        GenServer.call(__MODULE__, :force_reload)
+        call_store(pid, :force_reload)
 
       _ ->
-        case load_state(Workflow.workflow_file_path()) do
-          {:ok, _state} -> :ok
-          {:error, reason} -> {:error, reason}
-        end
+        load_reload_result()
+    end
+  end
+
+  defp call_store(pid, operation) do
+    GenServer.call(pid, operation)
+  catch
+    :exit, reason ->
+      # A timeout from a live authority must not bypass its publication guard.
+      if Process.alive?(pid), do: exit(reason), else: load_without_store(operation)
+  end
+
+  defp load_without_store(:current), do: Workflow.load()
+  defp load_without_store(:settings), do: load_settings()
+  defp load_without_store(:force_reload), do: load_reload_result()
+
+  defp load_settings do
+    case load_state(Workflow.workflow_file_path()) do
+      {:ok, %State{settings: settings}} -> {:ok, settings}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp load_reload_result do
+    case load_state(Workflow.workflow_file_path()) do
+      {:ok, _state} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -132,7 +152,9 @@ defmodule SymphonyElixir.WorkflowStore do
   def handle_call({:protect_environment, identity}, _from, %State{} = state) do
     current_identity = SymphonyElixir.ExecutionEnvironment.Config.identity(state.settings)
 
-    if identity == current_identity and (is_nil(state.environment_guard) or state.environment_guard.identity == identity) do
+    compatible_guard? = is_nil(state.environment_guard) or state.environment_guard.identity == identity
+
+    if identity == current_identity and compatible_guard? do
       token = make_ref()
       {:reply, {:ok, token}, %{state | environment_guard: %{identity: identity, token: token}}}
     else

@@ -59,6 +59,10 @@ treated as successful cleanup. Terminal retention defaults to zero, but deletion
 fresh terminal observation, qualified stop, cleanup hooks, and compute-plus-storage absence proof.
 Identity-changing workflow reloads are rejected while resources or unresolved operations remain.
 
+The dashboard, terminal status, and `/api/v1/state` expose pending or blocked managed discovery even
+before an environment record exists. Its redacted `environment_discovery` status distinguishes a
+frozen dispatch queue from an idle deployment without exposing provider credentials or raw errors.
+
 See [managed operation and configuration](elixir/README.md#managed-ticket-environments) and
 [SPEC Appendix B](SPEC.md#appendix-b-managed-ticket-environments-optional) before enabling it.
 Neither provider has been live/production-qualified by this change. In particular, upstream Agent

@@ -112,6 +112,24 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
         </section>
 
+        <section :if={@payload[:environment_discovery]} class="section-card" id="environment-discovery">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Managed discovery</h2>
+              <p class="section-copy">
+                <%= @payload.environment_discovery.provider_kind %>:
+                <strong><%= @payload.environment_discovery.status %></strong>
+                <span :if={@payload.environment_discovery.error_code}>
+                  (<%= @payload.environment_discovery.error_code %>)
+                </span>
+              </p>
+              <p :if={@payload.environment_discovery.status != :ready} class="section-copy">
+                New managed dispatch is paused until authoritative discovery succeeds.
+              </p>
+            </div>
+          </div>
+        </section>
+
         <section class="section-card">
           <div class="section-header">
             <div>

@@ -9,6 +9,17 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   @pv_finalizer "external-provisioner.volume.kubernetes.io/finalizer"
   @quota_fields ~w(concurrent_workers retained_environments persistent_disk_gib)
   @compute_states ~w(PROVISIONING STAGING RUNNING STOPPING SUSPENDING REPAIRING TERMINATED SUSPENDED)
+  @negative_metadata ~w(name namespace uid labels ownerReferences finalizers deletionGracePeriodSeconds)
+  @negative_status ~w(phase state conditions containerStatuses initContainerStatuses ephemeralContainerStatuses
+                      podIP podIPs hostIP hostIPs loadBalancer capacity accessModes currentNumberScheduled replicas
+                      readyReplicas availableReplicas endpoints)
+  @bookkeeping_fields ~w(resourceVersion generation observedGeneration managedFields etag createTime updateTime
+                         creationTimestamp deletionTimestamp startTime startedAt finishedAt lastProbeTime
+                         lastTransitionTime lastHeartbeatTime heartbeatTime message)
+  @workstation_configuration ~w(name uid displayName labels annotations host container persistentDirectories
+                                idleTimeout idleAction runningTimeout replicaZones enableTcpConnections allowedPorts
+                                disableTcpConnections serviceAccount scopes encryptionKey readinessChecks
+                                state degraded satisfiesPzs satisfiesPzi boostConfigs)
 
   # Only this opt-in helper consumes provider.qualification. No production profile
   # can turn the known v1.0.1 cleanup-ordering defect into a successful preflight.
@@ -38,7 +49,8 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
 
       "kubernetes" ->
         Keyword.put(opts, :command_fun, fn executable, args, command_opts ->
-          kubernetes_fault(config, entry, operation, callbacks, executable, args, bounded(command_opts, opts[:deadline]))
+          command_opts = bounded(command_opts, opts[:deadline])
+          kubernetes_fault(config, entry, operation, callbacks, executable, args, command_opts)
         end)
     end
   end
@@ -54,8 +66,11 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
         end
 
       case result do
-        {:ok, %{status: status, body: body}} when is_integer(status) and is_map(body) -> {:ok, %{status: status, body: body}}
-        _ -> {:error, :provider_evidence_request_failed}
+        {:ok, %{status: status, body: body}} when is_integer(status) and is_map(body) ->
+          {:ok, %{status: status, body: body}}
+
+        _ ->
+          {:error, :provider_evidence_request_failed}
       end
     end)
   end
@@ -79,47 +94,198 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   end
 
   def inventory(config, opts) do
-    safely(:complete_owned_inventory_unavailable, fn ->
-      opts = bounded(opts)
-      adapter = if config.kind == "google_workstations", do: Workstations, else: Kubernetes
+    safely(:complete_owned_inventory_unavailable, fn -> owned_inventory(config, bounded(opts)) end)
+  end
 
-      with {:ok, records} <- adapter.discover(config, opts),
-           true <- Enum.all?(records, &(record_scope(config, &1) == :ok and &1.metadata["orphaned"] != true)),
-           true <- unique?(records, & &1.key),
-           true <- unique?(records, & &1.issue_id),
-           {:ok, workers} <- current_workers(config, records, opts) do
-        counts = Map.new(records, &{&1.key, 0})
+  defp owned_inventory(config, opts) do
+    adapter = if config.kind == "google_workstations", do: Workstations, else: Kubernetes
 
-        counts =
-          Enum.reduce(workers, counts, fn {key, worker}, acc ->
-            if potentially_runnable?(config.kind, worker), do: Map.update!(acc, key, &(&1 + 1)), else: acc
-          end)
+    case adapter.discover(config, opts) do
+      {:ok, records} -> inventory_records(config, records, opts)
+      error -> inventory_error(error)
+    end
+  end
 
-        {:ok, %{records: records, live_worker_counts: counts}}
-      else
-        _ -> {:error, :complete_owned_inventory_unavailable}
-      end
-    end)
+  defp inventory_records(config, records, opts) do
+    with true <- Enum.all?(records, &valid_inventory_record?(config, &1)),
+         true <- unique?(records, & &1.key),
+         true <- unique?(records, & &1.issue_id),
+         {:ok, workers} <- current_workers(config, records, opts) do
+      counts = Enum.reduce(workers, Map.new(records, &{&1.key, 0}), &count_worker(config, &1, &2))
+      {:ok, %{records: records, live_worker_counts: counts}}
+    else
+      error -> record_inventory_error(error, records)
+    end
+  end
+
+  defp record_inventory_error(error, records) do
+    captured = Enum.flat_map(records, &record_resources/1)
+
+    case inventory_error(error) do
+      {:error, {:unknown, {:qualification_inventory_unresolved, resources}}} ->
+        unresolved_resources(captured ++ resources)
+
+      _ ->
+        unresolved_resources(captured)
+    end
+  end
+
+  defp record_resources(record) do
+    parent = parent_resource(record.provider_ref)
+    backing = record.metadata["backing_resources"] || []
+    volumes = Enum.flat_map(Map.values(record.metadata["volumes"] || %{}), &volume_resources(&1, record.scope))
+    [parent | backing ++ volumes]
+  end
+
+  defp parent_resource(%{name: name, uid: uid}), do: %{"name" => name, "uid" => uid}
+  defp parent_resource(uid) when is_binary(uid), do: %{"uid" => uid}
+  defp parent_resource(_), do: %{}
+
+  defp volume_resources(volume, scope) do
+    [
+      %{
+        "kind" => "PersistentVolumeClaim",
+        "name" => volume["pvc_name"],
+        "uid" => volume["pvc_uid"],
+        "namespace" => scope["namespace"]
+      },
+      %{
+        "kind" => "PersistentVolume",
+        "name" => volume["pv_name"],
+        "uid" => volume["pv_uid"],
+        "volume_handle" => volume["volume_handle"]
+      }
+    ]
+  end
+
+  defp valid_inventory_record?(config, record) do
+    record_scope(config, record) == :ok and record.metadata["orphaned"] != true
+  end
+
+  defp count_worker(config, {key, worker}, counts) do
+    if potentially_runnable?(config.kind, worker), do: Map.update!(counts, key, &(&1 + 1)), else: counts
+  end
+
+  defp inventory_error({:error, {:unknown, {tag, resources}}})
+       when tag in [:orphan_backing_resources, :kubernetes_invalid_owned_record, :qualification_inventory_unresolved] do
+    unresolved_resources(resources)
+  end
+
+  defp inventory_error(_), do: {:error, :complete_owned_inventory_unavailable}
+
+  defp unresolved_resources(resources) when is_list(resources) do
+    safe = resources |> Enum.map(&safe_resource/1) |> Enum.reject(&(map_size(&1) == 0)) |> Enum.uniq()
+
+    if safe == [],
+      do: {:error, :complete_owned_inventory_unavailable},
+      else: {:error, {:unknown, {:qualification_inventory_unresolved, safe}}}
+  end
+
+  defp unresolved_resources(_), do: {:error, :complete_owned_inventory_unavailable}
+
+  defp safe_resource(resource) when is_binary(resource), do: safe_resource(%{"id" => resource})
+
+  defp safe_resource(resource) when is_map(resource) do
+    resource
+    |> Map.take(~w(kind id name uid selfLink zone region namespace volume_handle))
+    |> Map.filter(fn {_key, value} -> safe_identifier?(value) end)
+  end
+
+  defp safe_resource(_), do: %{}
+
+  defp safe_identifier?(value) do
+    is_binary(value) and byte_size(value) in 1..1024 and
+      Regex.match?(~r{\A[a-zA-Z0-9][a-zA-Z0-9._:/@-]*\z}, value)
   end
 
   def unrelated_snapshot(config, paths, opts) do
-    safely(:negative_control_identity_unavailable, fn ->
-      if is_list(paths) and paths != [] and Enum.uniq(paths) == paths do
-        collect(paths, fn path ->
-          with true <- negative_control_path?(config, path),
-               {:ok, body} <- get(config, path, opts),
-               {:ok, identity} <- negative_identity(config, body),
-               true <- not owned_deployment?(config, body) do
-            {:ok, %{path: path, uid: identity}}
-          else
-            _ -> {:error, :negative_control_identity_unavailable}
-          end
-        end)
-      else
-        {:error, :negative_control_paths_required}
-      end
-    end)
+    safely(:negative_control_identity_unavailable, fn -> negative_controls(config, paths, opts) end)
   end
+
+  defp negative_controls(config, paths, opts) do
+    if is_list(paths) and paths != [] and Enum.uniq(paths) == paths do
+      collect(paths, &negative_control(config, &1, opts))
+    else
+      {:error, :negative_control_paths_required}
+    end
+  end
+
+  defp negative_control(config, path, opts) do
+    with true <- negative_control_path?(config, path),
+         {:ok, body} <- get(config, path, opts),
+         {:ok, identity} <- negative_identity(config, body),
+         true <- not owned_deployment?(config, body) do
+      {:ok, %{path: path, uid: identity, fingerprint: negative_fingerprint(config, path, body)}}
+    else
+      _ -> {:error, :negative_control_identity_unavailable}
+    end
+  end
+
+  # Only resource-specific configuration, ownership and lifecycle enter the digest.
+  # Canonical string leaves are hashed before encoding; neither credentials embedded
+  # in workload configuration nor the provider body can become public evidence.
+  defp negative_fingerprint(%{kind: "google_workstations"}, _path, body) do
+    body
+    |> Map.take(@workstation_configuration)
+    |> Map.put("deleting", body["deleteTime"] != nil)
+    |> fingerprint()
+  end
+
+  defp negative_fingerprint(%{kind: "kubernetes"}, path, body) do
+    {:ok, _, resource, _} = kube_path(path)
+    metadata = negative_metadata(body["metadata"] || %{})
+    status = body |> Map.get("status", %{}) |> Map.take(@negative_status) |> stable_status()
+
+    configuration =
+      case resource do
+        "configmaps" -> Map.take(body, ~w(immutable data binaryData))
+        _ -> body |> Map.take(~w(spec)) |> stable_spec()
+      end
+
+    fingerprint(%{"resource" => resource, "metadata" => metadata, "configuration" => configuration, "status" => status})
+  end
+
+  defp negative_metadata(metadata) do
+    metadata
+    |> Map.take(@negative_metadata)
+    |> Map.update("ownerReferences", [], &Enum.sort/1)
+    |> Map.update("finalizers", [], &Enum.sort/1)
+    |> Map.put("deleting", metadata["deletionTimestamp"] != nil)
+  end
+
+  defp fingerprint(value), do: value |> canonical_configuration() |> Jason.encode!() |> sha256()
+
+  defp canonical_configuration(value) when is_map(value) do
+    value
+    |> Enum.map(&canonical_field/1)
+    |> Enum.sort()
+    |> then(&["object", &1])
+  end
+
+  defp canonical_configuration(value) when is_list(value) do
+    ["array", Enum.map(value, &canonical_configuration/1)]
+  end
+
+  defp canonical_configuration(value) when is_binary(value), do: ["string_sha256", sha256(value)]
+  defp canonical_configuration(value), do: ["scalar", value]
+
+  defp canonical_field({key, value}), do: [key, canonical_configuration(value)]
+
+  defp stable_status(value) when is_map(value) do
+    value |> Map.drop(@bookkeeping_fields) |> Map.new(fn {key, child} -> {key, stable_status(child)} end)
+  end
+
+  defp stable_status(value) when is_list(value), do: value |> Enum.map(&stable_status/1) |> Enum.sort()
+  defp stable_status(value), do: value
+
+  defp stable_spec(value) when is_map(value), do: Map.new(value, &stable_spec_field/1)
+  defp stable_spec(value) when is_list(value), do: Enum.map(value, &stable_spec/1)
+  defp stable_spec(value), do: value
+
+  defp stable_spec_field({"metadata", metadata}) when is_map(metadata),
+    do: {"metadata", negative_metadata(metadata)}
+
+  defp stable_spec_field({key, value}), do: {key, stable_spec(value)}
 
   def physical_fault(config, profile, scenario, phase, record, opts) do
     safely(:operator_fault_driver_failed, fn ->
@@ -140,31 +306,7 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
           credential_references: credential_references(config)
         }
 
-        # Execute a private snapshot of precisely the audited bytes, not a path
-        # that can be replaced between hashing and exec. Drivers are self-contained.
-        result =
-          Command.with_json_file(
-            input,
-            fn request_path ->
-              executable = Path.join(Path.dirname(request_path), "fault-driver")
-
-              with :ok <- write_executable(executable, bytes) do
-                Command.run(executable, ["--request", request_path], Keyword.put(opts, :max_output_bytes, 16_384))
-              end
-            end,
-            opts
-          )
-
-        case result do
-          {:ok, %{status: 0, output: output}} ->
-            case Jason.decode(output) do
-              {:ok, %{"applied" => true} = acknowledgment} when map_size(acknowledgment) == 1 -> :ok
-              _ -> {:error, :operator_fault_driver_did_not_acknowledge}
-            end
-
-          _ ->
-            {:error, :operator_fault_driver_failed}
-        end
+        input |> run_private_driver(bytes, opts) |> driver_acknowledgment()
       else
         {:error, code} when is_atom(code) -> {:error, code}
         _ -> {:error, :operator_fault_driver_authorization_mismatch}
@@ -172,18 +314,34 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
     end)
   end
 
+  # Execute precisely the audited bytes, never a replaceable operator path.
+  defp run_private_driver(input, bytes, opts) do
+    Command.with_json_file(input, &invoke_private_driver(&1, bytes, opts), opts)
+  end
+
+  defp invoke_private_driver(request_path, bytes, opts) do
+    executable = Path.join(Path.dirname(request_path), "fault-driver")
+
+    with :ok <- write_executable(executable, bytes) do
+      Command.run(executable, ["--request", request_path], Keyword.put(opts, :max_output_bytes, 16_384))
+    end
+  end
+
+  defp driver_acknowledgment({:ok, %{status: 0, output: output}}) do
+    case Jason.decode(output) do
+      {:ok, %{"applied" => true} = acknowledgment} when map_size(acknowledgment) == 1 -> :ok
+      _ -> {:error, :operator_fault_driver_did_not_acknowledge}
+    end
+  end
+
+  defp driver_acknowledgment(_), do: {:error, :operator_fault_driver_failed}
+
   def gate_observation(%{kind: "kubernetes"} = config, record, opts) do
     safely(:kubernetes_gate_identity_unresolved, fn ->
       with :ok <- record_scope(config, record),
            {:ok, pod} <- exact_pod(config, record, bounded(opts)),
            true <- nonblank?(uid(pod)) do
-        held = own_gate?(pod)
-
-        if not held or never_scheduled?(pod) do
-          {:ok, %{held?: held, pod_uid: uid(pod)}}
-        else
-          {:error, :kubernetes_gate_did_not_prevent_execution}
-        end
+        gate_result(pod)
       else
         _ -> {:error, :kubernetes_gate_identity_unresolved}
       end
@@ -191,6 +349,14 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   end
 
   def gate_observation(_, _, _), do: {:error, :gate_requires_kubernetes}
+
+  defp gate_result(pod) do
+    held = own_gate?(pod)
+
+    if not held or never_scheduled?(pod),
+      do: {:ok, %{held?: held, pod_uid: uid(pod)}},
+      else: {:error, :kubernetes_gate_did_not_prevent_execution}
+  end
 
   def node_observation(%{kind: "kubernetes"} = config, record, profile, opts) do
     safely(:kubernetes_node_identity_unresolved, fn ->
@@ -202,11 +368,7 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
            true <- is_map(node) and node.uid in authorized,
            {:ok, pods} <- KubernetesClient.list(config, "/api/v1/pods", bounded(opts)),
            true <- unique?(pods, &uid/1),
-           true <-
-             Enum.all?(pods, fn other ->
-               get_in(other, ["spec", "nodeName"]) != node.name or
-                 (namespace(other) == config.provider["namespace"] and pod_owned?(other, record))
-             end),
+           true <- Enum.all?(pods, &dedicated_node_pod?(&1, node, config, record)),
            {:ok, object} <- get(config, "/api/v1/nodes/" <> segment(node.name), opts),
            true <- uid(object) == node.uid,
            [ready] <- Enum.filter(get_in(object, ["status", "conditions"]) || [], &(&1["type"] == "Ready")),
@@ -219,6 +381,11 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   end
 
   def node_observation(_, _, _, _), do: {:error, :node_fault_requires_kubernetes}
+
+  defp dedicated_node_pod?(pod, node, config, record) do
+    get_in(pod, ["spec", "nodeName"]) != node.name or
+      (namespace(pod) == config.provider["namespace"] and pod_owned?(pod, record))
+  end
 
   defp provider_preflight(%{kind: "google_workstations"} = config, profile, quota, opts) do
     with :ok <- Workstations.preflight(config, opts),
@@ -286,11 +453,9 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
     values = region["quotas"]
 
     if is_list(values) and values != [] do
-      collect(Enum.filter(values, &(&1["metric"] in ["DISKS_TOTAL_GB", "SSD_TOTAL_GB"])), fn quota ->
-        if is_number(quota["limit"]) and is_number(quota["usage"]),
-          do: {:ok, max(0, quota["limit"] - quota["usage"])},
-          else: {:error, :compute_quota_unavailable}
-      end)
+      values
+      |> Enum.filter(&(&1["metric"] in ["DISKS_TOTAL_GB", "SSD_TOTAL_GB"]))
+      |> collect(&quota_available/1)
       |> case do
         {:ok, []} -> {:error, :compute_quota_unavailable}
         {:ok, available} -> {:ok, %{"persistent_disk_gib" => Enum.min(available)}}
@@ -301,39 +466,74 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
     end
   end
 
+  defp quota_available(quota) do
+    if is_number(quota["limit"]) and is_number(quota["usage"]),
+      do: {:ok, max(0, quota["limit"] - quota["usage"])},
+      else: {:error, :compute_quota_unavailable}
+  end
+
   defp workstation_fault(request, operation, id, callbacks) do
-    method = Keyword.fetch!(request, :method)
-    url = Keyword.fetch!(request, :url)
-    stop = operation == :stop and method == :post and String.ends_with?(url, ":stop")
-    deny = stop and armed?(callbacks, {:deny_stop, id})
-    request = if deny, do: Keyword.put(request, :headers, [{"authorization", "Bearer deliberately-invalid-qualification-token"}]), else: request
+    verb = workstation_verb(request, operation)
+    deny = verb == "stop" and armed?(callbacks, {:deny_stop, id})
+    headers = [{"authorization", "Bearer deliberately-invalid-qualification-token"}]
+    request = if deny, do: Keyword.put(request, :headers, headers), else: request
     result = Req.request(request)
+    workstation_fault_result(result, request, verb, deny, id, callbacks)
+  end
 
-    case result do
-      {:ok, %{status: status, body: body}} when status in 200..299 ->
-        cond do
-          operation == :prepare and method == :post and String.ends_with?(url, "/workstations") and accepted_operation?(request, body, "create") and armed?(callbacks, {:lose_create, id}) ->
-            lose(callbacks, {:lose_create, id}, :create_response_lost, id)
+  defp workstation_verb(request, :prepare) do
+    url = Keyword.fetch!(request, :url)
 
-          operation == :prepare and method == :post and String.ends_with?(url, ":start") and accepted_operation?(request, body, "start") and armed?(callbacks, {:lose_start, id}) ->
-            lose(callbacks, {:lose_start, id}, :start_response_lost, id)
-
-          operation == :destroy and method == :delete and String.contains?(url, "/workstations/") and accepted_operation?(request, body, "delete") ->
-            emit(callbacks, :delete_accepted, id)
-            result
-
-          true ->
-            result
-        end
-
-      {:ok, %{status: status}} when deny and status in [401, 403] ->
-        emit(callbacks, :stop_denied, id)
-        result
-
-      _ ->
-        result
+    if request[:method] == :post do
+      cond do
+        String.ends_with?(url, "/workstations") -> "create"
+        String.ends_with?(url, ":start") -> "start"
+        true -> nil
+      end
     end
   end
+
+  defp workstation_verb(request, :stop) do
+    if request[:method] == :post and String.ends_with?(request[:url], ":stop"), do: "stop"
+  end
+
+  defp workstation_verb(request, :destroy) do
+    if request[:method] == :delete and String.contains?(request[:url], "/workstations/"), do: "delete"
+  end
+
+  defp workstation_verb(_, _), do: nil
+
+  defp workstation_fault_result({:ok, %{status: status, body: body}} = result, request, verb, _, id, callbacks)
+       when status in 200..299 and verb in ["create", "start", "delete"] do
+    if accepted_operation?(request, body, verb), do: accepted_fault(result, verb, id, callbacks), else: result
+  end
+
+  defp workstation_fault_result({:ok, %{status: status}} = result, _, _, true, id, callbacks)
+       when status in [401, 403] do
+    emit(callbacks, :stop_denied, id)
+    result
+  end
+
+  defp workstation_fault_result(result, _, _, _, _, _), do: result
+
+  defp accepted_fault(result, "create", id, callbacks) do
+    if armed?(callbacks, {:lose_create, id}),
+      do: lose(callbacks, {:lose_create, id}, :create_response_lost, id),
+      else: result
+  end
+
+  defp accepted_fault(result, "start", id, callbacks) do
+    if armed?(callbacks, {:lose_start, id}),
+      do: lose(callbacks, {:lose_start, id}, :start_response_lost, id),
+      else: result
+  end
+
+  defp accepted_fault(result, "delete", id, callbacks) do
+    emit(callbacks, :delete_accepted, id)
+    result
+  end
+
+  defp accepted_fault(result, nil, _, _), do: result
 
   defp accepted_operation?(request, body, verb) when is_map(body) do
     path = URI.parse(Keyword.fetch!(request, :url)).path |> String.replace_prefix("/v1/", "")
@@ -353,40 +553,50 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
 
   defp kubernetes_fault(config, entry, operation, callbacks, executable, args, opts) do
     safely(:qualification_transport_fault_failed, fn ->
-      id = if entry, do: entry.record.issue_id
-      mutation = kubernetes_mutation(args)
-      release = gate_release?(mutation)
-
-      with :ok <- maybe_hold_gate(config, entry, release, callbacks, opts) do
-        if operation == :stop and mutation != nil and armed?(callbacks, {:deny_stop, id}) do
-          deny_kubernetes(config, mutation, callbacks, id, executable, args, opts)
-        else
-          result = Command.run(executable, args, opts)
-
-          case accepted_command(result) do
-            {:ok, body} ->
-              cond do
-                operation == :prepare and sandbox_create?(config, entry, mutation, body) and armed?(callbacks, {:lose_create, id}) ->
-                  lose(callbacks, {:lose_create, id}, :create_response_lost, id)
-
-                operation == :prepare and release and released_pod?(mutation, body) and armed?(callbacks, {:lose_start, id}) ->
-                  lose(callbacks, {:lose_start, id}, :start_response_lost, id)
-
-                operation == :destroy and pvc_delete?(config, mutation, body) ->
-                  emit(callbacks, :delete_accepted, id)
-                  result
-
-                true ->
-                  result
-              end
-
-            _ ->
-              result
-          end
-        end
-      end
+      run_kubernetes_fault(config, entry, operation, callbacks, executable, args, opts)
     end)
   end
+
+  defp run_kubernetes_fault(config, entry, operation, callbacks, executable, args, opts) do
+    id = if entry, do: entry.record.issue_id
+    mutation = kubernetes_mutation(args)
+    release = gate_release?(mutation)
+
+    with :ok <- maybe_hold_gate(config, entry, release, callbacks, opts) do
+      if operation == :stop and mutation != nil and armed?(callbacks, {:deny_stop, id}) do
+        deny_kubernetes(config, mutation, callbacks, id, executable, args, opts)
+      else
+        result = Command.run(executable, args, opts)
+        kubernetes_fault_result(result, config, entry, operation, mutation, callbacks)
+      end
+    end
+  end
+
+  defp kubernetes_fault_result(result, config, entry, operation, mutation, callbacks) do
+    case accepted_command(result) do
+      {:ok, body} ->
+        verb = kubernetes_accepted_verb(config, entry, operation, mutation, body)
+        id = if entry, do: entry.record.issue_id
+        accepted_fault(result, verb, id, callbacks)
+
+      _ ->
+        result
+    end
+  end
+
+  defp kubernetes_accepted_verb(config, entry, :prepare, mutation, body) do
+    cond do
+      sandbox_create?(config, entry, mutation, body) -> "create"
+      gate_release?(mutation) and released_pod?(mutation, body) -> "start"
+      true -> nil
+    end
+  end
+
+  defp kubernetes_accepted_verb(config, _entry, :destroy, mutation, body) do
+    if pvc_delete?(config, mutation, body), do: "delete"
+  end
+
+  defp kubernetes_accepted_verb(_, _, _, _, _), do: nil
 
   # Detect only the production client's argv/JSON protocol. SSH and read-only
   # kubectl calls pass through unchanged; no CLI prose is parsed into a resource.
@@ -430,11 +640,13 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
     key = {:hold_gate, entry.record.issue_id}
 
     if armed?(callbacks, key) do
-      with {:ok, %{held?: true}} <- gate_observation(config, entry.record, Keyword.delete(opts, :command_fun)) do
-        emit(callbacks, :gate_held, entry.record.issue_id)
-        wait_gate(callbacks, key, opts)
-      else
-        _ -> {:error, :kubernetes_gate_not_held}
+      case gate_observation(config, entry.record, Keyword.delete(opts, :command_fun)) do
+        {:ok, %{held?: true}} ->
+          emit(callbacks, :gate_held, entry.record.issue_id)
+          wait_gate(callbacks, key, opts)
+
+        _ ->
+          {:error, :kubernetes_gate_not_held}
       end
     else
       :ok
@@ -464,24 +676,24 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
          :ok <- denied_authorization(config, identity, mutation, opts) do
       result = Command.run(executable, ["--as=" <> identity | args], opts)
 
-      case result do
-        {:ok, %{status: status, output: output}} when status != 0 ->
-          # CLI rejection is only fault-injection evidence, never physical stop
-          # or absence proof. A connection error must not pass the denial check.
-          if Regex.match?(~r/(?:^|\n)Error from server \((?:Forbidden|Unauthorized)\):/, output) do
-            emit(callbacks, :stop_denied, id)
-            result
-          else
-            {:error, :kubernetes_actual_denial_unobserved}
-          end
-
-        _ ->
-          {:error, :kubernetes_denied_identity_did_not_reject}
-      end
+      denied_command_result(result, callbacks, id)
     else
       _ -> {:error, :kubernetes_explicit_denied_identity_required}
     end
   end
+
+  # CLI rejection is fault-injection evidence, never physical stop or absence proof.
+  defp denied_command_result({:ok, %{status: status, output: output}} = result, callbacks, id)
+       when status != 0 do
+    if Regex.match?(~r/(?:^|\n)Error from server \((?:Forbidden|Unauthorized)\):/, output) do
+      emit(callbacks, :stop_denied, id)
+      result
+    else
+      {:error, :kubernetes_actual_denial_unobserved}
+    end
+  end
+
+  defp denied_command_result(_, _, _), do: {:error, :kubernetes_denied_identity_did_not_reject}
 
   defp denied_authorization(config, identity, mutation, opts) do
     group = if String.starts_with?(mutation.resource, "sandboxes"), do: "agents.x-k8s.io", else: ""
@@ -564,25 +776,42 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   defp current_workers(config, records, opts, complete_scope \\ true)
 
   defp current_workers(%{kind: "google_workstations"} = config, records, opts, complete_scope) do
-    with {:ok, instances} <- compute_inventory(config, "instances", opts),
-         true <- unique?(instances, & &1["id"]) do
-      collect_owned(instances, records, fn instance ->
-        owned_compute(config, records, instance, complete_scope)
-      end)
-    else
-      _ -> {:error, :compute_inventory_incomplete}
+    with {:ok, instances} <- compute_inventory(config, "instances", opts) do
+      classify = &owned_compute(config, records, &1, complete_scope)
+      classify_inventory(instances, classify, unique?(instances, & &1["id"]))
     end
   end
 
   defp current_workers(%{kind: "kubernetes"} = config, records, opts, complete_scope) do
-    with {:ok, pods} <- KubernetesClient.list(config, kube_collection(config, "pods"), opts),
-         true <- unique?(pods, &uid/1),
-         :ok <- sandbox_owner_inventory(config, records, pods, opts, complete_scope) do
-      collect_owned(pods, records, fn pod -> owned_pod(config, records, pod, complete_scope) end)
-    else
-      _ -> {:error, :kubernetes_inventory_incomplete}
+    with {:ok, pods} <- KubernetesClient.list(config, kube_collection(config, "pods"), opts) do
+      classify = &owned_pod(config, records, &1, complete_scope)
+      complete = unique?(pods, &uid/1) and sandbox_owner_inventory(config, records, pods, opts, complete_scope) == :ok
+      classify_inventory(pods, classify, complete)
     end
   end
+
+  defp classify_inventory(items, classify, complete) do
+    {workers, unresolved, resources} = Enum.reduce(items, {[], not complete, []}, &classify_worker(&1, classify, &2))
+    if unresolved, do: unresolved_resources(resources), else: {:ok, workers}
+  end
+
+  defp classify_worker(item, classify, {workers, unresolved, resources}) do
+    case safely(:worker_ownership_unresolved, fn -> classify.(item) end) do
+      {:ok, nil} -> {workers, unresolved, resources}
+      {:ok, key} -> {[{key, item} | workers], unresolved, [worker_resource(item) | resources]}
+      _ -> {workers, true, [worker_resource(item) | resources]}
+    end
+  end
+
+  defp worker_resource(%{"metadata" => metadata} = item) when is_map(metadata) do
+    if nonblank?(metadata["uid"]) or nonblank?(metadata["name"]) do
+      metadata |> Map.take(~w(name uid namespace)) |> Map.put("kind", item["kind"]) |> safe_resource()
+    else
+      safe_resource(item)
+    end
+  end
+
+  defp worker_resource(item), do: safe_resource(item)
 
   defp sandbox_owner_inventory(_config, _records, _pods, _opts, false), do: :ok
 
@@ -593,35 +822,23 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
            Enum.all?(records, fn record ->
              Enum.any?(sandboxes, &(uid(&1) == record.provider_ref and name(&1) == record.key and owned_deployment?(config, &1)))
            end),
-         true <-
-           Enum.all?(pods, fn pod ->
-             Enum.all?(get_in(pod, ["metadata", "ownerReferences"]) || [], fn owner ->
-               owner["kind"] != "Sandbox" or Enum.any?(sandboxes, &(uid(&1) == owner["uid"] and name(&1) == owner["name"]))
-             end)
-           end) do
+         true <- Enum.all?(pods, &known_sandbox_owners?(&1, sandboxes)) do
       :ok
     else
       _ -> {:error, :kubernetes_orphan_parent_inventory}
     end
   end
 
-  defp collect_owned(items, _records, classify) do
-    Enum.reduce_while(items, {:ok, []}, fn item, {:ok, acc} ->
-      case classify.(item) do
-        {:ok, nil} -> {:cont, {:ok, acc}}
-        {:ok, key} -> {:cont, {:ok, [{key, item} | acc]}}
-        _ -> {:halt, {:error, :worker_ownership_unresolved}}
-      end
-    end)
+  defp known_sandbox_owners?(pod, sandboxes) do
+    Enum.all?(get_in(pod, ["metadata", "ownerReferences"]) || [], &known_sandbox_owner?(&1, sandboxes))
+  end
+
+  defp known_sandbox_owner?(owner, sandboxes) do
+    owner["kind"] != "Sandbox" or Enum.any?(sandboxes, &(uid(&1) == owner["uid"] and name(&1) == owner["name"]))
   end
 
   defp owned_compute(config, records, instance, complete_scope) do
-    labels = instance["labels"] || %{}
-
-    matches =
-      Enum.filter(records, fn record ->
-        labels["symphony-ticket"] == record.key or Enum.any?(record.metadata["backing_resources"] || [], &(&1["id"] == instance["id"] and &1["selfLink"] == instance["selfLink"]))
-      end)
+    matches = Enum.filter(records, &compute_matches?(&1, instance))
 
     cond do
       matches == [] and (not owned_deployment?(config, instance) or not complete_scope) ->
@@ -631,15 +848,29 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
         {:error, :compute_orphan_or_ambiguous_owner}
 
       true ->
-        record = hd(matches)
+        compute_identity(config, hd(matches), instance)
+    end
+  end
 
-        with {:ok, _} <- compute_reference_path(config, instance, "instances"),
-             true <- labels["symphony-managed"] == "true" and labels["symphony-ticket"] == record.key and owned_deployment?(config, instance),
-             true <- instance["status"] in @compute_states do
-          {:ok, record.key}
-        else
-          _ -> {:error, :compute_identity_or_status_unresolved}
-        end
+  defp compute_matches?(record, instance) do
+    get_in(instance, ["labels", "symphony-ticket"]) == record.key or
+      Enum.any?(record.metadata["backing_resources"] || [], &same_compute_reference?(&1, instance))
+  end
+
+  defp same_compute_reference?(left, right) do
+    left["id"] == right["id"] and left["selfLink"] == right["selfLink"]
+  end
+
+  defp compute_identity(config, record, instance) do
+    labels = instance["labels"] || %{}
+
+    with {:ok, _} <- compute_reference_path(config, instance, "instances"),
+         true <- labels["symphony-managed"] == "true" and labels["symphony-ticket"] == record.key,
+         true <- owned_deployment?(config, instance),
+         true <- instance["status"] in @compute_states do
+      {:ok, record.key}
+    else
+      _ -> {:error, :compute_identity_or_status_unresolved}
     end
   end
 
@@ -666,12 +897,19 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
     statuses = Enum.flat_map(~w(containerStatuses initContainerStatuses ephemeralContainerStatuses), &(get_in(pod, ["status", &1]) || []))
 
     get_in(pod, ["status", "phase"]) in ["Succeeded", "Failed"] and containers != [] and
-      Enum.any?(get_in(pod, ["metadata", "managedFields"]) || [], &(&1["manager"] == "kubelet" and &1["subresource"] == "status")) and
-      Enum.all?(containers, fn container ->
-        status = Enum.find(statuses, &(&1["name"] == container["name"])) || %{}
-        terminated = get_in(status, ["state", "terminated"]) || %{}
-        nonblank?(terminated["containerID"]) and nonblank?(terminated["finishedAt"]) and terminated["reason"] != "ContainerStatusUnknown"
-      end)
+      kubelet_status?(pod) and Enum.all?(containers, &container_terminated?(&1, statuses))
+  end
+
+  defp kubelet_status?(pod) do
+    Enum.any?(get_in(pod, ["metadata", "managedFields"]) || [], &(&1["manager"] == "kubelet" and &1["subresource"] == "status"))
+  end
+
+  defp container_terminated?(container, statuses) do
+    status = Enum.find(statuses, &(&1["name"] == container["name"])) || %{}
+    terminated = get_in(status, ["state", "terminated"]) || %{}
+
+    nonblank?(terminated["containerID"]) and nonblank?(terminated["finishedAt"]) and
+      terminated["reason"] != "ContainerStatusUnknown"
   end
 
   defp exact_pod(config, record, opts) do
@@ -720,53 +958,38 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   # The harness captures this node reference only for restoring an already
   # observed physical fault. It never becomes a current runtime address.
   defp observed_node(config, record, opts) do
-    captured = record.metadata["qualification_node"]
-
     with {:ok, workers} <- current_workers(config, [record], bounded(opts), false) do
-      case workers do
-        [{_, pod}] ->
-          with {:ok, node} when is_map(node) <- pod_node(config, pod, opts),
-               true <- captured == nil or captured == node do
-            {:ok, node}
-          else
-            _ -> {:error, :kubernetes_fault_node_changed}
-          end
-
-        [] ->
-          with %{name: name, uid: expected} <- captured,
-               true <- safe_segment?(name) and nonblank?(expected),
-               {:ok, node} <- get(config, "/api/v1/nodes/" <> segment(name), opts),
-               true <- uid(node) == expected and name(node) == name do
-            {:ok, %{name: name, uid: expected}}
-          else
-            _ -> {:error, :kubernetes_fault_node_unavailable}
-          end
-
-        _ ->
-          {:error, :kubernetes_fault_pod_identity_unresolved}
-      end
+      fault_node(config, workers, record.metadata["qualification_node"], opts)
     end
   end
+
+  defp fault_node(config, [{_, pod}], captured, opts) do
+    with {:ok, node} when is_map(node) <- pod_node(config, pod, opts),
+         true <- captured == nil or captured == node do
+      {:ok, node}
+    else
+      _ -> {:error, :kubernetes_fault_node_changed}
+    end
+  end
+
+  defp fault_node(config, [], captured, opts) do
+    with %{name: name, uid: expected} <- captured,
+         true <- safe_segment?(name) and nonblank?(expected),
+         {:ok, node} <- get(config, "/api/v1/nodes/" <> segment(name), opts),
+         true <- uid(node) == expected and name(node) == name do
+      {:ok, %{name: name, uid: expected}}
+    else
+      _ -> {:error, :kubernetes_fault_node_unavailable}
+    end
+  end
+
+  defp fault_node(_, _, _, _), do: {:error, :kubernetes_fault_pod_identity_unresolved}
 
   defp storage(%{kind: "google_workstations"} = config, record, opts) do
     references = Enum.filter(record.metadata["backing_resources"] || [], &(is_binary(&1["selfLink"]) and String.contains?(&1["selfLink"], "/disks/")))
 
     with true <- references != [],
-         {:ok, observations} <-
-           collect(references, fn reference ->
-             with {:ok, path} <- compute_reference_path(config, reference, "disks") do
-               case request(config, :get, path, opts) do
-                 {:ok, %{status: 200, body: disk}} ->
-                   if disk["id"] == reference["id"] and disk["selfLink"] == reference["selfLink"], do: {:ok, true}, else: {:error, :storage_identity_changed}
-
-                 {:ok, %{status: 404}} ->
-                   {:ok, false}
-
-                 _ ->
-                   {:error, :storage_identity_unresolved}
-               end
-             end
-           end) do
+         {:ok, observations} <- collect(references, &disk_present(config, &1, opts)) do
       {:ok, Enum.any?(observations)}
     else
       _ -> {:error, :captured_service_managed_disk_evidence_unavailable}
@@ -787,12 +1010,25 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
     end
   end
 
+  defp disk_present(config, reference, opts) do
+    with {:ok, path} <- compute_reference_path(config, reference, "disks") do
+      disk_observation(request(config, :get, path, opts), reference)
+    end
+  end
+
+  defp disk_observation({:ok, %{status: 200, body: disk}}, reference) do
+    if same_compute_reference?(disk, reference), do: {:ok, true}, else: {:error, :storage_identity_changed}
+  end
+
+  defp disk_observation({:ok, %{status: 404}}, _), do: {:ok, false}
+  defp disk_observation(_, _), do: {:error, :storage_identity_unresolved}
+
   defp volume_present(config, volume, pvs, pvcs, driver) do
     pvc = Enum.filter(pvcs, &(name(&1) == volume["pvc_name"]))
     pv = Enum.filter(pvs, &(name(&1) == volume["pv_name"]))
 
     cond do
-      not nonblank?(volume["pvc_uid"]) or not nonblank?(volume["pv_uid"]) or not nonblank?(volume["volume_handle"]) ->
+      not captured_volume?(volume) ->
         {:error, :unbound_or_uncaptured_csi_storage}
 
       length(pvc) > 1 or length(pv) > 1 ->
@@ -804,18 +1040,37 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
       pv == [] ->
         # Unlike a bare missing PV, the adapter's captured CSI watch result is a
         # durable physical-deletion observation. We never manufacture that flag.
-        if pvc == [] and volume["deleted"] == true, do: {:ok, false}, else: {:error, :csi_physical_deletion_unresolved}
+        missing_volume_presence(volume, pvc)
 
       true ->
-        object = hd(pv)
-        csi = get_in(object, ["spec", "csi"]) || %{}
-        claim = get_in(object, ["spec", "claimRef"]) || %{}
-
-        if uid(object) == volume["pv_uid"] and csi["volumeHandle"] == volume["volume_handle"] and csi["driver"] == driver and
-             claim["uid"] == volume["pvc_uid"] and claim["namespace"] == config.provider["namespace"] and claim["name"] == volume["pvc_name"] and
-             get_in(object, ["spec", "persistentVolumeReclaimPolicy"]) == "Delete" and
-             (volume["csi_finalizer_observed"] == true or @pv_finalizer in (get_in(object, ["metadata", "finalizers"]) || [])), do: {:ok, true}, else: {:error, :csi_storage_identity_changed}
+        bound_volume_present(config, volume, hd(pv), driver)
     end
+  end
+
+  defp missing_volume_presence(%{"deleted" => true}, []), do: {:ok, false}
+  defp missing_volume_presence(_, _), do: {:error, :csi_physical_deletion_unresolved}
+
+  defp captured_volume?(volume), do: Enum.all?(~w(pvc_uid pv_uid volume_handle), &nonblank?(volume[&1]))
+
+  defp bound_volume_present(config, volume, object, driver) do
+    csi = get_in(object, ["spec", "csi"]) || %{}
+    claim = get_in(object, ["spec", "claimRef"]) || %{}
+    claim_matches = claim["uid"] == volume["pvc_uid"] and claim["name"] == volume["pvc_name"]
+    identity_matches = uid(object) == volume["pv_uid"] and csi["volumeHandle"] == volume["volume_handle"]
+
+    with true <- identity_matches and csi["driver"] == driver,
+         true <- claim_matches and claim["namespace"] == config.provider["namespace"],
+         true <- get_in(object, ["spec", "persistentVolumeReclaimPolicy"]) == "Delete",
+         true <- csi_finalizer_observed?(volume, object) do
+      {:ok, true}
+    else
+      _ -> {:error, :csi_storage_identity_changed}
+    end
+  end
+
+  defp csi_finalizer_observed?(volume, object) do
+    volume["csi_finalizer_observed"] == true or
+      @pv_finalizer in (get_in(object, ["metadata", "finalizers"]) || [])
   end
 
   defp captured_csi_driver(config, record, opts) do
@@ -833,7 +1088,8 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   end
 
   defp compute_inventory(config, kind, opts, token \\ nil, seen \\ MapSet.new(), pages \\ []) do
-    query = [maxResults: 100, returnPartialSuccess: false, includeAllScopes: true] ++ if(token, do: [pageToken: token], else: [])
+    pagination = if token, do: [pageToken: token], else: []
+    query = [maxResults: 100, returnPartialSuccess: false, includeAllScopes: true] ++ pagination
     path = compute_root(config) <> "/aggregated/" <> kind
 
     with {:ok, %{status: 200, body: body}} <- WorkstationsClient.request(config, :get, path, query, nil, opts),
@@ -864,10 +1120,10 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   defp compute_reference_path(config, reference, kind) do
     with true <- nonblank?(reference["id"]) and nonblank?(reference["selfLink"]),
          uri <- URI.parse(reference["selfLink"]),
-         true <- uri.scheme == "https" and uri.host in ["www.googleapis.com", "compute.googleapis.com"] and uri.query == nil and uri.fragment == nil,
+         true <- compute_uri?(uri),
          ["compute", "v1", "projects", project, scope, location, resource, name] <- String.split(uri.path || "", "/", trim: true),
-         true <- project == segment(config.provider["project"]) and scope in ["zones", "regions"] and resource == kind and safe_segment?(name),
-         true <- (scope == "regions" and location == config.provider["location"]) or (scope == "zones" and String.starts_with?(location, config.provider["location"] <> "-")),
+         true <- project == segment(config.provider["project"]) and resource == kind and safe_segment?(name),
+         true <- compute_location?(config, scope, location),
          true <- reference["name"] == name do
       {:ok, uri.path}
     else
@@ -875,33 +1131,48 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
     end
   end
 
+  defp compute_uri?(uri) do
+    uri.scheme == "https" and uri.host in ["www.googleapis.com", "compute.googleapis.com"] and
+      uri.query == nil and uri.fragment == nil
+  end
+
+  defp compute_location?(config, "regions", location), do: location == config.provider["location"]
+  defp compute_location?(config, "zones", location), do: String.starts_with?(location, config.provider["location"] <> "-")
+  defp compute_location?(_, _, _), do: false
+
   defp negative_control_path?(config, path) when is_binary(path) do
     uri = URI.parse(path)
 
-    if uri.scheme == nil and uri.host == nil and uri.query == nil and uri.fragment == nil and uri.path == path do
-      case config.kind do
-        "google_workstations" ->
-          prefix = workstation_cluster(config) <> "/workstationConfigs/"
-
-          String.starts_with?(path, prefix) and
-            case String.split(String.replace_prefix(path, prefix, ""), "/") do
-              [template] -> safe_segment?(template)
-              [template, "workstations", worker] -> safe_segment?(template) and safe_segment?(worker)
-              _ -> false
-            end
-
-        "kubernetes" ->
-          case kube_path(path) do
-            {:ok, ns, resource, name} -> ns == config.provider["namespace"] and resource in ~w(pods services persistentvolumeclaims configmaps sandboxes sandboxtemplates) and safe_segment?(name)
-            _ -> false
-          end
-      end
-    else
-      false
-    end
+    relative_resource_path?(uri, path) and negative_resource_path?(config, path)
   end
 
   defp negative_control_path?(_, _), do: false
+
+  defp relative_resource_path?(uri, path) do
+    uri.scheme == nil and uri.host == nil and uri.query == nil and uri.fragment == nil and uri.path == path
+  end
+
+  defp negative_resource_path?(%{kind: "google_workstations"} = config, path) do
+    prefix = workstation_cluster(config) <> "/workstationConfigs/"
+    String.starts_with?(path, prefix) and negative_workstation_path?(String.replace_prefix(path, prefix, ""))
+  end
+
+  defp negative_resource_path?(%{kind: "kubernetes"} = config, path) do
+    allowed = ~w(pods services persistentvolumeclaims configmaps sandboxes sandboxtemplates)
+
+    case kube_path(path) do
+      {:ok, ns, resource, name} -> ns == config.provider["namespace"] and resource in allowed and safe_segment?(name)
+      _ -> false
+    end
+  end
+
+  defp negative_workstation_path?(suffix) do
+    case String.split(suffix, "/") do
+      [template] -> safe_segment?(template)
+      [template, "workstations", worker] -> safe_segment?(template) and safe_segment?(worker)
+      _ -> false
+    end
+  end
 
   defp negative_identity(%{kind: "google_workstations"}, body) do
     if nonblank?(body["uid"]), do: {:ok, body["uid"]}, else: {:error, :negative_control_uid_unavailable}
@@ -911,15 +1182,18 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
     if nonblank?(uid(body)), do: {:ok, uid(body)}, else: {:error, :negative_control_uid_unavailable}
   end
 
-  defp fault_permission(config, profile, scenario, phase, record) do
-    cond do
-      phase not in ["apply", "restore"] -> {:error, :invalid_physical_fault_phase}
-      scenario == "all" and phase == "restore" and record == nil -> :ok
-      scenario == "storage_deletion" and profile["storage_fault_authorized"] == true and record != nil -> record_scope(config, record)
-      scenario == "node_disconnection" and config.kind == "kubernetes" and profile["node_fault_authorized"] == true and record != nil -> record_scope(config, record)
-      true -> {:error, :physical_fault_not_authorized}
-    end
-  end
+  defp fault_permission(_, _, _, phase, _) when phase not in ["apply", "restore"],
+    do: {:error, :invalid_physical_fault_phase}
+
+  defp fault_permission(_, _, "all", "restore", nil), do: :ok
+
+  defp fault_permission(config, %{"storage_fault_authorized" => true}, "storage_deletion", _, record)
+       when record != nil, do: record_scope(config, record)
+
+  defp fault_permission(%{kind: "kubernetes"} = config, %{"node_fault_authorized" => true}, "node_disconnection", _, record)
+       when record != nil, do: record_scope(config, record)
+
+  defp fault_permission(_, _, _, _, _), do: {:error, :physical_fault_not_authorized}
 
   defp fault_resource(_config, _profile, "all", "restore", nil, _opts), do: {:ok, nil}
 
@@ -936,16 +1210,7 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
     references = Enum.filter(record.metadata["backing_resources"] || [], &(is_binary(&1["selfLink"]) and String.contains?(&1["selfLink"], "/disks/")))
 
     with true <- references != [],
-         {:ok, disks} <-
-           collect(references, fn reference ->
-             with {:ok, path} <- compute_reference_path(config, reference, "disks"),
-                  {:ok, disk} <- get(config, path, opts),
-                  true <- disk["id"] == reference["id"] and disk["selfLink"] == reference["selfLink"] do
-               {:ok, Map.take(disk, ~w(id name selfLink zone region))}
-             else
-               _ -> {:error, :physical_fault_disk_identity_unresolved}
-             end
-           end) do
+         {:ok, disks} <- collect(references, &fault_disk(config, &1, opts)) do
       {:ok, %{environment_id: record.key, issue_id: record.issue_id, provider_resource_id: provider_id(record), backing_resources: disks}}
     else
       _ -> {:error, :physical_fault_disk_identity_unresolved}
@@ -955,17 +1220,37 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   defp fault_resource(%{kind: "kubernetes"} = config, _profile, "storage_deletion", _phase, record, opts) do
     with {:ok, true} <- storage_present(config, record, opts),
          {:ok, pvs} <- KubernetesClient.list(config, "/api/v1/persistentvolumes", opts),
-         {:ok, volumes} <-
-           collect(Map.values(record.metadata["volumes"] || %{}), fn volume ->
-             case Enum.filter(pvs, &(uid(&1) == volume["pv_uid"] and name(&1) == volume["pv_name"] and get_in(&1, ["spec", "csi", "volumeHandle"]) == volume["volume_handle"])) do
-               [pv] -> {:ok, Map.take(volume, ~w(pvc_name pvc_uid pv_name pv_uid volume_handle)) |> Map.put("csi_driver", get_in(pv, ["spec", "csi", "driver"]))}
-               _ -> {:error, :physical_fault_volume_identity_unresolved}
-             end
-           end) do
+         {:ok, volumes} <- collect(Map.values(record.metadata["volumes"] || %{}), &fault_volume(&1, pvs)) do
       {:ok, %{environment_id: record.key, issue_id: record.issue_id, provider_resource_id: provider_id(record), volumes: volumes}}
     else
       _ -> {:error, :physical_fault_volume_identity_unresolved}
     end
+  end
+
+  defp fault_disk(config, reference, opts) do
+    with {:ok, path} <- compute_reference_path(config, reference, "disks"),
+         {:ok, disk} <- get(config, path, opts),
+         true <- same_compute_reference?(disk, reference) do
+      {:ok, Map.take(disk, ~w(id name selfLink zone region))}
+    else
+      _ -> {:error, :physical_fault_disk_identity_unresolved}
+    end
+  end
+
+  defp fault_volume(volume, pvs) do
+    case Enum.filter(pvs, &volume_identity?(&1, volume)) do
+      [pv] ->
+        reference = Map.take(volume, ~w(pvc_name pvc_uid pv_name pv_uid volume_handle))
+        {:ok, Map.put(reference, "csi_driver", get_in(pv, ["spec", "csi", "driver"]))}
+
+      _ ->
+        {:error, :physical_fault_volume_identity_unresolved}
+    end
+  end
+
+  defp volume_identity?(pv, volume) do
+    uid(pv) == volume["pv_uid"] and name(pv) == volume["pv_name"] and
+      get_in(pv, ["spec", "csi", "volumeHandle"]) == volume["volume_handle"]
   end
 
   defp credential_references(%{kind: "google_workstations", provider: provider}), do: Map.take(provider, ~w(credential_configuration impersonate_service_account))

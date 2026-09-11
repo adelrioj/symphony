@@ -2,7 +2,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @moduledoc "Direct, permanently gated Agent Sandbox v1.0.1 environments. Qualification is operator-owned, never worker input."
   @behaviour SymphonyElixir.ExecutionEnvironment
 
-  alias SymphonyElixir.ExecutionEnvironment.{Config, Operations, Record}
+  alias SymphonyElixir.ExecutionEnvironment.{Command, Config, Connection, Operations, Record}
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Client
   alias SymphonyElixir.SSH.Target
 
@@ -22,7 +22,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     required = ["kubeconfig", "context", "namespace", "template", "ssh_user", "ssh_auth_volume"]
 
     if Enum.all?(required, &(is_binary(provider[&1]) and String.trim(provider[&1]) != "")) and
-         is_integer(provider["ssh_port"]) and provider["ssh_port"] in 1..65535 and File.regular?(provider["kubeconfig"]) and
+         is_integer(provider["ssh_port"]) and provider["ssh_port"] in 1..65_535 and File.regular?(provider["kubeconfig"]) and
          Regex.match?(~r/^[a-z_][a-z0-9_-]*[$]?$/, provider["ssh_user"]) do
       :ok
     else
@@ -35,7 +35,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @spec preflight(map(), keyword()) :: :ok | {:error, term()}
   def preflight(config, opts) do
     opts = with_deadline(opts)
-    with :ok <- validate_config(config.provider), {:ok, _} <- qualification(config, opts), {:ok, _} <- inventory(config, opts), do: :ok
+
+    with :ok <- validate_config(config.provider),
+         {:ok, _} <- qualification(config, opts),
+         {:ok, _} <- inventory(config, opts),
+         do: :ok
   end
 
   @spec discover(map(), keyword()) :: {:ok, [Record.t()]} | {:error, term()}
@@ -45,27 +49,36 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     with {:ok, objects} <- inventory(config, opts) do
       (objects["sandboxes"] ++ Enum.flat_map(@children, &objects[&1]))
       |> Enum.filter(&(get_in(&1, ["metadata", "labels", "symphony.dev/deployment"]) == digest(config.deployment_id)))
-      |> Enum.reduce_while({:ok, %{}}, fn object, {:ok, records} ->
-        case decode_record(object, config) do
-          {:ok, record} ->
-            parent = Enum.find(objects["sandboxes"], &(name(&1) == record.key))
-
-            if parent != nil and not owned?(parent, record) do
-              {:halt, {:error, {:unknown, :kubernetes_ownership_changed}}}
-            else
-              record = if parent, do: observe(record, parent), else: %{record | metadata: Map.put(record.metadata, "orphaned", true), proof: :unknown, phase: :unknown}
-              {:cont, {:ok, Map.put(records, record.key, record)}}
-            end
-
-          _ ->
-            resource_ids = Enum.filter([name(object), uid(object)], &is_binary/1)
-            {:halt, {:error, {:unknown, {:kubernetes_invalid_owned_record, resource_ids}}}}
-        end
-      end)
+      |> Enum.reduce_while({:ok, %{}}, &discover_object(&1, &2, objects, config))
       |> case do
         {:ok, records} -> {:ok, Map.values(records)}
         error -> error
       end
+    end
+  end
+
+  defp discover_object(object, {:ok, records}, objects, config) do
+    with {:ok, record} <- decode_record(object, config),
+         {:ok, observed} <- discovered_parent(record, objects["sandboxes"]) do
+      {:cont, {:ok, Map.put(records, record.key, observed)}}
+    else
+      {:error, {:unknown, :kubernetes_ownership_changed}} = error ->
+        {:halt, error}
+
+      _ ->
+        resource_ids = Enum.filter([name(object), uid(object)], &is_binary/1)
+        {:halt, {:error, {:unknown, {:kubernetes_invalid_owned_record, resource_ids}}}}
+    end
+  end
+
+  defp discovered_parent(record, parents) do
+    case Enum.find(parents, &(name(&1) == record.key)) do
+      nil ->
+        metadata = Map.put(record.metadata, "orphaned", true)
+        {:ok, %{record | metadata: metadata, proof: :unknown, phase: :unknown}}
+
+      parent ->
+        with :ok <- ownership(parent, record), do: {:ok, observe(record, parent)}
     end
   end
 
@@ -77,22 +90,32 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       with {:ok, q} <- qualification(config, opts),
            {:ok, existing} <- Client.lookup(config, collection(config, "sandboxes"), record.key, opts),
            {:ok, objects} <- inventory(config, opts) do
-        cond do
-          existing != nil ->
-            with :ok <- ownership(existing, record), observed = observe(record, existing), :ok <- template_identity(observed, q), do: {:ok, observed}
-
-          record.provider_ref != nil or record.metadata["orphaned"] == true ->
-            {:error, {:unknown, :retained_kubernetes_parent_missing}}
-
-          Enum.any?(@children, fn resource -> Enum.any?(objects[resource], &(get_in(&1, ["metadata", "labels", "symphony.dev/environment"]) == record.key)) end) ->
-            {:error, {:unknown, :retained_kubernetes_children_without_parent}}
-
-          true ->
-            materialize(config, record, q, opts)
-        end
+        ensure_observed(config, record, existing, objects, q, opts)
       end
 
     result(record, result)
+  end
+
+  defp ensure_observed(config, record, existing, objects, q, opts) do
+    cond do
+      existing != nil ->
+        with :ok <- ownership(existing, record),
+             observed = observe(record, existing),
+             :ok <- template_identity(observed, q),
+             do: {:ok, observed}
+
+      record.provider_ref != nil or record.metadata["orphaned"] == true ->
+        {:error, {:unknown, :retained_kubernetes_parent_missing}}
+
+      unresolved_mutations?(record) ->
+        {:error, {:unknown, :kubernetes_create_outcome}}
+
+      Enum.any?(@children, &Enum.any?(objects[&1], fn child -> labeled_candidate?(child, record) end)) ->
+        {:error, {:unknown, :retained_kubernetes_children_without_parent}}
+
+      true ->
+        materialize(config, record, q, opts)
+    end
   end
 
   @spec inspect(map(), Record.t(), keyword()) :: SymphonyElixir.ExecutionEnvironment.result()
@@ -102,18 +125,30 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     result =
       with {:ok, q} <- qualification(config, opts),
            {:ok, objects} <- inventory(config, opts),
-           {:ok, sandbox} <- parent(objects, record),
-           :ok <- template_identity(record, q),
-           :ok <- owned_pods(objects["pods"], record, sandbox),
-           {:ok, record} <- capture_storage(observe(record, sandbox), sandbox, objects, q),
-           {:ok, record} <- inspect_termination(config, record, q, opts),
-           {:ok, record} <- save_observation(config, record, opts) do
-        pods = children(objects["pods"], record, sandbox)
-        evidence = Map.get(record.metadata, "termination_evidence", %{})
-        {:ok, normalize(record, sandbox, pods, evidence)}
+           :ok <- template_identity(record, q) do
+        inspect_inventory(config, record, objects, q, opts)
       end
 
     result(record, result)
+  end
+
+  defp inspect_inventory(config, record, objects, q, opts) do
+    case parent(objects, record) do
+      {:ok, sandbox} -> inspect_parent(config, record, sandbox, objects, q, opts)
+      {:error, {:unknown, :kubernetes_parent_missing}} -> inspect_denied_create(record, objects, q)
+      error -> error
+    end
+  end
+
+  defp inspect_parent(config, record, sandbox, objects, q, opts) do
+    with :ok <- owned_pods(objects["pods"], record, sandbox),
+         {:ok, record} <- capture_storage(observe(record, sandbox), sandbox, objects, q),
+         {:ok, record} <- inspect_termination(config, record, q, opts),
+         {:ok, record} <- save_observation(config, record, opts) do
+      pods = children(objects["pods"], record, sandbox)
+      evidence = Map.get(record.metadata, "termination_evidence", %{})
+      {:ok, normalize(record, sandbox, pods, evidence)}
+    end
   end
 
   @spec put_intent(map(), Record.t(), map(), keyword()) :: SymphonyElixir.ExecutionEnvironment.result()
@@ -131,6 +166,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
         persist(config, updated, sandbox, [], opts)
       else
         false -> {:error, {:retryable, :kubernetes_cas_conflict}}
+        {:error, {:unknown, :kubernetes_parent_missing}} -> inspect(config, updated, opts)
         error -> error
       end
 
@@ -164,7 +200,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp start_running(config, record, opts) do
     with {:ok, sandbox} <- fetch_parent(config, record, opts),
          true <- observe(record, sandbox).desired == :running and get_in(sandbox, ["metadata", "deletionTimestamp"]) == nil do
-      persist(config, %{record | desired: :running, proof: :unknown, phase: :preparing}, sandbox, [%{"op" => "add", "path" => "/spec/operatingMode", "value" => "Running"}], opts)
+      updated = %{record | desired: :running, proof: :unknown, phase: :preparing}
+      patch = [%{"op" => "add", "path" => "/spec/operatingMode", "value" => "Running"}]
+      persist(config, updated, sandbox, patch, opts)
     else
       false -> {:error, {:unknown, :kubernetes_start_cancelled}}
       error -> error
@@ -178,9 +216,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     {:error, failure, %{record | metadata: durable_metadata(record.metadata)}}
   end
 
-  defp finish_start({:error, failure}, record), do: finish_start({:error, failure, record}, record)
-
-  @spec connect(map(), Record.t(), keyword()) :: {:ok, SymphonyElixir.ExecutionEnvironment.Connection.t()} | {:error, term()}
+  @spec connect(map(), Record.t(), keyword()) :: {:ok, Connection.t()} | {:error, term()}
   def connect(config, record, opts) do
     opts = with_deadline(opts)
 
@@ -211,21 +247,41 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     opts = with_deadline(opts)
 
     result =
-      with {:ok, q} <- qualification(config, opts),
-           {:ok, sandbox} <- fetch_parent(config, record, opts),
-           {:ok, stopped} <- persist(config, %{observe(record, sandbox) | desired: :stopped, phase: :stopping, proof: :unknown}, sandbox, [], opts),
-           {:ok, pods} <- Client.list(config, collection(config, "pods"), opts),
-           {:ok, fenced} <- stop_fences(config, stopped, children(pods, stopped, sandbox), q, opts),
-           {:ok, current} <- fetch_parent(config, fenced, opts),
-           {:ok, suspended} <- persist(config, fenced, current, [%{"op" => "add", "path" => "/spec/operatingMode", "value" => "Suspended"}], opts),
-           {:ok, proved} <- collect_termination(config, suspended, q, opts),
-           {:ok, current} <- fetch_parent(config, proved, opts),
-           {:ok, saved} <- persist(config, proved, current, [], opts) do
-        inspect(config, %{saved | metadata: durable_metadata(saved.metadata)}, opts)
+      with {:ok, q} <- qualification(config, opts) do
+        case fetch_parent(config, record, opts) do
+          {:ok, sandbox} ->
+            stop_parent(config, record, sandbox, q, opts)
+
+          {:error, {:unknown, :kubernetes_parent_missing}} ->
+            inspect(config, %{record | desired: :stopped}, opts)
+
+          error ->
+            error
+        end
       end
 
     cleanup_client_key(record)
     result(record, result)
+  end
+
+  defp stop_parent(config, record, sandbox, q, opts) do
+    stopping = %{observe(record, sandbox) | desired: :stopped, phase: :stopping, proof: :unknown}
+
+    with {:ok, stopped} <- persist(config, stopping, sandbox, [], opts),
+         {:ok, pods} <- Client.list(config, collection(config, "pods"), opts),
+         {:ok, fenced} <- stop_fences(config, stopped, children(pods, stopped, sandbox), q, opts),
+         {:ok, current} <- fetch_parent(config, fenced, opts),
+         {:ok, suspended} <- suspend(config, fenced, current, opts),
+         {:ok, proved} <- collect_termination(config, suspended, q, opts),
+         {:ok, current} <- fetch_parent(config, proved, opts),
+         {:ok, saved} <- persist(config, proved, current, [], opts) do
+      inspect(config, %{saved | metadata: durable_metadata(saved.metadata)}, opts)
+    end
+  end
+
+  defp suspend(config, record, sandbox, opts) do
+    patch = [%{"op" => "add", "path" => "/spec/operatingMode", "value" => "Suspended"}]
+    persist(config, record, sandbox, patch, opts)
   end
 
   @spec destroy(map(), Record.t(), keyword()) :: SymphonyElixir.ExecutionEnvironment.result()
@@ -234,60 +290,82 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     result =
       with {:ok, q} <- qualification(config, opts),
-           {:ok, stopped} <- stop(config, record, opts),
-           true <- match?({:quiescent, _}, stopped.proof),
-           {:ok, objects} <- inventory(config, opts),
-           {:ok, sandbox} <- parent(objects, stopped),
-           {:ok, captured} <- capture_storage(stopped, sandbox, objects, q),
-           {:ok, deleting} <- persist(config, %{captured | desired: :absent, phase: :deleting}, sandbox, [], opts),
-           {:ok, current} <- fetch_parent(config, deleting, opts),
-           :ok <- delete(config, "sandboxes", current, opts),
-           {:ok, current} <- fetch_parent(config, deleting, opts),
-           true <- get_in(current, ["metadata", "deletionTimestamp"]) != nil,
-           {:ok, objects} <- inventory(config, opts),
-           {:ok, deleting} <- capture_storage(deleting, current, objects, q),
-           {:ok, deleting} <- persist(config, deleting, current, [], opts),
-           {:ok, deleting} <- delete_children(config, deleting, current, objects, q, opts),
-           {:ok, deleting} <- storage_deletion(config, deleting, q, opts),
-           {:ok, current} <- fetch_parent(config, deleting, opts),
-           {:ok, saved} <- persist(config, deleting, current, [], opts),
-           {:ok, final_objects} <- inventory(config, opts) do
-        remaining = Map.new(@children, &{&1, Enum.map(children(final_objects[&1], saved, current), fn child -> %{"name" => name(child), "uid" => uid(child)} end)})
-        saved = %{saved | metadata: Map.put(saved.metadata, "cleanup_remaining", remaining)}
-        # v1.0.1's deletionTimestamp branch has no acknowledged reconcile barrier.
-        # Even zero current children plus CSI deletion is not proof against an old
-        # create completing later. Keep the last discoverable ownership/finalizer.
-        with {:ok, current} <- fetch_parent(config, saved, opts),
-             {:ok, saved} <- persist(config, saved, current, [], opts) do
-          {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}, saved}
-        end
-      else
-        false -> {:error, {:unknown, :kubernetes_cleanup_pending}}
-        other -> other
+           {:ok, stopped} <- stop(config, record, opts) do
+        destroy_stopped(config, stopped, q, opts)
       end
 
     result(record, result)
   end
 
+  defp destroy_stopped(_config, %{absent?: true, proof: {:quiescent, _}} = stopped, _q, _opts),
+    do: {:ok, %{stopped | desired: :absent}}
+
+  defp destroy_stopped(config, stopped, q, opts) do
+    with true <- match?({:quiescent, _}, stopped.proof),
+         {:ok, objects} <- inventory(config, opts),
+         {:ok, sandbox} <- parent(objects, stopped),
+         {:ok, captured} <- capture_storage(stopped, sandbox, objects, q),
+         {:ok, deleting} <- persist(config, %{captured | desired: :absent, phase: :deleting}, sandbox, [], opts),
+         {:ok, current} <- fetch_parent(config, deleting, opts),
+         :ok <- delete(config, "sandboxes", current, opts),
+         {:ok, current} <- fetch_parent(config, deleting, opts),
+         true <- get_in(current, ["metadata", "deletionTimestamp"]) != nil,
+         {:ok, objects} <- inventory(config, opts),
+         {:ok, deleting} <- capture_storage(deleting, current, objects, q),
+         {:ok, deleting} <- persist(config, deleting, current, [], opts),
+         {:ok, deleting} <- delete_children(config, deleting, current, objects, q, opts),
+         {:ok, deleting} <- storage_deletion(config, deleting, q, opts),
+         {:ok, current} <- fetch_parent(config, deleting, opts),
+         {:ok, saved} <- persist(config, deleting, current, [], opts),
+         {:ok, final_objects} <- inventory(config, opts) do
+      remaining = Map.new(@children, &{&1, Enum.map(children(final_objects[&1], saved, current), fn child -> %{"name" => name(child), "uid" => uid(child)} end)})
+      saved = %{saved | metadata: Map.put(saved.metadata, "cleanup_remaining", remaining)}
+      # v1.0.1's deletionTimestamp branch has no acknowledged reconcile barrier.
+      # Even zero current children plus CSI deletion is not proof against an old
+      # create completing later. Keep the last discoverable ownership/finalizer.
+      with {:ok, current} <- fetch_parent(config, saved, opts),
+           {:ok, saved} <- persist(config, saved, current, [], opts) do
+        {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}, saved}
+      end
+    else
+      false -> {:error, {:unknown, :kubernetes_cleanup_pending}}
+      other -> other
+    end
+  end
+
   @spec normalize(Record.t(), map(), [map()], map()) :: Record.t()
   def normalize(record, sandbox, pods, termination_evidence) do
-    authorized = Map.get(record.metadata, "authorized_pod_uids", [])
-    accounted = Enum.all?(authorized, &termination_proof?(termination_evidence[&1], &1, record))
-
-    stopped =
-      get_in(sandbox, ["spec", "operatingMode"]) == "Suspended" and condition?(sandbox, "Suspended") and
-        blueprint_gated?(sandbox) and not unsafe_pod?(get_in(sandbox, ["spec", "podTemplate", "spec"]) || %{}) and accounted and
-        Enum.all?(pods, &(gated?(&1) and not unsafe_pod?(&1["spec"] || %{}) and get_in(&1, ["metadata", "deletionTimestamp"]) == nil))
-
-    running =
-      get_in(sandbox, ["spec", "operatingMode"]) == "Running" and condition?(sandbox, "Ready") and
-        Enum.any?(pods, &(uid(&1) in authorized and ready_pod?(&1)))
-
     cond do
-      stopped -> %{record | phase: :stopped, pending: [], proof: {:quiescent, %{sandbox_uid: uid(sandbox), generation: get_in(sandbox, ["metadata", "generation"])}}}
-      running -> %{record | phase: :running, pending: [], proof: :unknown}
-      true -> %{record | phase: :unknown, proof: :unknown}
+      stopped_sandbox?(record, sandbox, pods, termination_evidence) ->
+        proof = %{sandbox_uid: uid(sandbox), generation: get_in(sandbox, ["metadata", "generation"])}
+        %{record | phase: :stopped, pending: [], proof: {:quiescent, proof}}
+
+      running_sandbox?(record, sandbox, pods) ->
+        %{record | phase: :running, pending: [], proof: :unknown}
+
+      true ->
+        %{record | phase: :unknown, proof: :unknown}
     end
+  end
+
+  defp stopped_sandbox?(record, sandbox, pods, evidence) do
+    authorized = Map.get(record.metadata, "authorized_pod_uids", [])
+    accounted = Enum.all?(authorized, &termination_proof?(evidence[&1], &1, record))
+
+    get_in(sandbox, ["spec", "operatingMode"]) == "Suspended" and condition?(sandbox, "Suspended") and
+      blueprint_gated?(sandbox) and not unsafe_pod?(get_in(sandbox, ["spec", "podTemplate", "spec"]) || %{}) and
+      accounted and Enum.all?(pods, &safely_gated?/1)
+  end
+
+  defp safely_gated?(pod) do
+    gated?(pod) and not unsafe_pod?(pod["spec"] || %{}) and get_in(pod, ["metadata", "deletionTimestamp"]) == nil
+  end
+
+  defp running_sandbox?(record, sandbox, pods) do
+    authorized = Map.get(record.metadata, "authorized_pod_uids", [])
+
+    get_in(sandbox, ["spec", "operatingMode"]) == "Running" and condition?(sandbox, "Ready") and
+      Enum.any?(pods, &(uid(&1) in authorized and ready_pod?(&1)))
   end
 
   defp qualification(config, opts) do
@@ -324,18 +402,27 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp schemas(crds) do
-    valid =
-      Enum.all?([{"sandboxes.agents.x-k8s.io", "37f0b89594ba20ca4d37b93714c362bcd694369f"}, {"sandboxtemplates.extensions.agents.x-k8s.io", "6c5c594b1a0cddda9b330bb094272e1c465d11c2"}], fn {name,
-                                                                                                                                                                                              expected_digest} ->
-        crd = Enum.find(crds, &(name(&1) == name))
-        versions = get_in(crd || %{}, ["spec", "versions"]) || []
-        version = Enum.find(versions, &(&1["name"] == "v1beta1" and &1["served"] == true and &1["storage"] == true))
-        schema = get_in(version || %{}, ["schema", "openAPIV3Schema"])
-        schema != nil and Enum.count(versions, &(&1["served"] == true)) == 1 and digest(schema) == expected_digest and get_in(crd, ["spec", "scope"]) == "Namespaced"
-      end)
+    expected = [
+      {"sandboxes.agents.x-k8s.io", "37f0b89594ba20ca4d37b93714c362bcd694369f"},
+      {"sandboxtemplates.extensions.agents.x-k8s.io", "6c5c594b1a0cddda9b330bb094272e1c465d11c2"}
+    ]
 
+    valid = Enum.all?(expected, fn {name, hash} -> qualified_schema?(crds, name, hash) end)
     if valid, do: :ok, else: {:error, {:invalid, :kubernetes_schema_mismatch}}
   end
+
+  defp qualified_schema?(crds, expected_name, hash) do
+    crd = Enum.find(crds, &(name(&1) == expected_name))
+    versions = get_in(crd || %{}, ["spec", "versions"]) || []
+    version = Enum.find(versions, &served_storage_version?/1)
+    schema = get_in(version || %{}, ["schema", "openAPIV3Schema"])
+
+    schema != nil and Enum.count(versions, &(&1["served"] == true)) == 1 and
+      digest(schema) == hash and get_in(crd, ["spec", "scope"]) == "Namespaced"
+  end
+
+  defp served_storage_version?(version),
+    do: version["name"] == "v1beta1" and version["served"] == true and version["storage"] == true
 
   defp kubernetes_version?(%{"major" => "1", "minor" => minor}) do
     case Integer.parse(minor) do
@@ -353,8 +440,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     is_integer(desired) and desired > 0 and is_integer(available) and available >= desired and
       q["controller_source_commit"] == "3e77ccbac4db8a12b0157eafcad0d1ad5872f32a" and
-      Enum.any?(containers, &(&1["image"] == q["controller_image"] and String.starts_with?(&1["image"] || "", "registry.k8s.io/agent-sandbox/agent-sandbox-controller@sha256:"))) and
+      Enum.any?(containers, &pinned_controller_image?(&1, q)) and
       get_in(controller, ["status", "observedGeneration"]) == get_in(controller, ["metadata", "generation"])
+  end
+
+  defp pinned_controller_image?(container, q) do
+    prefix = "registry.k8s.io/agent-sandbox/agent-sandbox-controller@sha256:"
+    container["image"] == q["controller_image"] and String.starts_with?(container["image"] || "", prefix)
   end
 
   defp storage_classes(template, classes, q) do
@@ -376,26 +468,34 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     profile = q["network_profile_label"]
 
     is_binary(profile) and not String.starts_with?(profile, "agents.x-k8s.io/") and labels[profile] != nil and
-      get_in(template, ["spec", "networkPolicyManagement"]) == "Unmanaged" and policy != nil and
-      get_in(policy, ["spec", "podSelector", "matchLabels", profile]) == labels[profile] and
+      get_in(template, ["spec", "networkPolicyManagement"]) == "Unmanaged" and
+      qualified_policy?(policy, profile, labels)
+  end
+
+  defp qualified_policy?(nil, _profile, _labels), do: false
+
+  defp qualified_policy?(policy, profile, labels) do
+    get_in(policy, ["spec", "podSelector", "matchLabels", profile]) == labels[profile] and
       selector_matches?(get_in(policy, ["spec", "podSelector"]) || %{}, labels) and
       Enum.sort(get_in(policy, ["spec", "policyTypes"]) || []) == ["Egress", "Ingress"]
   end
 
   defp selector_matches?(selector, labels) do
     Enum.all?(selector["matchLabels"] || %{}, fn {key, value} -> labels[key] == value end) and
-      Enum.all?(selector["matchExpressions"] || [], fn expression ->
-        key = expression["key"]
-        values = expression["values"] || []
+      Enum.all?(selector["matchExpressions"] || [], &expression_matches?(&1, labels))
+  end
 
-        case expression["operator"] do
-          "In" -> labels[key] in values
-          "NotIn" -> labels[key] not in values
-          "Exists" -> Map.has_key?(labels, key)
-          "DoesNotExist" -> not Map.has_key?(labels, key)
-          _ -> false
-        end
-      end)
+  defp expression_matches?(expression, labels) do
+    key = expression["key"]
+    values = expression["values"] || []
+
+    case expression["operator"] do
+      "In" -> labels[key] in values
+      "NotIn" -> labels[key] not in values
+      "Exists" -> Map.has_key?(labels, key)
+      "DoesNotExist" -> not Map.has_key?(labels, key)
+      _ -> false
+    end
   end
 
   defp safe_template(template, config, q) do
@@ -406,9 +506,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     unsafe = unsafe_pod?(spec)
 
     if not unsafe and length(auth) == 1 and q["runtime_handler"] != nil and
-         Enum.any?(containers, fn container -> Enum.any?(container["volumeMounts"] || [], &(&1["name"] == config.provider["ssh_auth_volume"] and &1["readOnly"] == true)) end),
+         Enum.any?(containers, &readonly_auth_mount?(&1, config.provider["ssh_auth_volume"])),
        do: :ok,
        else: {:error, {:invalid, :unsafe_kubernetes_template}}
+  end
+
+  defp readonly_auth_mount?(container, volume) do
+    Enum.any?(container["volumeMounts"] || [], &(&1["name"] == volume and &1["readOnly"] == true))
   end
 
   defp unsafe_pod?(spec) do
@@ -417,8 +521,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     Enum.any?(["hostNetwork", "hostPID", "hostIPC"], &(spec[&1] == true)) or spec["nodeName"] not in [nil, ""] or
       spec["schedulerName"] not in [nil, "default-scheduler"] or spec["ephemeralContainers"] not in [nil, []] or
-      Enum.any?(volumes, fn volume -> Map.has_key?(volume, "hostPath") or Enum.any?(get_in(volume, ["projected", "sources"]) || [], &Map.has_key?(&1, "serviceAccountToken")) end) or
-      Enum.any?(containers, fn container -> Map.has_key?(container, "restartPolicy") or Enum.any?(container["ports"] || [], &(&1["hostPort"] not in [nil, 0])) end)
+      Enum.any?(volumes, &unsafe_volume?/1) or Enum.any?(containers, &unsafe_container?/1)
+  end
+
+  defp unsafe_volume?(volume) do
+    Map.has_key?(volume, "hostPath") or
+      Enum.any?(get_in(volume, ["projected", "sources"]) || [], &Map.has_key?(&1, "serviceAccountToken"))
+  end
+
+  defp unsafe_container?(container) do
+    Map.has_key?(container, "restartPolicy") or Enum.any?(container["ports"] || [], &(&1["hostPort"] not in [nil, 0]))
   end
 
   defp materialize(config, record, q, opts) do
@@ -432,7 +544,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
         "volumes" => %{}
       })
 
-    record = %{record | metadata: metadata, pending: [%{verb: :create, id: record.key, outcome: :pending}]}
+    retained = Enum.reject(record.pending, &(&1 == %{verb: :create, id: record.key, outcome: :failed}))
+    pending = retained ++ [%{verb: :create, id: record.key, outcome: :pending}]
+    record = %{record | metadata: metadata, pending: pending, absent?: false, proof: :unknown}
     blueprint = Map.take(q["template"]["spec"], ["podTemplate", "volumeClaimTemplates", "service"])
     pod = blueprint["podTemplate"]
     spec = pod["spec"]
@@ -440,7 +554,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     volumes =
       Enum.map(spec["volumes"] || [], fn volume ->
-        if volume["name"] == config.provider["ssh_auth_volume"], do: %{"name" => volume["name"], "secret" => %{"secretName" => secret_name(record), "defaultMode" => 0o400}}, else: volume
+        if volume["name"] == config.provider["ssh_auth_volume"] do
+          %{"name" => volume["name"], "secret" => %{"secretName" => secret_name(record), "defaultMode" => 0o400}}
+        else
+          volume
+        end
       end)
 
     spec =
@@ -468,13 +586,89 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       {:ok, created} ->
         {:ok, observe(%{record | pending: []}, created)}
 
+      {:error, {:denied, _} = failure} ->
+        failed = %{record | pending: failed_create(record)}
+        {:error, failure, reconcile_denied_create(config, failed, q, opts)}
+
       {:error, _} ->
         case fetch_parent(config, record, opts) do
-          {:ok, existing} -> {:ok, observe(%{record | pending: []}, existing)}
-          _ -> {:error, {:unknown, :kubernetes_create_outcome}, %{record | pending: [%{verb: :create, id: record.key, outcome: :unknown}]}}
+          {:ok, existing} ->
+            {:ok, observe(%{record | pending: []}, existing)}
+
+          _ ->
+            pending = Enum.map(record.pending, &Map.put(&1, :outcome, :unknown))
+            {:error, {:unknown, :kubernetes_create_outcome}, %{record | pending: pending}}
         end
     end
   end
+
+  defp failed_create(record) do
+    Enum.map(record.pending, fn operation ->
+      if operation == %{verb: :create, id: record.key, outcome: :pending}, do: %{operation | outcome: :failed}, else: operation
+    end)
+  end
+
+  defp reconcile_denied_create(config, record, q, opts) do
+    with {:ok, objects} <- inventory(config, opts),
+         {:ok, observed} <- inspect_denied_create(record, objects, q) do
+      observed
+    else
+      {:error, _, observed} -> observed
+      _ -> %{record | proof: :unknown, phase: :unknown, absent?: false}
+    end
+  end
+
+  defp inspect_denied_create(record, objects, q) do
+    remaining = denied_candidates(record, objects)
+    captured = Map.get(record.metadata, "cleanup_remaining", %{})
+    remaining = Map.merge(captured, remaining, fn _kind, prior, current -> Enum.uniq(prior ++ current) end)
+    metadata = Map.put(record.metadata, "cleanup_remaining", remaining)
+    observed = %{record | metadata: metadata, proof: :unknown, phase: :unknown, absent?: false}
+
+    if denied_initial_create?(record) and Enum.all?(remaining, fn {_, items} -> items == [] end) do
+      proof = %{qualification_uid: q["uid"], initial_create: :denied, inventory: :complete}
+      {:ok, %{observed | proof: {:quiescent, proof}, phase: :stopped, absent?: true}}
+    else
+      {:error, {:unknown, :kubernetes_parent_missing}, observed}
+    end
+  end
+
+  defp denied_initial_create?(record) do
+    record.provider_ref == nil and record.metadata["orphaned"] != true and
+      record.pending == [%{verb: :create, id: record.key, outcome: :failed}] and
+      Map.get(record.metadata, "authorized_pod_uids", []) == [] and
+      Map.get(record.metadata, "volumes", %{}) == %{}
+  end
+
+  defp unresolved_mutations?(record) do
+    Enum.any?(record.pending, &(&1.outcome in [:unknown, :pending]))
+  end
+
+  defp denied_candidates(record, objects) do
+    Map.new(["sandboxes" | @children] ++ ["persistentvolumes"], fn resource ->
+      candidates = Enum.filter(objects[resource], &denied_candidate?(&1, resource, record))
+      {resource, Enum.map(candidates, &%{"name" => name(&1), "uid" => uid(&1)})}
+    end)
+  end
+
+  defp denied_candidate?(object, "sandboxes", record),
+    do: name(object) == record.key or labeled_candidate?(object, record)
+
+  defp denied_candidate?(object, "persistentvolumes", record) do
+    claim = get_in(object, ["spec", "claimRef"]) || %{}
+
+    labeled_candidate?(object, record) or
+      (claim["namespace"] == record.scope["namespace"] and
+         is_binary(claim["name"]) and String.ends_with?(claim["name"], "-" <> record.key))
+  end
+
+  defp denied_candidate?(object, _resource, record) do
+    labeled_candidate?(object, record) or
+      Enum.any?(get_in(object, ["metadata", "ownerReferences"]) || [], &(&1["name"] == record.key))
+  end
+
+  defp labeled_candidate?(object, record),
+    do: get_in(object, ["metadata", "labels", "symphony.dev/environment"]) == record.key
 
   defp with_deadline(opts), do: Keyword.put_new_lazy(opts, :deadline, fn -> System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, 20_000) end)
 
@@ -487,14 +681,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       with {:ok, sandbox} <- fetch_parent(config, record, opts),
            true <- observe(record, sandbox).desired == :running and get_in(sandbox, ["metadata", "deletionTimestamp"]) == nil,
            {:ok, pods} <- Client.list(config, collection(config, "pods"), opts) do
-        case children(pods, record, sandbox) do
-          [] ->
-            Keyword.get(opts, :sleep_fun, &Process.sleep/1).(min(250, max(0, opts[:deadline] - System.monotonic_time(:millisecond))))
-            wait_authorization(config, record, q, opts)
-
-          owned ->
-            authorize(config, observe(record, sandbox), sandbox, owned, q, opts)
-        end
+        authorize_observed(config, record, sandbox, children(pods, record, sandbox), q, opts)
       else
         false -> {:error, {:unknown, :kubernetes_start_cancelled}, record}
         error -> error
@@ -502,17 +689,34 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     end
   end
 
+  defp authorize_observed(config, record, _sandbox, [], q, opts) do
+    pause(opts)
+    wait_authorization(config, record, q, opts)
+  end
+
+  defp authorize_observed(config, record, sandbox, owned, q, opts),
+    do: authorize(config, observe(record, sandbox), sandbox, owned, q, opts)
+
+  defp pause(opts) do
+    delay = min(250, max(0, opts[:deadline] - System.monotonic_time(:millisecond)))
+    Keyword.get(opts, :sleep_fun, &Process.sleep/1).(delay)
+  end
+
   defp inspect_termination(config, %{desired: desired} = record, q, opts) when desired in [:stopped, :absent] do
     with {:ok, observed} <- collect_termination(config, record, q, opts) do
       if observed.metadata == record.metadata do
         {:ok, observed}
       else
-        with {:ok, sandbox} <- fetch_parent(config, observed, opts), do: persist(config, observed, sandbox, [], opts)
+        persist_current(config, observed, opts)
       end
     end
   end
 
   defp inspect_termination(_config, record, _q, _opts), do: {:ok, record}
+
+  defp persist_current(config, record, opts) do
+    with {:ok, sandbox} <- fetch_parent(config, record, opts), do: persist(config, record, sandbox, [], opts)
+  end
 
   defp authorize(config, record, sandbox, pods, q, opts) do
     cond do
@@ -523,16 +727,29 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
         {:error, {:retryable, :kubernetes_waiting_for_gated_pod}, record}
 
       true ->
-        pod = hd(pods)
-        authorized = Map.get(record.metadata, "authorized_pod_uids", [])
+        authorize_pod(config, record, sandbox, hd(pods), q, opts)
+    end
+  end
 
-        cond do
-          child_ownership(pod, record, sandbox) != :ok -> {:error, {:unknown, :kubernetes_child_ownership_changed}}
-          uid(pod) in authorized and not gated?(pod) -> {:ok, normalize(record, sandbox, pods, Map.get(record.metadata, "termination_evidence", %{}))}
-          uid(pod) in authorized -> {:error, {:unknown, :kubernetes_release_already_recorded}, record}
-          not gated?(pod) or not blueprint_gated?(sandbox) -> {:error, {:unknown, :kubernetes_gate_missing}}
-          true -> release(config, record, sandbox, pod, q, opts)
-        end
+  defp authorize_pod(config, record, sandbox, pod, q, opts) do
+    authorized = Map.get(record.metadata, "authorized_pod_uids", [])
+    evidence = Map.get(record.metadata, "termination_evidence", %{})
+
+    cond do
+      child_ownership(pod, record, sandbox) != :ok ->
+        {:error, {:unknown, :kubernetes_child_ownership_changed}}
+
+      uid(pod) in authorized and not gated?(pod) ->
+        {:ok, normalize(record, sandbox, [pod], evidence)}
+
+      uid(pod) in authorized ->
+        {:error, {:unknown, :kubernetes_release_already_recorded}, record}
+
+      not gated?(pod) or not blueprint_gated?(sandbox) ->
+        {:error, {:unknown, :kubernetes_gate_missing}}
+
+      true ->
+        release(config, record, sandbox, pod, q, opts)
     end
   end
 
@@ -543,7 +760,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp save_observation(config, record, opts) do
     with {:ok, sandbox} <- fetch_parent(config, record, opts) do
       current = observe(record, sandbox)
-      if current.version != record.version or current.metadata == record.metadata, do: {:ok, current}, else: persist(config, record, sandbox, [], opts)
+
+      if current.version != record.version or current.metadata == record.metadata do
+        {:ok, current}
+      else
+        persist(config, record, sandbox, [], opts)
+      end
     end
   end
 
@@ -569,7 +791,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     with {:ok, saved} <- persist(config, record, sandbox, [], opts),
          {:ok, current} <- fetch_parent(config, saved, opts),
-         true <- rv(current) == saved.version and get_in(current, ["spec", "operatingMode"]) == "Running" and observe(saved, current).desired == :running,
+         true <- rv(current) == saved.version and running_intent?(saved, current),
          :ok <- safe_live_pod(pod, q),
          index when is_integer(index) <- Enum.find_index(get_in(pod, ["spec", "schedulingGates"]) || [], &(&1["name"] == @gate)),
          {:ok, _} <-
@@ -582,94 +804,135 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
            ) do
       {:ok, %{saved | pending: [%{verb: :start, id: pod_uid, outcome: :succeeded}]}}
     else
-      _ -> {:error, {:unknown, :kubernetes_release_outcome}, %{record | pending: [%{verb: :start, id: pod_uid, outcome: :unknown}]}}
+      _ ->
+        pending = [%{verb: :start, id: pod_uid, outcome: :unknown}]
+        {:error, {:unknown, :kubernetes_release_outcome}, %{record | pending: pending}}
     end
+  end
+
+  defp running_intent?(record, sandbox) do
+    get_in(sandbox, ["spec", "operatingMode"]) == "Running" and observe(record, sandbox).desired == :running
   end
 
   defp safe_live_pod(pod, q) do
     spec = pod["spec"] || %{}
 
-    if spec["schedulerName"] == "default-scheduler" and spec["nodeName"] in [nil, ""] and spec["automountServiceAccountToken"] == false and
-         get_in(pod, ["metadata", "labels", q["network_profile_label"]]) == get_in(q, ["template", "spec", "podTemplate", "metadata", "labels", q["network_profile_label"]]) and
-         spec["enableServiceLinks"] == false and spec["restartPolicy"] == "Never" and spec["runtimeClassName"] == get_in(q, ["template", "spec", "podTemplate", "spec", "runtimeClassName"]) and
-         not unsafe_pod?(spec), do: :ok, else: {:error, {:invalid, :unsafe_admitted_pod}}
+    valid =
+      admitted_profile?(pod, q) and spec["schedulerName"] == "default-scheduler" and
+        spec["nodeName"] in [nil, ""] and spec["automountServiceAccountToken"] == false and
+        spec["enableServiceLinks"] == false and spec["restartPolicy"] == "Never" and not unsafe_pod?(spec)
+
+    if valid, do: :ok, else: {:error, {:invalid, :unsafe_admitted_pod}}
+  end
+
+  defp admitted_profile?(pod, q) do
+    blueprint = get_in(q, ["template", "spec", "podTemplate"])
+
+    get_in(pod, ["metadata", "labels", q["network_profile_label"]]) ==
+      get_in(blueprint, ["metadata", "labels", q["network_profile_label"]]) and
+      get_in(pod, ["spec", "runtimeClassName"]) == get_in(blueprint, ["spec", "runtimeClassName"])
   end
 
   defp replacement_safe(record, pods) do
     evidence = Map.get(record.metadata, "termination_evidence", %{})
     unresolved = Enum.reject(Map.get(record.metadata, "authorized_pod_uids", []), &termination_proof?(evidence[&1], &1, record))
-    if unresolved == [] or (length(pods) == 1 and unresolved == [uid(hd(pods))]), do: :ok, else: {:error, {:unknown, :previous_pod_termination_unresolved}}
+
+    if unresolved == [] or (length(pods) == 1 and unresolved == [uid(hd(pods))]) do
+      :ok
+    else
+      {:error, {:unknown, :previous_pod_termination_unresolved}}
+    end
   end
 
   defp stop_fences(config, record, pods, q, opts) do
     Enum.reduce_while(pods, {:ok, record}, fn pod, {:ok, current} ->
-      patch = cas(pod) ++ [%{"op" => "add", "path" => "/metadata/annotations", "value" => Map.put(get_in(pod, ["metadata", "annotations"]) || %{}, "symphony.dev/stop-fence", rv_from_record(current))}]
-
-      with {:ok, sandbox} <- fetch_parent(config, current, opts),
-           :ok <- child_ownership(pod, current, sandbox),
-           {:ok, fenced} <- api(config, :patch, object_path(config, "pods", pod), patch, opts) do
-        kind =
-          cond do
-            gated?(fenced) -> "never_released"
-            kubelet_terminated?(fenced) -> "kubelet_terminated"
-            true -> nil
-          end
-
-        current = if kind, do: save_evidence(current, uid(pod), %{"kind" => kind, "uid" => uid(pod), "resourceVersion" => rv(fenced), "qualification_uid" => q["uid"]}), else: current
-        refs = Map.get(current.metadata, "authorized_pods", %{})
-        ref = %{"name" => name(pod), "uid" => uid(pod), "resourceVersion" => rv(fenced)}
-        metadata = current.metadata |> Map.put("authorized_pods", Map.put(refs, uid(pod), ref)) |> Map.update("authorized_pod_uids", [uid(pod)], &Enum.uniq([uid(pod) | &1]))
-        current = %{current | metadata: metadata}
-
-        with {:ok, saved} <- persist(config, current, sandbox, [], opts), :ok <- delete(config, "pods", fenced, opts) do
-          {:cont, {:ok, saved}}
-        else
-          error -> {:halt, error}
-        end
-      else
+      case stop_fence(config, current, pod, q, opts) do
+        {:ok, saved} -> {:cont, {:ok, saved}}
         error -> {:halt, error}
       end
     end)
   end
 
-  defp collect_termination(config, record, q, opts) do
-    Enum.reduce_while(Map.get(record.metadata, "authorized_pods", %{}), {:ok, record}, fn {pod_uid, ref}, {:ok, current} ->
-      if termination_proof?(get_in(current.metadata, ["termination_evidence", pod_uid]), pod_uid, current) do
-        {:cont, {:ok, current}}
-      else
-        case Client.watch(config, collection(config, "pods"), ref["name"], ref["resourceVersion"], opts) do
-          {:ok, events} ->
-            proof =
-              Enum.find_value(events, fn event ->
-                pod = event["object"]
-                if uid(pod) == pod_uid and kubelet_terminated?(pod), do: %{"kind" => "kubelet_terminated", "uid" => pod_uid, "resourceVersion" => rv(pod), "qualification_uid" => q["uid"]}
-              end)
+  defp stop_fence(config, record, pod, q, opts) do
+    annotations = get_in(pod, ["metadata", "annotations"]) || %{}
+    annotations = Map.put(annotations, "symphony.dev/stop-fence", rv_from_record(record))
+    patch = cas(pod) ++ [%{"op" => "add", "path" => "/metadata/annotations", "value" => annotations}]
 
-            {:cont, {:ok, if(proof, do: save_evidence(current, pod_uid, proof), else: current)}}
+    with {:ok, sandbox} <- fetch_parent(config, record, opts),
+         :ok <- child_ownership(pod, record, sandbox),
+         {:ok, fenced} <- api(config, :patch, object_path(config, "pods", pod), patch, opts),
+         current = record_fence(record, fenced, q),
+         {:ok, saved} <- persist(config, current, sandbox, [], opts),
+         :ok <- delete(config, "pods", fenced, opts),
+         do: {:ok, saved}
+  end
 
-          {:error, _} ->
-            {:cont, {:ok, current}}
-        end
+  defp record_fence(record, fenced, q) do
+    kind =
+      cond do
+        gated?(fenced) -> "never_released"
+        kubelet_terminated?(fenced) -> "kubelet_terminated"
+        true -> nil
       end
+
+    record = if kind, do: save_evidence(record, uid(fenced), pod_evidence(fenced, kind, q)), else: record
+    ref = %{"name" => name(fenced), "uid" => uid(fenced), "resourceVersion" => rv(fenced)}
+    refs = Map.put(Map.get(record.metadata, "authorized_pods", %{}), uid(fenced), ref)
+    metadata = record.metadata |> Map.put("authorized_pods", refs)
+    metadata = Map.update(metadata, "authorized_pod_uids", [uid(fenced)], &Enum.uniq([uid(fenced) | &1]))
+    %{record | metadata: metadata}
+  end
+
+  defp pod_evidence(pod, kind, q),
+    do: %{"kind" => kind, "uid" => uid(pod), "resourceVersion" => rv(pod), "qualification_uid" => q["uid"]}
+
+  defp collect_termination(config, record, q, opts) do
+    Enum.reduce_while(Map.get(record.metadata, "authorized_pods", %{}), {:ok, record}, fn ref, {:ok, current} ->
+      {:cont, {:ok, collect_pod_termination(config, current, ref, q, opts)}}
     end)
+  end
+
+  defp collect_pod_termination(config, record, {pod_uid, ref}, q, opts) do
+    if termination_proof?(get_in(record.metadata, ["termination_evidence", pod_uid]), pod_uid, record) do
+      record
+    else
+      case Client.watch(config, collection(config, "pods"), ref["name"], ref["resourceVersion"], opts) do
+        {:ok, events} -> observe_termination(record, events, pod_uid, q)
+        {:error, _} -> record
+      end
+    end
+  end
+
+  defp observe_termination(record, events, pod_uid, q) do
+    proof =
+      Enum.find_value(events, fn event ->
+        pod = event["object"]
+        if uid(pod) == pod_uid and kubelet_terminated?(pod), do: pod_evidence(pod, "kubelet_terminated", q)
+      end)
+
+    if proof, do: save_evidence(record, pod_uid, proof), else: record
   end
 
   defp kubelet_terminated?(pod) when is_map(pod) do
     status = pod["status"] || %{}
     spec = pod["spec"] || %{}
-    containers = (spec["containers"] || []) ++ (spec["initContainers"] || []) ++ (spec["ephemeralContainers"] || [])
-    states = (status["containerStatuses"] || []) ++ (status["initContainerStatuses"] || []) ++ (status["ephemeralContainerStatuses"] || [])
+    containers = all_containers(spec, ["containers", "initContainers", "ephemeralContainers"])
+    states = all_containers(status, ["containerStatuses", "initContainerStatuses", "ephemeralContainerStatuses"])
     kubelet = Enum.any?(get_in(pod, ["metadata", "managedFields"]) || [], &(&1["manager"] == "kubelet" and &1["subresource"] == "status"))
 
     kubelet and status["phase"] in ["Succeeded", "Failed"] and containers != [] and
-      Enum.all?(containers, fn container ->
-        state = Enum.find(states, &(&1["name"] == container["name"]))
-        terminated = get_in(state || %{}, ["state", "terminated"]) || %{}
-        is_binary(terminated["finishedAt"]) and is_binary(terminated["containerID"]) and terminated["containerID"] != "" and terminated["reason"] != "ContainerStatusUnknown"
-      end)
+      Enum.all?(containers, &container_terminated?(&1, states))
   end
 
-  defp kubelet_terminated?(_), do: false
+  defp all_containers(object, keys), do: Enum.flat_map(keys, &(object[&1] || []))
+
+  defp container_terminated?(container, states) do
+    state = Enum.find(states, &(&1["name"] == container["name"]))
+    terminated = get_in(state || %{}, ["state", "terminated"]) || %{}
+
+    is_binary(terminated["finishedAt"]) and is_binary(terminated["containerID"]) and
+      terminated["containerID"] != "" and terminated["reason"] != "ContainerStatusUnknown"
+  end
 
   defp capture_storage(record, sandbox, objects, q) do
     claims = Map.new(get_in(q, ["template", "spec", "volumeClaimTemplates"]) || [], &{get_in(&1, ["metadata", "name"]) <> "-" <> name(sandbox), &1})
@@ -677,48 +940,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     known = Map.get(record.metadata, "volumes", %{})
 
     Enum.reduce_while(pvcs, {:ok, known}, fn pvc, {:ok, acc} ->
-      old = acc[name(pvc)]
-      claim = claims[name(pvc)]
       pv = Enum.find(objects["persistentvolumes"], &(name(&1) == get_in(pvc, ["spec", "volumeName"])))
 
-      cond do
-        child_ownership(pvc, record, sandbox) != :ok ->
-          {:halt, {:error, {:unknown, :kubernetes_child_ownership_changed}}}
-
-        claim == nil or get_in(pvc, ["spec", "storageClassName"]) != get_in(claim, ["spec", "storageClassName"]) ->
-          {:halt, {:error, {:invalid, :unqualified_kubernetes_pvc}}}
-
-        old != nil and old["pvc_uid"] != uid(pvc) ->
-          {:halt, {:error, {:unknown, :retained_pvc_replaced}}}
-
-        pv == nil and get_in(pvc, ["spec", "volumeName"]) not in [nil, ""] ->
-          {:halt, {:error, {:unknown, :bound_pv_missing}}}
-
-        pv == nil ->
-          {:cont, {:ok, Map.put(acc, name(pvc), %{"pvc_uid" => uid(pvc), "pvc_name" => name(pvc), "pvc_version" => rv(pvc), "unbound" => true})}}
-
-        get_in(pv, ["spec", "claimRef", "uid"]) != uid(pvc) or get_in(pv, ["spec", "claimRef", "namespace"]) != get_in(pvc, ["metadata", "namespace"]) or
-          get_in(pv, ["spec", "persistentVolumeReclaimPolicy"]) != "Delete" or get_in(pv, ["spec", "csi", "driver"]) != q["csi_driver"] or
-          not is_binary(get_in(pv, ["spec", "csi", "volumeHandle"])) or get_in(pv, ["spec", "csi", "volumeHandle"]) == "" or @pv_finalizer not in (get_in(pv, ["metadata", "finalizers"]) || []) ->
-          {:halt, {:error, {:unknown, :csi_deletion_evidence_unavailable}}}
-
-        old != nil and old["pv_uid"] != nil and old["pv_uid"] != uid(pv) ->
-          {:halt, {:error, {:unknown, :retained_pv_replaced}}}
-
-        true ->
-          volume = %{
-            "pvc_uid" => uid(pvc),
-            "pvc_name" => name(pvc),
-            "pvc_version" => rv(pvc),
-            "pv_uid" => uid(pv),
-            "pv_name" => name(pv),
-            "pv_version" => rv(pv),
-            "claim_ref" => get_in(pv, ["spec", "claimRef"]),
-            "volume_handle" => get_in(pv, ["spec", "csi", "volumeHandle"]),
-            "csi_finalizer_observed" => true
-          }
-
-          {:cont, {:ok, Map.put(acc, name(pvc), Map.merge(old || %{}, volume))}}
+      with :ok <- child_ownership(pvc, record, sandbox),
+           :ok <- validate_claim(pvc, claims[name(pvc)], acc[name(pvc)]),
+           {:ok, volume} <- capture_volume(pvc, pv, acc[name(pvc)], q) do
+        {:cont, {:ok, Map.put(acc, name(pvc), volume)}}
+      else
+        error -> {:halt, error}
       end
     end)
     |> case do
@@ -727,26 +956,91 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     end
   end
 
+  defp validate_claim(pvc, claim, old) do
+    cond do
+      claim == nil or get_in(pvc, ["spec", "storageClassName"]) != get_in(claim, ["spec", "storageClassName"]) ->
+        {:error, {:invalid, :unqualified_kubernetes_pvc}}
+
+      old != nil and old["pvc_uid"] != uid(pvc) ->
+        {:error, {:unknown, :retained_pvc_replaced}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp capture_volume(pvc, nil, _old, _q) do
+    if get_in(pvc, ["spec", "volumeName"]) in [nil, ""] do
+      {:ok, %{"pvc_uid" => uid(pvc), "pvc_name" => name(pvc), "pvc_version" => rv(pvc), "unbound" => true}}
+    else
+      {:error, {:unknown, :bound_pv_missing}}
+    end
+  end
+
+  defp capture_volume(pvc, pv, old, q) do
+    cond do
+      not qualified_volume?(pvc, pv, q) ->
+        {:error, {:unknown, :csi_deletion_evidence_unavailable}}
+
+      old != nil and old["pv_uid"] != nil and old["pv_uid"] != uid(pv) ->
+        {:error, {:unknown, :retained_pv_replaced}}
+
+      true ->
+        volume = %{
+          "pvc_uid" => uid(pvc),
+          "pvc_name" => name(pvc),
+          "pvc_version" => rv(pvc),
+          "pv_uid" => uid(pv),
+          "pv_name" => name(pv),
+          "pv_version" => rv(pv),
+          "claim_ref" => get_in(pv, ["spec", "claimRef"]),
+          "volume_handle" => get_in(pv, ["spec", "csi", "volumeHandle"]),
+          "csi_finalizer_observed" => true
+        }
+
+        {:ok, Map.merge(old || %{}, volume)}
+    end
+  end
+
+  defp qualified_volume?(pvc, pv, q) do
+    handle = get_in(pv, ["spec", "csi", "volumeHandle"])
+
+    get_in(pv, ["spec", "claimRef", "uid"]) == uid(pvc) and
+      get_in(pv, ["spec", "claimRef", "namespace"]) == get_in(pvc, ["metadata", "namespace"]) and
+      get_in(pv, ["spec", "persistentVolumeReclaimPolicy"]) == "Delete" and
+      get_in(pv, ["spec", "csi", "driver"]) == q["csi_driver"] and
+      is_binary(handle) and handle != "" and @pv_finalizer in (get_in(pv, ["metadata", "finalizers"]) || [])
+  end
+
   defp delete_children(config, record, sandbox, objects, _q, opts) do
     Enum.reduce_while(@children, {:ok, record}, fn resource, {:ok, current} ->
-      Enum.reduce_while(children(objects[resource], current, sandbox), :ok, fn child, :ok ->
-        safe = resource != "pods" or gated?(child) or termination_proof?(get_in(current.metadata, ["termination_evidence", uid(child)]), uid(child), current)
-
-        with true <- safe,
-             :ok <- child_ownership(child, current, sandbox),
-             :ok <- delete(config, resource, child, opts) do
-          {:cont, :ok}
-        else
-          false -> {:halt, {:error, {:unknown, :kubernetes_child_termination_unresolved}}}
-          error -> {:halt, error}
-        end
-      end)
+      delete_owned_children(config, current, sandbox, resource, objects[resource], opts)
       |> case do
         :ok -> {:cont, {:ok, current}}
         error -> {:halt, error}
       end
     end)
   end
+
+  defp delete_owned_children(config, record, sandbox, resource, items, opts) do
+    Enum.reduce_while(children(items, record, sandbox), :ok, fn child, :ok ->
+      with true <- child_stopped?(child, resource, record),
+           :ok <- child_ownership(child, record, sandbox),
+           :ok <- delete(config, resource, child, opts) do
+        {:cont, :ok}
+      else
+        false -> {:halt, {:error, {:unknown, :kubernetes_child_termination_unresolved}}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp child_stopped?(child, "pods", record) do
+    evidence = get_in(record.metadata, ["termination_evidence", uid(child)])
+    gated?(child) or termination_proof?(evidence, uid(child), record)
+  end
+
+  defp child_stopped?(_child, _resource, _record), do: true
 
   defp storage_deletion(config, record, q, opts) do
     volumes = Map.get(record.metadata, "volumes", %{})
@@ -760,25 +1054,34 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
           {:halt, {:error, {:unknown, :unbound_pvc_provisioning_unresolved}, current}}
 
         true ->
-          case Client.watch(config, "/api/v1/persistentvolumes", volume["pv_name"], volume["pv_version"], opts) do
-            {:ok, events} ->
-              deleted =
-                Enum.any?(events, fn event ->
-                  pv = event["object"]
-
-                  event["type"] == "DELETED" and uid(pv) == volume["pv_uid"] and volume["csi_finalizer_observed"] == true and
-                    @pv_finalizer not in (get_in(pv, ["metadata", "finalizers"]) || []) and get_in(pv, ["spec", "csi", "volumeHandle"]) == volume["volume_handle"] and
-                    get_in(pv, ["spec", "csi", "driver"]) == q["csi_driver"] and get_in(pv, ["spec", "claimRef", "uid"]) == volume["pvc_uid"]
-                end)
-
-              updated = if deleted, do: put_in(current.metadata, ["volumes", key, "deleted"], true), else: current.metadata
-              {:cont, {:ok, %{current | metadata: updated}}}
-
-            _ ->
-              {:cont, {:ok, current}}
-          end
+          {:cont, {:ok, observe_volume_deletion(config, current, key, volume, q, opts)}}
       end
     end)
+  end
+
+  defp observe_volume_deletion(config, record, key, volume, q, opts) do
+    case Client.watch(config, "/api/v1/persistentvolumes", volume["pv_name"], volume["pv_version"], opts) do
+      {:ok, events} ->
+        if Enum.any?(events, &volume_deleted?(&1, volume, q)) do
+          metadata = put_in(record.metadata, ["volumes", key, "deleted"], true)
+          %{record | metadata: metadata}
+        else
+          record
+        end
+
+      _ ->
+        record
+    end
+  end
+
+  defp volume_deleted?(event, volume, q) do
+    pv = event["object"]
+
+    event["type"] == "DELETED" and uid(pv) == volume["pv_uid"] and volume["csi_finalizer_observed"] == true and
+      @pv_finalizer not in (get_in(pv, ["metadata", "finalizers"]) || []) and
+      get_in(pv, ["spec", "csi", "volumeHandle"]) == volume["volume_handle"] and
+      get_in(pv, ["spec", "csi", "driver"]) == q["csi_driver"] and
+      get_in(pv, ["spec", "claimRef", "uid"]) == volume["pvc_uid"]
   end
 
   defp existing_secret_ownership(nil, _record, _sandbox), do: :ok
@@ -792,12 +1095,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
           {:ok, record}
 
         _ ->
-          with {:ok, observed, sandbox} <- wait_credential_stop(config, record, sandbox, opts) do
-            stage_credentials(config, observed, sandbox, secret, opts)
-          else
-            _ -> {:error, {:unknown, :client_key_rotation_requires_stop}}
-          end
+          rotate_after_stop(config, record, sandbox, secret, opts)
       end
+    end
+  end
+
+  defp rotate_after_stop(config, record, sandbox, secret, opts) do
+    case wait_credential_stop(config, record, sandbox, opts) do
+      {:ok, observed, current} -> stage_credentials(config, observed, current, secret, opts)
+      _ -> {:error, {:unknown, :client_key_rotation_requires_stop}}
     end
   end
 
@@ -814,10 +1120,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
           {:error, {:unknown, :client_key_rotation_requires_stop}}
 
         true ->
-          Keyword.get(opts, :sleep_fun, &Process.sleep/1).(min(250, max(0, opts[:deadline] - System.monotonic_time(:millisecond))))
-          with {:ok, current} <- fetch_parent(config, record, opts), do: wait_credential_stop(config, record, current, opts)
+          wait_next_credential_stop(config, record, opts)
       end
     end
+  end
+
+  defp wait_next_credential_stop(config, record, opts) do
+    pause(opts)
+
+    with {:ok, current} <- fetch_parent(config, record, opts),
+         do: wait_credential_stop(config, record, current, opts)
   end
 
   defp stage_credentials(config, record, sandbox, secret, opts) do
@@ -828,26 +1140,18 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp rotate_credentials(config, record, sandbox, secret, directory, opts) do
-    command = Keyword.get(opts, :command_fun, &SymphonyElixir.ExecutionEnvironment.Command.run/3)
+    command = Keyword.get(opts, :command_fun, &Command.run/3)
     client = Path.join(directory, "client")
     host = Path.join(directory, "host")
 
     result =
-      with {:ok, %{status: 0}} <- command.(System.find_executable("ssh-keygen") || "ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", client], command_options(opts)),
+      with {:ok, %{status: 0}} <- generate_key(command, client, opts),
            {:ok, public} <- File.read(client <> ".pub"),
            {:ok, data} <- host_data(secret, host, command, opts) do
         data = Map.put(data, "authorized_keys", Base.encode64(public))
-        metadata = stamp(%{"name" => secret_name(record), "namespace" => config.provider["namespace"], "ownerReferences" => [owner_reference(sandbox)]}, record)
 
-        response =
-          if secret == nil do
-            api(config, :post, collection(config, "secrets"), %{"apiVersion" => "v1", "kind" => "Secret", "metadata" => metadata, "type" => "Opaque", "data" => data}, opts)
-          else
-            with :ok <- child_ownership(secret, record, sandbox),
-                 do: api(config, :patch, object_path(config, "secrets", secret), cas(secret) ++ [%{"op" => "add", "path" => "/data", "value" => data}], opts)
-          end
-
-        with {:ok, _} <- response, do: {:ok, %{record | metadata: Map.put(record.metadata, "client_key_directory", directory)}}
+        with {:ok, _} <- save_credentials(config, record, sandbox, secret, data, opts),
+             do: {:ok, %{record | metadata: Map.put(record.metadata, "client_key_directory", directory)}}
       end
 
     File.rm(host)
@@ -863,8 +1167,32 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     end
   end
 
+  defp generate_key(command, path, opts) do
+    args = ["-q", "-t", "ed25519", "-N", "", "-f", path]
+    command.(System.find_executable("ssh-keygen") || "ssh-keygen", args, command_options(opts))
+  end
+
+  defp save_credentials(config, record, sandbox, nil, data, opts) do
+    metadata = %{
+      "name" => secret_name(record),
+      "namespace" => config.provider["namespace"],
+      "ownerReferences" => [owner_reference(sandbox)]
+    }
+
+    body = %{"apiVersion" => "v1", "kind" => "Secret", "metadata" => stamp(metadata, record)}
+    body = Map.merge(body, %{"type" => "Opaque", "data" => data})
+    api(config, :post, collection(config, "secrets"), body, opts)
+  end
+
+  defp save_credentials(config, record, sandbox, secret, data, opts) do
+    patch = cas(secret) ++ [%{"op" => "add", "path" => "/data", "value" => data}]
+
+    with :ok <- child_ownership(secret, record, sandbox),
+         do: api(config, :patch, object_path(config, "secrets", secret), patch, opts)
+  end
+
   defp host_data(nil, path, command, opts) do
-    with {:ok, %{status: 0}} <- command.(System.find_executable("ssh-keygen") || "ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", path], command_options(opts)),
+    with {:ok, %{status: 0}} <- generate_key(command, path, opts),
          {:ok, private} <- File.read(path),
          {:ok, public} <- File.read(path <> ".pub") do
       {:ok, %{"ssh_host_ed25519_key" => Base.encode64(private), "ssh_host_ed25519_key.pub" => Base.encode64(public)}}
@@ -936,10 +1264,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
         ]
 
         target = %Target{executable: System.find_executable("ssh") || "ssh", prefix: prefix, label: record.key}
-        command = Keyword.get(opts, :command_fun, &SymphonyElixir.ExecutionEnvironment.Command.run/3)
+        command = Keyword.get(opts, :command_fun, &Command.run/3)
+        paths = [private_paths: [directory], staged_paths: record.metadata["client_key_lease"]]
 
         with {:ok, %{status: 0}} <- command.(target.executable, prefix ++ ["true"], command_options(opts)),
-             {:ok, connection} <- Operations.open_connection(opts[:task_supervisor], opts[:authority], target, private_paths: [directory], staged_paths: record.metadata["client_key_lease"]) do
+             {:ok, connection} <- Operations.open_connection(opts[:task_supervisor], opts[:authority], target, paths) do
           {:ok, connection}
         else
           _ -> {:error, {:unknown, :kubernetes_ssh_authentication_failed}}
@@ -993,7 +1322,6 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
          :ok <- ownership(sandbox, record),
          do: {:ok, sandbox},
          else: (
-           nil -> {:error, {:unknown, :kubernetes_parent_missing}}
            {:ok, nil} -> {:error, {:unknown, :kubernetes_parent_missing}}
            error -> error
          )
@@ -1011,13 +1339,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp owned?(object, record) do
     labels = get_in(object || %{}, ["metadata", "labels"]) || %{}
 
-    with {:ok, fields, _lifecycle} <- decode_annotation(object) do
-      identity = [:key, :deployment_id, :tracker_kind, :issue_id, :kind, :scope, :workspace_path, :template_identity]
+    case decode_annotation(object) do
+      {:ok, fields, _lifecycle} ->
+        identity = [:key, :deployment_id, :tracker_kind, :issue_id, :kind, :scope, :workspace_path, :template_identity]
+        same_uid = record.provider_ref == nil or uid(object) == record.provider_ref
 
-      labels == Map.merge(labels, identity_labels(record)) and (record.provider_ref == nil or uid(object) == record.provider_ref) and
-        Enum.all?(identity, &(fields[Atom.to_string(&1)] == Map.fetch!(record, &1)))
-    else
-      _ -> false
+        labels == Map.merge(labels, identity_labels(record)) and same_uid and
+          Enum.all?(identity, &(fields[Atom.to_string(&1)] == Map.fetch!(record, &1)))
+
+      _ ->
+        false
     end
   end
 
@@ -1038,15 +1369,21 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp child_ownership(_, _, _), do: {:error, {:unknown, :kubernetes_child_missing}}
 
   defp template_identity(record, q) do
-    if record.metadata["template_uid"] in [nil, q["template_uid"]] and record.metadata["template_digest"] in [nil, q["template_digest"]] and record.metadata["qualification_uid"] in [nil, q["uid"]],
-      do: :ok,
-      else: {:error, {:invalid, :retained_template_changed}}
+    identity = [
+      {"template_uid", "template_uid"},
+      {"template_digest", "template_digest"},
+      {"qualification_uid", "uid"}
+    ]
+
+    if Enum.all?(identity, fn {saved, qualified} -> record.metadata[saved] in [nil, q[qualified]] end), do: :ok, else: {:error, {:invalid, :retained_template_changed}}
   end
 
   defp persist(config, record, sandbox, extra, opts) do
     annotations = Map.put(get_in(sandbox, ["metadata", "annotations"]) || %{}, @state, encode_record(record))
 
-    with {:ok, updated} <- api(config, :patch, object_path(config, "sandboxes", sandbox), cas(sandbox) ++ [%{"op" => "add", "path" => "/metadata/annotations", "value" => annotations}] ++ extra, opts),
+    patch = cas(sandbox) ++ [%{"op" => "add", "path" => "/metadata/annotations", "value" => annotations}] ++ extra
+
+    with {:ok, updated} <- api(config, :patch, object_path(config, "sandboxes", sandbox), patch, opts),
          do: {:ok, observe(record, updated)}
   end
 
@@ -1225,6 +1562,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp termination_proof?(_, _, _), do: false
   defp result(_record, {:ok, _} = result), do: result
   defp result(_record, {:error, _, %Record{}} = result), do: result
-  defp result(record, {:error, failure}), do: {:error, failure, %{record | proof: :unknown, phase: :unknown}}
-  defp result(record, _other), do: {:error, {:unknown, :kubernetes_unexpected_response}, %{record | proof: :unknown, phase: :unknown}}
+
+  defp result(record, {:error, failure}),
+    do: {:error, failure, %{record | proof: :unknown, phase: :unknown, absent?: false}}
 end

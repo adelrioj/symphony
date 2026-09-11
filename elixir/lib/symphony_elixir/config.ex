@@ -3,8 +3,12 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
-  alias SymphonyElixir.{Config.Schema, Tracker}
-  alias SymphonyElixir.{Workflow, WorkflowStore}
+  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.ExecutionEnvironment
+  alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
+  alias SymphonyElixir.Tracker
+  alias SymphonyElixir.Workflow
+  alias SymphonyElixir.WorkflowStore
 
   @default_prompt_template """
   You are working on an issue from the configured tracker.
@@ -152,12 +156,12 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_environment(settings) do
-    case SymphonyElixir.ExecutionEnvironment.Config.runtime(settings) do
+    case EnvironmentConfig.runtime(settings) do
       nil ->
         :ok
 
       config ->
-        with {:ok, adapter} <- SymphonyElixir.ExecutionEnvironment.adapter(config.kind),
+        with {:ok, adapter} <- ExecutionEnvironment.adapter(config.kind),
              :ok <- adapter.validate_config(config.provider) do
           :ok
         else

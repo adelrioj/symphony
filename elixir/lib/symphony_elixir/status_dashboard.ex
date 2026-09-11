@@ -318,6 +318,7 @@ defmodule SymphonyElixir.StatusDashboard do
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
+             environment_discovery: Map.get(snapshot, :environment_discovery),
              polling: Map.get(snapshot, :polling)
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
@@ -366,6 +367,7 @@ defmodule SymphonyElixir.StatusDashboard do
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            scope_and_dashboard_lines,
            project_refresh_line,
+           format_environment_discovery(Map.get(snapshot, :environment_discovery)),
            colorize("├─ Running", @ansi_bold),
            "│",
            running_table_header_row(running_event_width),
@@ -391,6 +393,14 @@ defmodule SymphonyElixir.StatusDashboard do
         |> List.flatten()
         |> Enum.join("\n")
     end
+  end
+
+  defp format_environment_discovery(nil), do: []
+
+  defp format_environment_discovery(%{provider_kind: provider, status: status, error_code: error}) do
+    detail = if is_nil(error), do: "", else: " (#{error})"
+    color = if status == :blocked, do: @ansi_red, else: @ansi_cyan
+    [colorize("│ Managed discovery: ", @ansi_bold) <> colorize("#{provider} #{status}#{detail}", color)]
   end
 
   defp format_scope_and_dashboard_lines do
@@ -558,6 +568,7 @@ defmodule SymphonyElixir.StatusDashboard do
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
+             environment_discovery: Map.get(snapshot, :environment_discovery),
              polling: Map.get(snapshot, :polling)
            }}
 

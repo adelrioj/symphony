@@ -19,6 +19,27 @@ defmodule SymphonyElixir.SSHTest do
     assert System.get_env("SYMPHONY_TARGET_VALUE") == nil
   end
 
+  test "target environment overrides caller values while retaining unrelated caller environment" do
+    target = %SSH.Target{
+      executable: "/bin/sh",
+      prefix: ["-c"],
+      label: "fixture",
+      env: [{"SYMPHONY_TARGET_VALUE", "private"}, {"SYMPHONY_REMOVED_VALUE", nil}]
+    }
+
+    command =
+      ~s(printf '%s:%s:%s' "$SYMPHONY_TARGET_VALUE" "$SYMPHONY_CALLER_VALUE" "${SYMPHONY_REMOVED_VALUE-unset}")
+
+    assert {:ok, {"private:caller:unset", 0}} =
+             SSH.run(target, command,
+               env: [
+                 {"SYMPHONY_TARGET_VALUE", "overridden"},
+                 {"SYMPHONY_CALLER_VALUE", "caller"},
+                 {"SYMPHONY_REMOVED_VALUE", "removed"}
+               ]
+             )
+  end
+
   test "run/3 keeps bracketed IPv6 host:port targets intact" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-ipv6-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")

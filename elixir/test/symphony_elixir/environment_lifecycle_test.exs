@@ -106,11 +106,38 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
     assert Lifecycle.occupied?(entry)
   end
 
+  test "late stop cannot forget unresolved deletion and later absence remains authoritative" do
+    proof = %{record() | phase: :stopped, proof: {:quiescent, %{workers: []}}}
+    stopped = %{Lifecycle.new(proof, "a", :cleanup) | phase: :stopped}
+    {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(stopped, :destroy, 0)
+    pending = %{proof | pending: [%{verb: :destroy, id: "disk", outcome: :unknown}]}
+    {unknown, []} = Lifecycle.step(deleting, {:failed, id, {:unknown, :timeout}, pending}, 1)
+    assert {unknown, []} == Lifecycle.step(unknown, {:stopped, id, proof}, 2)
+    assert {unknown, []} == Lifecycle.step(unknown, {:destroyed, id, %{pending | absent?: true}}, 3)
+    {absent, [:forget]} = Lifecycle.step(unknown, {:destroyed, id, %{proof | absent?: true}}, 4)
+    refute Lifecycle.occupied?(absent)
+  end
+
+  test "repeated stop failure does not borrow a previous proof or invent deletion intent" do
+    entry = Lifecycle.new(record(), "a", :cleanup)
+    {stopping, [{:provider, :stop, id}]} = Lifecycle.step(entry, {:cancel, :denied}, 0)
+    {unknown, []} = Lifecycle.step(stopping, {:failed, id, {:unknown, :timeout}, record()}, 1)
+    {still_unknown, []} = Lifecycle.step(unknown, {:failed, id, {:denied, :permission}, record()}, 2)
+    assert Lifecycle.occupied?(still_unknown)
+    proof = %{record() | phase: :stopped, proof: {:quiescent, %{workers: []}}}
+    {released, [{:release, :denied}]} = Lifecycle.step(still_unknown, {:stopped, id, proof}, 3)
+    refute Lifecycle.occupied?(released)
+  end
+
   test "retention uses saved UTC terminal stamp and fresh authoritative observation" do
     record = %{record() | terminal_observed_at: 1_000}
     refute Lifecycle.deletion_due?(record, :terminal, 500, 1_499)
     assert Lifecycle.deletion_due?(record, :terminal, 500, 1_500)
-    for observation <- [:missing, :error, :nonterminal], do: refute(Lifecycle.deletion_due?(record, observation, 500, 5_000))
+
+    for observation <- [:missing, :error, :nonterminal] do
+      refute Lifecycle.deletion_due?(record, observation, 500, 5_000)
+    end
+
     refute Lifecycle.deletion_due?(%{record | terminal_observed_at: nil}, :terminal, 0, 5_000)
   end
 end

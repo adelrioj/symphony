@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Agent.{Codex, Result}
+
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
       Path.join(
@@ -1589,13 +1591,13 @@ defmodule SymphonyElixir.AppServerTest do
           end
 
         context = SymphonyElixir.ExecutionContext.ssh("/remote/workspaces", target)
-        assert {:ok, session} = SymphonyElixir.Agent.Codex.start_session(remote_workspace, execution_context: context)
+        assert {:ok, session} = Codex.start_session(remote_workspace, execution_context: context)
 
         try do
-          assert {:ok, %SymphonyElixir.Agent.Result{status: :done, session_id: "thread-remote-turn-remote"}} =
-                   SymphonyElixir.Agent.Codex.run_turn(session, "Run remote worker", issue, [])
+          assert {:ok, %Result{status: :done, session_id: "thread-remote-turn-remote"}} =
+                   Codex.run_turn(session, "Run remote worker", issue, [])
         after
-          SymphonyElixir.Agent.Codex.stop_session(session)
+          Codex.stop_session(session)
         end
 
         trace = File.read!(trace_file)

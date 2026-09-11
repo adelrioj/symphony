@@ -3,7 +3,95 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
+  alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.Linear.Client
+
+  defmodule FailingManagedBackend do
+    @behaviour SymphonyElixir.Agent
+    alias SymphonyElixir.Agent.Claude
+
+    @impl true
+    def start_session(workspace, opts), do: Claude.start_session(workspace, opts)
+
+    @impl true
+    def run_turn(session, prompt, issue, opts) do
+      {:ok, _result} = Claude.run_turn(session, prompt, issue, opts)
+
+      case Keyword.fetch!(opts, :failure) do
+        :raise -> raise ArgumentError, "ordinary backend failure"
+        :exit -> exit(:ordinary_backend_exit)
+        :unknown -> {:error, {:managed_execution_unknown, :fixture_transport}}
+        :unknown_exit -> exit({:managed_execution_unknown, :fixture_transport})
+      end
+    end
+
+    @impl true
+    def stop_session(session), do: Claude.stop_session(session)
+  end
+
+  for failure <- [:raise, :exit] do
+    test "managed after-run is best effort after a real session #{failure}" do
+      {context, opts} = failing_managed_runner_fixture!()
+      issue = %Issue{id: "failure", identifier: "FAIL-1"}
+      run = fn -> AgentRunner.run(issue, nil, opts ++ [failure: unquote(failure)]) end
+
+      case unquote(failure) do
+        :raise -> assert_raise ArgumentError, "ordinary backend failure", run
+        :exit -> assert catch_exit(run.()) == :ordinary_backend_exit
+      end
+
+      assert File.read!(Path.join(context.workspace_path, "turn-completed")) == "done"
+      assert File.read!(Path.join(context.workspace_path, "after-run")) == "attempted"
+    end
+  end
+
+  for failure <- [:unknown, :unknown_exit] do
+    test "managed transport #{failure} forbids after-run following a real session" do
+      {context, opts} = failing_managed_runner_fixture!()
+      issue = %Issue{id: "unknown", identifier: "UNKNOWN-1"}
+
+      assert catch_exit(AgentRunner.run(issue, nil, opts ++ [failure: unquote(failure)])) ==
+               {:managed_execution_unknown, :fixture_transport}
+
+      assert File.read!(Path.join(context.workspace_path, "turn-completed")) == "done"
+      refute File.exists?(Path.join(context.workspace_path, "after-run"))
+    end
+  end
+
+  defp failing_managed_runner_fixture! do
+    root = Path.join(System.tmp_dir!(), "symphony-managed-runner-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(root) end)
+    target = managed_shell_target!(root)
+    command = Path.join(root, "claude")
+
+    File.write!(command, """
+    #!/bin/sh
+    cat >/dev/null
+    printf done > turn-completed
+    printf '%s\\n' '{"type":"system","subtype":"init","session_id":"managed-failure"}'
+    printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"result":"done"}'
+    """)
+
+    File.chmod!(command, 0o700)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      tracker_kind: "memory",
+      agent_backend: "claude",
+      claude_command: command,
+      claude_allowed_tools: nil,
+      hook_after_run: "printf attempted > after-run; exit 9"
+    )
+
+    context = %ExecutionContext{
+      mode: :managed,
+      workspace_root: root,
+      workspace_path: Path.join(root, "ticket"),
+      target: target
+    }
+
+    {context, [backend_module: FailingManagedBackend, execution_context: context]}
+  end
 
   test "managed workspaces retain their persisted path across issue renames" do
     root = Path.join(System.tmp_dir!(), "symphony-managed-path-#{System.unique_integer([:positive])}")
@@ -11,7 +99,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_create: "printf retained > retained")
     target = managed_shell_target!(root)
 
-    context = %SymphonyElixir.ExecutionContext{
+    context = %ExecutionContext{
       mode: :managed,
       workspace_root: root,
       workspace_path: Path.join(root, "persisted-key"),
@@ -43,7 +131,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     target = managed_shell_target!(root)
 
     for path <- [root, Path.join(root, "escape")] do
-      context = %SymphonyElixir.ExecutionContext{mode: :managed, workspace_root: root, workspace_path: path, target: target}
+      context = %ExecutionContext{mode: :managed, workspace_root: root, workspace_path: path, target: target}
       assert {:error, _} = Workspace.create_for_issue("IGNORED", context)
       assert {:error, _, _} = Workspace.remove(path, context)
     end
@@ -60,7 +148,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     File.write!(Path.join(workspace, "keep"), "retained")
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_remove: "touch hook-ran; exit 9")
     target = managed_shell_target!(root)
-    context = %SymphonyElixir.ExecutionContext{mode: :managed, workspace_root: root, workspace_path: workspace, target: target}
+    context = %ExecutionContext{mode: :managed, workspace_root: root, workspace_path: workspace, target: target}
     assert :ok = Workspace.run_before_remove_hook(workspace, "RETAIN-1", context)
     assert File.exists?(Path.join(workspace, "hook-ran"))
     assert File.read!(Path.join(workspace, "keep")) == "retained"
@@ -68,7 +156,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "managed before-run timeout reports unknown execution without running after-run" do
     {root, context, hook, release} = delayed_managed_hook_fixture!()
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_run: hook, hook_after_run: "touch after-run", hook_timeout_ms: 2_000)
+    hooks = [hook_before_run: hook, hook_after_run: "touch after-run", hook_timeout_ms: 2_000]
+    write_workflow_file!(Workflow.workflow_file_path(), [workspace_root: root] ++ hooks)
     issue = %Issue{id: "managed-timeout", identifier: "TIMEOUT-1", state: "In Progress"}
 
     assert {:managed_execution_unknown, {:remote_command_timeout, "before_run", 2_000}} =
@@ -82,7 +171,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "managed after-create timeout retains workspace while the remote hook is unconfirmed" do
     {root, context, hook, release} = delayed_managed_hook_fixture!()
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_create: hook, hook_timeout_ms: 2_000)
+    hooks = [hook_after_create: hook, hook_timeout_ms: 2_000]
+    write_workflow_file!(Workflow.workflow_file_path(), [workspace_root: root] ++ hooks)
 
     assert {:error, {:managed_execution_unknown, {:remote_command_timeout, "after_create", 2_000}}} =
              Workspace.create_for_issue("TIMEOUT-2", context)
@@ -97,7 +187,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     {root, context, hook, release} = delayed_managed_hook_fixture!()
     File.mkdir_p!(context.workspace_path)
     File.write!(Path.join(context.workspace_path, "retained"), "keep")
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_remove: hook, hook_timeout_ms: 2_000)
+    hooks = [hook_before_remove: hook, hook_timeout_ms: 2_000]
+    write_workflow_file!(Workflow.workflow_file_path(), [workspace_root: root] ++ hooks)
 
     assert {:error, {:managed_execution_unknown, {:remote_command_timeout, "before_remove", 2_000}}, ""} =
              Workspace.remove(context.workspace_path, context)
@@ -127,7 +218,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end)
 
     hook = "trap '' HUP; printf '%s' \"$$\" > '#{pidfile}'; printf started > '#{started}'; IFS= read -r token < '#{gate}'; printf finished > delayed"
-    context = %SymphonyElixir.ExecutionContext{mode: :managed, workspace_root: root, workspace_path: workspace, target: target}
+    context = %ExecutionContext{mode: :managed, workspace_root: root, workspace_path: workspace, target: target}
 
     release = fn ->
       assert {_, 0} = System.cmd("kill", ["-0", String.trim(File.read!(pidfile))], stderr_to_stdout: true)

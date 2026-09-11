@@ -22,6 +22,7 @@ defmodule SymphonyElixirWeb.Presenter do
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           environments: Map.get(snapshot, :environments, []),
+          environment_discovery: Map.get(snapshot, :environment_discovery),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits
         }
@@ -86,10 +87,14 @@ defmodule SymphonyElixirWeb.Presenter do
         codex_session_logs: []
       },
       recent_events: recent_events_payload(running || blocked),
-      last_error: (blocked && blocked.error) || (retry && retry.error),
+      last_error: issue_error(blocked, retry),
       tracked: %{}
     }
   end
+
+  defp issue_error(%{error: error}, _retry) when not is_nil(error), do: error
+  defp issue_error(_blocked, %{error: error}), do: error
+  defp issue_error(_blocked, _retry), do: nil
 
   defp issue_id_from_entries(running, retry, blocked),
     do: (running && running.issue_id) || (retry && retry.issue_id) || (blocked && blocked.issue_id)

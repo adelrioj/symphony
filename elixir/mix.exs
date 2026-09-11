@@ -15,6 +15,8 @@ defmodule SymphonyElixir.MixProject do
         ignore_modules: coverage_ignore_modules()
       ],
       test_ignore_filters: [
+        "test/support/managed_environment_fixture/control.exs",
+        "test/support/managed_environment_fixture/provider.exs",
         "test/support/snapshot_support.exs",
         "test/support/test_support.exs"
       ],

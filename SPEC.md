@@ -2624,6 +2624,12 @@ unresolved work; protection MUST be reacquired before a later allocation. Mutabl
 polling, deadlines and retention are not identity fields; jobs retain captured runtime settings.
 Provider template drift MUST NOT silently redefine retained environments.
 
+A surviving orchestrator may reacquire the same accepted identity after replacement of the identity
+authority only when that replacement is established. An invalid token alone is insufficient:
+replacement by a competing owner within the same authority generation MUST continue to fence the
+old owner. Authority recovery MUST NOT adopt a previously rejected on-disk identity change while
+owned resources or unresolved operations may survive.
+
 ### B.2 Startup, Execution Capacity, and Recovery
 
 Startup MUST preflight and completely inventory the selected deployment before dispatch. Partial,
@@ -2632,6 +2638,10 @@ reconstruct identity, workspace, template, desired state, first terminal observa
 and pending mutation outcomes. A lost orchestrator PID or missing transport is not remote stop proof.
 Recovered potentially executing resources MUST be reconciled before reuse; unknown creates/starts
 MUST prevent duplicate allocation.
+
+An authoritatively observed metadata payload MUST remain resolved across restart without requiring
+indefinite retention of its completed operation history. Missing operation history alone MUST NOT
+resolve genuinely ambiguous create, start, stop, or delete mutations.
 
 The existing configurable global and per-state agent limits govern capacity; the reference deployment
 example uses `agent.max_concurrent_agents: 5`, not a separate hard-coded managed limit. Reservations,
@@ -2647,6 +2657,11 @@ A failed stop MUST NOT become successful cancellation. Provider operations and h
 supervised jobs outside the scheduling callback, carrying one monotonic-millisecond deadline.
 Opaque attempt and operation generations MUST fence stale launch/results; stale connection leases
 must still be cleaned locally without granting stale launch authority.
+
+A definitively rejected initial create may contribute qualified no-compute evidence only after
+complete authoritative parent and backing/child inventory, with no earlier ambiguous mutation.
+Denial alone is not absence proof. Remaining owned artifacts stay discoverable, and ordinary
+stop/reconciliation and retry policy still apply.
 
 ### B.3 Retention, Reopen, and Cleanup
 
@@ -2693,6 +2708,13 @@ without raw error text; unknown phase without a captured failure still exposes s
 Records, metadata, credentials/auth references, SSH arguments/environment, connection material and
 raw CLI/provider output MUST NOT be serialized. Logs likewise use redacted categories while
 retaining issue ID/identifier and agent session ID where applicable.
+
+Snapshots and `GET /api/v1/state` also expose `environment_discovery`: null for local/static execution,
+otherwise a safe map containing `provider_kind`, `status` (`pending`, `ready`, or `blocked`), and
+`error_code`. The error code is null or a fixed category (`denied`, `invalid`, `retryable`, `unknown`,
+`authority_replaced`, or `unresolved`), never raw provider/configuration text. Pending or blocked
+discovery MUST remain visible in the dashboard and terminal status even when `environments` is
+empty. This global status does not change the meaning of agent running/retrying/blocked counts.
 
 `GET /api/v1/<issue_identifier>` MUST find retained environments even without running/retrying/blocked
 agent entries. It adds `environment` with the same projection (null for unmanaged issues), reports

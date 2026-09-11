@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Workspace do
   alias SymphonyElixir.{Config, ExecutionContext, PathSafety, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
+  @type hook_result :: :ok | {:error, {:managed_execution_unknown, term()}}
 
   @spec create_for_issue(map() | String.t() | nil, ExecutionContext.t()) ::
           {:ok, Path.t()} | {:error, term()}
@@ -114,20 +115,23 @@ defmodule SymphonyElixir.Workspace do
   end
 
   def remove(workspace, %ExecutionContext{} = worker_host) do
-    with :ok <- run_before_remove_hook(workspace, Path.basename(workspace), worker_host) do
-      script =
-        [
-          remote_workspace_guard(workspace, worker_host),
-          "rm -rf \"$workspace\""
-        ]
-        |> Enum.join("\n")
+    case run_before_remove_hook(workspace, Path.basename(workspace), worker_host) do
+      :ok -> remove_remote_workspace(workspace, worker_host)
+      {:error, reason} -> {:error, reason, ""}
+    end
+  end
 
-      case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms, :workspace_remove) do
-        {:ok, {_output, 0}} -> {:ok, []}
-        {:ok, {output, status}} -> {:error, {:workspace_remove_failed, worker_host.worker_host, status, output}, ""}
-        {:error, reason} -> {:error, reason, ""}
-      end
-    else
+  defp remove_remote_workspace(workspace, worker_host) do
+    script =
+      [
+        remote_workspace_guard(workspace, worker_host),
+        "rm -rf \"$workspace\""
+      ]
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms, :workspace_remove) do
+      {:ok, {_output, 0}} -> {:ok, []}
+      {:ok, {output, status}} -> {:error, {:workspace_remove_failed, worker_host.worker_host, status, output}, ""}
       {:error, reason} -> {:error, reason, ""}
     end
   end
@@ -192,7 +196,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) :: :ok | {:error, {:managed_execution_unknown, term()}}
+  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) :: hook_result()
   def run_after_run_hook(workspace, issue_or_identifier, %ExecutionContext{} = worker_host) when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
@@ -296,7 +300,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  @spec run_before_remove_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) :: :ok | {:error, {:managed_execution_unknown, term()}}
+  @spec run_before_remove_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) :: hook_result()
   def run_before_remove_hook(workspace, issue, %ExecutionContext{} = context) do
     case Config.settings!().hooks.before_remove do
       nil ->
@@ -395,26 +399,35 @@ defmodule SymphonyElixir.Workspace do
       invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root) ->
         {:error, {:workspace_path_unreadable, workspace, :invalid_characters}}
 
-      context.mode == :managed and workspace != context.workspace_path ->
-        {:error, {:workspace_path_unreadable, workspace, :identity_mismatch}}
-
-      context.mode == :managed ->
-        case run_remote_command(context, remote_workspace_guard(workspace, context), Config.settings!().hooks.timeout_ms) do
-          {:ok, {_output, 0}} -> :ok
-          {:ok, {output, status}} -> {:error, {:workspace_path_unreadable, workspace, {status, output}}}
-          {:error, _reason} = error -> error
-        end
-
       true ->
-        :ok
+        validate_managed_workspace_path(workspace, context)
     end
   end
+
+  defp validate_managed_workspace_path(workspace, %ExecutionContext{mode: :managed} = context) do
+    if workspace == context.workspace_path do
+      script = remote_workspace_guard(workspace, context)
+      timeout_ms = Config.settings!().hooks.timeout_ms
+
+      case run_remote_command(context, script, timeout_ms) do
+        {:ok, {_output, 0}} -> :ok
+        {:ok, {output, status}} -> {:error, {:workspace_path_unreadable, workspace, {status, output}}}
+        {:error, _reason} = error -> error
+      end
+    else
+      {:error, {:workspace_path_unreadable, workspace, :identity_mismatch}}
+    end
+  end
+
+  defp validate_managed_workspace_path(_workspace, _context), do: :ok
 
   defp invalid_remote_path?(path) when is_binary(path), do: String.match?(path, ~r/[\x00-\x1f\x7f]/)
   defp invalid_remote_path?(_path), do: true
 
   defp remote_workspace_guard(workspace, %ExecutionContext{mode: :managed} = context) do
-    if invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root) or workspace != context.workspace_path do
+    invalid_path? = invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root)
+
+    if invalid_path? or workspace != context.workspace_path do
       "exit 64"
     else
       [

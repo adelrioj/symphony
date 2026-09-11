@@ -9,7 +9,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   def start(supervisor, adapter, config, entry, operation, opts) do
     opts = Keyword.put(opts, :task_supervisor, supervisor)
     operation_fun = Keyword.get(opts, :operation_fun, &run/5)
-    task = Task.Supervisor.async_nolink(supervisor, fn -> {entry.operation_id, operation_fun.(adapter, config, entry, operation, opts)} end)
+    run = fn -> {entry.operation_id, operation_fun.(adapter, config, entry, operation, opts)} end
+    task = Task.Supervisor.async_nolink(supervisor, run)
     {:ok, task}
   end
 
@@ -18,7 +19,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     token = {:discovery, make_ref()}
     opts = Keyword.put(opts, :task_supervisor, supervisor)
     operation_fun = Keyword.get(opts, :operation_fun, &run/5)
-    task = Task.Supervisor.async_nolink(supervisor, fn -> {token, operation_fun.(adapter, config, nil, :discover, opts)} end)
+    run = fn -> {token, operation_fun.(adapter, config, nil, :discover, opts)} end
+    task = Task.Supervisor.async_nolink(supervisor, run)
     {:ok, task, token}
   end
 
@@ -26,9 +28,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   def run(adapter, config, nil, :discover, opts) do
     opts = deadline_options(config, :discover, opts)
 
-    with :ok <- invoke(adapter, :preflight, [config], opts),
-         {:ok, records} <- invoke(adapter, :discover, [config], opts) do
-      {:ok, records}
+    with :ok <- invoke(adapter, :preflight, [config], opts) do
+      invoke(adapter, :discover, [config], opts)
     end
   end
 
@@ -98,10 +99,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     if node(authority) == node() and node(donor) == node() and Process.alive?(authority) and Process.alive?(donor) do
       id = make_ref()
 
-      case Task.Supervisor.start_child(supervisor, fn -> holder(authority, donor, id, nil, [], paths) end) do
-        {:ok, owner} -> acknowledge_staged_paths({:staged_paths, owner, id})
-        {:error, _} -> {:error, {:unknown, :connection_holder_failed}}
-      end
+      start_staged_holder(supervisor, authority, donor, id, paths)
     else
       {:error, {:invalid, :connection_authority}}
     end
@@ -110,6 +108,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   end
 
   def stage_private_paths(_supervisor, _authority, _donor, _paths), do: {:error, {:invalid, :connection_authority}}
+
+  defp start_staged_holder(supervisor, authority, donor, id, paths) do
+    start = fn -> holder(authority, donor, id, nil, [], paths) end
+
+    case Task.Supervisor.start_child(supervisor, start) do
+      {:ok, owner} -> acknowledge_staged_paths({:staged_paths, owner, id})
+      {:error, _} -> {:error, {:unknown, :connection_holder_failed}}
+    end
+  end
 
   @spec release_staged_paths(staged_paths()) :: :ok | {:error, term()}
   def release_staged_paths({:staged_paths, owner, id}) do
@@ -140,23 +147,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
     if node(authority) == node() and Process.alive?(authority) do
       case Keyword.get(opts, :staged_paths) do
-        nil ->
-          id = make_ref()
-
-          if Enum.all?(ports, &(Port.info(&1, :connected) == {:connected, donor})) do
-            case Task.Supervisor.start_child(supervisor, fn -> holder(authority, donor, id, target, ports, paths) end) do
-              {:ok, owner} -> adopt_connection(owner, id, target, ports)
-              {:error, _} -> {:error, {:unknown, :connection_holder_failed}}
-            end
-          else
-            {:error, {:invalid, :connection_ports}}
-          end
-
-        {:staged_paths, owner, id} ->
-          promote_connection(owner, id, authority, donor, target, ports, paths)
-
-        _ ->
-          {:error, {:invalid, :staged_paths}}
+        nil -> open_unstaged_connection(supervisor, authority, donor, target, ports, paths)
+        {:staged_paths, owner, id} -> promote_connection(owner, id, authority, donor, target, ports, paths)
+        _ -> {:error, {:invalid, :staged_paths}}
       end
     else
       {:error, {:invalid, :connection_authority}}
@@ -168,6 +161,24 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   end
 
   def open_connection(_supervisor, _authority, _target, _opts), do: {:error, {:invalid, :connection_authority}}
+
+  defp open_unstaged_connection(supervisor, authority, donor, target, ports, paths) do
+    if Enum.all?(ports, &(Port.info(&1, :connected) == {:connected, donor})) do
+      id = make_ref()
+      start_connection_holder(supervisor, authority, donor, id, target, ports, paths)
+    else
+      {:error, {:invalid, :connection_ports}}
+    end
+  end
+
+  defp start_connection_holder(supervisor, authority, donor, id, target, ports, paths) do
+    start = fn -> holder(authority, donor, id, target, ports, paths) end
+
+    case Task.Supervisor.start_child(supervisor, start) do
+      {:ok, owner} -> adopt_connection(owner, id, target, ports)
+      {:error, _} -> {:error, {:unknown, :connection_holder_failed}}
+    end
+  end
 
   @spec close_connection(Connection.t()) :: :ok | {:error, term()}
   def close_connection(%Connection{owner: owner, id: id}) do
@@ -199,29 +210,27 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   end
 
   defp adopt_connection(owner, id, target, ports) do
-    try do
-      Enum.each(ports, fn port ->
-        true = Port.connect(port, owner)
-        Process.unlink(port)
-      end)
+    Enum.each(ports, fn port ->
+      true = Port.connect(port, owner)
+      Process.unlink(port)
+    end)
 
-      case GenServer.call(owner, {:adopt_connection, id}, 1_000) do
-        :ok ->
-          {:ok, %Connection{owner: owner, id: id, target: target}}
+    case GenServer.call(owner, {:adopt_connection, id}, 1_000) do
+      :ok ->
+        {:ok, %Connection{owner: owner, id: id, target: target}}
 
-        _ ->
-          close_connection(%Connection{owner: owner, id: id, target: target})
-          {:error, {:unknown, :connection_adoption_failed}}
-      end
-    rescue
       _ ->
         close_connection(%Connection{owner: owner, id: id, target: target})
         {:error, {:unknown, :connection_adoption_failed}}
-    catch
-      :exit, _ ->
-        close_connection(%Connection{owner: owner, id: id, target: target})
-        {:error, {:unknown, :connection_adoption_failed}}
     end
+  rescue
+    _ ->
+      close_connection(%Connection{owner: owner, id: id, target: target})
+      {:error, {:unknown, :connection_adoption_failed}}
+  catch
+    :exit, _ ->
+      close_connection(%Connection{owner: owner, id: id, target: target})
+      {:error, {:unknown, :connection_adoption_failed}}
   end
 
   defp holder(authority, donor, id, target, ports, paths) do
@@ -231,9 +240,22 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     # Cleanup must retain promoted ports even if the holder loop exits exceptionally.
     Process.put({__MODULE__, :owned_ports}, ports)
 
+    state = %{
+      authority: authority,
+      authority_ref: authority_ref,
+      donor: donor,
+      donor_ref: donor_ref,
+      id: id,
+      target: target,
+      ports: ports,
+      paths: paths,
+      adopted?: false,
+      retained_ports: []
+    }
+
     result =
       try do
-        holder_loop(%{authority: authority, authority_ref: authority_ref, donor: donor, donor_ref: donor_ref, id: id, target: target, ports: ports, paths: paths, adopted?: false, retained_ports: []})
+        holder_loop(state)
       catch
         _kind, _reason -> :holder_failed
       end
@@ -248,99 +270,115 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
   defp holder_loop(state) do
     receive do
-      {:"$gen_call", from, {:stage_paths, id}} when id == state.id and is_nil(state.target) ->
-        if Process.alive?(state.authority) and Process.alive?(state.donor) do
-          GenServer.reply(from, :ok)
-          holder_loop(state)
-        else
-          GenServer.reply(from, {:error, :connection_closed})
-        end
+      message -> holder_message(message, state)
+    end
+  end
 
-      {:"$gen_call", from, {:create_staged_directory, id, directory}} when id == state.id and is_nil(state.target) ->
-        result =
-          if directory in state.paths and Process.alive?(state.authority) and Process.alive?(state.donor) do
-            create_private_directory(directory)
-          else
-            {:error, {:invalid, :staged_directory}}
-          end
+  defp holder_call({:stage_paths, id}, from, %{id: id, target: nil} = state) do
+    if live_owners?(state) do
+      GenServer.reply(from, :ok)
+      holder_loop(state)
+    else
+      GenServer.reply(from, {:error, :connection_closed})
+    end
+  end
 
-        GenServer.reply(from, result)
-        holder_loop(state)
+  defp holder_call({:create_staged_directory, id, directory}, from, %{id: id, target: nil} = state) do
+    result =
+      if directory in state.paths and live_owners?(state) do
+        create_private_directory(directory)
+      else
+        {:error, {:invalid, :staged_directory}}
+      end
 
-      {:"$gen_call", from, {:start_staged_port, id, donor, executable, args, opts}}
-      when id == state.id and donor == state.donor and is_nil(state.target) ->
-        case start_owned_port(executable, args, opts) do
-          {:ok, port} ->
-            ports = [port | state.ports]
-            Process.put({__MODULE__, :owned_ports}, ports)
-            GenServer.reply(from, {:ok, port})
-            retained = if Keyword.get(opts, :retain_on_exit, false), do: [port | state.retained_ports], else: state.retained_ports
-            holder_loop(%{state | ports: ports, retained_ports: retained})
+    GenServer.reply(from, result)
+    holder_loop(state)
+  end
 
-          error ->
-            GenServer.reply(from, error)
-            holder_loop(state)
-        end
+  defp holder_call({:start_staged_port, id, src, bin, args, opts}, from, %{id: id, donor: src, target: nil} = state) do
+    case start_owned_port(bin, args, opts) do
+      {:ok, port} ->
+        ports = [port | state.ports]
+        Process.put({__MODULE__, :owned_ports}, ports)
+        GenServer.reply(from, {:ok, port})
+        retain? = Keyword.get(opts, :retain_on_exit, false)
+        retained = if retain?, do: [port | state.retained_ports], else: state.retained_ports
+        holder_loop(%{state | ports: ports, retained_ports: retained})
 
-      {:"$gen_call", from, {:promote_connection, id, authority, donor, %Target{} = target, ports, paths}}
-      when id == state.id and authority == state.authority and donor == state.donor and paths === state.paths and ports === state.ports and is_nil(state.target) ->
-        if Process.alive?(authority) and Process.alive?(donor) and live_ports?(ports) do
-          GenServer.reply(from, :ok)
-          holder_loop(%{state | target: target, ports: ports})
-        else
-          GenServer.reply(from, {:error, :invalid_connection})
-          holder_loop(state)
-        end
-
-      {:"$gen_call", from, {:adopt_connection, id}} when id == state.id and not is_nil(state.target) ->
-        if live_ports?(state.ports) and Process.alive?(state.authority) do
-          GenServer.reply(from, :ok)
-          holder_loop(%{state | adopted?: true})
-        else
-          GenServer.reply(from, {:error, :connection_closed})
-        end
-
-      {:"$gen_call", from, {:validate_connection, id, target}} ->
-        valid = state.adopted? and id == state.id and target === state.target and live_ports?(state.ports) and Process.alive?(state.authority)
-        GenServer.reply(from, if(valid, do: :ok, else: {:error, :invalid_connection}))
-        holder_loop(state)
-
-      {:"$gen_call", from, {:release_connection, id}} when id == state.id ->
-        {:release, from}
-
-      {:"$gen_call", from, _request} ->
-        GenServer.reply(from, {:error, :invalid_connection})
-        holder_loop(state)
-
-      {:DOWN, ref, :process, _, _} when ref == state.authority_ref ->
-        :ok
-
-      {:DOWN, ref, :process, _, :normal} when ref == state.donor_ref and state.adopted? ->
-        holder_loop(%{state | donor_ref: nil})
-
-      {:DOWN, ref, :process, _, _} when ref == state.donor_ref ->
-        :ok
-
-      {port, {:data, data}} when is_port(port) ->
-        if not state.adopted?, do: send(state.donor, {port, {:data, data}})
-        holder_loop(state)
-
-      {port, {:exit_status, status}} when is_port(port) ->
-        if not state.adopted?, do: send(state.donor, {port, {:exit_status, status}})
-        if not state.adopted? and port in state.retained_ports, do: holder_loop(state), else: :ok
-
-      {:EXIT, port, reason} when is_port(port) ->
-        retain? = not state.adopted? and port in state.retained_ports
-        if not state.adopted? and (not retain? or reason != :normal), do: send(state.donor, {:EXIT, port, reason})
-        if retain?, do: holder_loop(state), else: :ok
-
-      {:EXIT, _, _} ->
-        :ok
-
-      _ ->
+      error ->
+        GenServer.reply(from, error)
         holder_loop(state)
     end
   end
+
+  defp holder_call(
+         {:promote_connection, id, authority, donor, %Target{} = target, ports, paths},
+         from,
+         %{id: id, authority: authority, donor: donor, target: nil, ports: ports, paths: paths} = state
+       ) do
+    if live_owners?(state) and live_ports?(ports) do
+      GenServer.reply(from, :ok)
+      holder_loop(%{state | target: target, ports: ports})
+    else
+      GenServer.reply(from, {:error, :invalid_connection})
+      holder_loop(state)
+    end
+  end
+
+  defp holder_call({:adopt_connection, id}, from, %{id: id, target: target} = state) when not is_nil(target) do
+    if live_ports?(state.ports) and Process.alive?(state.authority) do
+      GenServer.reply(from, :ok)
+      holder_loop(%{state | adopted?: true})
+    else
+      GenServer.reply(from, {:error, :connection_closed})
+    end
+  end
+
+  defp holder_call({:validate_connection, id, target}, from, state) do
+    valid = state.adopted? and id == state.id and target === state.target
+    valid = valid and live_ports?(state.ports) and Process.alive?(state.authority)
+    GenServer.reply(from, if(valid, do: :ok, else: {:error, :invalid_connection}))
+    holder_loop(state)
+  end
+
+  defp holder_call({:release_connection, id}, from, %{id: id}), do: {:release, from}
+
+  defp holder_call(_request, from, state) do
+    GenServer.reply(from, {:error, :invalid_connection})
+    holder_loop(state)
+  end
+
+  defp holder_message({:"$gen_call", from, request}, state), do: holder_call(request, from, state)
+
+  defp holder_message({:DOWN, ref, :process, _, _}, %{authority_ref: ref}), do: :ok
+
+  defp holder_message({:DOWN, ref, :process, _, :normal}, %{donor_ref: ref, adopted?: true} = state) do
+    holder_loop(%{state | donor_ref: nil})
+  end
+
+  defp holder_message({:DOWN, ref, :process, _, _}, %{donor_ref: ref}), do: :ok
+
+  defp holder_message({port, {:data, _}} = message, state) when is_port(port) do
+    if not state.adopted?, do: send(state.donor, message)
+    holder_loop(state)
+  end
+
+  defp holder_message({port, {:exit_status, _}} = message, state) when is_port(port) do
+    if not state.adopted?, do: send(state.donor, message)
+    if retained_port?(state, port), do: holder_loop(state), else: :ok
+  end
+
+  defp holder_message({:EXIT, port, reason} = message, state) when is_port(port) do
+    retain? = retained_port?(state, port)
+    if not state.adopted? and (not retain? or reason != :normal), do: send(state.donor, message)
+    if retain?, do: holder_loop(state), else: :ok
+  end
+
+  defp holder_message({:EXIT, _, _}, _state), do: :ok
+  defp holder_message(_message, state), do: holder_loop(state)
+
+  defp retained_port?(state, port), do: not state.adopted? and port in state.retained_ports
+  defp live_owners?(state), do: Process.alive?(state.authority) and Process.alive?(state.donor)
 
   defp create_private_directory(directory) do
     with :ok <- File.mkdir(directory),
@@ -414,13 +452,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
       if command_opts[:timeout_ms] <= 0 do
         {:error, {:unknown, :readiness_timeout}}
       else
-        case command_fun.(target.executable, target.prefix ++ [SSH.remote_shell_command(command)], command_opts) do
-          {:ok, %{status: 0}} -> :ok
-          {:ok, %{status: _}} -> {:error, {:invalid, :worker_readiness}}
-          {:error, {:unknown, _}} -> {:error, {:unknown, :readiness_timeout_or_transport}}
-          {:error, _} -> {:error, {:unknown, :readiness_transport}}
-        end
+        run_readiness(command_fun, target, command, command_opts)
       end
+    end
+  end
+
+  defp run_readiness(command_fun, target, command, opts) do
+    case command_fun.(target.executable, target.prefix ++ [SSH.remote_shell_command(command)], opts) do
+      {:ok, %{status: 0}} -> :ok
+      {:ok, %{status: _}} -> {:error, {:invalid, :worker_readiness}}
+      {:error, {:unknown, _}} -> {:error, {:unknown, :readiness_timeout_or_transport}}
+      {:error, _} -> {:error, {:unknown, :readiness_transport}}
     end
   end
 
@@ -472,17 +514,21 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     else
       case mutate(adapter, :inspect, config, record, opts) do
         {:ok, latest} ->
-          if reached?(latest, expected) do
-            {:ok, latest}
-          else
-            sleep = Keyword.get(opts, :sleep_fun, &Process.sleep/1)
-            sleep.(min(1_000, remaining(opts)))
-            poll(adapter, config, latest, expected, opts)
-          end
+          continue_poll(adapter, config, latest, expected, opts)
 
         error ->
           error
       end
+    end
+  end
+
+  defp continue_poll(adapter, config, record, expected, opts) do
+    if reached?(record, expected) do
+      {:ok, record}
+    else
+      sleep = Keyword.get(opts, :sleep_fun, &Process.sleep/1)
+      sleep.(min(1_000, remaining(opts)))
+      poll(adapter, config, record, expected, opts)
     end
   end
 

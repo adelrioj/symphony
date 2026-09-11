@@ -1,13 +1,23 @@
 Code.require_file("../support/managed_environment_fixture/provider.exs", __DIR__)
+Code.require_file("../support/managed_environment_fixture/control.exs", __DIR__)
 
 defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.{AgentRunner, AgentRuntimeSupervisor, Config, ExecutionEnvironment, Orchestrator, SSH, Tracker, Workflow, WorkflowStore}
-  alias SymphonyElixir.ExecutionEnvironment.{Command, Lifecycle, Operations}
+  alias SymphonyElixir.AgentRunner
+  alias SymphonyElixir.AgentRuntimeSupervisor
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.ExecutionEnvironment
+  alias SymphonyElixir.ExecutionEnvironment.Command
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
-  alias SymphonyElixir.ManagedEnvironmentFixture.Provider
+  alias SymphonyElixir.ExecutionEnvironment.Lifecycle
+  alias SymphonyElixir.ExecutionEnvironment.Operations
+  alias SymphonyElixir.ManagedEnvironmentFixture.{Control, Provider}
+  alias SymphonyElixir.Orchestrator
+  alias SymphonyElixir.SSH
   alias SymphonyElixir.Tracker.Issue
+  alias SymphonyElixir.Workflow
+  alias SymphonyElixir.WorkflowStore
 
   @moduletag :live_e2e
   @moduletag timeout: 1_800_000
@@ -23,78 +33,6 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     defexception [:code]
     @impl true
     def message(error), do: error.code
-  end
-
-  # Memory notifications are applied by one owner, never by racing test/runner processes.
-  defmodule Control do
-    use GenServer
-    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
-    @impl true
-    def init(opts) do
-      limit = if is_integer(opts[:session_limit]) and opts[:session_limit] > 0, do: opts[:session_limit], else: 0
-
-      {:ok,
-       %{
-         issues: [],
-         faults: MapSet.new(),
-         events: [],
-         sessions: 0,
-         limit: limit,
-         baseline: nil,
-         allocation_started: false,
-         interrupted: false,
-         checks: Map.new(opts[:checks], &{&1, %{name: &1, status: :not_run}})
-       }}
-    end
-
-    @impl true
-    def handle_call({:issues, issues}, _from, state) do
-      Application.put_env(:symphony_elixir, :memory_tracker_issues, issues)
-      {:reply, :ok, %{state | issues: issues}}
-    end
-
-    def handle_call({:transition, id, next}, _from, state) do
-      :ok = Tracker.Memory.update_issue_state(id, next)
-
-      receive do
-        {:memory_tracker_state_update, ^id, ^next} -> :ok
-      after
-        1_000 -> raise "Memory transition notification unavailable"
-      end
-
-      {:reply, :ok, apply_transition(state, id, next)}
-    end
-
-    def handle_call({:fault, action, key}, _from, state) do
-      faults = if action == :arm, do: MapSet.put(state.faults, key), else: MapSet.delete(state.faults, key)
-      {:reply, :ok, %{state | faults: faults}}
-    end
-
-    def handle_call({:armed?, key}, _from, state), do: {:reply, MapSet.member?(state.faults, key), state}
-    def handle_call({:event, event}, _from, state), do: {:reply, :ok, %{state | events: Enum.take([event | state.events], 512)}}
-    def handle_call({:check, name, result}, _from, state), do: {:reply, :ok, %{state | checks: Map.put(state.checks, name, Map.merge(%{name: name}, result))}}
-    def handle_call({:baseline, baseline}, _from, state), do: {:reply, :ok, %{state | baseline: baseline}}
-    def handle_call(:allocation_started, _from, state), do: {:reply, :ok, %{state | allocation_started: true}}
-    def handle_call(:clear_faults, _from, state), do: {:reply, :ok, %{state | faults: MapSet.new()}}
-
-    def handle_call({:interrupted, evidence}, _from, state),
-      do: {:reply, :ok, %{state | interrupted: true, sessions: evidence["backend_sessions"] || 0, events: Enum.reverse(evidence["events"] || [])}}
-
-    def handle_call(:session, _from, state) do
-      allowed = state.sessions < state.limit
-      {:reply, allowed, %{state | sessions: state.sessions + if(allowed, do: 1, else: 0)}}
-    end
-
-    def handle_call(:snapshot, _from, state), do: {:reply, state, state}
-    @impl true
-    def handle_info({:memory_tracker_state_update, id, next}, state), do: {:noreply, apply_transition(state, id, next)}
-    def handle_info({:memory_tracker_comment, _, _}, state), do: {:noreply, state}
-
-    defp apply_transition(state, id, next) do
-      issues = Enum.map(state.issues, fn issue -> if issue.id == id, do: %{issue | state: next}, else: issue end)
-      Application.put_env(:symphony_elixir, :memory_tracker_issues, issues)
-      %{state | issues: issues}
-    end
   end
 
   setup do
@@ -115,76 +53,83 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       Workflow.set_workflow_file_path(original_path)
     end)
 
-    try do
-      input = required_absolute_env!("SYMPHONY_MANAGED_E2E_WORKFLOW")
+    result =
+      try do
+        input = required_absolute_env!("SYMPHONY_MANAGED_E2E_WORKFLOW")
 
-      document =
-        case Workflow.load(input) do
-          {:ok, document} -> document
-          _ -> require!(false, "authorized_workflow_unreadable_or_invalid")
-        end
+        document =
+          case Workflow.load(input) do
+            {:ok, document} -> document
+            _ -> require!(false, "authorized_workflow_unreadable_or_invalid")
+          end
 
-      workflow_path = Path.join(run_root, "WORKFLOW")
-      # Install probes only after prerequisite validation, so absent profile values cannot crash setup.
-      raw = qualification_workflow(document.config, run_id)
-      write_private!(workflow_path, workflow_document(raw))
-      Workflow.set_workflow_file_path(workflow_path)
-      require!(match?({:ok, _}, Config.settings()), "qualification_workflow_invalid")
-      config = EnvironmentConfig.runtime(Config.settings!())
-      require!(is_map(config) and config.kind in ["google_workstations", "kubernetes"], "managed_provider_required")
-      {:ok, adapter} = ExecutionEnvironment.adapter(config.kind)
-      profile = Map.get(config.provider, "qualification", %{})
-      require!(is_map(profile), "qualification_profile_required")
-      check_names = if config.kind == "kubernetes", do: @checks ++ ["delayed_gate_release", "node_disconnection"], else: @checks
-      {:ok, control} = Control.start_link(checks: check_names, session_limit: profile["max_backend_sessions"])
-      {:ok, tasks} = Task.Supervisor.start_link()
-      Application.put_env(:symphony_elixir, :memory_tracker_recipient, control)
-      GenServer.call(control, {:issues, []})
+        workflow_path = Path.join(run_root, "WORKFLOW")
+        # Install probes only after prerequisite validation, so absent profile values cannot crash setup.
+        raw = qualification_workflow(document.config, run_id)
+        write_private!(workflow_path, workflow_document(raw))
+        Workflow.set_workflow_file_path(workflow_path)
+        require!(match?({:ok, _}, Config.settings()), "qualification_workflow_invalid")
+        config = EnvironmentConfig.runtime(Config.settings!())
+        require!(is_map(config) and config.kind in ["google_workstations", "kubernetes"], "managed_provider_required")
+        {:ok, adapter} = ExecutionEnvironment.adapter(config.kind)
+        profile = Map.get(config.provider, "qualification", %{})
+        require!(is_map(profile), "qualification_profile_required")
+        check_names = if config.kind == "kubernetes", do: @checks ++ ["delayed_gate_release", "node_disconnection"], else: @checks
+        control_opts = [checks: check_names, session_limit: profile["max_backend_sessions"], config: config]
+        {:ok, control} = Control.start_link(control_opts)
+        {:ok, tasks} = Task.Supervisor.start_link()
+        Application.put_env(:symphony_elixir, :memory_tracker_recipient, control)
+        GenServer.call(control, {:issues, []})
 
-      issues =
-        Enum.map(1..6, fn index ->
-          %Issue{
-            id: "#{run_id}-#{index}",
-            identifier: "QUAL-#{index}",
-            title: "Disposable managed qualification #{index}",
-            description:
-              "Run bash .symphony-qualification/run-probes.sh #{index}. Do not alter the fixtures, skip probes, weaken permissions, push git changes, or mutate an external tracker. Keep the foreground controlled workload alive and wait for its release file; do not finish the turn early.",
-            state: "Qualification Codex",
-            priority: index,
-            dispatchable: true
-          }
-        end)
+        issues =
+          Enum.map(1..6, fn index ->
+            %Issue{
+              id: "#{run_id}-#{index}",
+              identifier: "QUAL-#{index}",
+              title: "Disposable managed qualification #{index}",
+              description:
+                "Run bash .symphony-qualification/run-probes.sh #{index}. Do not alter the fixtures, skip probes, weaken permissions, push git changes, or mutate an external tracker. Keep the foreground controlled workload alive and wait for its release file; do not finish the turn early.",
+              state: "Qualification Codex",
+              priority: index,
+              dispatchable: true
+            }
+          end)
 
-      ctx = %{
-        config: config,
-        adapter: adapter,
-        profile: profile,
-        control: control,
-        tasks: tasks,
-        issues: issues,
-        raw: raw,
-        workflow_path: workflow_path,
-        run_root: run_root,
-        output: output,
-        run_id: run_id,
-        check_names: check_names,
-        fixture_images: fixture_images(),
-        deadline: now() + 1_500_000
-      }
+        ctx = %{
+          config: config,
+          adapter: adapter,
+          profile: profile,
+          control: control,
+          tasks: tasks,
+          issues: issues,
+          raw: raw,
+          workflow_path: workflow_path,
+          run_root: run_root,
+          output: output,
+          run_id: run_id,
+          check_names: check_names,
+          fixture_images: fixture_images(),
+          deadline: now() + 1_500_000
+        }
 
-      write_evidence(ctx, [], false)
-      on_exit(fn -> recover_interrupted_cleanup(ctx) end)
-      {:ok, ctx: ctx}
-    rescue
-      error in Failure ->
-        bootstrap_blocked(output, run_id, error.code)
+        write_evidence(ctx, [], false)
+        on_exit(fn -> recover_interrupted_cleanup(ctx) end)
+        {:ok, ctx: ctx}
+      rescue
+        error in Failure -> {:setup_failed, error.code}
+        _ -> {:setup_failed, "qualification_setup_failed"}
+      catch
+        _, _ -> {:setup_failed, "qualification_setup_interrupted"}
+      end
+
+    case result do
+      {:setup_failed, code} ->
+        bootstrap_blocked(output, run_id, code)
         File.rm_rf!(run_root)
-        reraise error, __STACKTRACE__
+        require!(false, code)
 
-      _ ->
-        bootstrap_blocked(output, run_id, "qualification_setup_failed")
-        File.rm_rf!(run_root)
-        raise Failure, code: "qualification_setup_failed"
+      ready ->
+        ready
     end
   end
 
@@ -209,7 +154,9 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       pass(ctx, "codex_workloads", %{issues: Enum.map(first_five, & &1.id), observations: facts})
       begin_check("five_slots_and_queue")
       state = scheduler_state()
-      require!(map_size(state.running) == 5 and occupied_count(state) == 5 and not Map.has_key?(state.environment_entries, issue(ctx, 6).id), "sixth_worker_started_without_capacity")
+      sixth_not_started = not Map.has_key?(state.environment_entries, issue(ctx, 6).id)
+      five_occupied = map_size(state.running) == 5 and occupied_count(state) == 5
+      require!(five_occupied and sixth_not_started, "sixth_worker_started_without_capacity")
       require!(length(Enum.uniq(Enum.map(facts, & &1.engine_id))) == 5, "docker_daemon_identity_shared")
       assert_no_duplicate_resources!(ctx)
       pass(ctx, "five_slots_and_queue", %{environment_ids: Enum.map(first_five, &entry!(&1.id).record.key), queued_issue: issue(ctx, 6).id})
@@ -311,7 +258,9 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
 
       await(ctx, "deletion_recovery_guard_held", fn ->
         state = scheduler_state()
-        is_reference(state.environment_guard) and (state.environment_discovery != :ready or Map.has_key?(state.environment_entries, storage_victim.issue_id))
+        recovery_pending = state.environment_discovery != :ready
+        retained_entry = Map.has_key?(state.environment_entries, storage_victim.issue_id)
+        is_reference(state.environment_guard) and (recovery_pending or retained_entry)
       end)
 
       require!(storage_present?(ctx, storage_victim), "delayed_storage_disappeared_before_release")
@@ -358,30 +307,12 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   defp prerequisites!(ctx) do
     profile = ctx.profile
 
-    require!(
-      profile["paid_model_calls_authorized"] == true and profile["max_concurrent_workers"] == 5 and is_integer(profile["max_retained_environments"]) and profile["max_retained_environments"] >= 6 and
-        is_integer(profile["max_backend_sessions"]) and profile["max_backend_sessions"] >= 20,
-      "explicit_qualification_budget_required"
-    )
-
-    require!(is_binary(profile["qualification_report"]) and profile["qualification_report"] != "" and is_map(profile["quota_evidence"]), "operator_prerequisite_evidence_required")
-    quota = Map.take(profile["quota_evidence"], ["concurrent_workers", "retained_environments", "persistent_disk_gib"])
-
-    require!(
-      is_number(quota["concurrent_workers"]) and quota["concurrent_workers"] >= 5 and is_number(quota["retained_environments"]) and quota["retained_environments"] >= 6 and
-        Enum.all?(quota, fn {_, value} -> is_number(value) and value >= 0 end),
-      "numeric_worker_and_storage_quota_evidence_required"
-    )
-
-    require!(
-      is_binary(profile["runtime_version"]) and profile["runtime_version"] != "" and is_binary(profile["node_modules_path"]) and Path.type(profile["node_modules_path"]) == :absolute,
-      "qualified_runtime_and_dependencies_required"
-    )
-
-    require!(is_list(profile["unrelated_resource_paths"]) and profile["unrelated_resource_paths"] != [], "unrelated_negative_control_required")
-    url = if is_binary(profile["review_app_url"]), do: URI.parse(profile["review_app_url"]), else: %URI{}
-    require!(url.scheme == "https" and is_binary(url.host) and url.userinfo == nil and url.query == nil and url.fragment == nil, "independent_review_app_required")
-    require!(is_binary(get_in(ctx.raw, ["hooks", "after_create"])) and String.trim(get_in(ctx.raw, ["hooks", "after_create"])) != "", "disposable_repository_clone_hook_required")
+    qualification_budget!(profile)
+    quota = qualification_quota!(profile)
+    qualification_runtime!(profile)
+    qualification_negative_control!(profile)
+    clone_hook = get_in(ctx.raw, ["hooks", "after_create"])
+    require!(nonblank?(clone_hook), "disposable_repository_clone_hook_required")
     validate_fault_driver!(profile)
 
     case Provider.preflight(ctx.config, profile, provider_opts(ctx)) do
@@ -395,6 +326,45 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
         provider_failure!(code)
     end
   end
+
+  defp qualification_budget!(profile) do
+    authorized = profile["paid_model_calls_authorized"] == true and profile["max_concurrent_workers"] == 5
+    retained = profile["max_retained_environments"]
+    sessions = profile["max_backend_sessions"]
+    require!(authorized and at_least?(retained, 6) and at_least?(sessions, 20), "explicit_qualification_budget_required")
+  end
+
+  defp qualification_quota!(profile) do
+    documented = nonblank?(profile["qualification_report"]) and is_map(profile["quota_evidence"])
+    require!(documented, "operator_prerequisite_evidence_required")
+    quota = Map.take(profile["quota_evidence"], ["concurrent_workers", "retained_environments", "persistent_disk_gib"])
+    enough = numeric_at_least?(quota["concurrent_workers"], 5) and numeric_at_least?(quota["retained_environments"], 6)
+
+    require!(
+      enough and Enum.all?(quota, fn {_, value} -> numeric_at_least?(value, 0) end),
+      "numeric_worker_and_storage_quota_evidence_required"
+    )
+
+    quota
+  end
+
+  defp qualification_runtime!(profile) do
+    dependencies = profile["node_modules_path"]
+    absolute = is_binary(dependencies) and Path.type(dependencies) == :absolute
+    require!(nonblank?(profile["runtime_version"]) and absolute, "qualified_runtime_and_dependencies_required")
+  end
+
+  defp qualification_negative_control!(profile) do
+    paths = profile["unrelated_resource_paths"]
+    require!(is_list(paths) and paths != [], "unrelated_negative_control_required")
+    url = if is_binary(profile["review_app_url"]), do: URI.parse(profile["review_app_url"]), else: %URI{}
+    clean = url.userinfo == nil and url.query == nil and url.fragment == nil
+    require!(url.scheme == "https" and is_binary(url.host) and clean, "independent_review_app_required")
+  end
+
+  defp nonblank?(value), do: is_binary(value) and String.trim(value) != ""
+  defp at_least?(value, minimum), do: is_integer(value) and value >= minimum
+  defp numeric_at_least?(value, minimum), do: is_number(value) and value >= minimum
 
   defp qualification_workflow(raw, run_id) do
     worker = Map.get(raw, "worker", %{})
@@ -461,7 +431,9 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       opts = opts |> Keyword.put(:deadline, deadline) |> Keyword.put(:timeout_ms, max(1, min(timeout, deadline - now())))
       callbacks = %{armed?: &armed?(ctx, &1), disarm: &disarm(ctx, &1), event: &event(ctx, &1)}
       opts = Provider.fault_options(config, entry, operation, opts, callbacks)
+      if entry, do: capture_result(ctx, {:ok, entry.record})
       result = Operations.run(adapter, config, entry, operation, opts)
+      capture_result(ctx, result)
 
       if entry,
         do: event(ctx, %{event: :operation_result, issue_id: entry.record.issue_id, operation: operation, attempt_id: entry.attempt_id, outcome: if(match?({:ok, _}, result), do: :ok, else: :error)})
@@ -470,10 +442,28 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     end
 
     runner_fun = fn issue, recipient, opts ->
-      if now() < ctx.deadline and GenServer.call(ctx.control, :session), do: AgentRunner.run(issue, recipient, opts), else: exit(:qualification_backend_budget_exhausted)
+      invocation = %{event: :runner_invocation, issue_id: issue.id, options: opts}
+      accepted = GenServer.call(ctx.control, {:event, invocation})
+      write_evidence(ctx, [], false)
+      require!(accepted == :ok, "qualification_runner_context_rejected")
+
+      if now() < ctx.deadline and GenServer.call(ctx.control, :session) do
+        write_evidence(ctx, [], false)
+        AgentRunner.run(issue, recipient, opts)
+      else
+        exit(:qualification_backend_budget_exhausted)
+      end
     end
 
-    case AgentRuntimeSupervisor.start_link(name: @runtime, task_supervisor_name: @worker_tasks, orchestrator_name: @orchestrator, environment_operation_fun: operation_fun, runner_fun: runner_fun) do
+    runtime_opts = [
+      name: @runtime,
+      task_supervisor_name: @worker_tasks,
+      orchestrator_name: @orchestrator,
+      environment_operation_fun: operation_fun,
+      runner_fun: runner_fun
+    ]
+
+    case AgentRuntimeSupervisor.start_link(runtime_opts) do
       {:ok, runtime} ->
         # Supervisors trap normal linked exits; a separate monitor also fences normal owner death.
         spawn(fn ->
@@ -753,17 +743,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
         await(
           deletion_ctx,
           "all_owned_resources_absent",
-          fn ->
-            state = scheduler_state()
-
-            case Provider.inventory(ctx.config, provider_opts(deletion_ctx)) do
-              {:ok, %{records: [], live_worker_counts: counts}} ->
-                Enum.all?(counts, fn {_, count} -> count == 0 end) and map_size(state.environment_entries) == 0 and map_size(state.environment_jobs) == 0 and state.environment_guard == nil
-
-              _ ->
-                false
-            end
-          end,
+          fn -> all_owned_absent?(deletion_ctx) end,
           remaining(deletion_ctx)
         )
 
@@ -785,6 +765,19 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       stop_runtime()
       if Process.alive?(ctx.tasks), do: Supervisor.stop(ctx.tasks, :normal, 5_000)
       if Process.alive?(ctx.control), do: GenServer.stop(ctx.control)
+    end
+  end
+
+  defp all_owned_absent?(ctx) do
+    state = scheduler_state()
+    released = state.environment_guard == nil and map_size(state.environment_jobs) == 0
+
+    case inventory(ctx) do
+      {:ok, %{records: [], live_worker_counts: counts}} ->
+        released and map_size(state.environment_entries) == 0 and Enum.all?(counts, fn {_, count} -> count == 0 end)
+
+      _ ->
+        false
     end
   end
 
@@ -818,7 +811,11 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
         _, _ -> nil
       end
 
-    require!(is_list(baseline) and baseline != [] and observed == baseline, "unrelated_resource_identity_changed_during_cleanup")
+    require!(
+      Control.unrelated_unchanged?(control_snapshot(ctx), observed),
+      "unrelated_resource_identity_changed_during_cleanup"
+    )
+
     pass(ctx, "unrelated_resources", %{resources: baseline})
   end
 
@@ -827,20 +824,13 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
          {:ok, evidence} <- Jason.decode(bytes),
          true <- evidence["deployment_id"] == ctx.run_id,
          true <- evidence["allocation_started"] == true and evidence["inventory_complete"] != true do
-      {:ok, control} = Control.start_link(checks: ctx.check_names, session_limit: 0)
+      {:ok, control} = Control.start_link(checks: ctx.check_names, session_limit: 0, config: ctx.config)
       {:ok, tasks} = Task.Supervisor.start_link()
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, control)
       GenServer.call(control, :allocation_started)
-      GenServer.call(control, {:baseline, decode_baseline(evidence["unrelated_baseline"])})
 
       for result <- evidence["checks"] || [], result["name"] in ctx.check_names do
-        status =
-          case result["status"] do
-            "passed" -> :passed
-            "blocked" -> :blocked
-            "failed" -> :failed
-            _ -> :not_run
-          end
+        status = restored_check_status(result["status"])
 
         GenServer.call(control, {:check, result["name"], %{status: status, evidence: result["evidence"], code: result["code"]}})
       end
@@ -856,27 +846,58 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     _, _ -> IO.puts("Managed cleanup interrupted for deployment #{ctx.run_id}")
   end
 
+  defp restored_check_status("passed"), do: :passed
+  defp restored_check_status("blocked"), do: :blocked
+  defp restored_check_status("failed"), do: :failed
+  defp restored_check_status(_), do: :not_run
+
   defp remaining_resources(ctx) do
-    try do
-      case Provider.inventory(ctx.config, provider_opts(ctx)) do
-        {:ok, %{records: records, live_worker_counts: counts}} ->
-          Enum.map(records, &safe_record/1) ++ for({key, count} <- counts, count > 0, do: %{environment_id: key, live_worker_count: count})
+    case inventory(ctx) do
+      {:ok, _} ->
+        control_snapshot(ctx).observed_resources
 
-        _ ->
-          unresolved = [%{deployment_id: ctx.run_id, status: :inventory_unresolved}]
-
-          case ctx.adapter.discover(ctx.config, provider_opts(ctx)) do
-            {:ok, records} -> Enum.map(records, &safe_record/1) ++ unresolved
-            _ -> unresolved
-          end
-      end
-    catch
-      _, _ -> [%{deployment_id: ctx.run_id, status: :inventory_unresolved}]
+      _ ->
+        capture_result(ctx, discover_remaining(ctx))
+        state = control_snapshot(ctx)
+        captured = Enum.map(state.captured_resources, &Map.put(&1, "status", "captured"))
+        captured ++ [%{deployment_id: ctx.run_id, status: :inventory_unresolved}]
     end
   end
 
+  defp discover_remaining(ctx) do
+    ctx.adapter.discover(ctx.config, provider_opts(ctx))
+  rescue
+    _ -> {:error, :qualification_inventory_unavailable}
+  catch
+    _, _ -> {:error, :qualification_inventory_unavailable}
+  end
+
+  defp inventory(ctx) do
+    result = read_inventory(ctx)
+    GenServer.call(ctx.control, {:event, %{event: :inventory_observation, result: result}})
+    write_evidence(ctx, [], false)
+    result
+  end
+
+  defp read_inventory(ctx) do
+    Provider.inventory(ctx.config, provider_opts(ctx))
+  rescue
+    _ -> {:error, :qualification_inventory_unavailable}
+  catch
+    _, _ -> {:error, :qualification_inventory_unavailable}
+  end
+
+  defp capture_result(ctx, result) do
+    GenServer.call(ctx.control, {:event, %{event: :record_observation, result: result}})
+    write_evidence(ctx, [], false)
+  end
+
   defp write_evidence(ctx, remaining, inventory_complete) do
-    state = control_snapshot(ctx)
+    writer = fn state -> persist_evidence(ctx, state, remaining, inventory_complete) end
+    require!(GenServer.call(ctx.control, {:persist, writer}) == :ok, "qualification_evidence_write_failed")
+  end
+
+  defp persist_evidence(ctx, state, remaining, inventory_complete) do
     checks = Enum.map(ctx.check_names, &state.checks[&1])
     prerequisite = Map.get(state.checks["prerequisites"], :evidence) || %{}
 
@@ -889,6 +910,9 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       fixture_images: ctx.fixture_images,
       checks: checks,
       backend_sessions: state.sessions,
+      runner_rejected: state.runner_rejected,
+      runner_invocations: state.runner_invocations,
+      captured_resources: state.captured_resources,
       events: Enum.reverse(state.events),
       allocation_started: state.allocation_started,
       interrupted: state.interrupted,
@@ -896,7 +920,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       remaining_owned_resources: remaining,
       inventory_complete: inventory_complete,
       recovery_workflow: if(inventory_complete or not state.allocation_started, do: nil, else: ctx.workflow_path),
-      qualified?: not state.interrupted and inventory_complete and remaining == [] and Enum.all?(checks, &(&1.status == :passed))
+      qualified?: inventory_complete and remaining == [] and Control.qualified?(state)
     }
 
     replace_private!(ctx.output, Jason.encode!(evidence, pretty: true))
@@ -945,7 +969,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   end
 
   defp assert_no_duplicate_resources!(ctx) do
-    %{records: records, live_worker_counts: counts} = provider_value!(Provider.inventory(ctx.config, provider_opts(ctx)))
+    %{records: records, live_worker_counts: counts} = provider_value!(inventory(ctx))
     require!(length(Enum.uniq_by(records, & &1.issue_id)) == length(records) and length(records) <= 6, "duplicate_owned_environment")
     require!(Enum.all?(counts, fn {_, count} -> is_integer(count) and count in 0..1 end) and Enum.sum(Map.values(counts)) <= 5, "duplicate_or_overbudget_actual_workers")
   end
@@ -995,22 +1019,22 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     if Process.whereis(@orchestrator), do: refresh()
   end
 
-  defp await_absence(ctx, issue),
-    do:
-      await(
-        ctx,
-        "owned_compute_and_storage_absent",
-        fn ->
-          case Provider.inventory(ctx.config, provider_opts(ctx)) do
-            {:ok, %{records: records, live_worker_counts: counts}} ->
-              not Enum.any?(records, &(&1.issue_id == issue.id)) and not Map.has_key?(scheduler_state().environment_entries, issue.id) and Enum.all?(counts, fn {_, count} -> count in 0..1 end)
+  defp await_absence(ctx, issue) do
+    await(ctx, "owned_compute_and_storage_absent", fn -> issue_absent?(ctx, issue.id) end, ctx.config.shutdown_timeout_ms * 2)
+  end
 
-            _ ->
-              false
-          end
-        end,
-        ctx.config.shutdown_timeout_ms * 2
-      )
+  defp issue_absent?(ctx, id) do
+    case inventory(ctx) do
+      {:ok, %{records: records, live_worker_counts: counts}} ->
+        absent = not Enum.any?(records, &(&1.issue_id == id))
+        absent and not Map.has_key?(scheduler_state().environment_entries, id) and bounded_worker_counts?(counts)
+
+      _ ->
+        false
+    end
+  end
+
+  defp bounded_worker_counts?(counts), do: Enum.all?(counts, fn {_, count} -> count in 0..1 end)
 
   defp await(ctx, label, predicate, timeout \\ 180_000), do: await_loop(ctx, label, predicate, min(ctx.deadline, now() + timeout))
 
@@ -1104,8 +1128,6 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     String.trim(value)
   end
 
-  defp decode_baseline(baseline) when is_list(baseline), do: Enum.map(baseline, &%{path: &1["path"], uid: &1["uid"]})
-  defp decode_baseline(_), do: nil
   defp now, do: System.monotonic_time(:millisecond)
   defp remaining(ctx), do: max(0, ctx.deadline - now())
 
@@ -1129,17 +1151,6 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   end
 
   defp safe_scope(ctx), do: EnvironmentConfig.scope(ctx.config) |> Map.take(["project", "location", "cluster", "config", "context", "namespace"])
-
-  defp safe_record(record) do
-    id =
-      case record.provider_ref do
-        %{name: name} -> name
-        value when is_binary(value) -> value
-        _ -> nil
-      end
-
-    %{environment_id: record.key, issue_id: record.issue_id, provider_resource_id: id, desired: record.desired, phase: record.phase}
-  end
 
   defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\\''") <> "'"
   defp require!(true, _code), do: :ok

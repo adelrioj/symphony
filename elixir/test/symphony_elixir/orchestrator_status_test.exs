@@ -78,7 +78,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     task_supervisor = start_supervised!({Task.Supervisor, []}, id: :retained_status_supervisor)
     orchestrator = start_supervised!({Orchestrator, name: nil, task_supervisor: task_supervisor})
-    record = %{status_environment_record() | phase: :stopped, proof: {:quiescent, %{provider: :confirmed}}, terminal_observed_at: 1_789_084_800_123}
+    stopped = %{status_environment_record() | phase: :stopped, proof: {:quiescent, %{provider: :confirmed}}}
+    record = %{stopped | terminal_observed_at: 1_789_084_800_123}
     entry = %Lifecycle.Entry{record: record, attempt_id: "retained-attempt", purpose: :agent, phase: :stopped}
     :sys.replace_state(orchestrator, &%{&1 | environment_entries: %{record.issue_id => entry}})
 
@@ -111,7 +112,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       assert {:noreply, ^state} = Orchestrator.handle_info(message, state)
     end
 
-    assert {:noreply, updated} = Orchestrator.handle_info({:worker_runtime_info, "issue", attempt_id, %{workspace_path: "/current"}}, state)
+    message = {:worker_runtime_info, "issue", attempt_id, %{workspace_path: "/current"}}
+    assert {:noreply, updated} = Orchestrator.handle_info(message, state)
     assert updated.running["issue"].workspace_path == "/current"
   end
 

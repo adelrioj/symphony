@@ -58,11 +58,12 @@ defmodule SymphonyElixir.ExecutionContext do
   def remote?(%__MODULE__{mode: mode}), do: mode in [:ssh, :managed]
 
   defp matching_record?(
-         %{kind: kind, deployment_id: deployment_id, tracker_kind: tracker_kind, workspace_root: root, provider: provider} = config,
+         %{kind: kind, deployment_id: deployment_id, tracker_kind: tracker_kind, provider: provider} = config,
          %Record{phase: :running, absent?: false} = record
        )
        when kind in ["google_workstations", "kubernetes"] and is_map(provider) do
-    with {:ok, _parsed} <- Config.parse(config),
+    with %{workspace_root: root} <- config,
+         {:ok, _parsed} <- Config.parse(config),
          true <- Enum.all?([deployment_id, tracker_kind, record.issue_id], &nonblank?/1),
          scope <- Config.scope(config),
          true <- map_size(scope) == 3 and Enum.all?(Map.values(scope), &nonblank?/1) do
@@ -79,13 +80,16 @@ defmodule SymphonyElixir.ExecutionContext do
 
   defp ready_connection?(%Connection{owner: owner, id: id, target: %Target{} = target})
        when is_pid(owner) and is_reference(id) and node(owner) == node() and owner != self() do
-    Process.alive?(owner) and nonblank?(target.executable) and nonblank?(target.label) and
-      is_list(target.prefix) and Enum.all?(target.prefix, &transport_string?/1) and
-      is_list(target.env) and Enum.all?(target.env, &environment_entry?/1) and
-      holder_confirms_connection?(owner, id, target)
+    Process.alive?(owner) and valid_target?(target) and holder_confirms_connection?(owner, id, target)
   end
 
   defp ready_connection?(_connection), do: false
+
+  defp valid_target?(target) do
+    nonblank?(target.executable) and nonblank?(target.label) and
+      is_list(target.prefix) and Enum.all?(target.prefix, &transport_string?/1) and
+      is_list(target.env) and Enum.all?(target.env, &environment_entry?/1)
+  end
 
   defp holder_confirms_connection?(owner, id, target) do
     GenServer.call(owner, {:validate_connection, id, target}, 1_000) == :ok

@@ -1,7 +1,15 @@
 defmodule SymphonyElixir.ManagedOrchestratorTest do
   use SymphonyElixir.TestSupport
-  alias SymphonyElixir.{ExecutionContext, ExecutionEnvironment, SSH}
-  alias SymphonyElixir.ExecutionEnvironment.{Lifecycle, Operations, Record}
+  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.ExecutionContext
+  alias SymphonyElixir.ExecutionEnvironment
+  alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
+  alias SymphonyElixir.ExecutionEnvironment.Lifecycle
+  alias SymphonyElixir.ExecutionEnvironment.Operations
+  alias SymphonyElixir.ExecutionEnvironment.Record
+  alias SymphonyElixir.SSH
+  alias SymphonyElixir.StatusDashboard
+  alias SymphonyElixirWeb.Presenter
 
   defmodule MemoryInventory do
     use GenServer
@@ -127,18 +135,20 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     discover([retained])
     poll(owner)
     original = Config.settings!().worker.environment.deployment_id
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: "/home/user/workspaces", worker_environment: Map.put(environment(), "deployment_id", "other"))
+    replacement = Map.put(environment(), "deployment_id", "other")
+    write_managed_workflow(worker_environment: replacement)
     assert {:error, :environment_identity_in_use} = WorkflowStore.force_reload()
     assert Config.settings!().worker.environment.deployment_id == original
   end
 
   test "explicit null empty and static managed conflicts never select local execution" do
     for invalid <- [nil, %{}] do
-      assert {:error, {:invalid_workflow_config, _}} = SymphonyElixir.Config.Schema.parse(%{"worker" => %{"environment" => invalid}})
+      assert {:error, {:invalid_workflow_config, _}} = Schema.parse(%{"worker" => %{"environment" => invalid}})
     end
 
     for {key, value} <- [{"ssh_hosts", []}, {"max_concurrent_agents_per_host", nil}] do
-      assert {:error, {:invalid_workflow_config, _}} = SymphonyElixir.Config.Schema.parse(%{"worker" => %{"environment" => environment(), key => value}})
+      worker = %{"environment" => environment(), key => value}
+      assert {:error, {:invalid_workflow_config, _}} = Schema.parse(%{"worker" => worker})
     end
   end
 
@@ -177,7 +187,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   test "reopened retained environment clears marker durably before preparing again" do
     issues([issue("first", 1)])
     {owner, tasks} = scheduler()
-    retained = %{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}, terminal_observed_at: 1, metadata: %{"symphony_cleanup_hook_completed" => true}}
+    retained = cleaned_record("first")
     discover([retained])
     {_, reopening, task} = operation(:metadata)
     poll(owner)
@@ -194,7 +204,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     issues([])
     {owner, tasks} = scheduler()
     discover([])
-    config = SymphonyElixir.ExecutionEnvironment.Config.runtime(Config.settings!())
+    config = EnvironmentConfig.runtime(Config.settings!())
     entry = Lifecycle.new(record("stale"), "stale-attempt", :agent)
     target = %SSH.Target{executable: "/bin/sh", prefix: ["-c"], label: "stale"}
     {:ok, connection} = Operations.open_connection(tasks, owner, target, [])
@@ -219,12 +229,14 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
           send(runner, {:fail_agent, :fixture_failure})
 
         :input_required ->
-          send(owner, {:codex_worker_update, "first", opts[:attempt_id], %{event: :turn_input_required, timestamp: DateTime.utc_now()}})
+          update = %{event: :turn_input_required, timestamp: DateTime.utc_now()}
+          send(owner, {:codex_worker_update, "first", opts[:attempt_id], update})
           Orchestrator.snapshot(owner, 1_000)
           send(runner, :finish_agent)
 
         :turn_exhausted ->
-          :sys.replace_state(owner, fn state -> %{state | turn_exhaustions: %{"first" => %{state: "in progress", count: 2, head: nil}}} end)
+          exhaustion = %{state: "in progress", count: 2, head: nil}
+          :sys.replace_state(owner, &%{&1 | turn_exhaustions: %{"first" => exhaustion}})
           send(owner, {:agent_turns_exhausted, "first", opts[:attempt_id], "In Progress"})
           Orchestrator.snapshot(owner, 1_000)
           send(runner, :finish_agent)
@@ -345,7 +357,8 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     ready(config, entry, prepare, owner, tasks)
     {_, stopping, stop} = operation(:stop)
     token = make_ref()
-    :sys.replace_state(owner, fn state -> %{state | retry_attempts: %{"first" => %{attempt: 1, retry_token: token, due_at_ms: 0, identifier: "TEST-first"}}} end)
+    retry = %{attempt: 1, retry_token: token, due_at_ms: 0, identifier: "TEST-first"}
+    :sys.replace_state(owner, &%{&1 | retry_attempts: %{"first" => retry}})
     send(owner, {:retry_issue, "first", token})
     poll(owner)
     assert Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
@@ -390,10 +403,10 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   end
 
   test "completed cleanup marker recovered after restart does not deliberately replay the hook" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: "/home/user/workspaces", worker_environment: environment(), hook_before_remove: "echo cleanup")
+    write_managed_workflow(hook_before_remove: "echo cleanup")
     issues([%{issue("first", 1) | state: "Done"}])
     {_owner, _tasks} = scheduler()
-    retained = %{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}, terminal_observed_at: 1, metadata: %{"symphony_cleanup_hook_completed" => true}}
+    retained = cleaned_record("first")
     discover([retained])
     {_, destroying, _} = operation(:destroy)
     assert destroying.record.workspace_path == retained.workspace_path
@@ -402,7 +415,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   end
 
   test "cleanup prepare failure retains storage and reports failure instead of skipping the hook" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: "/home/user/workspaces", worker_environment: environment(), hook_before_remove: "echo cleanup")
+    write_managed_workflow(hook_before_remove: "echo cleanup")
     issues([%{issue("first", 1) | state: "Done"}])
     {owner, _} = scheduler()
     retained = %{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}, terminal_observed_at: 1}
@@ -423,7 +436,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     {owner, _} = scheduler()
     discover([%{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}])
     wait_state(owner, &Map.has_key?(&1.environment_entries, "first"))
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear", workspace_root: "/home/user/workspaces", worker_environment: environment())
+    write_managed_workflow(tracker_kind: "linear")
     assert {:error, :environment_identity_in_use} = WorkflowStore.force_reload()
     assert Config.settings!().tracker.kind == "memory"
   end
@@ -458,13 +471,124 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     {owner, _} = scheduler()
     discover([%{record("retained") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}])
     wait_state(owner, &Map.has_key?(&1.environment_entries, "retained"))
-    {:ok, replacement} = WorkflowStore.protect_environment(SymphonyElixir.ExecutionEnvironment.Config.identity(Config.settings!()))
+    {:ok, replacement} = WorkflowStore.protect_environment(EnvironmentConfig.identity(Config.settings!()))
     release_guard_on_exit(replacement)
     issues([issue("first", 1)])
     poll(owner)
     refute_receive {:environment_operation, :prepare, _, _, _, _}, 0
     assert {:error, :authority_replaced} = :sys.get_state(owner).environment_discovery
     assert :sys.get_state(WorkflowStore).environment_guard.token == replacement
+  end
+
+  test "surviving scheduler reacquires the same identity after the workflow store process restarts" do
+    issues([])
+    {owner, tasks} = scheduler()
+    retained = %{record("retained") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}
+    discover([retained])
+    wait_state(owner, &Map.has_key?(&1.environment_entries, "retained"))
+    previous_store = Process.whereis(WorkflowStore)
+    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    assert %{queued: true} = Orchestrator.request_refresh(owner)
+    assert Orchestrator.snapshot(owner, 1_000).environment_discovery.status == :blocked
+    assert {:ok, replacement} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+    refute replacement == previous_store
+    release_guard_on_exit(:sys.get_state(replacement).environment_guard.token)
+    Orchestrator.request_refresh(owner)
+    discover([retained])
+    wait_state(owner, &(&1.environment_discovery == :ready))
+    issues([issue("first", 1)])
+    poll(owner)
+    {config, entry, prepare} = operation(:prepare)
+    ready(config, entry, prepare, owner, tasks)
+    assert_receive {:agent_started, "first", _, _}, 1_000
+    assert [%{issue_id: "first"}] = Orchestrator.snapshot(owner, 1_000).running
+  end
+
+  test "store restart cannot adopt a rejected on-disk identity while retained resources survive" do
+    issues([])
+    {owner, _tasks} = scheduler()
+    discover([%{record("retained") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}])
+    accepted = wait_state(owner, &Map.has_key?(&1.environment_entries, "retained")).environment_identity
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: "/home/user/workspaces",
+      worker_environment: Map.put(environment(), "deployment_id", "rejected-deployment")
+    )
+
+    assert {:error, :environment_identity_in_use} = WorkflowStore.force_reload()
+    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    assert {:ok, replacement} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+    release_guard_on_exit(:sys.get_state(replacement).environment_guard.token)
+    issues([issue("first", 1)])
+    Orchestrator.request_refresh(owner)
+    poll(owner)
+    assert :sys.get_state(owner).environment_identity == accepted
+    assert {:error, :authority_replaced} = :sys.get_state(owner).environment_discovery
+    refute_receive {:environment_operation, :discover, _, _, _, _}, 0
+    refute_receive {:environment_operation, :prepare, _, _, _, _}, 0
+  end
+
+  test "discovery failure is globally visible and redacted even without environment entries" do
+    issues([issue("first", 1)])
+    {owner, tasks} = scheduler()
+    assert_receive {:environment_operation, :discover, _, nil, task, _}, 1_000
+    pending = Presenter.state_payload(owner, 1_000)
+    assert pending.environment_discovery == %{provider_kind: "google_workstations", status: :pending, error_code: nil}
+    secret = "DISCOVERY-CREDENTIAL-CANARY"
+    send(task, {:complete_operation, {:error, {:denied, %{authorization: secret, body: secret}}}})
+    wait_state(owner, &match?({:error, _}, &1.environment_discovery))
+    payload = Presenter.state_payload(owner, 1_000)
+    assert payload.environment_discovery == %{provider_kind: "google_workstations", status: :blocked, error_code: :denied}
+    assert payload.environments == []
+    assert payload.counts == %{running: 0, retrying: 0, blocked: 0}
+    snapshot = Orchestrator.snapshot(owner, 1_000)
+    rendered = StatusDashboard.format_snapshot_content_for_test({:ok, snapshot}, 0, 160)
+    assert rendered =~ "Managed discovery"
+    assert rendered =~ "blocked"
+    refute Jason.encode!(payload) =~ secret
+    refute rendered =~ secret
+    refute inspect(:sys.get_state(owner)) =~ secret
+    refute_receive {:environment_operation, :prepare, _, _, _, _}, 0
+    assert %{queued: true} = Orchestrator.request_refresh(owner)
+    discover([])
+    {config, entry, prepare} = operation(:prepare)
+    ready(config, entry, prepare, owner, tasks)
+    assert_receive {:agent_started, "first", _, _}, 1_000
+    recovered = Presenter.state_payload(owner, 1_000)
+    assert recovered.environment_discovery == %{provider_kind: "google_workstations", status: :ready, error_code: nil}
+  end
+
+  test "definitive create denial keeps capacity until qualified no-compute proof then retries normally" do
+    issues([issue("first", 1), issue("second", 2)])
+    {owner, tasks} = scheduler()
+    discover([])
+    {_, entry, prepare} = operation(:prepare)
+    denied = %{entry.record | pending: [%{verb: :create, outcome: :failed}]}
+    send(prepare, {:complete_operation, {:error, {:denied, :create_forbidden}, denied}})
+    {_, stopping, stop} = operation(:stop)
+    poll(owner)
+    assert Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
+    refute Map.has_key?(:sys.get_state(owner).retry_attempts, "first")
+    refute_receive {:environment_operation, :prepare, _, _, _, _}, 0
+    stopped(stop, stopping)
+    {config, second, prepare} = operation(:prepare)
+    assert second.record.issue_id == "second"
+    assert Map.has_key?(:sys.get_state(owner).retry_attempts, "first")
+    ready(config, second, prepare, owner, tasks)
+    assert_receive {:agent_started, "second", runner, _}, 1_000
+    set_issue_state("second", "In Review")
+    send(runner, :finish_agent)
+    {_, stopping, stop} = operation(:stop)
+    stopped(stop, stopping)
+    wait_state(owner, &(not Lifecycle.occupied?(&1.environment_entries["second"])))
+    retry = :sys.get_state(owner).retry_attempts["first"]
+    send(owner, {:retry_issue, "first", retry.retry_token})
+    {config, retry_entry, prepare} = operation(:prepare)
+    assert retry_entry.record.issue_id == "first"
+    refute retry_entry.attempt_id == entry.attempt_id
+    ready(config, retry_entry, prepare, owner, tasks)
+    assert_receive {:agent_started, "first", _, _}, 1_000
   end
 
   test "running and reserved entries count as a union rather than double charging a managed agent" do
@@ -559,7 +683,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   end
 
   test "unknown cleanup hook outcome is stopped without a completed marker or destruction" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: "/home/user/workspaces", worker_environment: environment(), hook_before_remove: "echo cleanup")
+    write_managed_workflow(hook_before_remove: "echo cleanup")
     issues([%{issue("first", 1) | state: "Done"}])
     {owner, tasks} = scheduler()
     discover([%{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}, terminal_observed_at: 1}])
@@ -718,12 +842,37 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
       end
     end
 
-    owner =
-      start_supervised!(Supervisor.child_spec({Orchestrator, name: nil, task_supervisor: tasks, environment_operation_fun: operation_fun, runner_fun: runner_fun}, restart: :temporary), id: make_ref())
+    options = [
+      name: nil,
+      task_supervisor: tasks,
+      environment_operation_fun: operation_fun,
+      runner_fun: runner_fun
+    ]
 
-    state = wait_state(owner, fn state -> state.poll_check_in_progress == false and state.next_poll_due_at_ms > System.monotonic_time(:millisecond) end)
+    child = Supervisor.child_spec({Orchestrator, options}, restart: :temporary)
+    owner = start_supervised!(child, id: make_ref())
+    state = wait_state(owner, &poll_idle?/1)
     release_guard_on_exit(state.environment_guard)
     {owner, tasks}
+  end
+
+  defp poll_idle?(state) do
+    state.poll_check_in_progress == false and state.next_poll_due_at_ms > System.monotonic_time(:millisecond)
+  end
+
+  defp cleaned_record(id) do
+    stopped = %{record(id) | phase: :stopped, proof: {:quiescent, %{fixture: true}}}
+    %{stopped | terminal_observed_at: 1, metadata: %{"symphony_cleanup_hook_completed" => true}}
+  end
+
+  defp write_managed_workflow(overrides) do
+    defaults = [
+      tracker_kind: "memory",
+      workspace_root: "/home/user/workspaces",
+      worker_environment: environment()
+    ]
+
+    write_workflow_file!(Workflow.workflow_file_path(), Keyword.merge(defaults, overrides))
   end
 
   defp discover(records) do

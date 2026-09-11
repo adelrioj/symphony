@@ -2,7 +2,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
   @moduledoc "Bounded local argv execution. Killing local transport never proves remote cancellation."
   alias SymphonyElixir.ExecutionEnvironment.Operations
 
-  @spec run(String.t(), [String.t()], keyword()) :: {:ok, %{output: binary(), status: integer()}} | {:error, {:unknown, term()}}
+  @type error :: {:error, {:unknown, term()}}
+
+  @spec run(String.t(), [String.t()], keyword()) :: {:ok, %{output: binary(), status: integer()}} | error()
   def run(executable, args, opts) when is_binary(executable) and is_list(args) do
     timeout = Keyword.fetch!(opts, :timeout_ms)
     limit = Keyword.get(opts, :max_output_bytes, 65_536)
@@ -14,7 +16,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
     end
   end
 
-  @spec with_json_file(term(), (String.t() -> result), keyword()) :: result | {:error, {:unknown, term()}} when result: term()
+  @spec with_json_file(term(), (String.t() -> result), keyword()) :: result | error() when result: term()
   def with_json_file(body, fun, opts) when is_function(fun, 1) do
     directory = Path.join(System.tmp_dir!(), "symphony-command-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false))
 
@@ -37,12 +39,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
       if System.monotonic_time(:millisecond) >= deadline do
         {:error, {:unknown, {:timeout, ""}}}
       else
-        case Operations.start_staged_port(lease, executable, args, Keyword.put(opts, :retain_on_exit, true)) do
-          {:ok, port} -> collect(port, deadline, limit, [], 0)
-          {:error, _} -> {:error, {:unknown, :command_failed}}
-        end
+        start_command(lease, executable, args, opts, deadline, limit)
       end
     end)
+  end
+
+  defp start_command(lease, executable, args, opts, deadline, limit) do
+    case Operations.start_staged_port(lease, executable, args, Keyword.put(opts, :retain_on_exit, true)) do
+      {:ok, port} -> collect(port, deadline, limit, [], 0)
+      {:error, _} -> {:error, {:unknown, :command_failed}}
+    end
   end
 
   defp with_stage(opts, paths, fun) do
@@ -111,27 +117,25 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
 
   @spec terminate_port(port()) :: :ok | {:error, :local_process_termination_unconfirmed}
   def terminate_port(port) when is_port(port) do
-    try do
-      case Port.info(port, :os_pid) do
-        {:os_pid, pid} ->
-          # Signal only the child of this still-owned port, never a process-name match.
-          case System.find_executable("kill") do
-            nil ->
-              {:error, :local_process_termination_unconfirmed}
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} ->
+        # Signal only the child of this still-owned port, never a process-name match.
+        case System.find_executable("kill") do
+          nil ->
+            {:error, :local_process_termination_unconfirmed}
 
-            executable ->
-              System.cmd(executable, ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
-              await_port_exit(port)
-          end
+          executable ->
+            System.cmd(executable, ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+            await_port_exit(port)
+        end
 
-        nil ->
-          :ok
-      end
-    rescue
-      _ -> {:error, :local_process_termination_unconfirmed}
-    after
-      close_port(port)
+      nil ->
+        :ok
     end
+  rescue
+    _ -> {:error, :local_process_termination_unconfirmed}
+  after
+    close_port(port)
   end
 
   defp await_port_exit(port) do

@@ -11,18 +11,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
     with :ok <- credentials(provider),
          true <- remaining(opts) > 0,
          true <- String.starts_with?(path, "/") and not String.contains?(path, ["\n", "\r"]) do
-      invoke = fn file ->
-        args = ["--kubeconfig", provider["kubeconfig"], "--context", provider["context"], "--request-timeout=#{max(1, min(20_000, remaining(opts)))}ms"]
-        command = Keyword.get(opts, :command_fun, &Command.run/3)
-
-        with {:ok, suffix} <- arguments(method, path, file),
-             {:ok, %{output: output, status: status}} <-
-               command.(System.find_executable("kubectl") || "kubectl", args ++ suffix, Keyword.merge(opts, timeout_ms: remaining(opts), max_output_bytes: 8_388_608)) do
-          decode(output, status, method)
-        else
-          {:error, _} -> {:error, {:unknown, :kubernetes_command_failed}}
-        end
-      end
+      invoke = &invoke(provider, method, path, &1, opts)
 
       if body == nil, do: invoke.(nil), else: Command.with_json_file(body, invoke, opts)
     else
@@ -33,8 +22,23 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
     _ -> {:error, {:unknown, :kubernetes_command_failed}}
   end
 
+  defp invoke(provider, method, path, file, opts) do
+    timeout = max(1, min(20_000, remaining(opts)))
+    args = ["--kubeconfig", provider["kubeconfig"], "--context", provider["context"], "--request-timeout=#{timeout}ms"]
+    command = Keyword.get(opts, :command_fun, &Command.run/3)
+    options = Keyword.merge(opts, timeout_ms: remaining(opts), max_output_bytes: 8_388_608)
+
+    with {:ok, suffix} <- arguments(method, path, file),
+         {:ok, %{output: output, status: status}} <-
+           command.(System.find_executable("kubectl") || "kubectl", args ++ suffix, options) do
+      decode(output, status, method)
+    else
+      {:error, _} -> {:error, {:unknown, :kubernetes_command_failed}}
+    end
+  end
+
   @spec list(map(), String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
-  def list(config, path, opts), do: pages(config, path, deadline(opts), nil, [], MapSet.new(), 0)
+  def list(config, path, opts), do: pages(config, path, deadline(opts), nil, [], %{}, 0)
 
   @spec lookup(map(), String.t(), String.t(), keyword()) :: {:ok, map() | nil} | {:error, term()}
   def lookup(config, collection, name, opts) do
@@ -106,13 +110,21 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
 
   defp arguments(:patch, path, file) do
     case String.split(path, "/", trim: true) do
-      ["api", "v1", "namespaces", ns, resource, name] -> {:ok, ["patch", resource, name, "--namespace", ns, "--type=json", "--patch-file", file, "-o", "json"]}
-      ["apis", group, _version, "namespaces", ns, resource, name] -> {:ok, ["patch", resource <> "." <> group, name, "--namespace", ns, "--type=json", "--patch-file", file, "-o", "json"]}
-      _ -> {:error, {:invalid, :kubernetes_patch_path}}
+      ["api", "v1", "namespaces", ns, resource, name] ->
+        patch_arguments(resource, name, ns, file)
+
+      ["apis", group, _version, "namespaces", ns, resource, name] ->
+        patch_arguments(resource <> "." <> group, name, ns, file)
+
+      _ ->
+        {:error, {:invalid, :kubernetes_patch_path}}
     end
   end
 
   defp arguments(_, _, _), do: {:error, {:invalid, :kubernetes_method}}
+
+  defp patch_arguments(resource, name, namespace, file),
+    do: {:ok, ["patch", resource, name, "--namespace", namespace, "--type=json", "--patch-file", file, "-o", "json"]}
 
   defp decode(output, 0, :watch) do
     output
@@ -138,33 +150,40 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
   end
 
   defp pages(config, path, opts, token, acc, seen, restarts) do
-    params = if token, do: %{"limit" => "100", "continue" => token}, else: %{"limit" => "100"}
+    params = page_params(token)
 
     case request(config, :get, query(path, params), nil, opts) do
       {:ok, %{status: 200, body: %{"items" => items, "metadata" => metadata}}} when is_list(items) and is_map(metadata) ->
-        next = Map.get(metadata, "continue", "")
-
-        cond do
-          not Enum.all?(items, &is_map/1) -> {:error, {:unknown, :kubernetes_incomplete_inventory}}
-          next == "" -> {:ok, acc |> Enum.reverse() |> List.flatten() |> Kernel.++(items)}
-          not is_binary(next) or MapSet.member?(seen, next) -> {:error, {:unknown, :kubernetes_continuation_loop}}
-          true -> pages(config, path, opts, next, [items | acc], MapSet.put(seen, next), restarts)
-        end
+        continue_page(config, path, opts, items, metadata, acc, seen, restarts)
 
       {:ok, %{status: 410}} when restarts < 2 ->
-        pages(config, path, opts, nil, [], MapSet.new(), restarts + 1)
+        pages(config, path, opts, nil, [], %{}, restarts + 1)
 
       {:ok, %{status: code}} when code in [401, 403] ->
         {:error, {:denied, :kubernetes_inventory}}
 
       {:error, _} when token != nil and restarts < 2 ->
-        pages(config, path, opts, nil, [], MapSet.new(), restarts + 1)
+        pages(config, path, opts, nil, [], %{}, restarts + 1)
 
       {:error, _} = error ->
         error
 
       _ ->
         {:error, {:unknown, :kubernetes_incomplete_inventory}}
+    end
+  end
+
+  defp page_params(nil), do: %{"limit" => "100"}
+  defp page_params(token), do: %{"limit" => "100", "continue" => token}
+
+  defp continue_page(config, path, opts, items, metadata, acc, seen, restarts) do
+    next = Map.get(metadata, "continue", "")
+
+    cond do
+      not Enum.all?(items, &is_map/1) -> {:error, {:unknown, :kubernetes_incomplete_inventory}}
+      next == "" -> {:ok, acc |> Enum.reverse() |> List.flatten() |> Kernel.++(items)}
+      not is_binary(next) or Map.has_key?(seen, next) -> {:error, {:unknown, :kubernetes_continuation_loop}}
+      true -> pages(config, path, opts, next, [items | acc], Map.put(seen, next, true), restarts)
     end
   end
 
