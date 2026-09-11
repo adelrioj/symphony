@@ -10,8 +10,9 @@ defmodule SymphonyElixir.ExecutionEnvironment do
     @moduledoc """
     Durable identity and lifecycle observations for one managed environment.
 
-    Pending operations retain their kind, correlation ID (when known), and explicit
-    unknown-outcome marker. A missing resource cannot clear an unresolved create.
+    Pending operations retain their `verb`, correlation `id` (when known), and
+    `outcome` (`:pending`, `:unknown`, `:succeeded`, or `:failed`). A missing resource
+    cannot clear an unresolved create.
     Only adapters establish quiescence proof; agent-writable metadata is not evidence.
     `absent?` is true only after both owned compute and disk absence are established.
     """
@@ -34,7 +35,12 @@ defmodule SymphonyElixir.ExecutionEnvironment do
                   metadata: %{}
                 ]
 
-    @type pending_operation :: %{kind: atom(), correlation_id: term() | nil, unknown_outcome?: boolean()}
+    @type pending_operation :: %{
+            required(:verb) => atom(),
+            required(:id) => String.t() | nil,
+            required(:outcome) => :pending | :unknown | :succeeded | :failed,
+            optional(atom()) => term()
+          }
     @type t :: %__MODULE__{
             key: String.t(),
             deployment_id: String.t(),
@@ -60,7 +66,15 @@ defmodule SymphonyElixir.ExecutionEnvironment do
   end
 
   defmodule Connection do
-    @moduledoc "Runtime-only transport lease. Never serialize this into provider metadata."
+    @moduledoc """
+    Runtime-only transport lease. Never serialize this into provider metadata.
+
+    Before managed execution, the holder must acknowledge the exact lease ID and
+    target with `:ok` in response to
+    `GenServer.call(owner, {:validate_connection, id, target}, 1_000)`.
+    This establishes ready lease consistency, not an authorization boundary between
+    trusted BEAM callers or proof that remote execution has stopped.
+    """
     @enforce_keys [:target, :owner, :id]
     @derive {Inspect, only: [:owner, :id]}
     defstruct @enforce_keys

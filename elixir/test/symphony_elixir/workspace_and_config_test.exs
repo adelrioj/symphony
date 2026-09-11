@@ -54,6 +54,78 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert File.read!(Path.join(workspace, "keep")) == "retained"
   end
 
+  test "managed before-run timeout reports unknown execution without running after-run" do
+    {root, context, hook, release} = delayed_managed_hook_fixture!()
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root, hook_before_run: hook,
+      hook_after_run: "touch after-run", hook_timeout_ms: 2_000
+    )
+    issue = %Issue{id: "managed-timeout", identifier: "TIMEOUT-1", state: "In Progress"}
+    assert {:managed_execution_unknown, {:remote_command_timeout, "before_run", 2_000}} =
+             catch_exit(AgentRunner.run(issue, nil, execution_context: context))
+    assert File.exists?(Path.join(root, "started"))
+    refute File.exists?(Path.join(context.workspace_path, "after-run"))
+    release.()
+    refute File.exists?(Path.join(context.workspace_path, "after-run"))
+  end
+
+  test "managed after-create timeout retains workspace while the remote hook is unconfirmed" do
+    {root, context, hook, release} = delayed_managed_hook_fixture!()
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_create: hook, hook_timeout_ms: 2_000)
+    assert {:error, {:managed_execution_unknown, {:remote_command_timeout, "after_create", 2_000}}} =
+             Workspace.create_for_issue("TIMEOUT-2", context)
+    assert File.exists?(Path.join(root, "started"))
+    assert File.dir?(context.workspace_path)
+    release.()
+    assert File.read!(Path.join(context.workspace_path, "delayed")) == "finished"
+  end
+
+  test "managed before-remove timeout cannot authorize directory deletion" do
+    {root, context, hook, release} = delayed_managed_hook_fixture!()
+    File.mkdir_p!(context.workspace_path)
+    File.write!(Path.join(context.workspace_path, "retained"), "keep")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_remove: hook, hook_timeout_ms: 2_000)
+    assert {:error, {:managed_execution_unknown, {:remote_command_timeout, "before_remove", 2_000}}, ""} =
+             Workspace.remove(context.workspace_path, context)
+    assert File.read!(Path.join(context.workspace_path, "retained")) == "keep"
+    release.()
+    assert File.read!(Path.join(context.workspace_path, "delayed")) == "finished"
+  end
+
+  defp delayed_managed_hook_fixture! do
+    root = Path.join(System.tmp_dir!(), "symphony-managed-delayed-#{System.unique_integer([:positive])}")
+    target = managed_shell_target!(root)
+    workspace = Path.join(root, "workspace")
+    pidfile = Path.join(root, "remote.pid")
+    gate = Path.join(root, "release")
+    started = Path.join(root, "started")
+    assert {_, 0} = System.cmd("mkfifo", [gate])
+    on_exit(fn ->
+      # The blocked hook uses shell builtins only; its recorded shell has no child
+      # work to orphan. Kill it before deleting the FIFO/workspace on a failed test.
+      if File.exists?(pidfile) and not File.exists?(Path.join(workspace, "delayed")) do
+        System.cmd("kill", ["-KILL", String.trim(File.read!(pidfile))], stderr_to_stdout: true)
+      end
+      File.rm_rf(root)
+    end)
+    hook = "trap '' HUP; printf '%s' \"$$\" > '#{pidfile}'; printf started > '#{started}'; IFS= read -r token < '#{gate}'; printf finished > delayed"
+    context = %SymphonyElixir.ExecutionContext{mode: :managed, workspace_root: root, workspace_path: workspace, target: target}
+    release = fn ->
+      assert {_, 0} = System.cmd("kill", ["-0", String.trim(File.read!(pidfile))], stderr_to_stdout: true)
+      Task.async(fn -> File.write!(gate, "continue\n") end) |> Task.await(2_000)
+      await_delayed_hook!(Path.join(workspace, "delayed"), 200)
+    end
+    {root, context, hook, release}
+  end
+
+  defp await_delayed_hook!(path, attempts) do
+    cond do
+      File.read(path) == {:ok, "finished"} -> :ok
+      attempts == 0 -> flunk("remote hook did not finish after release")
+      true -> Process.sleep(10); await_delayed_hook!(path, attempts - 1)
+    end
+  end
+
   defp managed_shell_target!(root) do
     realpath = System.find_executable("grealpath") || System.find_executable("realpath") || flunk("managed workspace fixtures require a real realpath executable supporting -m")
     bin = Path.join(root, "fixture-bin")

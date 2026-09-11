@@ -24,6 +24,8 @@ defmodule SymphonyElixir.AgentRunner do
 
       case run_on_worker_host(issue, codex_update_recipient, opts, context) do
         :ok -> :ok
+        {:error, {:managed_execution_unknown, _detail} = reason} ->
+          exit(reason)
         {:error, reason} ->
           Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
           raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
@@ -47,19 +49,40 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, workspace} ->
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace, opts[:attempt_id])
 
-        try do
-          outcome =
-            with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-              run_agent_turns(workspace, issue, codex_update_recipient, opts, worker_host)
-            end
-
-          handle_run_outcome(outcome, issue)
-        after
-          Workspace.run_after_run_hook(workspace, issue, worker_host)
-        end
+        run_with_workspace_hooks(workspace, issue, codex_update_recipient, opts, worker_host)
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp run_with_workspace_hooks(workspace, issue, recipient, opts, %ExecutionContext{mode: :managed} = context) do
+    outcome =
+      with :ok <- Workspace.run_before_run_hook(workspace, issue, context) do
+        run_agent_turns(workspace, issue, recipient, opts, context)
+      end
+
+    case outcome do
+      {:error, {:managed_execution_unknown, _detail}} = unknown ->
+        unknown
+
+      _ ->
+        with :ok <- Workspace.run_after_run_hook(workspace, issue, context) do
+          handle_run_outcome(outcome, issue)
+        end
+    end
+  end
+
+  defp run_with_workspace_hooks(workspace, issue, recipient, opts, context) do
+    try do
+      outcome =
+        with :ok <- Workspace.run_before_run_hook(workspace, issue, context) do
+          run_agent_turns(workspace, issue, recipient, opts, context)
+        end
+
+      handle_run_outcome(outcome, issue)
+    after
+      Workspace.run_after_run_hook(workspace, issue, context)
     end
   end
 

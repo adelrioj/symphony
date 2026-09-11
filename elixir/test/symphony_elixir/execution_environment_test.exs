@@ -6,6 +6,20 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
   alias SymphonyElixir.ExecutionEnvironment.{Config, Connection, Record}
   alias SymphonyElixir.SSH.Target
 
+  defmodule ConnectionHolder do
+    use GenServer
+
+    @impl true
+    def init({id, target}), do: {:ok, %{id: id, target: target, mode: :ready}}
+
+    @impl true
+    def handle_call({:validate_connection, id, target}, _from, %{mode: :ready, id: id, target: target} = state), do: {:reply, :ok, state}
+    def handle_call({:validate_connection, _id, _target}, _from, %{mode: :unresponsive} = state), do: {:noreply, state}
+    def handle_call({:validate_connection, _id, _target}, _from, %{mode: :exiting} = state), do: {:stop, :normal, state}
+    def handle_call({:validate_connection, _id, _target}, _from, state), do: {:reply, {:error, :invalid_lease}, state}
+    def handle_call({:mode, mode}, _from, state), do: {:reply, :ok, %{state | mode: mode}}
+  end
+
   test "opaque issue keys cannot collide through separator or display-name changes" do
     left = Environment.resource_key("deployment:a", "linear", "b")
     right = Environment.resource_key("deployment", "a:linear", "b")
@@ -76,7 +90,7 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
 
     assert Config.identity(changed) == identity
 
-    for field <- ["project", "location", "cluster", "config", "credential_configuration", "impersonate_service_account"] do
+    for field <- ["project", "location", "cluster", "config", "credential_configuration", "impersonate_service_account", "ssh_user"] do
       refute Config.identity(put_in(settings, [:worker, :environment, "provider", field], "changed")) == identity
     end
 
@@ -96,9 +110,11 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     settings = put_in(settings(), [:worker, :environment], Map.merge(attributes(), %{"kind" => "kubernetes", "provider" => kubernetes_provider()}))
     identity = Config.identity(settings)
 
-    for field <- ["kubeconfig", "context", "namespace", "template", "ssh_auth_volume"] do
+    for field <- ["kubeconfig", "context", "namespace", "template", "ssh_auth_volume", "ssh_user"] do
       refute Config.identity(put_in(settings, [:worker, :environment, "provider", field], "changed")) == identity
     end
+
+    refute Config.identity(put_in(settings, [:worker, :environment, "provider", "ssh_port"], 2223)) == identity
   end
 
   test "unknown adapters fail closed without treating input as a module name" do
@@ -141,6 +157,31 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     end
 
     assert_raise ArgumentError, fn -> ExecutionContext.managed(%{}, record, connection) end
+
+    unrelated = connection()
+
+    for invalid <- [
+          %{connection | owner: self()},
+          %{connection | owner: unrelated.owner},
+          %{connection | id: make_ref()},
+          %{connection | target: %{connection.target | prefix: ["changed-target"]}},
+          %{connection | target: %{connection.target | env: [{"SECRET", "changed-secret"}]}}
+        ] do
+      assert_raise ArgumentError, fn -> ExecutionContext.managed(config, record, invalid) end
+    end
+  end
+
+  test "managed construction rejects closed unresponsive and exiting connection holders without leaking the lease" do
+    config = Config.runtime(settings())
+    record = record(config)
+
+    for mode <- [:closed, :unresponsive, :exiting] do
+      connection = connection()
+      assert :ok = GenServer.call(connection.owner, {:mode, mode})
+      error = assert_raise ArgumentError, fn -> ExecutionContext.managed(config, record, connection) end
+      refute Exception.message(error) =~ "transport-secret"
+      refute Exception.message(error) =~ "config-secret"
+    end
   end
 
   test "redacted inspection does not expose provider metadata or connection credentials" do
@@ -200,6 +241,9 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
   end
 
   defp connection do
-    %Connection{target: %Target{executable: "/usr/bin/ssh", prefix: ["-i", "transport-secret", "worker@localhost"], label: "managed-worker", env: [{"SECRET", "transport-secret"}]}, owner: self(), id: make_ref()}
+    target = %Target{executable: "/usr/bin/ssh", prefix: ["-i", "transport-secret", "worker@localhost"], label: "managed-worker", env: [{"SECRET", "transport-secret"}]}
+    id = make_ref()
+    owner = start_supervised!(%{id: id, start: {GenServer, :start_link, [ConnectionHolder, {id, target}]}, restart: :temporary})
+    %Connection{target: target, owner: owner, id: id}
   end
 end

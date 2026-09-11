@@ -78,13 +78,20 @@ defmodule SymphonyElixir.ExecutionContext do
   defp matching_record?(_config, _record), do: false
 
   defp ready_connection?(%Connection{owner: owner, id: id, target: %Target{} = target})
-       when is_pid(owner) and is_reference(id) and node(owner) == node() do
+       when is_pid(owner) and is_reference(id) and node(owner) == node() and owner != self() do
     Process.alive?(owner) and nonblank?(target.executable) and nonblank?(target.label) and
       is_list(target.prefix) and Enum.all?(target.prefix, &transport_string?/1) and
-      is_list(target.env) and Enum.all?(target.env, &environment_entry?/1)
+      is_list(target.env) and Enum.all?(target.env, &environment_entry?/1) and
+      holder_confirms_connection?(owner, id, target)
   end
 
   defp ready_connection?(_connection), do: false
+
+  defp holder_confirms_connection?(owner, id, target) do
+    GenServer.call(owner, {:validate_connection, id, target}, 1_000) == :ok
+  catch
+    :exit, _reason -> false
+  end
 
   defp workspace_path?(root, path) when is_binary(root) and is_binary(path) do
     nonblank?(root) and nonblank?(path) and Path.type(root) == :absolute and Path.type(path) == :absolute and

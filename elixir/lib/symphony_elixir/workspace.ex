@@ -23,9 +23,14 @@ defmodule SymphonyElixir.Workspace do
           :ok ->
             {:ok, workspace}
 
-          {:error, _reason} = error ->
-            cleanup_failed_new_workspace(workspace, created?, worker_host)
+          {:error, {:managed_execution_unknown, _detail}} = error ->
             error
+
+          {:error, _reason} = error ->
+            case cleanup_failed_new_workspace(workspace, created?, worker_host) do
+              {:error, {:managed_execution_unknown, _detail}} = unknown -> unknown
+              _ -> error
+            end
         end
       end
     rescue
@@ -109,24 +114,21 @@ defmodule SymphonyElixir.Workspace do
   end
 
   def remove(workspace, %ExecutionContext{} = worker_host) do
-    run_before_remove_hook(workspace, Path.basename(workspace), worker_host)
+    with :ok <- run_before_remove_hook(workspace, Path.basename(workspace), worker_host) do
+      script =
+        [
+          remote_workspace_guard(workspace, worker_host),
+          "rm -rf \"$workspace\""
+        ]
+        |> Enum.join("\n")
 
-    script =
-      [
-        remote_workspace_guard(workspace, worker_host),
-        "rm -rf \"$workspace\""
-      ]
-      |> Enum.join("\n")
-
-    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
-      {:ok, {_output, 0}} ->
-        {:ok, []}
-
-      {:ok, {output, status}} ->
-        {:error, {:workspace_remove_failed, worker_host.worker_host, status, output}, ""}
-
-      {:error, reason} ->
-        {:error, reason, ""}
+      case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms, :workspace_remove) do
+        {:ok, {_output, 0}} -> {:ok, []}
+        {:ok, {output, status}} -> {:error, {:workspace_remove_failed, worker_host.worker_host, status, output}, ""}
+        {:error, reason} -> {:error, reason, ""}
+      end
+    else
+      {:error, reason} -> {:error, reason, ""}
     end
   end
 
@@ -159,13 +161,16 @@ defmodule SymphonyElixir.Workspace do
     File.rm_rf(workspace)
   end
 
-  @spec remove_issue_workspaces(term(), ExecutionContext.t()) :: :ok
+  @spec remove_issue_workspaces(term(), ExecutionContext.t()) :: :ok | {:error, {:managed_execution_unknown, term()}}
   def remove_issue_workspaces(issue_or_identifier, %ExecutionContext{} = context) when is_map(issue_or_identifier) or is_binary(issue_or_identifier) do
     case workspace_path_for_issue(workspace_key(issue_or_identifier), context) do
-      {:ok, workspace} -> remove(workspace, context)
+      {:ok, workspace} ->
+        case remove(workspace, context) do
+          {:error, {:managed_execution_unknown, _detail} = reason, _path} -> {:error, reason}
+          _ -> :ok
+        end
       {:error, _reason} -> :ok
     end
-    :ok
   end
 
   def remove_issue_workspaces(_issue_or_identifier, %ExecutionContext{}), do: :ok
@@ -185,7 +190,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) :: :ok
+  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) :: :ok | {:error, {:managed_execution_unknown, term()}}
   def run_after_run_hook(workspace, issue_or_identifier, %ExecutionContext{} = worker_host) when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
@@ -277,16 +282,19 @@ defmodule SymphonyElixir.Workspace do
   defp cleanup_failed_new_workspace(workspace, true, %ExecutionContext{} = worker_host) do
     script = [remote_workspace_guard(workspace, worker_host), "rm -rf \"$workspace\""] |> Enum.join("\n")
 
-    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
+    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms, :workspace_cleanup) do
       {:ok, {_output, 0}} ->
         :ok
+
+      {:error, {:managed_execution_unknown, _detail}} = unknown ->
+        unknown
 
       result ->
         Logger.warning("Failed to remove partial workspace worker_host=#{worker_host_for_log(worker_host)} result=#{inspect(result)}")
     end
   end
 
-  @spec run_before_remove_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) :: :ok
+  @spec run_before_remove_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) :: :ok | {:error, {:managed_execution_unknown, term()}}
   def run_before_remove_hook(workspace, issue, %ExecutionContext{} = context) do
     case Config.settings!().hooks.before_remove do
       nil -> :ok
@@ -301,6 +309,7 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp ignore_hook_failure(:ok), do: :ok
+  defp ignore_hook_failure({:error, {:managed_execution_unknown, _detail}} = unknown), do: unknown
   defp ignore_hook_failure({:error, _reason}), do: :ok
 
   defp run_hook(command, workspace, issue_context, hook_name, %ExecutionContext{mode: :local} = context) do
@@ -332,7 +341,7 @@ defmodule SymphonyElixir.Workspace do
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
 
     script = remote_workspace_guard(workspace, worker_host) <> "\ncd \"$workspace\"\n" <> command
-    case run_remote_command(worker_host, script, timeout_ms) do
+    case run_remote_command(worker_host, script, timeout_ms, hook_name) do
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
@@ -484,7 +493,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp run_remote_command(%ExecutionContext{target: target}, script, timeout_ms)
+  defp run_remote_command(%ExecutionContext{target: target} = context, script, timeout_ms, operation \\ :remote_command)
        when is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
     task =
       Task.async(fn ->
@@ -497,7 +506,11 @@ defmodule SymphonyElixir.Workspace do
 
       nil ->
         Task.shutdown(task, :brutal_kill)
-        {:error, {:workspace_hook_timeout, "remote_command", timeout_ms}}
+        if context.mode == :managed do
+          {:error, {:managed_execution_unknown, {:remote_command_timeout, operation, timeout_ms}}}
+        else
+          {:error, {:workspace_hook_timeout, "remote_command", timeout_ms}}
+        end
     end
   end
 
