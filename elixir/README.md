@@ -1021,7 +1021,9 @@ Its JSON contains `scenario` (`storage_deletion`, `node_disconnection`, or `all`
 `resource` (safe backing-storage/volume/node identities, or `null` for `all/restore`),
 and `credential_references`. References select the operator's existing credential
 configuration/impersonation identity or kubeconfig/context; they are **not credential
-values** and must never be printed or copied into public evidence. Emit only
+values**. Never print or copy credential-reference maps into public evidence. The selected
+Kubernetes context name is recorded separately with its namespace as required target audit
+identity; credential file paths, configurations and impersonation selectors stay private. Emit only
 `{"applied":true}` on stdout after successful application/restoration. This acknowledgment
 and the executable hash are **not physical-effect proof**. `all/restore` must be
 idempotent, confined to this deployment/scope, and work even after the original provider

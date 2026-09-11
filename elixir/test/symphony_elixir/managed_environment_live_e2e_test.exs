@@ -1128,7 +1128,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     end
   end
 
-  defp safe_scope(ctx), do: EnvironmentConfig.scope(ctx.config) |> Map.take(["project", "location", "cluster", "config", "namespace"])
+  defp safe_scope(ctx), do: EnvironmentConfig.scope(ctx.config) |> Map.take(["project", "location", "cluster", "config", "context", "namespace"])
 
   defp safe_record(record) do
     id =
