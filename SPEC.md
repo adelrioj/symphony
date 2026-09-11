@@ -2755,6 +2755,11 @@ resource bindings, permissions and operational restrictions are documented in
 [the reference operator contract](elixir/README.md#kubernetes-agent-sandbox-qualification-contract).
 Symphony MUST NOT create that qualification evidence or treat it as an operation fence.
 
+Production Kubernetes preflight MUST reject allocation while the cleanup-ordering guarantee below
+remains unresolved, even if all other profile and inventory checks succeed. Ordinary managed
+discovery MUST remain blocked and admit no tickets. The qualification harness MUST enforce the
+same stop; no workflow field or operator assertion may bypass it.
+
 **Baseline Kubernetes final absence remains blocked:** upstream v1.0.1 lacks authoritative
 per-Sandbox acknowledgment ordering earlier child-create operations before final cleanup. Its
 [deletionTimestamp branch](https://github.com/kubernetes-sigs/agent-sandbox/blob/v1.0.1/controllers/sandbox_controller.go#L303-L308)

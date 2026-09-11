@@ -68,6 +68,8 @@ See [managed operation and configuration](elixir/README.md#managed-ticket-enviro
 Neither provider has been live/production-qualified by this change. In particular, upstream Agent
 Sandbox v1.0.1 lacks authoritative child-create cleanup ordering acknowledgment: final Sandbox
 absence cannot currently be certified, and its cleanup finalizer and deployment guard remain held.
+Ordinary production startup also rejects this profile before ticket admission, so preparing the
+infrastructure cannot enable Kubernetes allocation while the ordering guarantee remains unresolved.
 Examples are references to operator-created infrastructure, not provisioning or live-use approval.
 
 ---

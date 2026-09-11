@@ -428,20 +428,14 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
     end
   end
 
-  defp provider_preflight(%{kind: "kubernetes"} = config, profile, _quota, opts) do
-    # Adapter preflight reads the actual immutable contract, controller deployment,
-    # CRD schemas, runtime class, CSI classes and isolation policy. It cannot prove
-    # the upstream deletion/create ordering barrier, which is intentionally fatal.
-    with :ok <- Kubernetes.preflight(config, opts),
-         {:ok, template} <- get(config, kube_collection(config, "sandboxtemplates") <> "/" <> segment(config.provider["template"]), opts),
-         containers when is_list(containers) <- get_in(template, ["spec", "podTemplate", "spec", "containers"]),
-         true <- Enum.any?(containers, &(&1["image"] == profile["worker_image"])),
-         true <- Enum.all?(containers, &pinned_image?(&1["image"])),
-         {:ok, quotas} <- KubernetesClient.list(config, kube_collection(config, "resourcequotas"), opts),
-         true <- Enum.all?(quotas, &(is_map(get_in(&1, ["status", "hard"])) and is_map(get_in(&1, ["status", "used"])))) do
-      {:error, :kubernetes_controller_cleanup_ordering_unproven}
-    else
-      _ -> {:error, :kubernetes_prerequisites_unavailable}
+  defp provider_preflight(%{kind: "kubernetes"} = config, _profile, _quota, opts) do
+    # Production preflight owns the allocation stop; qualification cannot bypass it.
+    case Kubernetes.preflight(config, opts) do
+      {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}} ->
+        {:error, :kubernetes_controller_cleanup_ordering_unproven}
+
+      _ ->
+        {:error, :kubernetes_prerequisites_unavailable}
     end
   end
 

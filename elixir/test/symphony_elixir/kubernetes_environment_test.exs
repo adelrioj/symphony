@@ -78,6 +78,16 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     refute File.exists?(file)
   end
 
+  test "production discovery blocks allocation despite an otherwise qualified Kubernetes profile" do
+    {config, _record, opts} = api_fixture()
+    inventory = api_state()
+
+    assert {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}} =
+             Operations.run(Kubernetes, config, nil, :discover, opts)
+
+    assert api_state() == inventory
+  end
+
   test "lost Sandbox create response is recovered without duplicating retained PVCs" do
     {config, record, opts} = api_fixture(lost_create: true)
     assert {:ok, created} = Kubernetes.ensure(config, record, opts)
@@ -644,7 +654,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     policy = put_in(policy, ["spec", "podSelector", "matchExpressions"], expressions)
     put_object("networkpolicies", policy)
-    assert :ok = Kubernetes.preflight(config, opts)
+    assert {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}} = Kubernetes.preflight(config, opts)
     invalid = expressions ++ [%{"key" => "profile", "operator" => "Unrecognized"}]
     put_object("networkpolicies", put_in(policy, ["spec", "podSelector", "matchExpressions"], invalid))
     assert {:error, {:invalid, :kubernetes_profile_not_qualified}, _} = Kubernetes.ensure(config, record, opts)

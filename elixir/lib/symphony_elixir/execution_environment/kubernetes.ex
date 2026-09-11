@@ -39,7 +39,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     with :ok <- validate_config(config.provider),
          {:ok, _} <- qualification(config, opts),
          {:ok, _} <- inventory(config, opts),
-         do: :ok
+         do: {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}}
   end
 
   @spec discover(map(), keyword()) :: {:ok, [Record.t()]} | {:error, term()}

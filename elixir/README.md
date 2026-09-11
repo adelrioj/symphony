@@ -552,7 +552,7 @@ before deletion; a complete exact-UID PV deletion watch must show finalizer remo
 missing PVs, unbound claims with unknown provisioning, denied inventory, or compacted watch history
 do not establish disk absence. Never strip protection finalizers to force progress.
 
-**Final-cleanup blocker:** upstream v1.0.1 has no authoritative per-Sandbox acknowledgment ordering
+**Allocation and final-cleanup blocker:** upstream v1.0.1 has no authoritative per-Sandbox acknowledgment ordering
 all earlier child-create requests before final cleanup. Its
 [deletionTimestamp branch](https://github.com/kubernetes-sigs/agent-sandbox/blob/v1.0.1/controllers/sandbox_controller.go#L303-L308)
 only logs, clears a local deferral clock, and returns. An elapsed timeout, qualification ConfigMap,
@@ -562,6 +562,13 @@ retains remaining identities, and reports `kubernetes_controller_cleanup_orderin
 Final absence is **unknown**, the identity guard cannot release, and no full Kubernetes production
 qualification is claimed. Resolving this needs authoritative upstream evidence or an approved design
 change, not a workflow flag.
+
+Production `Kubernetes.preflight/2` returns
+`{:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}}` even when every
+read-only profile and inventory check succeeds. The normal discovery path remains blocked and
+the scheduler admits no Kubernetes tickets; this is not merely a qualification-harness restriction.
+The harness preserves the same blocker. No workflow field or operator ConfigMap can override it.
+Local/static SSH operation and the existing VM deployment do not depend on this managed-provider gate.
 
 #### Managed observability API
 
