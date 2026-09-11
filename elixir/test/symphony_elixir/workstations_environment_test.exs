@@ -281,6 +281,88 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     eventually(fn -> not File.exists?(hosts) end)
   end
 
+  test "preflight rejects disabled plain TCP even when port 22 is allowed" do
+    {server, request} = provider()
+    Agent.update(server, &put_in(&1, [:template, "disableTcpConnections"], true))
+    assert {:error, {:invalid, :workstations_profile}} = Workstations.preflight(config(), opts(request))
+  end
+
+  test "retained configuration cannot change its captured plain TCP policy" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    Agent.update(server, &put_in(&1, [:template, "disableTcpConnections"], true))
+    assert {:error, {:invalid, :workstations_config_changed}, _} = Workstations.ensure(config(), created, opts(request))
+  end
+
+  test "omitted and explicit false TCP policy have the same captured runtime identity" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    Agent.update(server, &put_in(&1, [:template, "disableTcpConnections"], false))
+    assert {:ok, retained} = Workstations.ensure(config(), created, opts(request))
+    assert retained.provider_ref == created.provider_ref
+  end
+
+  test "quiescence rejects succeeded stop journals without a valid scoped operation ID" do
+    for id <- [nil, "", "arbitrary", "projects/p/locations/l/operations/", "projects/foreign/locations/l/operations/op"] do
+      record = %{record() | provider_ref: %{name: name(), uid: "ws-uid"}, pending: [%{verb: :stop, id: id, outcome: :succeeded}]}
+      observed = Workstations.normalize(record, workstation(), [])
+      assert observed.proof == :unknown
+      assert observed.phase == :unknown
+    end
+  end
+
+  test "invalid succeeded operation metadata cannot authorize destruction" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    for id <- [nil, "", "projects/foreign/locations/l/operations/op"] do
+      change_annotation(server, &Map.put(&1, "pending", [%{"verb" => "stop", "id" => id, "outcome" => "succeeded"}]))
+      before = Agent.get(server, & &1.operations)
+      assert {:error, {:invalid, :workstations_ownership}, _} = Workstations.destroy(config(), created, opts(request))
+      assert Agent.get(server, & &1.operations) == before
+    end
+  end
+
+  test "missing or foreign captured config identity blocks destruction before provider adoption" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    original = Agent.get(server, &get_in(&1, [:workstation, "annotations", "symphony.dev/record"]))
+    changes = [
+      &Map.delete(&1, "template_identity"),
+      &Map.put(&1, "template_identity", " "),
+      &Map.put(&1, "template_identity", "foreign-config-uid"),
+      &update_in(&1, ["metadata"], fn metadata -> Map.delete(metadata, "config_name") end),
+      &put_in(&1, ["metadata", "config_fingerprint"], "")
+    ]
+    for change <- changes do
+      Agent.update(server, &put_in(&1, [:workstation, "annotations", "symphony.dev/record"], original))
+      change_annotation(server, change)
+      before = Agent.get(server, & &1.operations)
+      unadopted = %{created | provider_ref: nil}
+      assert {:error, {:invalid, :workstations_ownership}, _} = Workstations.destroy(config(), unadopted, opts(request))
+      assert Agent.get(server, & &1.operations) == before
+    end
+  end
+
+  test "OAuth subprocess keeps supervised context and caller environment overrides" do
+    directory = Path.join(System.tmp_dir!(), "workstation-token-test-#{System.unique_integer([:positive])}")
+    File.mkdir!(directory)
+    on_exit(fn -> File.rm_rf!(directory) end)
+    executable = Path.join(directory, "gcloud")
+    File.write!(executable, "#!/bin/sh\ntest \"$WORKSTATION_TEST_CONTEXT\" = scoped || exit 3\ntest \"$CLOUDSDK_CORE_DISABLE_PROMPTS\" = 1 || exit 4\nprintf 'scripted-access-token\\n'\n")
+    File.chmod!(executable, 0o700)
+    supervisor = start_supervised!(Task.Supervisor)
+    request = fn _ -> response(200, %{"observed" => true}) end
+    options = [gcloud_executable: executable, task_supervisor: supervisor, authority: self(), request_fun: request,
+      deadline: System.monotonic_time(:millisecond) + 5_000, timeout_ms: 5_000, env: [{"WORKSTATION_TEST_CONTEXT", "scoped"}]]
+    assert {:ok, %{status: 200, body: %{"observed" => true}}} = Client.request(config(), :get, "/v1/" <> operation_name(), [], nil, options)
+  end
+
+  defp change_annotation(server, change) do
+    Agent.update(server, fn state ->
+      update_in(state, [:workstation, "annotations", "symphony.dev/record"], fn value -> value |> Jason.decode!() |> change.() |> Jason.encode!() end)
+    end)
+  end
+
   defp eventually(predicate, attempts \\ 200) do
     cond do
       predicate.() -> :ok

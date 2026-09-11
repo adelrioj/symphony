@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.ExecutionEnvironment.Command do
   @moduledoc "Bounded local argv execution. Killing local transport never proves remote cancellation."
+  alias SymphonyElixir.ExecutionEnvironment.Operations
 
   @spec run(String.t(), [String.t()], keyword()) :: {:ok, %{output: binary(), status: integer()}} | {:error, {:unknown, term()}}
   def run(executable, args, opts) when is_binary(executable) and is_list(args) do
@@ -13,55 +14,75 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
     end
   end
 
-  @spec with_json_file(term(), (String.t() -> result)) :: result | {:error, {:unknown, term()}} when result: term()
-  def with_json_file(body, fun) when is_function(fun, 1) do
+  @spec with_json_file(term(), (String.t() -> result), keyword()) :: result | {:error, {:unknown, term()}} when result: term()
+  def with_json_file(body, fun, opts) when is_function(fun, 1) do
     directory = Path.join(System.tmp_dir!(), "symphony-command-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false))
 
-    case File.mkdir(directory) do
-      :ok ->
-        try do
-          path = Path.join(directory, "request.json")
-
-          with :ok <- File.chmod(directory, 0o700),
-               {:ok, file} <- File.open(path, [:write, :binary, :exclusive]) do
-            try do
-              with :ok <- File.chmod(path, 0o600),
-                   :ok <- IO.binwrite(file, Jason.encode!(body)) do
-                File.close(file)
-                fun.(path)
-              else
-                {:error, _} -> {:error, {:unknown, :private_request_file}}
-              end
-            after
-              File.close(file)
-            end
-          else
-            {:error, _} -> {:error, {:unknown, :private_request_file}}
-          end
-        after
-          File.rm_rf(directory)
-        end
-
-      {:error, _} ->
-        {:error, {:unknown, :private_request_file}}
-    end
+    with_stage(opts, [directory], fn lease ->
+      with :ok <- Operations.create_staged_directory(lease, directory),
+           {:ok, path} <- write_request_file(directory, body) do
+        fun.(path)
+      else
+        {:error, _} -> {:error, {:unknown, :private_request_file}}
+      end
+    end)
   end
 
   defp execute(executable, args, opts, timeout, limit) do
-    previous_trap = Process.flag(:trap_exit, true)
+    clock = Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
+    remaining = if Keyword.has_key?(opts, :deadline), do: max(Keyword.fetch!(opts, :deadline) - clock.(), 0), else: timeout
+    deadline = System.monotonic_time(:millisecond) + min(timeout, remaining)
 
-    try do
-      port = Port.open({:spawn_executable, executable}, [:binary, :exit_status, :use_stdio, :stderr_to_stdout, :hide, args: args, env: port_env(Keyword.get(opts, :env, []))])
-
-      try do
-        collect(port, System.monotonic_time(:millisecond) + timeout, limit, [], 0)
-      after
-        close_port(port)
+    with_stage(opts, [], fn lease ->
+      if System.monotonic_time(:millisecond) >= deadline do
+        {:error, {:unknown, {:timeout, ""}}}
+      else
+        case Operations.start_staged_port(lease, executable, args, Keyword.put(opts, :retain_on_exit, true)) do
+          {:ok, port} -> collect(port, deadline, limit, [], 0)
+          {:error, _} -> {:error, {:unknown, :command_failed}}
+        end
       end
-    rescue
-      _ -> {:error, {:unknown, :command_failed}}
-    after
-      Process.flag(:trap_exit, previous_trap)
+    end)
+  end
+
+  defp with_stage(opts, paths, fun) do
+    supervisor = Keyword.fetch!(opts, :task_supervisor)
+    authority = Keyword.get(opts, :authority, self())
+
+    case Operations.stage_private_paths(supervisor, authority, self(), paths) do
+      {:ok, lease} ->
+        outcome =
+          try do
+            {:returned, fun.(lease)}
+          catch
+            kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+          end
+
+        cleanup = Operations.release_staged_paths(lease)
+
+        case {outcome, cleanup} do
+          {{:raised, kind, reason, stacktrace}, _} -> :erlang.raise(kind, reason, stacktrace)
+          {{:returned, result}, :ok} -> result
+          {{:returned, _result}, {:error, _}} -> {:error, {:unknown, :local_cleanup_unconfirmed}}
+        end
+
+      {:error, _} ->
+        {:error, {:unknown, :command_resource_owner}}
+    end
+  end
+
+  defp write_request_file(directory, body) do
+    path = Path.join(directory, "request.json")
+
+    with {:ok, file} <- File.open(path, [:write, :binary, :exclusive]) do
+      try do
+        with :ok <- File.chmod(path, 0o600),
+             :ok <- IO.binwrite(file, Jason.encode!(body)) do
+          {:ok, path}
+        end
+      after
+        File.close(file)
+      end
     end
   end
 
@@ -72,7 +93,6 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
       {^port, {:data, data}} ->
         if size + byte_size(data) > limit do
           output = IO.iodata_to_binary(Enum.reverse([binary_part(data, 0, max(limit - size, 0)) | chunks]))
-          terminate_port(port)
           {:error, {:unknown, {:output_limit, output}}}
         else
           collect(port, deadline, limit, [data | chunks], size + byte_size(data))
@@ -85,7 +105,6 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
         {:error, {:unknown, :command_exited}}
     after
       remaining ->
-        terminate_port(port)
         {:error, {:unknown, {:timeout, IO.iodata_to_binary(Enum.reverse(chunks))}}}
     end
   end
@@ -127,5 +146,4 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
     ArgumentError -> :ok
   end
 
-  defp port_env(env), do: Enum.map(env, fn {key, value} -> {String.to_charlist(key), if(is_nil(value), do: false, else: String.to_charlist(value))} end)
 end

@@ -64,6 +64,19 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
     {_, [:forget]} = Lifecycle.step(entry, {:destroyed, entry.operation_id, %{proof | absent?: true}}, 2)
   end
 
+  test "later authoritative absence supersedes unknown deletion with an outstanding start" do
+    proof = %{record() | phase: :stopped, proof: {:quiescent, %{uid: "pod"}}}
+    {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(%{Lifecycle.new(proof, "a", :cleanup) | phase: :stopped}, :destroy, 0)
+    late_start = %{proof | phase: :unknown, pending: [%{verb: :start, id: "late-start", outcome: :unknown}]}
+    {unknown, []} = Lifecycle.step(deleting, {:failed, id, {:unknown, :timeout}, late_start}, 1)
+    assert Lifecycle.occupied?(unknown)
+    absent = %{late_start | absent?: true, pending: [], proof: :unknown}
+    assert {unknown, []} == Lifecycle.step(unknown, {:destroyed, {"a", 99}, absent}, 2)
+    {forgotten, [:forget]} = Lifecycle.step(unknown, {:destroyed, id, absent}, 3)
+    refute Lifecycle.occupied?(forgotten)
+    assert {forgotten, []} == Lifecycle.step(forgotten, {:destroyed, id, absent}, 4)
+  end
+
   test "managed unknown hook exit preserves completion and context until provider stop" do
     context = %{connection: :existing_connection}
     record = %{record() | version: "latest"}

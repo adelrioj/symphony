@@ -90,8 +90,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations.Client do
   defp cache_key(config), do: {__MODULE__, :token, Map.take(config.provider, ["project", "credential_configuration", "impersonate_service_account"])}
 
   defp fetch_token(config, opts) do
+    command_opts =
+      opts
+      |> Keyword.merge(timeout_ms: remaining(opts), max_output_bytes: 16_384)
+      |> Keyword.update(:env, [{"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}], &List.keystore(&1, "CLOUDSDK_CORE_DISABLE_PROMPTS", 0, {"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}))
+
     with executable when is_binary(executable) <- Keyword.get_lazy(opts, :gcloud_executable, fn -> System.find_executable("gcloud") end),
-         {:ok, %{output: output, status: 0}} <- Command.run(executable, ["auth", "print-access-token", "--verbosity=error"] ++ auth_args(config), timeout_ms: remaining(opts), max_output_bytes: 16_384, env: [{"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}]),
+         {:ok, %{output: output, status: 0}} <- Command.run(executable, ["auth", "print-access-token", "--verbosity=error"] ++ auth_args(config), command_opts),
          token <- String.trim(output),
          true <- token != "" and not String.contains?(token, ["\n", "\r", " "]) do
       {:ok, token}

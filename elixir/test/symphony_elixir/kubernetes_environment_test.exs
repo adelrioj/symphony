@@ -58,13 +58,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   test "JSON CAS conflict is retained and request bodies are private and removed" do
     parent = self()
+    supervisor = start_supervised!(Task.Supervisor)
     command = fn _, args, _ ->
       file = Enum.at(args, Enum.find_index(args, &(&1 == "--patch-file")) + 1)
       send(parent, {:body_file, file, File.stat!(file).mode, Jason.decode!(File.read!(file))})
       {:ok, %{status: 1, output: Jason.encode!(%{"kind" => "Status", "code" => 409})}}
     end
     patch = [%{"op" => "test", "path" => "/metadata/uid", "value" => "original"}]
-    assert {:ok, %{status: 409}} = Client.request(config(), :patch, "/api/v1/namespaces/test/pods/ticket", patch, command_fun: command, timeout_ms: 1_000)
+    assert {:ok, %{status: 409}} = Client.request(config(), :patch, "/api/v1/namespaces/test/pods/ticket", patch, command_fun: command, timeout_ms: 1_000, task_supervisor: supervisor, authority: self())
     assert_receive {:body_file, file, mode, ^patch}
     assert Bitwise.band(mode, 0o777) == 0o600
     refute File.exists?(file)
@@ -266,6 +267,131 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     refute File.exists?(path)
   end
 
+  test "discovery and ensure restore durable attempt, terminal retention, and unknown operation state" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    pending = [%{verb: :start, id: "possible-release", outcome: :unknown}]
+    candidate = %{created | pending: pending}
+    intent = %{desired: :stopped, attempt_id: "attempt-after-restart", issue_state: "Done", terminal_observed_at: 1_789_084_800_000}
+    candidate = %{candidate | issue_identifier: "MEM-42"}
+    assert {:ok, _} = Kubernetes.put_intent(config, candidate, intent, opts)
+    assert {:ok, [recovered]} = Kubernetes.discover(config, opts)
+    assert recovered.pending == pending
+    assert recovered.attempt_id == intent.attempt_id
+    assert recovered.issue_identifier == "MEM-42"
+    assert recovered.issue_state == "Done"
+    assert recovered.terminal_observed_at == intent.terminal_observed_at
+    assert recovered.desired == :stopped
+    assert {:ok, ensured} = Kubernetes.ensure(config, record, opts)
+    assert ensured.pending == recovered.pending
+    assert ensured.attempt_id == recovered.attempt_id
+    assert ensured.issue_identifier == recovered.issue_identifier
+    assert ensured.issue_state == recovered.issue_state
+    assert ensured.terminal_observed_at == recovered.terminal_observed_at
+  end
+
+  test "invalid durable operation enums prevent recovery instead of erasing uncertainty" do
+    {config, record, opts} = api_fixture()
+    {:ok, _} = Kubernetes.ensure(config, record, opts)
+    parent = api_state()["sandboxes"][record.key]
+    state = Jason.decode!(parent["metadata"]["annotations"]["symphony.dev/record"])
+    state = Map.put(state, "pending", [%{"verb" => "unrecognized-provider-action", "id" => "unknown", "outcome" => "unknown"}])
+    put_object("sandboxes", put_in(parent, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(state)))
+    assert {:error, {:unknown, :kubernetes_invalid_owned_record}} = Kubernetes.discover(config, opts)
+    assert {:error, {:unknown, :kubernetes_ownership_changed}, _} = Kubernetes.ensure(config, record, opts)
+  end
+
+  test "an admitted unqualified WaitForFirstConsumer PVC cannot authorize first execution" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    pvc = api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+    put_object("persistentvolumeclaims", put_in(pvc, ["spec"], %{"storageClassName" => "unqualified-default"}))
+    Process.put(:kubernetes_api, Map.put(api_state(), "persistentvolumes", %{}))
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    assert {:error, {:invalid, :unqualified_kubernetes_pvc}, _} = Kubernetes.start(config, intended, opts)
+    assert api_state()["pods"] == %{}
+    assert api_state()["sandboxes"][record.key]["spec"]["operatingMode"] == "Suspended"
+  end
+
+  test "a bound PVC must still match its pinned template storage class" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    pvc = api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+    put_object("persistentvolumeclaims", put_in(pvc, ["spec", "storageClassName"], "unqualified"))
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    assert {:error, {:invalid, :unqualified_kubernetes_pvc}, _} = Kubernetes.start(config, intended, opts)
+    assert api_state()["pods"] == %{}
+  end
+
+  test "an owned PVC with an unexpected generated claim name cannot authorize execution" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    pvc = api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+    remove_object("persistentvolumeclaims", "workspace-se-ticket")
+    put_object("persistentvolumeclaims", put_in(pvc, ["metadata", "name"], "unexpected-se-ticket"))
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    assert {:error, {:invalid, :unqualified_kubernetes_pvc}, _} = Kubernetes.start(config, intended, opts)
+    assert api_state()["pods"] == %{}
+  end
+
+  test "a foreign PVC occupying the generated claim name cannot authorize execution" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    pvc = api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+    foreign = pvc |> put_in(["metadata", "labels", "symphony.dev/environment"], "another-environment")
+      |> put_in(["metadata", "ownerReferences"], [%{"kind" => "Sandbox", "uid" => "foreign-parent"}])
+    put_object("persistentvolumeclaims", foreign)
+    {:ok, desired} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    assert {:error, {:unknown, :kubernetes_child_ownership_changed}, _} = Kubernetes.start(config, desired, opts)
+    assert api_state()["pods"] == %{}
+  end
+
+  test "PVC admission changes after Running intent are revalidated before gate release" do
+    {config, record, opts} = api_fixture(mutate_pvc_on_pod_creation: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, desired} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    assert {:error, {:invalid, :unqualified_kubernetes_pvc}, _} = Kubernetes.start(config, desired, opts)
+    assert %{"name" => "symphony.dev/start-authorized"} in get_in(api_state(), ["pods", record.key, "spec", "schedulingGates"])
+    refute get_in(api_state(), ["pods", record.key, "status", "phase"]) == "Running"
+  end
+
+  test "a matching staged client key cannot reuse a foreign SSH Secret before ungating" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, directory, lease} = Client.private_directory(opts)
+    :ok = Client.write_private(Path.join(directory, "client"), "private-existing-key")
+    :ok = Client.write_private(Path.join(directory, "client.pub"), "ssh-ed25519 existing\n")
+    metadata = Map.merge(created.metadata, %{"client_key_directory" => directory, "client_key_lease" => lease})
+    candidate = %{created | metadata: metadata}
+    foreign = %{"metadata" => Map.put(meta(record.key <> "-ssh", "foreign-secret"), "ownerReferences", [%{"kind" => "Sandbox", "uid" => "foreign-parent"}]),
+      "data" => %{"authorized_keys" => Base.encode64("ssh-ed25519 existing\n")}}
+    put_object("secrets", foreign)
+    {:ok, intended} = Kubernetes.put_intent(config, candidate, %{desired: :running}, opts)
+    assert {:error, {:unknown, :kubernetes_child_ownership_changed}, _} = Kubernetes.start(config, intended, opts)
+    assert api_state()["pods"] == %{}
+    assert api_state()["sandboxes"][record.key]["spec"]["operatingMode"] == "Suspended"
+    refute File.exists?(directory)
+  end
+
+  test "an admitted Pod missing the qualified network profile remains gated" do
+    {config, record, opts} = api_fixture(strip_network_profile: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    assert {:error, {:unknown, :kubernetes_release_outcome}, _} = Kubernetes.start(config, intended, opts)
+    pod = api_state()["pods"][record.key]
+    assert Enum.any?(pod["spec"]["schedulingGates"], &(&1["name"] == "symphony.dev/start-authorized"))
+    refute get_in(pod, ["status", "phase"]) == "Running"
+  end
+
+  test "a scaled-to-zero controller cannot pass preflight or create an environment" do
+    {config, record, opts} = api_fixture()
+    controller = api_state()["deployments"]["sandbox"] |> put_in(["spec", "replicas"], 0) |> put_in(["status", "availableReplicas"], 0)
+    put_object("deployments", controller)
+    assert {:error, {:invalid, :kubernetes_profile_not_qualified}} = Kubernetes.preflight(config, opts)
+    assert {:error, {:invalid, :kubernetes_profile_not_qualified}, _} = Kubernetes.ensure(config, record, opts)
+    assert api_state()["sandboxes"] == %{}
+  end
+
   defp api_fixture(options \\ []) do
     config = %{provider: Map.merge(config().provider, %{"template" => "development", "ssh_user" => "worker", "ssh_port" => 2222, "ssh_auth_volume" => "ssh-auth"}), deployment_id: "deployment", tracker_kind: "memory", kind: "kubernetes"}
     record = %{record() | scope: SymphonyElixir.ExecutionEnvironment.Config.scope(config)}
@@ -381,7 +507,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
         cond do
           resource == "sandboxes" and get_in(updated, ["spec", "operatingMode"]) == "Running" and api_state()["pods"] == %{} ->
             pod = updated["spec"]["podTemplate"] |> Map.put("metadata", Map.merge(updated["spec"]["podTemplate"]["metadata"], child_meta(updated, name, "pod-uid")))
+            pod = if option(:strip_network_profile), do: update_in(pod, ["metadata", "labels"], &Map.delete(&1, "profile")), else: pod
             put_object("pods", pod)
+            if option(:mutate_pvc_on_pod_creation) do
+              for pvc <- Map.values(api_state()["persistentvolumeclaims"]), do: put_object("persistentvolumeclaims", put_in(pvc, ["spec", "storageClassName"], "unqualified-admission"))
+            end
           resource == "sandboxes" and get_in(updated, ["spec", "operatingMode"]) == "Suspended" ->
             put_object(resource, suspend_status(updated))
           resource == "pods" and not Enum.any?(get_in(updated, ["spec", "schedulingGates"]) || [], &(&1["name"] == "symphony.dev/start-authorized")) ->

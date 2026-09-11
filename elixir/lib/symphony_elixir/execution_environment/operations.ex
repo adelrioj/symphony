@@ -37,6 +37,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     record = %{entry.record | attempt_id: entry.attempt_id}
 
     with {:ok, ensured} <- mutate(adapter, :ensure, config, record, opts),
+         ensured = %{ensured | attempt_id: entry.attempt_id, issue_state: entry.record.issue_state, issue_identifier: entry.record.issue_identifier},
          {:ok, intended} <- intent(adapter, config, ensured, :running, opts),
          {:ok, started} <- mutate(adapter, :start, config, intended, opts),
          {:ok, running} <- poll(adapter, config, started, :running, opts) do
@@ -94,6 +95,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     GenServer.call(owner, {:release_connection, id}, 1_000)
   catch
     :exit, _ -> {:error, :connection_closed}
+  end
+
+  @spec create_staged_directory(staged_paths(), String.t()) :: :ok | {:error, term()}
+  def create_staged_directory({:staged_paths, owner, id}, directory) do
+    GenServer.call(owner, {:create_staged_directory, id, directory}, 1_000)
+  catch
+    :exit, _ -> {:error, {:unknown, :private_directory_creation_failed}}
   end
 
   @spec start_staged_port(staged_paths(), String.t(), [String.t()], keyword()) :: {:ok, port()} | {:error, term()}
@@ -190,7 +198,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
     result =
       try do
-        holder_loop(%{authority: authority, authority_ref: authority_ref, donor: donor, donor_ref: donor_ref, id: id, target: target, ports: ports, paths: paths, adopted?: false})
+        holder_loop(%{authority: authority, authority_ref: authority_ref, donor: donor, donor_ref: donor_ref, id: id, target: target, ports: ports, paths: paths, adopted?: false, retained_ports: []})
       catch
         _kind, _reason -> :holder_failed
       end
@@ -213,6 +221,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
           GenServer.reply(from, {:error, :connection_closed})
         end
 
+      {:"$gen_call", from, {:create_staged_directory, id, directory}} when id == state.id and is_nil(state.target) ->
+        result =
+          if directory in state.paths and Process.alive?(state.authority) and Process.alive?(state.donor) do
+            create_private_directory(directory)
+          else
+            {:error, {:invalid, :staged_directory}}
+          end
+
+        GenServer.reply(from, result)
+        holder_loop(state)
+
       {:"$gen_call", from, {:start_staged_port, id, donor, executable, args, opts}}
       when id == state.id and donor == state.donor and is_nil(state.target) ->
         case start_owned_port(executable, args, opts) do
@@ -220,7 +239,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
             ports = [port | state.ports]
             Process.put({__MODULE__, :owned_ports}, ports)
             GenServer.reply(from, {:ok, port})
-            holder_loop(%{state | ports: ports})
+            retained = if Keyword.get(opts, :retain_on_exit, false), do: [port | state.retained_ports], else: state.retained_ports
+            holder_loop(%{state | ports: ports, retained_ports: retained})
 
           error ->
             GenServer.reply(from, error)
@@ -266,13 +286,23 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
       {port, {:exit_status, status}} when is_port(port) ->
         if not state.adopted?, do: send(state.donor, {port, {:exit_status, status}})
-        :ok
+        if not state.adopted? and port in state.retained_ports, do: holder_loop(state), else: :ok
 
       {:EXIT, port, reason} when is_port(port) ->
-        if not state.adopted?, do: send(state.donor, {:EXIT, port, reason})
-        :ok
+        retain? = not state.adopted? and port in state.retained_ports
+        if not state.adopted? and (not retain? or reason != :normal), do: send(state.donor, {:EXIT, port, reason})
+        if retain?, do: holder_loop(state), else: :ok
       {:EXIT, _, _} -> :ok
       _ -> holder_loop(state)
+    end
+  end
+
+  defp create_private_directory(directory) do
+    with :ok <- File.mkdir(directory),
+         :ok <- File.chmod(directory, 0o700) do
+      :ok
+    else
+      {:error, _} -> {:error, {:unknown, :private_directory_creation_failed}}
     end
   end
 

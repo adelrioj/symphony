@@ -294,6 +294,33 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     assert :ok = Operations.close_connection(context.connection)
   end
 
+  test "prepare publishes current attempt intent before a start that rejects stale durable routing" do
+    supervisor = start_supervised!(Task.Supervisor)
+    target = %Target{executable: "/usr/bin/ssh", prefix: ["worker"], label: "worker"}
+    {config, entry} = preparation("/state/workspaces")
+    entry = %{entry | attempt_id: "current-attempt", record: %{entry.record | issue_state: "In Review", issue_identifier: "ISSUE-42"}}
+    fallback = prepare_request(supervisor, target, self())
+    request = fn
+      :ensure, record, _ ->
+        {:ok, %{record | attempt_id: "durable-old-attempt", issue_state: "Implemented", issue_identifier: "OLD-7", template_identity: "retained-template", workspace_path: "/state/workspaces/retained-ticket", terminal_observed_at: 123}}
+      {:intent, %{desired: :running, terminal_observed_at: 123}}, %{attempt_id: "current-attempt", issue_state: "In Review", issue_identifier: "ISSUE-42"} = record, _ ->
+        {:ok, %{record | desired: :running, metadata: Map.put(record.metadata, "accepted_attempt", "current-attempt")}}
+      {:intent, _}, record, _ ->
+        {:error, {:denied, :stale_attempt_intent}, record}
+      :start, %{attempt_id: "current-attempt", issue_state: "In Review", issue_identifier: "ISSUE-42", metadata: %{"accepted_attempt" => "current-attempt"}} = record, _ ->
+        {:ok, %{record | phase: :running}}
+      :start, record, _ ->
+        {:error, {:denied, :stale_attempt_start}, record}
+      operation, record, opts -> fallback.(operation, record, opts)
+    end
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare,
+      task_supervisor: supervisor, authority: self(), request_fun: request, agent_executable: "claude", command_fun: fn _, _, _ -> {:ok, %{output: "", status: 0}} end)
+    assert context.workspace_path == "/state/workspaces/retained-ticket"
+    assert context.environment.record.template_identity == "retained-template"
+    assert context.environment.record.terminal_observed_at == 123
+    assert :ok = Operations.close_connection(context.connection)
+  end
+
   defp preparation(root) do
     config = %{kind: "kubernetes", deployment_id: "deployment", tracker_kind: "memory", workspace_root: root, provider: %{"kubeconfig" => "/operator/config", "context" => "test", "namespace" => "workers", "template" => "/operator/template", "ssh_user" => "worker", "ssh_auth_volume" => "key", "ssh_port" => 2222}, startup_timeout_ms: 5_000, shutdown_timeout_ms: 5_000, terminal_retention_ms: 0}
     record = %{record() | key: SymphonyElixir.ExecutionEnvironment.resource_key("deployment", "memory", "ticket"), scope: SymphonyElixir.ExecutionEnvironment.Config.scope(config), workspace_path: Path.join(root, "ticket")}
@@ -330,14 +357,16 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
   end
 
   test "argv helper does not interpret shell metacharacters and bounds diagnostics" do
-    assert {:ok, %{output: "$(echo forbidden)", status: 0}} = Command.run(System.find_executable("printf"), ["%s", "$(echo forbidden)"], timeout_ms: 1_000)
-    assert {:error, {:unknown, {:output_limit, output}}} = Command.run(System.find_executable("printf"), ["%s", String.duplicate("x", 100)], timeout_ms: 1_000, max_output_bytes: 8)
+    supervisor = start_supervised!(Task.Supervisor)
+    assert {:ok, %{output: "$(echo forbidden)", status: 0}} = Command.run(System.find_executable("printf"), ["%s", "$(echo forbidden)"], task_supervisor: supervisor, timeout_ms: 1_000)
+    assert {:error, {:unknown, {:output_limit, output}}} = Command.run(System.find_executable("printf"), ["%s", String.duplicate("x", 100)], task_supervisor: supervisor, timeout_ms: 1_000, max_output_bytes: 8)
     assert byte_size(output) <= 8
-    assert {:error, {:unknown, {:timeout, _}}} = Command.run(System.find_executable("sleep"), ["10"], timeout_ms: 10)
+    assert {:error, {:unknown, {:timeout, _}}} = Command.run(System.find_executable("sleep"), ["10"], task_supervisor: supervisor, timeout_ms: 10)
   end
 
   test "command timeout reaps the known local process rather than just closing its port" do
-    assert {:error, {:unknown, {:timeout, output}}} = Command.run("/bin/sh", ["-c", "printf '%s\\n' \"$$\"; exec sleep 10"], timeout_ms: 200)
+    supervisor = start_supervised!(Task.Supervisor)
+    assert {:error, {:unknown, {:timeout, output}}} = Command.run("/bin/sh", ["-c", "printf '%s\\n' \"$$\"; exec sleep 10"], task_supervisor: supervisor, timeout_ms: 200)
     pid = output |> String.trim() |> String.to_integer()
     assert pid > 0
     {_diagnostic, status} = System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true)
@@ -345,6 +374,7 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
   end
 
   test "JSON request bodies are private and removed even when the consumer raises" do
+    supervisor = start_supervised!(Task.Supervisor)
     parent = self()
     assert_raise RuntimeError, fn ->
       Command.with_json_file(%{"safe" => true}, fn path ->
@@ -353,9 +383,66 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
         assert Bitwise.band(mode, 0o777) == 0o600
         assert Jason.decode!(File.read!(path)) == %{"safe" => true}
         raise "consumer failure"
-      end)
+      end, task_supervisor: supervisor)
     end
     assert_receive {:private_file, path}
     refute File.exists?(path)
+  end
+
+  test "brutal command caller cancellation reaps its already-started OS child" do
+    supervisor = start_supervised!(Task.Supervisor)
+    root = Path.join(System.tmp_dir!(), "symphony-command-cancel-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+    pid_path = Path.join(root, "pid")
+    authority = self()
+    task = Task.Supervisor.async_nolink(supervisor, fn ->
+      Command.run("/bin/sh", ["-c", "printf '%s\\n' \"$$\" > \"$PID_FILE\"; exec sleep 30"],
+        task_supervisor: supervisor, authority: authority, timeout_ms: 30_000, env: [{"PID_FILE", pid_path}])
+    end)
+    eventually(fn -> match?({:ok, content} when byte_size(content) > 0, File.read(pid_path)) end)
+    pid = pid_path |> File.read!() |> String.trim() |> String.to_integer()
+    assert {_diagnostic, 0} = System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true)
+    Task.shutdown(task, :brutal_kill)
+    eventually(fn -> elem(System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true), 1) != 0 end)
+    eventually(fn -> Task.Supervisor.children(supervisor) == [] end)
+  end
+
+  test "brutal JSON callback cancellation removes the protected request directory" do
+    supervisor = start_supervised!(Task.Supervisor)
+    authority = self()
+    task = Task.Supervisor.async_nolink(supervisor, fn ->
+      Command.with_json_file(%{"secret" => "private"}, fn path ->
+        send(authority, {:json_callback_blocked, path})
+        receive do :finish -> :ok end
+      end, task_supervisor: supervisor, authority: authority)
+    end)
+    assert_receive {:json_callback_blocked, path}
+    assert Jason.decode!(File.read!(path)) == %{"secret" => "private"}
+    Task.shutdown(task, :brutal_kill)
+    eventually(fn -> not File.exists?(Path.dirname(path)) end)
+    eventually(fn -> Task.Supervisor.children(supervisor) == [] end)
+  end
+
+  test "staged directory creation is private and rejects a path outside the lease" do
+    supervisor = start_supervised!(Task.Supervisor)
+    directory = Path.join(System.tmp_dir!(), "symphony-owned-directory-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(directory) end)
+    {:ok, lease} = Operations.stage_private_paths(supervisor, self(), self(), [directory])
+    assert {:error, _} = Operations.create_staged_directory(lease, directory <> "-unowned")
+    refute File.exists?(directory <> "-unowned")
+    assert :ok = Operations.create_staged_directory(lease, directory)
+    assert Bitwise.band(File.stat!(directory).mode, 0o777) == 0o700
+    assert :ok = Operations.release_staged_paths(lease)
+    refute File.exists?(directory)
+  end
+
+  defp eventually(fun, remaining \\ 100)
+  defp eventually(fun, 0), do: assert(fun.())
+  defp eventually(fun, remaining) do
+    unless fun.() do
+      Process.sleep(10)
+      eventually(fun, remaining - 1)
+    end
   end
 end

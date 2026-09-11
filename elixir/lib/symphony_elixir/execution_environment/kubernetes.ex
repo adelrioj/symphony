@@ -15,6 +15,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @pv_finalizer "external-provisioner.volume.kubernetes.io/finalizer"
   @children ["pods", "persistentvolumeclaims", "services", "secrets"]
 
+  @verbs [:create, :start, :stop, :delete, :update]
+  @outcomes [:pending, :unknown, :succeeded, :failed]
   @spec validate_config(map()) :: :ok | {:error, term()}
   def validate_config(provider) when is_map(provider) do
     required = ["kubeconfig", "context", "namespace", "template", "ssh_user", "ssh_auth_volume"]
@@ -71,7 +73,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       cond do
         existing != nil ->
           with :ok <- ownership(existing, record),
-               :ok <- template_identity(record, q), do: {:ok, observe(record, existing)}
+               observed = observe(record, existing),
+               :ok <- template_identity(observed, q), do: {:ok, observed}
         record.provider_ref != nil or record.metadata["orphaned"] == true -> {:error, {:unknown, :retained_kubernetes_parent_missing}}
         Enum.any?(@children, fn resource -> Enum.any?(objects[resource], &(get_in(&1, ["metadata", "labels", "symphony.dev/environment"]) == record.key)) end) -> {:error, {:unknown, :retained_kubernetes_children_without_parent}}
         true -> materialize(config, record, q, opts)
@@ -125,16 +128,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
                   :ok <- replacement_safe(record, children(objects["pods"], record, sandbox)),
                   {:ok, record} <- ensure_credentials(config, record, sandbox, q, opts) do
       case start_running(config, record, opts) do
-        {:ok, running} -> finish_start(wait_authorization(config, running, q, with_deadline(opts)), running)
-        {:error, failure} ->
-          cleanup_client_key(record)
-          {:error, failure, %{record | metadata: durable_metadata(record.metadata)}}
+        {:ok, running} -> result(running, wait_authorization(config, running, q, with_deadline(opts)))
+        {:error, failure} -> {:error, failure, record}
       end
     else
       false -> {:error, {:unknown, :kubernetes_start_cancelled}}
       error -> error
     end
-    result(record, result)
+    finish_start(result(record, result), record)
   end
   defp start_running(config, record, opts) do
     with {:ok, sandbox} <- fetch_parent(config, record, opts),
@@ -303,10 +304,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp kubernetes_version?(_), do: false
   defp controller_image?(controller, q) do
     containers = get_in(controller, ["spec", "template", "spec", "containers"]) || []
-    q["controller_source_commit"] == "3e77ccbac4db8a12b0157eafcad0d1ad5872f32a" and
+    desired = get_in(controller, ["spec", "replicas"])
+    available = get_in(controller, ["status", "availableReplicas"])
+    is_integer(desired) and desired > 0 and is_integer(available) and available >= desired and
+      q["controller_source_commit"] == "3e77ccbac4db8a12b0157eafcad0d1ad5872f32a" and
       Enum.any?(containers, &(&1["image"] == q["controller_image"] and String.starts_with?(&1["image"] || "", "registry.k8s.io/agent-sandbox/agent-sandbox-controller@sha256:"))) and
-      get_in(controller, ["status", "observedGeneration"]) == get_in(controller, ["metadata", "generation"]) and
-      get_in(controller, ["status", "availableReplicas"]) == get_in(controller, ["spec", "replicas"])
+      get_in(controller, ["status", "observedGeneration"]) == get_in(controller, ["metadata", "generation"])
   end
 
   defp storage_classes(template, classes, q) do
@@ -454,6 +457,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp release(config, record, sandbox, pod, q, opts) do
+    with {:ok, objects} <- inventory(config, opts),
+         {:ok, record} <- capture_storage(record, sandbox, objects, q),
+         true <- Enum.all?(get_in(q, ["template", "spec", "volumeClaimTemplates"]) || [], fn claim ->
+           Enum.any?(objects["persistentvolumeclaims"], &(name(&1) == get_in(claim, ["metadata", "name"]) <> "-" <> name(sandbox)))
+         end) do
+      record_release(config, record, sandbox, pod, q, opts)
+    else
+      false -> {:error, {:retryable, :kubernetes_waiting_for_qualified_claims}}
+      error -> error
+    end
+  end
+
+  defp record_release(config, record, sandbox, pod, q, opts) do
     pod_uid = uid(pod)
     reference = %{"name" => name(pod), "uid" => pod_uid, "resourceVersion" => rv(pod)}
     metadata = record.metadata |> Map.update("authorized_pod_uids", [pod_uid], &Enum.uniq([pod_uid | &1])) |> Map.update("authorized_pods", %{pod_uid => reference}, &Map.put(&1, pod_uid, reference))
@@ -473,6 +489,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp safe_live_pod(pod, q) do
     spec = pod["spec"] || %{}
     if spec["schedulerName"] == "default-scheduler" and spec["nodeName"] in [nil, ""] and spec["automountServiceAccountToken"] == false and
+      get_in(pod, ["metadata", "labels", q["network_profile_label"]]) == get_in(q, ["template", "spec", "podTemplate", "metadata", "labels", q["network_profile_label"]]) and
       spec["enableServiceLinks"] == false and spec["restartPolicy"] == "Never" and spec["runtimeClassName"] == get_in(q, ["template", "spec", "podTemplate", "spec", "runtimeClassName"]) and
       not unsafe_pod?(spec),
       do: :ok, else: {:error, {:invalid, :unsafe_admitted_pod}}
@@ -544,13 +561,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp kubelet_terminated?(_), do: false
 
   defp capture_storage(record, sandbox, objects, q) do
-    pvcs = children(objects["persistentvolumeclaims"], record, sandbox)
+    claims = Map.new(get_in(q, ["template", "spec", "volumeClaimTemplates"]) || [], &{get_in(&1, ["metadata", "name"]) <> "-" <> name(sandbox), &1})
+    pvcs = Enum.filter(objects["persistentvolumeclaims"], &(Map.has_key?(claims, name(&1)) or child_candidate?(&1, record, sandbox)))
     known = Map.get(record.metadata, "volumes", %{})
     Enum.reduce_while(pvcs, {:ok, known}, fn pvc, {:ok, acc} ->
       old = acc[name(pvc)]
+      claim = claims[name(pvc)]
       pv = Enum.find(objects["persistentvolumes"], &(name(&1) == get_in(pvc, ["spec", "volumeName"])))
       cond do
         child_ownership(pvc, record, sandbox) != :ok -> {:halt, {:error, {:unknown, :kubernetes_child_ownership_changed}}}
+        claim == nil or get_in(pvc, ["spec", "storageClassName"]) != get_in(claim, ["spec", "storageClassName"]) -> {:halt, {:error, {:invalid, :unqualified_kubernetes_pvc}}}
         old != nil and old["pvc_uid"] != uid(pvc) -> {:halt, {:error, {:unknown, :retained_pvc_replaced}}}
         pv == nil and get_in(pvc, ["spec", "volumeName"]) not in [nil, ""] -> {:halt, {:error, {:unknown, :bound_pv_missing}}}
         pv == nil -> {:cont, {:ok, Map.put(acc, name(pvc), %{"pvc_uid" => uid(pvc), "pvc_name" => name(pvc), "pvc_version" => rv(pvc), "unbound" => true})}}
@@ -614,14 +634,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
 
+  defp existing_secret_ownership(nil, _record, _sandbox), do: :ok
+  defp existing_secret_ownership(secret, record, sandbox), do: child_ownership(secret, record, sandbox)
+
   defp ensure_credentials(config, record, sandbox, _q, opts) do
-    with {:ok, secret} <- Client.lookup(config, collection(config, "secrets"), secret_name(record), opts) do
+    with {:ok, secret} <- Client.lookup(config, collection(config, "secrets"), secret_name(record), opts),
+         :ok <- existing_secret_ownership(secret, record, sandbox) do
       case client_key_path(record, secret) do
         {:ok, _} -> {:ok, record}
         _ ->
-          with {:ok, observed, sandbox} <- wait_credential_stop(config, record, sandbox, opts),
-               {:ok, directory} <- Client.private_directory() do
-            stage_credentials(config, observed, sandbox, secret, directory, opts)
+          with {:ok, observed, sandbox} <- wait_credential_stop(config, record, sandbox, opts) do
+            stage_credentials(config, observed, sandbox, secret, opts)
           else
             _ -> {:error, {:unknown, :client_key_rotation_requires_stop}}
           end
@@ -643,14 +666,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
 
-  defp stage_credentials(config, record, sandbox, secret, directory, opts) do
-    case Operations.stage_private_paths(opts[:task_supervisor], opts[:authority], self(), [directory]) do
-      {:ok, lease} ->
-        metadata = Map.merge(record.metadata, %{"client_key_directory" => directory, "client_key_lease" => lease})
-        rotate_credentials(config, %{record | metadata: metadata}, sandbox, secret, directory, opts)
-      {:error, failure} ->
-        File.rm_rf(directory)
-        {:error, failure}
+  defp stage_credentials(config, record, sandbox, secret, opts) do
+    with {:ok, directory, lease} <- Client.private_directory(opts) do
+      metadata = Map.merge(record.metadata, %{"client_key_directory" => directory, "client_key_lease" => lease})
+      rotate_credentials(config, %{record | metadata: metadata}, sandbox, secret, directory, opts)
     end
   end
 
@@ -775,13 +794,18 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp ownership(object, record), do: if(owned?(object, record), do: :ok, else: {:error, {:unknown, :kubernetes_ownership_changed}})
   defp owned?(object, record) do
     labels = get_in(object || %{}, ["metadata", "labels"]) || %{}
-    labels == Map.merge(labels, identity_labels(record)) and (record.provider_ref == nil or uid(object) == record.provider_ref)
+    with {:ok, fields, _lifecycle} <- decode_annotation(object) do
+      identity = [:key, :deployment_id, :tracker_kind, :issue_id, :kind, :scope, :workspace_path, :template_identity]
+      labels == Map.merge(labels, identity_labels(record)) and (record.provider_ref == nil or uid(object) == record.provider_ref) and
+        Enum.all?(identity, &(fields[Atom.to_string(&1)] == Map.fetch!(record, &1)))
+    else
+      _ -> false
+    end
   end
-  defp children(items, record, sandbox) do
-    Enum.filter(items, fn item ->
-      labels = get_in(item, ["metadata", "labels"]) || %{}
-      labels["symphony.dev/environment"] == record.key or Enum.any?(get_in(item, ["metadata", "ownerReferences"]) || [], &(&1["uid"] == uid(sandbox)))
-    end)
+  defp children(items, record, sandbox), do: Enum.filter(items, &child_candidate?(&1, record, sandbox))
+  defp child_candidate?(item, record, sandbox) do
+    labels = get_in(item, ["metadata", "labels"]) || %{}
+    labels["symphony.dev/environment"] == record.key or Enum.any?(get_in(item, ["metadata", "ownerReferences"]) || [], &(&1["uid"] == uid(sandbox)))
   end
   defp child_ownership(child, record, sandbox) when is_map(child) do
     refs = get_in(child, ["metadata", "ownerReferences"]) || []
@@ -799,26 +823,67 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp durable_metadata(metadata), do: Map.drop(metadata, ["client_key_directory", "client_key_lease"])
 
   defp observe(record, sandbox) do
-    decoded = case Jason.decode(get_in(sandbox, ["metadata", "annotations", @state]) || "") do
-      {:ok, value} -> value
-      _ -> %{}
+    case decode_annotation(sandbox) do
+      {:ok, fields, lifecycle} ->
+        metadata = Map.merge(lifecycle.metadata, Map.take(record.metadata, ["client_key_directory", "client_key_lease"]))
+        struct!(record, Map.merge(lifecycle, %{provider_ref: uid(sandbox), version: rv(sandbox), template_identity: fields["template_identity"], metadata: metadata}))
+      {:error, _} ->
+        %{record | phase: :unknown, proof: :unknown, pending: [%{verb: :update, id: nil, outcome: :unknown}]}
     end
-    metadata = Map.merge(record.metadata, durable_metadata(Map.get(decoded, "metadata", %{})))
-    desired = case decoded["desired"] do "running" -> :running; "absent" -> :absent; _ -> :stopped end
-    %{record | provider_ref: uid(sandbox), version: rv(sandbox), metadata: metadata, desired: desired}
   end
   defp encode_record(record) do
-    record |> Map.from_struct() |> Map.take([:key, :deployment_id, :tracker_kind, :issue_id, :kind, :scope, :workspace_path, :template_identity, :desired, :attempt_id, :issue_identifier, :issue_state, :terminal_observed_at, :metadata]) |> Map.update!(:metadata, &durable_metadata/1) |> Jason.encode!()
+    record |> Map.from_struct() |> Map.take([:key, :deployment_id, :tracker_kind, :issue_id, :kind, :scope, :workspace_path, :template_identity, :desired, :pending, :attempt_id, :issue_identifier, :issue_state, :terminal_observed_at, :metadata]) |> Map.update!(:metadata, &durable_metadata/1) |> Jason.encode!()
   end
   defp decode_record(object, config) do
-    with {:ok, fields} <- Jason.decode(get_in(object, ["metadata", "annotations", @state]) || ""),
+    with {:ok, fields, lifecycle} <- decode_annotation(object),
          true <- fields["deployment_id"] == config.deployment_id and fields["scope"] == Config.scope(config) and fields["kind"] == "kubernetes",
          true <- Enum.all?(["key", "tracker_kind", "issue_id", "workspace_path"], &is_binary(fields[&1])) do
-      {:ok, %Record{key: fields["key"], deployment_id: fields["deployment_id"], tracker_kind: fields["tracker_kind"], issue_id: fields["issue_id"], kind: "kubernetes", scope: fields["scope"], workspace_path: fields["workspace_path"], template_identity: fields["template_identity"], metadata: durable_metadata(fields["metadata"] || %{})}}
+      record = %Record{key: fields["key"], deployment_id: fields["deployment_id"], tracker_kind: fields["tracker_kind"], issue_id: fields["issue_id"], kind: "kubernetes", scope: fields["scope"], workspace_path: fields["workspace_path"], template_identity: fields["template_identity"]}
+      {:ok, struct!(record, lifecycle)}
     else
       _ -> {:error, {:unknown, :kubernetes_record_invalid}}
     end
   end
+  defp decode_annotation(object) do
+    with {:ok, fields} when is_map(fields) <- Jason.decode(get_in(object || %{}, ["metadata", "annotations", @state]) || ""),
+         {:ok, desired} <- enum(fields["desired"], [:running, :stopped, :absent]),
+         {:ok, pending} <- decode_pending(fields["pending"]),
+         true <- is_map(fields["metadata"]),
+         true <- Enum.all?(~w(attempt_id issue_identifier issue_state), &(is_nil(fields[&1]) or is_binary(fields[&1]))),
+         true <- is_nil(fields["terminal_observed_at"]) or is_integer(fields["terminal_observed_at"]) do
+      lifecycle = %{desired: desired, pending: pending, metadata: durable_metadata(fields["metadata"]), attempt_id: fields["attempt_id"],
+        issue_identifier: fields["issue_identifier"], issue_state: fields["issue_state"], terminal_observed_at: fields["terminal_observed_at"]}
+      {:ok, fields, lifecycle}
+    else
+      _ -> {:error, {:unknown, :kubernetes_record_invalid}}
+    end
+  end
+
+  defp decode_pending(entries) when is_list(entries) do
+    Enum.reduce_while(entries, {:ok, []}, fn item, {:ok, acc} ->
+      with true <- is_map(item) and map_size(item) == 3 and Map.has_key?(item, "id"),
+           {:ok, verb} <- enum(item["verb"], @verbs),
+           {:ok, outcome} <- enum(item["outcome"], @outcomes),
+           true <- is_nil(item["id"]) or is_binary(item["id"]) do
+        {:cont, {:ok, [%{verb: verb, id: item["id"], outcome: outcome} | acc]}}
+      else
+        _ -> {:halt, {:error, {:unknown, :kubernetes_record_invalid}}}
+      end
+    end)
+    |> case do
+      {:ok, pending} -> {:ok, Enum.reverse(pending)}
+      error -> error
+    end
+  end
+  defp decode_pending(_), do: {:error, {:unknown, :kubernetes_record_invalid}}
+
+  defp enum(value, allowed) do
+    case Enum.find(allowed, &(Atom.to_string(&1) == value)) do
+      nil -> {:error, :invalid_enum}
+      atom -> {:ok, atom}
+    end
+  end
+
   defp stamp(metadata, record), do: metadata |> Map.update("labels", identity_labels(record), &Map.merge(&1, identity_labels(record))) |> Map.update("annotations", %{@state => encode_record(record)}, &Map.put(&1, @state, encode_record(record)))
   defp identity_labels(record), do: %{"symphony.dev/deployment" => digest(record.deployment_id), "symphony.dev/environment" => record.key, "symphony.dev/issue" => digest(record.issue_id), "symphony.dev/tracker" => record.tracker_kind}
   defp owner_reference(sandbox), do: %{"apiVersion" => @api, "kind" => "Sandbox", "name" => name(sandbox), "uid" => uid(sandbox), "controller" => true, "blockOwnerDeletion" => true}

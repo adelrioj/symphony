@@ -11,7 +11,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   @annotation "symphony.dev/record"
   @verbs [:create, :start, :stop, :delete, :update]
   @outcomes [:pending, :unknown, :succeeded, :failed]
-  @runtime_fields ~w(host container persistentDirectories idleTimeout idleAction runningTimeout allowedPorts encryptionKey replicaZones)
+  @runtime_fields ~w(host container persistentDirectories idleTimeout idleAction runningTimeout allowedPorts disableTcpConnections encryptionKey replicaZones)
 
   @impl true
   @spec validate_config(term()) :: :ok | {:error, term()}
@@ -187,12 +187,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   def normalize(record, workstation, operations) do
     pending = observed_pending(record.pending, operations, ref_name(record))
     same_uid = is_binary(workstation["uid"]) and workstation["uid"] != "" and ref_uid(record) == workstation["uid"]
-    unresolved = Enum.any?(pending, &(&1.outcome in [:pending, :unknown]))
+    unresolved = Enum.any?(pending, &(&1.outcome in [:pending, :unknown] or not valid_pending_evidence?(record.scope, &1)))
     # Workstation.reconciling is an implicit-presence proto3 bool; omitted means false.
     reconciling = Map.get(workstation, "reconciling", false)
     stopped = same_uid and not unresolved and workstation["state"] == "STATE_STOPPED" and reconciling == false
     latest = Enum.find(Enum.reverse(pending), &(&1.verb in [:create, :start, :stop, :delete]))
-    stop = if latest && latest.verb == :stop && latest.outcome == :succeeded, do: latest, else: nil
+    stop = if latest && latest.verb == :stop && latest.outcome == :succeeded && operation_name_in_scope?(record.scope, latest.id), do: latest, else: nil
     phase = cond do
       not same_uid or unresolved or reconciling != false -> :unknown
       workstation["state"] == "STATE_RUNNING" -> :running
@@ -311,6 +311,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       pending = observed_pending(record.pending, operations, resource_name(config, record))
       Enum.reduce_while(pending, {:ok, %{record | pending: pending}}, fn entry, {:ok, current} ->
         cond do
+          not valid_pending_evidence?(record.scope, entry) -> {:halt, fail(current, {:invalid, :workstations_operation_evidence})}
           entry.outcome in [:succeeded, :failed] -> {:cont, {:ok, current}}
           is_nil(entry.id) -> {:halt, fail(current, {:unknown, :uncorrelated_mutation})}
           true ->
@@ -412,7 +413,21 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   end
   defp valid_operation?(_, _, _, _), do: false
 
-  defp operation_name?(config, name), do: is_binary(name) and String.starts_with?(name, region(config) <> "/operations/") and length(String.split(name, "/")) == 6 and not String.contains?(name, ["?", "#", "..", "%"])
+  defp operation_name?(config, name), do: operation_name_in_scope?(config.provider, name)
+
+  defp operation_name_in_scope?(%{"project" => project, "location" => location}, name)
+       when is_binary(project) and is_binary(location) and is_binary(name) do
+    case String.split(name, "/") do
+      ["projects", named_project, "locations", named_location, "operations", id] ->
+        named_project == segment(project) and named_location == segment(location) and nonblank?(id) and
+          id not in [".", ".."] and URI.encode(id, &URI.char_unreserved?/1) == id
+      _ -> false
+    end
+  end
+  defp operation_name_in_scope?(_, _), do: false
+
+  defp valid_pending_evidence?(_scope, %{id: nil, outcome: outcome}), do: outcome in [:unknown, :failed]
+  defp valid_pending_evidence?(scope, %{id: id}), do: operation_name_in_scope?(scope, id)
 
   defp marker(verb, opts), do: %{verb: verb, id: nil, outcome: :unknown, from: DateTime.to_iso8601(DateTime.utc_now()), until: DateTime.utc_now() |> DateTime.add(Client.remaining(opts), :millisecond) |> DateTime.to_iso8601()}
   defp replace_last(record, verb, attrs) do
@@ -443,7 +458,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
          {:ok, durable} <- decode(config, workstation),
          true <- durable.key == record.key and durable.issue_id == record.issue_id and durable.tracker_kind == record.tracker_kind and durable.workspace_path == record.workspace_path,
          true <- is_nil(record.provider_ref) or ref_uid(record) == workstation["uid"],
-         true <- record.template_identity in [nil, "", durable.template_identity] or record.provider_ref == nil,
+         true <- nonblank?(record.template_identity) and record.template_identity == durable.template_identity,
          true <- workstation["name"] == resource_name(config, record),
          true <- is_binary(workstation["uid"]) and workstation["uid"] != "" and is_binary(workstation["etag"]) and workstation["etag"] != "" do
       pending = merge_pending(durable.pending, record.pending)
@@ -477,13 +492,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   defp decode(config, workstation) do
     with encoded when is_binary(encoded) <- get_in(workstation, ["annotations", @annotation]),
          {:ok, data} when is_map(data) <- Jason.decode(encoded),
-         true <- Enum.all?(~w(key deployment_id tracker_kind issue_id kind workspace_path), &is_binary(data[&1])),
+         true <- Enum.all?(~w(key deployment_id tracker_kind issue_id kind workspace_path template_identity), &nonblank?(data[&1])),
          true <- data["deployment_id"] == config.deployment_id and data["scope"] == Config.scope(config),
          true <- is_nil(data["provider_uid"]) or data["provider_uid"] == workstation["uid"],
          true <- labels(data["deployment_id"], data["key"]) |> Enum.all?(fn {key, value} -> get_in(workstation, ["labels", key]) == value end),
          {:ok, desired} <- enum(data["desired"], [:running, :stopped, :absent]),
-         {:ok, pending} <- decode_pending(data["pending"]),
-         true <- is_map(data["metadata"]) do
+         {:ok, pending} <- decode_pending(config.provider, data["pending"]),
+         true <- is_map(data["metadata"]),
+         true <- nonblank?(data["metadata"]["config_name"]) and nonblank?(data["metadata"]["config_fingerprint"]),
+         true <- valid_config_name?(config, data["metadata"]["config_name"]) do
       record = %Record{key: data["key"], deployment_id: data["deployment_id"], tracker_kind: data["tracker_kind"], issue_id: data["issue_id"], kind: data["kind"], scope: data["scope"], workspace_path: data["workspace_path"],
         template_identity: data["template_identity"], desired: desired, pending: pending, metadata: data["metadata"], attempt_id: data["attempt_id"], issue_identifier: data["issue_identifier"], issue_state: data["issue_state"], terminal_observed_at: data["terminal_observed_at"],
         provider_ref: %{name: workstation["name"], uid: workstation["uid"]}, version: workstation["etag"]}
@@ -499,10 +516,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     end
   end
 
-  defp decode_pending(entries) when is_list(entries) do
+  defp decode_pending(scope, entries) when is_list(entries) do
     Enum.reduce_while(entries, {:ok, []}, fn item, {:ok, acc} ->
       with true <- is_map(item), {:ok, verb} <- enum(item["verb"], @verbs), {:ok, outcome} <- enum(item["outcome"], @outcomes),
-           true <- is_nil(item["id"]) or is_binary(item["id"]) do
+           true <- valid_pending_evidence?(scope, %{id: item["id"], outcome: outcome}) do
         entry = %{verb: verb, outcome: outcome, id: item["id"]}
         entry = Enum.reduce([:from, :until], entry, fn key, value -> if is_binary(item[Atom.to_string(key)]), do: Map.put(value, key, item[Atom.to_string(key)]), else: value end)
         {:cont, {:ok, acc ++ [entry]}}
@@ -511,7 +528,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       end
     end)
   end
-  defp decode_pending(_), do: {:error, {:invalid, :workstations_metadata}}
+  defp decode_pending(_scope, _entries), do: {:error, {:invalid, :workstations_metadata}}
   defp enum(value, allowed) do
     case Enum.find(allowed, &(Atom.to_string(&1) == value)) do
       nil -> {:error, :invalid_enum}
@@ -519,12 +536,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     end
   end
 
+  defp nonblank?(value), do: is_binary(value) and String.trim(value) != ""
+
   defp compatible(template) do
     dirs = Map.get(template, "persistentDirectories", [])
     home = Enum.find(dirs, &(&1["mountPath"] == "/home"))
     ports = Map.get(template, "allowedPorts", [%{"first" => 22, "last" => 22}])
     host = get_in(template, ["host", "gceInstance"]) || %{}
-    valid = is_binary(template["uid"]) and template["reconciling"] != true and home != nil and length(dirs) == 1 and
+    valid = nonblank?(template["uid"]) and template["reconciling"] != true and Map.get(template, "disableTcpConnections", false) == false and home != nil and length(dirs) == 1 and
       get_in(home || %{}, ["gcePd", "reclaimPolicy"]) == "DELETE" and get_in(home || %{}, ["gcePd", "archiveTimeout"]) == "0s" and
       Map.get(host, "poolSize", 0) == 0 and Map.get(template, "idleTimeout", "1200s") == "0s" and Map.get(template, "runningTimeout", "43200s") == "0s" and
       Enum.all?(Map.get(host, "boostConfigs", []), &(Map.get(&1, "poolSize", 0) == 0)) and
@@ -541,7 +560,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       _ -> {:error, {:invalid, :workstations_config_changed}}
     end
   end
-  defp fingerprint(template), do: template |> Map.take(@runtime_fields) |> canonical() |> :erlang.term_to_binary() |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+  defp fingerprint(template), do: template |> Map.put_new("disableTcpConnections", false) |> Map.take(@runtime_fields) |> canonical() |> :erlang.term_to_binary() |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
   defp canonical(map) when is_map(map), do: map |> Enum.map(fn {key, value} -> {key, canonical(value)} end) |> Enum.sort()
   defp canonical(list) when is_list(list), do: Enum.map(list, &canonical/1)
   defp canonical(value), do: value
@@ -683,16 +702,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp connect_tunnel(config, record, supervisor, authority, opts) do
     with gcloud when is_binary(gcloud) <- Keyword.get_lazy(opts, :gcloud_executable, fn -> System.find_executable("gcloud") end),
-         ssh when is_binary(ssh) <- Keyword.get_lazy(opts, :ssh_executable, fn -> System.find_executable("ssh") end),
-         {:ok, directory} <- private_directory() do
+         ssh when is_binary(ssh) <- Keyword.get_lazy(opts, :ssh_executable, fn -> System.find_executable("ssh") end) do
+      directory = private_directory_path()
       case Operations.stage_private_paths(supervisor, authority, self(), [directory]) do
         {:ok, stage} ->
           staged_opts = Keyword.put(opts, :staged_paths, stage)
-          case connect_staged(config, record, gcloud, ssh, directory, supervisor, authority, staged_opts) do
+          result = with :ok <- Operations.create_staged_directory(stage, directory) do
+            connect_staged(config, record, gcloud, ssh, directory, supervisor, authority, staged_opts)
+          end
+          case result do
             {:ok, _} = connection -> connection
             error -> Operations.release_staged_paths(stage); error
           end
-        error -> File.rm_rf(directory); error
+        error -> error
       end
     else
       _ -> {:error, {:invalid, :workstations_connection_prerequisite}}
@@ -719,7 +741,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
         prefix = ["-F", "/dev/null", "-T", "-o", "BatchMode=yes", "-o", "ForwardAgent=no", "-o", "IdentityAgent=none", "-o", "PubkeyAuthentication=no",
           "-o", "PreferredAuthentications=none", "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no", "-o", "GlobalKnownHostsFile=/dev/null", "-o", "UserKnownHostsFile=" <> known_hosts,
           "-o", "StrictHostKeyChecking=accept-new", "-p", Integer.to_string(local_port), "-l", config.provider["ssh_user"], "127.0.0.1"]
-        with {:ok, %{status: 0}} <- Command.run(ssh, prefix ++ ["true"], timeout_ms: max(Client.remaining(opts), 1)),
+        with {:ok, %{status: 0}} <- Command.run(ssh, prefix ++ ["true"], Keyword.put(opts, :timeout_ms, max(Client.remaining(opts), 1))),
              {:ok, stat} <- File.stat(known_hosts), true <- stat.size > 0,
              :ok <- File.chmod(known_hosts, 0o600) do
           target = %Target{executable: ssh, prefix: Enum.map(prefix, fn value -> if value == "StrictHostKeyChecking=accept-new", do: "StrictHostKeyChecking=yes", else: value end), label: "managed-workstation"}
@@ -735,16 +757,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     _ -> {:error, {:unknown, :workstations_tunnel_failed}}
   end
 
-  defp private_directory do
-    directory = Path.join(System.tmp_dir!(), "symphony-ws-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false))
-    case File.mkdir(directory) do
-      :ok ->
-        case File.chmod(directory, 0o700) do
-          :ok -> {:ok, directory}
-          error -> File.rm_rf(directory); error
-        end
-      error -> error
-    end
+  defp private_directory_path do
+    Path.join(System.tmp_dir!(), "symphony-ws-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false))
   end
 
   defp tunnel_ready(port, opts, output) do

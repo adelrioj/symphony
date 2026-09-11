@@ -55,7 +55,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   end
 
   def step(%Entry{phase: phase, operation_id: id} = entry, {:destroyed, id, %Record{absent?: true} = record}, _now) when phase in [:deleting, :unknown] and not is_nil(id) do
-    if not unresolved?(record) and not occupied?(entry) do
+    if not unresolved?(record) do
       {%{entry | record: record, phase: :absent, context: nil, operation_id: nil}, [:forget]}
     else
       {entry, []}

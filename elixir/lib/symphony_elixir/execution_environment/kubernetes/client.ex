@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
   @moduledoc "Bounded argv-only Kubernetes JSON access; failed CLI prose is never absence evidence."
 
-  alias SymphonyElixir.ExecutionEnvironment.Command
+  alias SymphonyElixir.ExecutionEnvironment.{Command, Operations}
 
   @spec request(map(), atom(), String.t(), term(), keyword()) :: {:ok, map()} | {:error, term()}
   def request(config, method, path, body, opts) do
@@ -22,7 +22,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
           {:error, _} -> {:error, {:unknown, :kubernetes_command_failed}}
         end
       end
-      if body == nil, do: invoke.(nil), else: Command.with_json_file(body, invoke)
+      if body == nil, do: invoke.(nil), else: Command.with_json_file(body, invoke, opts)
     else
       false -> {:error, {:unknown, :kubernetes_deadline_or_path}}
       {:error, _} = error -> error
@@ -63,15 +63,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
     end
   end
 
-  @spec private_directory() :: {:ok, String.t()} | {:error, term()}
-  def private_directory do
+  @spec private_directory(keyword()) :: {:ok, String.t(), Operations.staged_paths()} | {:error, term()}
+  def private_directory(opts) do
     path = Path.join(System.tmp_dir!(), "symphony-kubernetes-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false))
-    with :ok <- File.mkdir(path) do
-      case File.chmod(path, 0o700) do
-        :ok -> {:ok, path}
-        {:error, _} ->
-          File.rmdir(path)
-          {:error, {:unknown, :private_directory_permissions}}
+    with {:ok, lease} <- Operations.stage_private_paths(opts[:task_supervisor], Keyword.get(opts, :authority, self()), self(), [path]) do
+      case Operations.create_staged_directory(lease, path) do
+        :ok -> {:ok, path, lease}
+        {:error, _} = error ->
+          Operations.release_staged_paths(lease)
+          error
       end
     end
   end
