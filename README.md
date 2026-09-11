@@ -39,6 +39,33 @@ ask your favorite coding agent to help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+## Managed ticket environments
+
+Local workspaces and static SSH workers remain supported. The optional managed mode gives each
+ticket a complete Linux development environment with a private Docker daemon, keeping existing
+Docker Compose and Testcontainers setup/test commands unchanged. Environments belong to one stable,
+independent deployment and opaque tracker issue ID, not a display identifier or a shared company pool.
+Use the existing `agent.max_concurrent_agents: 5` for five simultaneous executions; retained stopped
+environments do not consume those execution slots, but their storage can still incur charges.
+
+Cloud Workstations is the preferred Google-managed worker profile to qualify, even when Symphony
+or review apps run on GKE. The alternative Kubernetes Agent Sandbox profile requires qualified Kata
+VM isolation, persistent guest-compatible Docker storage, admission, networking, and CSI evidence;
+managed gVisor and GKE Autopilot are not interchangeable with this profile.
+
+Managed selection never falls back to local execution or another provider. Startup inventories owned
+resources before dispatch, and unresolved remote stop or deletion remains visible rather than being
+treated as successful cleanup. Terminal retention defaults to zero, but deletion still requires a
+fresh terminal observation, qualified stop, cleanup hooks, and compute-plus-storage absence proof.
+Identity-changing workflow reloads are rejected while resources or unresolved operations remain.
+
+See [managed operation and configuration](elixir/README.md#managed-ticket-environments) and
+[SPEC Appendix B](SPEC.md#appendix-b-managed-ticket-environments-optional) before enabling it.
+Neither provider has been live/production-qualified by this change. In particular, upstream Agent
+Sandbox v1.0.1 lacks authoritative child-create cleanup ordering acknowledgment: final Sandbox
+absence cannot currently be certified, and its cleanup finalizer and deployment guard remain held.
+Examples are references to operator-created infrastructure, not provisioning or live-use approval.
+
 ---
 
 ## License

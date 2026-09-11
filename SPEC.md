@@ -2572,3 +2572,172 @@ Extension config:
 - Cleanup and observability:
   - Operators need to know which host owns a run, where its workspace lives, and whether cleanup
     happened on the right machine.
+
+## Appendix B. Managed Ticket Environments (OPTIONAL)
+
+This extension retains the single orchestrator, tracker and agent protocols. It adds provider-owned
+Linux development environments with a private Docker daemon per opaque tracker issue ID, preserving
+repository Docker Compose/Testcontainers commands. It does not replace local execution or Appendix A
+static SSH, introduce a cross-deployment resource pool, or provision operator infrastructure.
+When this extension is selected, its managed rules supersede local/static workspace selection and
+filesystem-only recovery/cleanup. Without `worker.environment`, the existing profiles are unchanged.
+
+### B.1 Configuration and Identity
+
+`worker.environment` is an OPTIONAL map. If present it MUST contain:
+
+- `kind`: exactly `google_workstations` or `kubernetes`.
+- `deployment_id`: required nonblank stable string identifying this independent deployment.
+- `startup_timeout_ms` and `shutdown_timeout_ms`: required positive integer durations in milliseconds.
+- `provider`: required string-keyed provider map described below.
+- `terminal_retention_ms`: OPTIONAL nonnegative integer duration in milliseconds, default `0`.
+
+Explicit null/empty/non-map managed configuration and null required values MUST be rejected before
+default or null normalization. Explicit `worker.ssh_hosts` or
+`worker.max_concurrent_agents_per_host` MUST conflict with managed selection, including explicit
+empty/null static values. Omission of `worker.environment`, not null, selects the unmanaged profile.
+No missing configuration, context, readiness, capacity, or provider result may cause automatic local,
+static SSH, or alternative-provider fallback.
+
+The Workstations provider map requires nonblank string `project`, `location`, `cluster`, `config`,
+`credential_configuration`, `impersonate_service_account`, and `ssh_user`. Credentials are selected
+explicitly and noninteractively using the named gcloud configuration and impersonated identity,
+never by changing the user's active configuration.
+
+The Kubernetes provider map requires nonblank string `kubeconfig`, `context`, `namespace`, `template`,
+`ssh_user`, `ssh_auth_volume`, and integer `ssh_port` in `1..65535`. `kubeconfig` MUST identify an
+existing regular local file; `ssh_user` MUST match `^[a-z_][a-z0-9_-]*[$]?$`. No implicit current
+context substitutes for these settings. Provider preflight is asynchronous runtime work, not a
+network side effect of workflow parsing.
+
+Resource identity MUST derive deterministically from the stable deployment ID, tracker kind, and
+opaque issue ID, never its mutable display identifier. The persisted worker-side workspace path and
+template identity MUST survive rename, retry, and restart. Path validation MUST remain strictly under
+the configured root, reject root equality/symlink escape, and never execute in the source repository.
+
+Reload identity covers provider kind, deployment ID, tracker kind, workspace root and all listed
+provider reference fields, including explicit auth selection. Cluster/namespace scope is an operator deployment boundary,
+not an agent scheduling option. Publication MUST atomically reject an identity change while owned
+resources or unresolved jobs remain, retaining the complete last-good workflow. Owner restart/death
+MUST NOT release that guard. A guard may release only after authoritative complete absence and no
+unresolved work; protection MUST be reacquired before a later allocation. Mutable concurrency,
+polling, deadlines and retention are not identity fields; jobs retain captured runtime settings.
+Provider template drift MUST NOT silently redefine retained environments.
+
+### B.2 Startup, Execution Capacity, and Recovery
+
+Startup MUST preflight and completely inventory the selected deployment before dispatch. Partial,
+denied, malformed, or unknown inventory MUST NOT be treated as empty. Durable provider records
+reconstruct identity, workspace, template, desired state, first terminal observation, attempt identity,
+and pending mutation outcomes. A lost orchestrator PID or missing transport is not remote stop proof.
+Recovered potentially executing resources MUST be reconciled before reuse; unknown creates/starts
+MUST prevent duplicate allocation.
+
+The existing configurable global and per-state agent limits govern capacity; the reference deployment
+example uses `agent.max_concurrent_agents: 5`, not a separate hard-coded managed limit. Reservations,
+preparation, running, stopping, and unknown possible execution occupy slots. Qualified stopped
+retained storage does not. An environment with quiescent compute and unresolved deletion may free its
+execution slot but MUST remain discoverable and hold the identity guard; retained storage can incur
+charges independently of five active executions.
+
+Only qualified provider quiescence, including ordering of earlier mutations, may release possibly
+executing capacity. Agent completion/cancellation/stall, local process death, SSH closure, request
+timeout, a stop request, or a missing API object MUST NOT independently establish quiescence.
+A failed stop MUST NOT become successful cancellation. Provider operations and hooks run in bounded
+supervised jobs outside the scheduling callback, carrying one monotonic-millisecond deadline.
+Opaque attempt and operation generations MUST fence stale launch/results; stale connection leases
+must still be cleaned locally without granting stale launch authority.
+
+### B.3 Retention, Reopen, and Cleanup
+
+The first affirmative terminal observation MUST be persisted once as UTC Unix milliseconds and
+survive restart. Retention expiry alone is insufficient: a fresh tracker observation MUST still
+affirm terminal state before destructive cleanup. Failed/missing tracker reads, missing issues,
+and nonactive nonterminal states MUST NOT authorize destruction. Zero retention makes cleanup
+eligible immediately under these same evidence requirements; it does not bypass them.
+
+A genuine reopen MUST conditionally clear the terminal timestamp and canceled cleanup intent before
+restart, unless deletion is already irreversible. It reuses the persisted workspace. A completed
+before-remove marker from an earlier terminal episode MUST NOT suppress cleanup after a genuine reopen.
+
+Workspace hook semantics remain unchanged except that an ambiguous managed timeout cannot be
+treated as a normal best-effort completion. `after_create` applies only to a newly created checkout.
+Cleanup preparation reserves execution capacity but launches no agent or `before_run`; it runs
+`before_remove`, records confirmed/best-effort-completed execution durably, obtains qualified stop,
+then attempts provider destruction. Managed hook timeout MUST block follow-on hooks/reuse/deletion
+until stop proof and MUST NOT persist a successful hook marker.
+Compute and persistent storage absence must both be established before forgetting the environment.
+Provider delete acknowledgment, PVC/workstation disappearance, or local transport teardown alone
+is not full absence.
+
+### B.4 Operator Status Contract
+
+Snapshots and `GET /api/v1/state` add `environments: []` with only explicit safe projections:
+
+| Field | Public meaning |
+| --- | --- |
+| `environment_id` | Deterministic resource key |
+| `provider` | `google_workstations` or `kubernetes` |
+| `issue_id` | Opaque tracker issue ID |
+| `issue_identifier` | Current known display identifier or null |
+| `phase` | `reserved`, `preparing`, `running`, `stopping`, `stopped`, `deleting`, or `unknown` |
+| `desired` | Persisted `running`, `stopped`, or `absent` intent |
+| `occupies_slot` | Boolean execution-capacity occupancy, not storage/billing count |
+| `workspace_path` | Persisted worker path, never display-identifier-derived |
+| `provider_resource_id` | Safe Workstations resource name or Kubernetes UID, nullable |
+| `terminal_observed_at` | First terminal observation in **UTC Unix milliseconds**, nullable |
+| `unresolved` | Null or whitelisted `category`, `code`, `operation` map |
+
+`unresolved` MUST classify invalid configuration, provider denial, retryable and unknown outcomes
+without raw error text; unknown phase without a captured failure still exposes safe unknown state.
+Records, metadata, credentials/auth references, SSH arguments/environment, connection material and
+raw CLI/provider output MUST NOT be serialized. Logs likewise use redacted categories while
+retaining issue ID/identifier and agent session ID where applicable.
+
+`GET /api/v1/<issue_identifier>` MUST find retained environments even without running/retrying/blocked
+agent entries. It adds `environment` with the same projection (null for unmanaged issues), reports
+the persisted remote `workspace.path` and provider kind as the safe `workspace.host` label.
+With no agent entry, `status` is the environment phase string; `running`, `retry`, and `blocked`
+are null and no active session is invented. Otherwise existing running/retrying/blocked precedence,
+payloads, counts and timestamp conventions retain their meaning. The new terminal stamp alone uses
+UTC Unix milliseconds; configured `_ms` values are durations, not timestamps.
+
+### B.5 Deployment Profiles and Qualification Limits
+
+Both profiles require operator-supplied Linux images, mounted persistent workspace and private Docker
+storage, Bash, actual GNU `realpath -m --`, Git, configured agent executables, Compose and repository
+browser/test dependencies. Readiness probes do not independently certify isolation or durability.
+Local macOS tests of managed path safety also require GNU coreutils realpath on `PATH`.
+
+Workstations is the preferred Google-managed worker profile to qualify even when Symphony/review apps
+run on GKE. It requires persistent `/home` and private Docker data, captured DELETE reclaim,
+`archiveTimeout: 0s`, disabled normal/boost warm pools, idle/running timeout and suspension policies,
+and authenticated loopback tunnel access to port 22. Lifecycle identity MUST be distinct from the
+worker VM identity; qualification MUST establish provider-enforced isolation from usable metadata
+credentials or report the profile unavailable. Root-controlled in-worker firewalls are insufficient.
+Complete cluster/config/operation and read-only Compute VM/disk inventory, ownership propagation,
+quotas and charges for retained/partial resources are operator prerequisites.
+
+The Kubernetes baseline pins Agent Sandbox v1.0.1, its exact v1beta1 schemas and source commit
+`3e77ccbac4db8a12b0157eafcad0d1ad5872f32a`. It requires qualified Kata VM isolation with
+`privileged_without_host_devices=true`, fail-closed admission/runtime selection, enforcing
+NetworkPolicy, private SSH, permanent scheduling gates with per-Pod UID/resourceVersion authorization,
+owned Secret lifecycle, and qualified kubelet/CSI evidence. Guest DinD privilege MUST NOT become
+privileged runc node access. Kata virtiofs/overlayfs incompatibility requires qualified persistent
+guest storage, not an ephemeral memory workaround. GKE Standard/Kata, managed gVisor, and Autopilot
+are distinct support contracts.
+
+The Template's `symphony.dev/qualification` annotation names an operator-owned immutable ConfigMap
+with `data["contract.json"]`. The exact pinned schema digests and all required qualification fields,
+resource bindings, permissions and operational restrictions are documented in
+[the reference operator contract](elixir/README.md#kubernetes-agent-sandbox-qualification-contract).
+Symphony MUST NOT create that qualification evidence or treat it as an operation fence.
+
+**Baseline Kubernetes final absence remains blocked:** upstream v1.0.1 lacks authoritative
+per-Sandbox acknowledgment ordering earlier child-create operations before final cleanup. Its
+[deletionTimestamp branch](https://github.com/kubernetes-sigs/agent-sandbox/blob/v1.0.1/controllers/sandbox_controller.go#L303-L308)
+does not provide that witness. Timeout, ConfigMap assertions, empty inventory, and parent 404 cannot
+substitute. After reachable cleanup, the deleting parent and `symphony.dev/environment-cleanup`
+finalizer MUST remain discoverable; `kubernetes_controller_cleanup_ordering_unproven` stays unknown
+and the identity guard MUST NOT release. Neither provider has live/production qualification from
+this implementation. Examples confer no authorization for external mutation or paid qualification.

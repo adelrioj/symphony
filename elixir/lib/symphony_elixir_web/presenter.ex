@@ -5,7 +5,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   alias SymphonyElixir.{Config, Orchestrator, StatusDashboard, Workspace}
 
-  @spec state_payload(GenServer.name(), timeout()) :: map()
+  @spec state_payload(GenServer.server(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
     generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
@@ -21,6 +21,7 @@ defmodule SymphonyElixirWeb.Presenter do
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
+          environments: Map.get(snapshot, :environments, []),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits
         }
@@ -33,18 +34,19 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  @spec issue_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}
+  @spec issue_payload(String.t(), GenServer.server(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}
   def issue_payload(issue_identifier, orchestrator, snapshot_timeout_ms) when is_binary(issue_identifier) do
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
         running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
         retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
         blocked = Enum.find(Map.get(snapshot, :blocked, []), &(&1.identifier == issue_identifier))
+        environment = Enum.find(Map.get(snapshot, :environments, []), &(&1.issue_identifier == issue_identifier))
 
-        if is_nil(running) and is_nil(retry) and is_nil(blocked) do
+        if is_nil(running) and is_nil(retry) and is_nil(blocked) and is_nil(environment) do
           {:error, :issue_not_found}
         else
-          {:ok, issue_payload_body(issue_identifier, running, retry, blocked)}
+          {:ok, issue_payload_body(issue_identifier, running, retry, blocked, environment)}
         end
 
       _ ->
@@ -52,7 +54,7 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  @spec refresh_payload(GenServer.name()) :: {:ok, map()} | {:error, :unavailable}
+  @spec refresh_payload(GenServer.server()) :: {:ok, map()} | {:error, :unavailable}
   def refresh_payload(orchestrator) do
     case Orchestrator.request_refresh(orchestrator) do
       :unavailable ->
@@ -63,14 +65,14 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  defp issue_payload_body(issue_identifier, running, retry, blocked) do
+  defp issue_payload_body(issue_identifier, running, retry, blocked, environment) do
     %{
       issue_identifier: issue_identifier,
-      issue_id: issue_id_from_entries(running, retry, blocked),
-      status: issue_status(running, retry, blocked),
+      issue_id: issue_id_from_entries(running, retry, blocked) || (environment && environment.issue_id),
+      status: issue_status(running, retry, blocked, environment),
       workspace: %{
-        path: workspace_path(issue_identifier, running, retry, blocked),
-        host: workspace_host(running, retry, blocked)
+        path: workspace_path(issue_identifier, running, retry, blocked, environment),
+        host: workspace_host(running, retry, blocked, environment)
       },
       attempts: %{
         restart_count: restart_count(retry),
@@ -79,6 +81,7 @@ defmodule SymphonyElixirWeb.Presenter do
       running: running && running_issue_payload(running),
       retry: retry && retry_issue_payload(retry),
       blocked: blocked && blocked_issue_payload(blocked),
+      environment: environment,
       logs: %{
         codex_session_logs: []
       },
@@ -95,9 +98,10 @@ defmodule SymphonyElixirWeb.Presenter do
   defp retry_attempt(nil), do: 0
   defp retry_attempt(retry), do: retry.attempt || 0
 
-  defp issue_status(running, _retry, _blocked) when not is_nil(running), do: "running"
-  defp issue_status(nil, retry, _blocked) when not is_nil(retry), do: "retrying"
-  defp issue_status(nil, nil, _blocked), do: "blocked"
+  defp issue_status(running, _retry, _blocked, _environment) when not is_nil(running), do: "running"
+  defp issue_status(nil, retry, _blocked, _environment) when not is_nil(retry), do: "retrying"
+  defp issue_status(nil, nil, blocked, _environment) when not is_nil(blocked), do: "blocked"
+  defp issue_status(nil, nil, nil, environment), do: to_string(environment.phase)
 
   defp running_entry_payload(entry) do
     %{
@@ -194,14 +198,20 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp workspace_path(issue_identifier, running, retry, blocked) do
+  defp workspace_path(_issue_identifier, _running, _retry, _blocked, environment) when not is_nil(environment),
+    do: environment.workspace_path
+
+  defp workspace_path(issue_identifier, running, retry, blocked, nil) do
     (running && Map.get(running, :workspace_path)) ||
       (retry && Map.get(retry, :workspace_path)) ||
       (blocked && Map.get(blocked, :workspace_path)) ||
       Path.join(Config.settings!().workspace.root, Workspace.workspace_key(issue_identifier))
   end
 
-  defp workspace_host(running, retry, blocked) do
+  defp workspace_host(_running, _retry, _blocked, environment) when not is_nil(environment),
+    do: environment.provider
+
+  defp workspace_host(running, retry, blocked, nil) do
     (running && Map.get(running, :worker_host)) ||
       (retry && Map.get(retry, :worker_host)) ||
       (blocked && Map.get(blocked, :worker_host))

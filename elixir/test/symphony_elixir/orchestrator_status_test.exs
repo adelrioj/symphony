@@ -1,6 +1,97 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.ExecutionContext
+  alias SymphonyElixir.ExecutionEnvironment.{Lifecycle, Operations, Record}
+  alias SymphonyElixir.SSH.Target
+  alias SymphonyElixirWeb.Presenter
+
+  test "Presenter redacts private managed records and connections while reporting unresolved stop occupancy" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    task_supervisor = start_supervised!({Task.Supervisor, []}, id: :status_connection_supervisor)
+    orchestrator = start_supervised!({Orchestrator, name: nil, task_supervisor: task_supervisor})
+    record = status_environment_record()
+    target = %Target{
+      executable: "/usr/bin/ssh",
+      prefix: ["-i", "/private/never-expose-key", "worker"],
+      label: "google_workstations",
+      env: [{"ACCESS_TOKEN", "never-expose-token"}]
+    }
+    assert {:ok, connection} = Operations.open_connection(task_supervisor, orchestrator, target, [])
+    config = %{
+      kind: record.kind,
+      deployment_id: record.deployment_id,
+      tracker_kind: record.tracker_kind,
+      workspace_root: "/remote/persistent",
+      startup_timeout_ms: 1_000,
+      shutdown_timeout_ms: 1_000,
+      terminal_retention_ms: 0,
+      provider: Map.merge(record.scope, %{
+        "config" => "qualified-template",
+        "credential_configuration" => "never-expose-authentication",
+        "impersonate_service_account" => "lifecycle@example.invalid",
+        "ssh_user" => "worker"
+      })
+    }
+    context = ExecutionContext.managed(config, %{record | phase: :running}, connection)
+    entry = %Lifecycle.Entry{
+      record: record,
+      context: context,
+      attempt_id: "opaque-status-attempt",
+      purpose: :agent,
+      phase: :unknown,
+      last_error: {:stop, {:unknown, "never-expose-provider-output"}}
+    }
+    :sys.replace_state(orchestrator, &%{&1 | environment_entries: %{record.issue_id => entry}})
+
+    payload = Presenter.state_payload(orchestrator, 1_000)
+    assert [environment] = payload.environments
+    assert environment.environment_id == record.key
+    assert environment.provider_resource_id == "projects/project/locations/region/workstationClusters/cluster/workstationConfigs/config/workstations/worker"
+    assert environment.phase == :unknown
+    assert environment.desired == :stopped
+    assert environment.occupies_slot
+    assert environment.unresolved.category == :unknown
+    assert environment.unresolved.operation == :stop
+    assert payload.counts == %{running: 0, retrying: 0, blocked: 0}
+
+    assert {:ok, issue} = Presenter.issue_payload(record.issue_identifier, orchestrator, 1_000)
+    encoded = Jason.encode!(%{state: payload, issue: issue})
+    for secret <- ["never-expose-this", "never-expose-key", "never-expose-token",
+                   "never-expose-authentication", "never-expose-provider-output", "never-expose-reference"] do
+      refute encoded =~ secret
+    end
+    assert :ok = Operations.close_connection(connection)
+  end
+
+  test "Presenter finds a stopped retained remote ticket without an active agent or a local workspace fallback" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    task_supervisor = start_supervised!({Task.Supervisor, []}, id: :retained_status_supervisor)
+    orchestrator = start_supervised!({Orchestrator, name: nil, task_supervisor: task_supervisor})
+    record = %{status_environment_record() |
+      phase: :stopped,
+      proof: {:quiescent, %{provider: :confirmed}},
+      terminal_observed_at: 1_789_084_800_123
+    }
+    entry = %Lifecycle.Entry{record: record, attempt_id: "retained-attempt", purpose: :agent, phase: :stopped}
+    :sys.replace_state(orchestrator, &%{&1 | environment_entries: %{record.issue_id => entry}})
+
+    assert {:ok, payload} = Presenter.issue_payload("RENAMED-77", orchestrator, 1_000)
+    assert payload.issue_id == record.issue_id
+    assert payload.status == "stopped"
+    assert payload.workspace == %{path: "/remote/persistent/original-opaque-checkout", host: "google_workstations"}
+    assert payload.running == nil
+    assert payload.retry == nil
+    assert payload.blocked == nil
+    assert payload.recent_events == []
+    assert payload.environment.terminal_observed_at == 1_789_084_800_123
+    refute payload.environment.occupies_slot
+    assert payload.environment.unresolved == nil
+    assert {:error, :issue_not_found} = Presenter.issue_payload("UNKNOWN-77", orchestrator, 1_000)
+  end
+
   test "stale attempt_ids cannot change replacement runtime, usage or exhaustion" do
     attempt_id = make_ref()
     replacement = %{attempt_id: attempt_id, workspace_path: "/replacement", session_id: "replacement", codex_total_tokens: 0}
@@ -1834,6 +1925,28 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert rendered =~ "app_status=offline"
     refute rendered =~ "Timestamp:"
+  end
+
+  defp status_environment_record do
+    %Record{
+      key: SymphonyElixir.ExecutionEnvironment.resource_key("status-deployment", "memory", "opaque-status-issue"),
+      deployment_id: "status-deployment",
+      tracker_kind: "memory",
+      issue_id: "opaque-status-issue",
+      issue_identifier: "RENAMED-77",
+      kind: "google_workstations",
+      scope: %{"project" => "project", "location" => "region", "cluster" => "cluster"},
+      workspace_path: "/remote/persistent/original-opaque-checkout",
+      template_identity: "qualified-template",
+      provider_ref: %{
+        name: "projects/project/locations/region/workstationClusters/cluster/workstationConfigs/config/workstations/worker",
+        uid: "worker-uid",
+        private: "never-expose-reference"
+      },
+      phase: :unknown,
+      desired: :stopped,
+      metadata: %{"test_secret" => "never-expose-this"}
+    }
   end
 
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
