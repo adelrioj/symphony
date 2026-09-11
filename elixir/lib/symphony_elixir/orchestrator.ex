@@ -280,8 +280,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp record_turn_exhaustion(%State{} = state, issue_id, running_entry) do
-    case Map.get(running_entry, :turns_exhausted_state) do
-      state_name when is_binary(state_name) ->
+    case {Config.settings!().agent.max_turn_exhaustions, Map.get(running_entry, :turns_exhausted_state)} do
+      {0, _} ->
+        {:continue, clear_turn_exhaustions(state, issue_id)}
+
+      {limit, state_name} when is_binary(state_name) ->
         head = workspace_head(running_entry)
         count = next_turn_exhaustion_count(state, issue_id, state_name, head)
 
@@ -295,7 +298,7 @@ defmodule SymphonyElixir.Orchestrator do
               })
         }
 
-        if count >= Config.settings!().agent.max_turn_exhaustions do
+        if count >= limit do
           {:exhausted, count, state}
         else
           {:continue, state}
