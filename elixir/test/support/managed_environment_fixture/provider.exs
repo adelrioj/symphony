@@ -9,7 +9,8 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   @pv_finalizer "external-provisioner.volume.kubernetes.io/finalizer"
   @quota_fields ~w(concurrent_workers retained_environments persistent_disk_gib)
   @compute_states ~w(PROVISIONING STAGING RUNNING STOPPING SUSPENDING REPAIRING TERMINATED SUSPENDED)
-  @negative_metadata ~w(name namespace uid labels ownerReferences finalizers deletionGracePeriodSeconds)
+  @negative_metadata ~w(name namespace uid labels annotations ownerReferences finalizers
+                        deletionGracePeriodSeconds)
   @negative_status ~w(phase state conditions containerStatuses initContainerStatuses ephemeralContainerStatuses
                       podIP podIPs hostIP hostIPs loadBalancer capacity accessModes currentNumberScheduled replicas
                       readyReplicas availableReplicas endpoints)
@@ -188,10 +189,17 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   defp safe_resource(resource) when is_map(resource) do
     resource
     |> Map.take(~w(kind id name uid selfLink zone region namespace volume_handle))
-    |> Map.filter(fn {_key, value} -> safe_identifier?(value) end)
+    |> Map.filter(&safe_resource_field?/1)
   end
 
   defp safe_resource(_), do: %{}
+
+  # CSI handles are opaque UTF-8, bounded by the production client's 8 MiB response limit.
+  defp safe_resource_field?({"volume_handle", value}) when is_binary(value) do
+    byte_size(value) in 1..8_388_608 and String.valid?(value)
+  end
+
+  defp safe_resource_field?({_key, value}), do: safe_identifier?(value)
 
   defp safe_identifier?(value) do
     is_binary(value) and byte_size(value) in 1..1024 and

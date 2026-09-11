@@ -26,6 +26,49 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
     refute kubernetes_snapshot(config, deleting) == baseline
   end
 
+  test "annotation-only collateral changes alter the fingerprint without exposing annotation values", context do
+    config = kubernetes_config(context)
+    body = put_in(pod(), ["metadata", "annotations"], %{"operator.example/policy" => "PRIVATE-BASELINE"})
+    baseline = kubernetes_snapshot(config, body)
+    changed = put_in(body, ["metadata", "annotations", "operator.example/policy"], "PRIVATE-CHANGED")
+    observed = kubernetes_snapshot(config, changed)
+    refute observed == baseline
+    refute Jason.encode!([baseline, observed]) =~ "PRIVATE-"
+  end
+
+  test "orphaned durable CSI handles remain exact despite opaque punctuation and length", context do
+    config = kubernetes_config(context)
+    handle = "_tenant#disk%2F=雪\\\"\n" <> String.duplicate("x", 2_100)
+    scope = Map.take(config.provider, ~w(kubeconfig context namespace))
+
+    record = %{
+      key: "se-ticket",
+      deployment_id: config.deployment_id,
+      tracker_kind: "memory",
+      issue_id: "opaque-issue",
+      kind: "kubernetes",
+      scope: scope,
+      workspace_path: "/home/user/workspaces/ticket",
+      desired: :stopped,
+      pending: [],
+      metadata: %{"volumes" => %{"claim" => %{"pv_uid" => "pv-uid", "volume_handle" => handle}}}
+    }
+
+    orphan =
+      pod()
+      |> put_in(["metadata", "labels"], %{"symphony.dev/deployment" => digest(Jason.encode!(config.deployment_id), 40)})
+      |> put_in(["metadata", "annotations"], %{"symphony.dev/record" => Jason.encode!(record)})
+
+    opts =
+      kubernetes_opts(fn path ->
+        %{"items" => if(String.ends_with?(path, "/pods"), do: [orphan], else: []), "metadata" => %{}}
+      end)
+
+    assert {:error, {:unknown, {:qualification_inventory_unresolved, resources}}} = Provider.inventory(config, opts)
+    assert Enum.any?(Jason.decode!(Jason.encode!(resources)), &(&1["volume_handle"] == handle))
+    assert_safe_resources(resources)
+  end
+
   test "canonical fingerprints ignore volatile versions timestamps and map insertion order", context do
     config = kubernetes_config(context)
     baseline = kubernetes_snapshot(config, pod())

@@ -263,8 +263,15 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
   defp safe_resources(_), do: []
 
   defp safe_resource(resource) do
-    resource |> Map.take(@resource_keys) |> Map.filter(fn {_key, value} -> safe_identifier?(value) end)
+    resource |> Map.take(@resource_keys) |> Map.filter(&safe_resource_field?/1)
   end
+
+  # Keep exact CSI handles across JSON persistence; the provider response bounds their size.
+  defp safe_resource_field?({"volume_handle", value}) when is_binary(value) do
+    byte_size(value) in 1..8_388_608 and String.valid?(value)
+  end
+
+  defp safe_resource_field?({_key, value}), do: safe_identifier?(value)
 
   defp identified_resource?(resource) do
     Enum.any?(~w(id name uid selfLink volume_handle), &Map.has_key?(resource, &1))

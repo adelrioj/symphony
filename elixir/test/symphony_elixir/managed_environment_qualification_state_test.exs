@@ -26,6 +26,7 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
 
   test "captured backing identities survive inventory failure and interrupted recovery" do
     control = start_supervised!({Control, checks: ["final_absence"], session_limit: 3})
+    handle = "_tenant#disk%2F=雪\\\"\n" <> String.duplicate("x", 2_100)
 
     record = %{
       key: "environment-1",
@@ -39,7 +40,7 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
             "pvc_uid" => "claim-uid",
             "pv_name" => "pv-1",
             "pv_uid" => "pv-uid",
-            "volume_handle" => "volume-1",
+            "volume_handle" => handle,
             "claim_ref" => %{"token" => "SECRET"}
           }
         },
@@ -52,7 +53,8 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
     state = GenServer.call(control, :snapshot)
     captured = Map.get(state, :captured_resources, [])
     encoded = Jason.encode!(captured)
-    for id <- ["disk-1", "claim-uid", "pv-uid", "volume-1", "pod-uid"], do: assert(encoded =~ id)
+    for id <- ["disk-1", "claim-uid", "pv-uid", "pod-uid"], do: assert(encoded =~ id)
+    assert Enum.any?(Jason.decode!(encoded), &(&1["volume_handle"] == handle))
     refute encoded =~ "SECRET"
     assert Map.get(state, :inventory_complete) == false
     assert Map.get(state, :observed_resources) == []
