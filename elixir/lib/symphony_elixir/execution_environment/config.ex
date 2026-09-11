@@ -1,9 +1,9 @@
 defmodule SymphonyElixir.ExecutionEnvironment.Config do
   @moduledoc """
-  Private managed-environment configuration, runtime capture, and reload identity.
+  Managed-environment configuration, runtime capture, and reload identity.
 
-  This schema is deliberately not embedded in the public worker configuration yet.
-  Provider-specific validation belongs to adapters, not this parser. Identity hashes
+  Embedded in the public worker configuration. Provider-specific validation belongs
+  to adapters, not this parser. Identity hashes
   operator references, never resolved credentials or mutable scheduling settings.
   """
 
@@ -38,6 +38,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
   @spec parse(term()) :: {:ok, t()} | {:error, {:invalid_environment_config, map()}}
   def parse(config) when is_map(config) do
     %__MODULE__{}
+    |> changeset(config)
+    |> apply_action(:validate)
+    |> case do
+      {:ok, parsed} -> {:ok, parsed}
+      {:error, changeset} -> {:error, {:invalid_environment_config, traverse_errors(changeset, fn {message, _opts} -> message end)}}
+    end
+  end
+
+  def parse(_config), do: {:error, {:invalid_environment_config, %{environment: ["must be a managed configuration map"]}}}
+
+  @spec changeset(t(), map()) :: Ecto.Changeset.t()
+  def changeset(schema, config) do
+    schema
     |> cast(normalize_keys(config), @fields, empty_values: [])
     |> validate_required(@fields)
     |> validate_inclusion(:kind, ["google_workstations", "kubernetes"])
@@ -50,14 +63,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
     |> validate_change(:provider, fn :provider, provider ->
       if string_keys?(provider), do: [], else: [provider: "must contain string keys"]
     end)
-    |> apply_action(:validate)
-    |> case do
-      {:ok, parsed} -> {:ok, parsed}
-      {:error, changeset} -> {:error, {:invalid_environment_config, traverse_errors(changeset, fn {message, _opts} -> message end)}}
-    end
   end
 
-  def parse(_config), do: {:error, {:invalid_environment_config, %{environment: ["must be a managed configuration map"]}}}
 
   @spec runtime(map()) :: map() | nil
   def runtime(settings) do
@@ -76,7 +83,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
       config ->
         keys = if config.kind == "google_workstations", do: @workstations_identity, else: @kubernetes_identity
 
-        {config.kind, config.deployment_id, config.workspace_root, canonical(Map.take(config.provider, keys))}
+        {config.kind, config.deployment_id, config.tracker_kind, config.workspace_root, canonical(Map.take(config.provider, keys))}
         |> :erlang.term_to_binary()
         |> then(&:crypto.hash(:sha256, &1))
     end

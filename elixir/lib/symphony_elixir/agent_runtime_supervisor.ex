@@ -24,7 +24,7 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
         id: task_supervisor_name
       ),
       Supervisor.child_spec(
-        {SymphonyElixir.Orchestrator, name: orchestrator_name, task_supervisor: task_supervisor_name},
+        {SymphonyElixir.Orchestrator, Keyword.merge(Keyword.take(opts, [:environment_operation_fun, :runner_fun]), name: orchestrator_name, task_supervisor: task_supervisor_name)},
         id: orchestrator_name
       )
     ]

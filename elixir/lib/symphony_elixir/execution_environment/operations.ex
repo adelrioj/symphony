@@ -67,6 +67,26 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     end
   end
 
+  def run(adapter, config, %Lifecycle.Entry{} = entry, :inspect, opts) do
+    mutate(adapter, :inspect, config, entry.record, deadline_options(config, :inspect, opts))
+  end
+
+  def run(adapter, config, %Lifecycle.Entry{} = entry, :metadata, opts) do
+    opts = deadline_options(config, :metadata, opts)
+    case invoke(adapter, :put_intent, [config, entry.record, entry.metadata_intent || %{}], opts) do
+      {:ok, latest} -> {:ok, latest}
+      {:error, failure, latest} -> {:error, failure, latest}
+      {:error, failure} -> {:error, failure, entry.record}
+    end
+  end
+
+  def run(_adapter, _config, %Lifecycle.Entry{context: %ExecutionContext{} = context} = entry, :cleanup_hook, _opts) do
+    case SymphonyElixir.Workspace.run_before_remove_hook(entry.record.workspace_path, entry.issue || entry.record.issue_identifier, context) do
+      :ok -> {:ok, entry.record}
+      {:error, failure} -> {:error, failure, entry.record}
+    end
+  end
+
   def run(_adapter, _config, %Lifecycle.Entry{record: record}, _operation, _opts), do: {:error, {:invalid, :environment_operation}, record}
   def run(_adapter, _config, nil, _operation, _opts), do: {:error, {:invalid, :environment_operation}}
 

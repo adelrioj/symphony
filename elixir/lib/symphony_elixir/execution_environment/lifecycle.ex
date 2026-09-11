@@ -5,8 +5,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   defmodule Entry do
     @moduledoc false
     @enforce_keys [:record, :attempt_id, :purpose]
-    defstruct [:record, :context, :attempt_id, :operation_id, :purpose, :completion, phase: :reserved, operation_seq: 0]
-    @type t :: %__MODULE__{record: Record.t(), context: SymphonyElixir.ExecutionContext.t() | nil, attempt_id: String.t(), operation_id: {String.t(), non_neg_integer()} | nil, purpose: :agent | :cleanup, phase: atom(), completion: term(), operation_seq: non_neg_integer()}
+    @derive {Inspect, only: [:record, :attempt_id, :operation_id, :purpose, :phase]}
+    defstruct [:record, :context, :attempt_id, :operation_id, :purpose, :completion, :last_error, :issue, :backend_module, :agent_executable, :retry_attempt, :metadata_intent, :terminal_observation, :cleanup_retry_at, phase: :reserved, operation_seq: 0]
+    @type t :: %__MODULE__{record: Record.t(), context: SymphonyElixir.ExecutionContext.t() | nil, attempt_id: String.t(), operation_id: {String.t(), non_neg_integer()} | nil, purpose: :agent | :cleanup, phase: atom(), completion: term(), last_error: term(), issue: term(), backend_module: module() | nil, agent_executable: String.t() | nil, retry_attempt: term(), metadata_intent: map() | nil, terminal_observation: integer() | nil, cleanup_retry_at: integer() | nil, operation_seq: non_neg_integer()}
   end
 
   @spec new(Record.t(), String.t(), :agent | :cleanup) :: Entry.t()
@@ -16,6 +17,23 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
 
   @spec step(Entry.t(), term(), integer()) :: {Entry.t(), [term()]}
   def step(%Entry{phase: :reserved} = entry, :prepare, _now), do: operation(entry, :prepare, :preparing)
+
+  def step(%Entry{} = entry, {:reconcile, operation}, _now) when operation in [:stop, :destroy, :inspect, :metadata, :cleanup_hook] do
+    phase = case operation do
+      :stop -> :stopping
+      :destroy -> :deleting
+      _ -> entry.phase
+    end
+    operation(entry, operation, phase)
+  end
+
+  def step(%Entry{operation_id: id} = entry, {:updated, id, %Record{} = record}, _now) when not is_nil(id) do
+    {%{entry | record: record, operation_id: nil, last_error: nil}, []}
+  end
+
+  def step(%Entry{phase: :stopped} = entry, {:reserve, attempt_id, purpose}, _now) do
+    {%{entry | attempt_id: attempt_id, purpose: purpose, phase: :reserved, completion: nil, context: nil, last_error: nil}, []}
+  end
 
   def step(%Entry{phase: :preparing, operation_id: id} = entry, {:prepared, id, %Record{phase: :running} = record}, _now) when not is_nil(id) do
     {%{entry | record: record, operation_id: nil}, []}
@@ -45,9 +63,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
     end
   end
 
-  def step(%Entry{operation_id: id} = entry, {:failed, id, _failure, %Record{} = record}, _now) when not is_nil(id) do
+  def step(%Entry{operation_id: id} = entry, {:failed, id, failure, %Record{} = record}, _now) when not is_nil(id) do
     record = retain_delete_proof(entry, record) |> invalidate_start_proof()
-    {%{entry | record: record, phase: :unknown}, []}
+    {%{entry | record: record, phase: :unknown, last_error: failure}, []}
   end
 
   def step(%Entry{phase: :stopped} = entry, :destroy, _now) do
@@ -98,7 +116,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
 
   defp retain_delete_proof(%Entry{phase: phase, record: old}, record) when phase in [:deleting, :unknown] do
     if old.desired == :absent or phase == :deleting do
-      if quiescent?(old), do: %{record | proof: old.proof, desired: :absent}, else: record
+      %{record | proof: if(quiescent?(old), do: old.proof, else: record.proof), desired: :absent}
     else
       record
     end

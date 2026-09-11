@@ -9,6 +9,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{AgentRunner, BlockedIssue, Config, ExecutionContext, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
+  alias SymphonyElixir.{ExecutionEnvironment, WorkflowStore}
+  alias SymphonyElixir.ExecutionEnvironment.{Lifecycle, Operations, Record}
+  alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
+  alias SymphonyElixir.ExecutionEnvironment.Lifecycle.Entry
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -26,6 +30,7 @@ defmodule SymphonyElixir.Orchestrator do
     Runtime state for the orchestrator polling loop.
     """
 
+    @derive {Inspect, only: [:poll_interval_ms, :max_concurrent_agents, :environment_discovery]}
     defstruct [
       :poll_interval_ms,
       :max_concurrent_agents,
@@ -34,6 +39,16 @@ defmodule SymphonyElixir.Orchestrator do
       :tick_timer_ref,
       :tick_token,
       task_supervisor: SymphonyElixir.TaskSupervisor,
+      environment_entries: %{},
+      environment_jobs: %{},
+      environment_discovery: :ready,
+      environment_discovery_token: nil,
+      environment_inventory_due_at_ms: nil,
+      environment_config: nil,
+      environment_identity: nil,
+      environment_guard: nil,
+      environment_operation_fun: &Operations.run/5,
+      runner_fun: &AgentRunner.run/3,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -66,11 +81,14 @@ defmodule SymphonyElixir.Orchestrator do
           tick_timer_ref: nil,
           tick_token: nil,
           task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor),
+          environment_operation_fun: Keyword.get(opts, :environment_operation_fun, &Operations.run/5),
+          runner_fun: Keyword.get(opts, :runner_fun, &AgentRunner.run/3),
           codex_totals: @empty_codex_totals,
           codex_rate_limits: nil
         }
 
-        run_terminal_workspace_cleanup()
+        state = capture_environment(state, config)
+        if is_nil(state.environment_config), do: run_terminal_workspace_cleanup()
         state = schedule_tick(state, 0)
 
         {:ok, state}
@@ -83,7 +101,7 @@ defmodule SymphonyElixir.Orchestrator do
   @impl true
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
       when is_reference(tick_token) do
-    state = refresh_runtime_config(state)
+    state = state |> refresh_runtime_config() |> refresh_environment_inventory()
 
     state = %{
       state
@@ -101,7 +119,7 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info({:tick, _tick_token}, state), do: {:noreply, state}
 
   def handle_info(:tick, state) do
-    state = refresh_runtime_config(state)
+    state = state |> refresh_runtime_config() |> refresh_environment_inventory()
 
     state = %{
       state
@@ -126,6 +144,30 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
+  def handle_info({ref, {operation_id, result}}, state) when is_reference(ref) do
+    case Map.pop(state.environment_jobs, ref) do
+      {nil, _} ->
+        close_stale_prepared(result, state)
+        {:noreply, state}
+      {job, jobs} ->
+        Process.demonitor(ref, [:flush])
+        state = %{state | environment_jobs: jobs}
+        state = if job.operation_id == operation_id do
+          environment_result(state, job, result)
+        else
+          close_stale_prepared(result, state)
+          environment_task_failed(state, job)
+        end
+        notify_dashboard()
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{environment_jobs: jobs} = state) when is_map_key(jobs, ref) do
+    {job, jobs} = Map.pop(jobs, ref)
+    {:noreply, environment_task_failed(%{state | environment_jobs: jobs}, job)}
+  end
+
   def handle_info(
         {:DOWN, ref, :process, _pid, reason},
         %{running: running} = state
@@ -139,9 +181,14 @@ defmodule SymphonyElixir.Orchestrator do
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
-        state = handle_agent_down(reason, state, issue_id, running_entry, session_id)
+        state =
+          if managed_entry?(state, issue_id) do
+            managed_stop(state, issue_id, {:agent_down, safe_agent_reason(reason), running_entry})
+          else
+            handle_agent_down(reason, state, issue_id, running_entry, session_id)
+          end
 
-        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
+        Logger.info("Agent task finished for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}")
 
         notify_dashboard()
         {:noreply, state}
@@ -213,8 +260,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
-  def handle_info(msg, state) do
-    Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
+  def handle_info(_msg, state) do
+    Logger.debug("Orchestrator ignored an unrecognized message")
     {:noreply, state}
   end
 
@@ -378,8 +425,10 @@ defmodule SymphonyElixir.Orchestrator do
       state
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
+      |> reconcile_environments()
 
-    with :ok <- Config.validate!(),
+    with true <- managed_dispatch_ready?(state),
+         :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states),
          true <- available_slots(state) > 0 do
       choose_issues(issues, state)
@@ -555,7 +604,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        state |> observe_terminal(issue.id) |> terminate_running_issue(issue.id, true)
 
       !issue_routable?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
@@ -589,7 +638,7 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
-        cleanup_issue_workspace(issue, Map.get(state.blocked, issue.id, %{}))
+        unless managed_entry?(state, issue.id), do: cleanup_issue_workspace(issue, Map.get(state.blocked, issue.id, %{}))
         release_issue_claim(state, issue.id)
 
       !issue_routable?(issue) ->
@@ -683,6 +732,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp terminate_running_issue(%State{environment_entries: entries} = state, issue_id, _cleanup_workspace) when is_map_key(entries, issue_id) do
+    managed_stop(state, issue_id, :release)
+  end
+
   defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
     case Map.get(state.running, issue_id) do
       nil ->
@@ -751,7 +804,7 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; #{error}")
 
         state
-        |> record_session_completion_totals(running_entry)
+        |> then(fn current -> if managed_entry?(current, issue_id), do: current, else: record_session_completion_totals(current, running_entry) end)
         |> stop_and_block_issue(issue_id, running_entry, error)
       else
         Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
@@ -877,6 +930,10 @@ defmodule SymphonyElixir.Orchestrator do
     :ok
   end
 
+  defp stop_and_block_issue(%State{environment_entries: entries} = state, issue_id, running_entry, error) when is_map_key(entries, issue_id) do
+    managed_stop(state, issue_id, {:block, running_entry, error})
+  end
+
   defp stop_and_block_issue(%State{} = state, issue_id, running_entry, error) do
     stop_running_task(
       Map.get(running_entry, :pid),
@@ -958,7 +1015,7 @@ defmodule SymphonyElixir.Orchestrator do
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(blocked, issue.id) and
       available_slots(state) > 0 and
-      state_slots_available?(issue, running) and
+      state_slots_available?(issue, capacity_running(state)) and managed_issue_available?(state, issue.id) and
       worker_slots_available?(state)
   end
 
@@ -976,6 +1033,7 @@ defmodule SymphonyElixir.Orchestrator do
     normalized_state = normalize_issue_state(issue_state)
 
     Enum.count(running, fn
+      {_id, %{unknown_state?: true}} -> true
       {_id, %{issue: %Issue{state: state_name}}} ->
         normalize_issue_state(state_name) == normalized_state
 
@@ -1124,6 +1182,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp do_dispatch_issue(%State{environment_config: config} = state, issue, attempt, _preferred_worker_host, backend_module) when not is_nil(config) do
+    reserve_environment(state, issue, attempt, backend_module)
+  end
+
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host, backend_module) do
     recipient = self()
 
@@ -1140,8 +1202,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, backend_module) do
     context = static_execution_context(worker_host)
     attempt_id = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+    spawn_issue_with_context(state, issue, attempt, recipient, worker_host, backend_module, context, attempt_id, true)
+  end
+
+  defp spawn_issue_with_context(state, issue, attempt, recipient, worker_host, backend_module, context, attempt_id, claim?) do
+    runner = state.runner_fun
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
-           AgentRunner.run(issue, recipient,
+           runner.(issue, recipient,
              attempt: attempt,
              execution_context: context,
              attempt_id: attempt_id,
@@ -1153,7 +1220,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
 
-        claim_issue_state(issue)
+        if claim?, do: claim_issue_state(issue)
 
         running =
           Map.put(state.running, issue.id, %{
@@ -1164,7 +1231,7 @@ defmodule SymphonyElixir.Orchestrator do
             identifier: issue.identifier,
             issue: issue,
             worker_host: worker_host,
-            workspace_path: nil,
+            workspace_path: context.workspace_path,
             session_id: nil,
             last_codex_message: nil,
             last_codex_timestamp: nil,
@@ -1229,7 +1296,17 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
+  defp schedule_issue_retry(%State{environment_entries: entries} = state, issue_id, attempt, metadata) when is_map_key(entries, issue_id) do
+    if Lifecycle.occupied?(entries[issue_id]) do
+      managed_stop(state, issue_id, {:retry, attempt, metadata})
+    else
+      do_schedule_issue_retry(state, issue_id, attempt, metadata)
+    end
+  end
+
+  defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata), do: do_schedule_issue_retry(state, issue_id, attempt, metadata)
+
+  defp do_schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
@@ -1315,7 +1392,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
-        cleanup_issue_workspace(issue, metadata)
+        unless managed_entry?(state, issue_id), do: cleanup_issue_workspace(issue, metadata)
         {:noreply, release_issue_claim(state, issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
@@ -1393,7 +1470,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_dispatch_available?(state, issue, metadata) do
-    retry_candidate_issue?(issue, terminal_state_set()) and
+    managed_dispatch_ready?(state) and managed_issue_available?(state, issue.id) and retry_candidate_issue?(issue, terminal_state_set()) and
       dispatch_slots_available?(issue, state) and
       worker_slots_available?(state, metadata[:worker_host])
   end
@@ -1449,6 +1526,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
+    if managed_entry?(state, issue_id) and Lifecycle.occupied?(state.environment_entries[issue_id]) do
+      managed_stop(state, issue_id, :release)
+    else
+      do_release_issue_claim(state, issue_id)
+    end
+  end
+
+  defp do_release_issue_claim(%State{} = state, issue_id) do
     %{
       state
       | claimed: MapSet.delete(state.claimed, issue_id),
@@ -1598,10 +1683,537 @@ defmodule SymphonyElixir.Orchestrator do
   defp available_slots(%State{} = state) do
     max(
       (state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents) -
-        map_size(state.running),
+        map_size(capacity_running(state)),
       0
     )
   end
+
+  # Provider calls and remote hooks belong exclusively to supervised operation jobs.
+  # The scheduler retains both the generation and the job until result or DOWN wins.
+  defp capture_environment(state, settings) do
+    identity = EnvironmentConfig.identity(settings)
+    cond do
+      identity == state.environment_identity and is_nil(identity) -> state
+      identity == state.environment_identity ->
+        managed = settings.worker.environment
+        config = %{state.environment_config | startup_timeout_ms: managed.startup_timeout_ms, shutdown_timeout_ms: managed.shutdown_timeout_ms, terminal_retention_ms: managed.terminal_retention_ms}
+        %{state | environment_config: config}
+      map_size(state.environment_entries) > 0 or map_size(state.environment_jobs) > 0 -> state
+      is_nil(identity) ->
+        %{state | environment_config: nil, environment_identity: nil, environment_guard: nil, environment_discovery: :ready}
+      true ->
+        config = EnvironmentConfig.runtime(settings)
+        state = %{state | environment_config: config, environment_identity: identity, environment_guard: nil, environment_discovery: :pending}
+        case protect_environment(state) do
+          {:ok, state} -> discover_environments(state)
+          {:error, state} -> state
+        end
+    end
+  end
+
+  defp protect_environment(%State{environment_guard: guard} = state) when is_reference(guard) do
+    case WorkflowStore.protect_environment(state.environment_identity, guard) do
+      {:ok, ^guard} -> {:ok, state}
+      {:error, _} -> {:error, %{state | environment_discovery: {:error, :authority_replaced}}}
+    end
+  end
+  defp protect_environment(state) do
+    case WorkflowStore.protect_environment(state.environment_identity) do
+      {:ok, token} -> {:ok, %{state | environment_guard: token}}
+      {:error, _} -> {:error, %{state | environment_discovery: {:error, :identity_changed}}}
+    end
+  end
+
+  defp discover_environments(state) do
+    {:ok, adapter} = ExecutionEnvironment.adapter(state.environment_config.kind)
+    {:ok, task, token} = Operations.discover(state.task_supervisor, adapter, state.environment_config, environment_options(state))
+    job = %{issue_id: nil, operation_id: token, operation: :discover, task: task}
+    %{state | environment_jobs: Map.put(state.environment_jobs, task.ref, job), environment_discovery: :pending, environment_discovery_token: token,
+      environment_inventory_due_at_ms: System.monotonic_time(:millisecond) + state.poll_interval_ms}
+  end
+
+  defp environment_options(state), do: [authority: self(), operation_fun: state.environment_operation_fun]
+  defp managed_entry?(state, id), do: Map.has_key?(state.environment_entries, id)
+  defp managed_dispatch_ready?(%State{environment_config: nil}), do: true
+  defp managed_dispatch_ready?(state), do: state.environment_discovery == :ready
+
+  defp managed_issue_available?(state, id) do
+    case state.environment_entries[id] do
+      nil -> true
+      %Entry{phase: :stopped, operation_id: nil, record: %{terminal_observed_at: nil, desired: desired}} -> desired != :absent and not environment_job?(state, id)
+      _ -> false
+    end
+  end
+
+  defp capacity_running(state) do
+    Enum.reduce(state.environment_entries, state.running, fn {id, entry}, used ->
+      if Lifecycle.occupied?(entry), do: Map.put(used, id, %{issue: %Issue{state: entry.record.issue_state || ""}, unknown_state?: is_nil(entry.record.issue_state)}), else: used
+    end)
+  end
+
+  defp environment_job?(state, id), do: Enum.any?(state.environment_jobs, fn {_, job} -> job.issue_id == id end)
+  defp put_environment(state, entry), do: %{state | environment_entries: Map.put(state.environment_entries, entry.record.issue_id, entry)}
+  defp attempt_id, do: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+  defp utc_ms, do: System.system_time(:millisecond)
+
+  defp reserve_environment(state, issue, attempt, backend) do
+    with true <- managed_dispatch_ready?(state) and managed_issue_available?(state, issue.id),
+         true <- available_slots(state) > 0 and state_slots_available?(claim_capacity_issue(issue), capacity_running(state)),
+         {:ok, state} <- protect_environment(state) do
+      id = attempt_id()
+      config = state.environment_config
+      key = ExecutionEnvironment.resource_key(config.deployment_id, config.tracker_kind, issue.id)
+      entry = case state.environment_entries[issue.id] do
+        nil ->
+          record = %Record{key: key, deployment_id: config.deployment_id, tracker_kind: config.tracker_kind, issue_id: issue.id,
+            issue_identifier: issue.identifier, issue_state: issue.state, kind: config.kind, scope: EnvironmentConfig.scope(config),
+            workspace_path: Path.join(config.workspace_root, key), template_identity: nil, attempt_id: id}
+          Lifecycle.new(record, id, :agent)
+        old -> elem(Lifecycle.step(old, {:reserve, id, :agent}, utc_ms()), 0)
+      end
+      # This successful claim-time move is our own baseline, not an external reroute.
+      issue = managed_claim_issue(issue)
+      backend = case backend_module_for_dispatch(issue) do
+        {:ok, selected} -> selected
+        _ -> backend
+      end
+      entry = %{entry | issue: issue, backend_module: backend, retry_attempt: attempt, agent_executable: selected_executable(backend),
+        record: %{entry.record | attempt_id: id, issue_state: issue.state, issue_identifier: issue.identifier}}
+      state = %{put_environment(state, entry) | claimed: MapSet.put(state.claimed, issue.id), retry_attempts: Map.delete(state.retry_attempts, issue.id)}
+      environment_step(state, issue.id, :prepare)
+    else
+      {:error, state} -> state
+      _ -> state
+    end
+  end
+
+  defp claim_capacity_issue(issue) do
+    case Config.settings!().agent.in_progress_state do
+      target when is_binary(target) and target != "" -> %{issue | state: target}
+      _ -> issue
+    end
+  end
+
+  defp managed_claim_issue(issue) do
+    target = Config.settings!().agent.in_progress_state
+    if target not in [nil, "", issue.state] do
+      case Tracker.update_issue_state(issue.id, target) do
+        :ok -> %{issue | state: target}
+        _ -> issue
+      end
+    else
+      issue
+    end
+  end
+
+  defp selected_executable(backend) do
+    settings = Config.settings!()
+    command = if backend == SymphonyElixir.Agent.Claude, do: settings.claude.command, else: settings.codex.command
+    command |> OptionParser.split() |> List.first()
+  rescue
+    _ -> nil
+  end
+
+  defp environment_step(state, id, event) do
+    {entry, effects} = Lifecycle.step(Map.fetch!(state.environment_entries, id), event, utc_ms())
+    state = put_environment(state, entry)
+    Enum.reduce(effects, state, fn
+      {:provider, operation, _}, acc -> start_environment_job(acc, entry, operation)
+      {:release, completion}, acc -> finish_environment_stop(acc, entry, completion)
+      :forget, acc -> %{do_release_issue_claim(acc, id) | environment_entries: Map.delete(acc.environment_entries, id)}
+      {:launch_agent, _}, acc -> launch_environment_agent(acc, entry)
+    end)
+  end
+
+  defp start_environment_job(state, entry, operation) do
+    if operation in [:stop, :inspect] do
+      do_start_environment_job(state, entry, operation)
+    else
+      case protect_environment(state) do
+        {:ok, state} -> do_start_environment_job(state, entry, operation)
+        {:error, state} -> apply_environment_result(state, entry, operation, {:error, {:denied, :authority_replaced}, entry.record})
+      end
+    end
+  end
+
+  defp do_start_environment_job(state, entry, operation) do
+    {:ok, adapter} = ExecutionEnvironment.adapter(state.environment_config.kind)
+    opts = environment_options(state)
+    opts = if entry.purpose == :agent, do: Keyword.put(opts, :agent_executable, entry.agent_executable), else: opts
+    entry = if operation == :stop and is_integer(entry.terminal_observation) and is_nil(entry.record.terminal_observed_at) do
+      %{entry | record: %{entry.record | terminal_observed_at: entry.terminal_observation}}
+    else
+      entry
+    end
+    {:ok, task} = Operations.start(state.task_supervisor, adapter, state.environment_config, entry, operation, opts)
+    job = %{issue_id: entry.record.issue_id, operation_id: entry.operation_id, operation: operation, task: task}
+    %{state | environment_jobs: Map.put(state.environment_jobs, task.ref, job)}
+  end
+
+  defp environment_result(state, %{operation: :discover, operation_id: token}, result) do
+    if state.environment_discovery_token == token do
+      case result do
+        {:ok, records} when is_list(records) ->
+          if Enum.all?(records, &valid_inventory_record?(&1, state.environment_config)) do
+            state = Enum.reduce(records, %{state | environment_discovery: :ready, environment_discovery_token: nil}, &adopt_environment/2)
+            state = maybe_release_environment_guard(state, records == [])
+            enqueue_environment_poll(state)
+          else
+            ids = Enum.flat_map(records, fn
+              %Record{} = record -> [safe_resource_id(record.provider_ref) || record.key]
+              _ -> []
+            end)
+            Logger.warning("Managed environment discovery unresolved: unmapped owned resource")
+            reconcile_environment_entries(%{state | environment_discovery: {:error, {:unmapped_owned_resource, ids}}, environment_discovery_token: nil})
+          end
+        {:error, {:unknown, {code, ids}}} when code in [:orphan_backing_resources, :kubernetes_invalid_owned_record] and is_list(ids) ->
+          ids = Enum.flat_map(ids, fn
+            id when is_binary(id) -> [id]
+            item when is_map(item) -> item |> Map.take(["id", "name"]) |> Map.values() |> Enum.filter(&is_binary/1)
+            _ -> []
+          end)
+          Logger.warning("Managed environment discovery unresolved: owned orphan resource")
+          reconcile_environment_entries(%{state | environment_discovery: {:error, {code, ids}}, environment_discovery_token: nil})
+        _ ->
+          Logger.warning("Managed environment discovery unresolved")
+          reconcile_environment_entries(%{state | environment_discovery: {:error, :discovery_unresolved}, environment_discovery_token: nil})
+      end
+    else
+      state
+    end
+  end
+
+  defp environment_result(state, job, result) do
+    case state.environment_entries[job.issue_id] do
+      %Entry{operation_id: id} = entry when id == job.operation_id ->
+        apply_environment_result(state, entry, job.operation, result)
+      _ ->
+        close_stale_prepared(result, state)
+        state
+    end
+  end
+
+  defp valid_inventory_record?(%Record{issue_id: id} = record, config) when is_binary(id) and id != "" do
+    record.deployment_id == config.deployment_id and record.tracker_kind == config.tracker_kind and record.kind == config.kind and
+      record.scope == EnvironmentConfig.scope(config) and record.key == ExecutionEnvironment.resource_key(config.deployment_id, config.tracker_kind, id)
+  end
+  defp valid_inventory_record?(_record, _config), do: false
+
+  defp qualified_stopped_record?(%Record{phase: :stopped, proof: {:quiescent, evidence}, pending: pending}) when is_map(evidence) and map_size(evidence) > 0 do
+    not Enum.any?(pending, &(&1.outcome in [:pending, :unknown]))
+  end
+  defp qualified_stopped_record?(_record), do: false
+
+  defp adopt_environment(record, state) do
+    case state.environment_entries[record.issue_id] do
+      %Entry{attempt_id: id, phase: :running} = entry when id == record.attempt_id ->
+        # Routine inventory must not stop an exact healthy attempt we own.
+        healthy? = record.phase == :running and not Enum.any?(record.pending, &(&1.outcome in [:pending, :unknown])) and Map.has_key?(state.running, record.issue_id)
+        if healthy?, do: state, else: managed_stop(put_environment(state, %{entry | record: record}), record.issue_id, :release)
+      %Entry{phase: :running} = entry ->
+        managed_stop(put_environment(state, %{entry | record: record}), record.issue_id, :release)
+      %Entry{phase: :stopped} = entry ->
+        if qualified_stopped_record?(record) and record.attempt_id == entry.record.attempt_id, do: put_environment(state, %{entry | record: record}), else: environment_step(put_environment(state, %{entry | record: record}), record.issue_id, {:reconcile, :stop})
+      %Entry{phase: :unknown} = entry ->
+        if environment_job?(state, record.issue_id) do
+          state
+        else
+          record = if entry.record.desired == :absent, do: %{record | desired: :absent}, else: record
+          state |> put_environment(%{entry | record: record}) |> environment_step(record.issue_id, {:reconcile, :inspect})
+        end
+      %Entry{} -> state
+      nil ->
+        entry = Lifecycle.new(record, attempt_id(), :agent)
+        entry = %{entry | phase: if(qualified_stopped_record?(record), do: :stopped, else: :unknown)}
+        state = put_environment(state, entry)
+        if entry.phase == :stopped, do: state, else: environment_step(state, record.issue_id, {:reconcile, if(record.desired == :absent, do: :destroy, else: :stop)})
+    end
+  end
+
+  defp environment_task_failed(state, %{operation: :discover} = job), do: environment_result(state, job, {:error, {:unknown, :task_down}})
+  defp environment_task_failed(state, job) do
+    case state.environment_entries[job.issue_id] do
+      %Entry{operation_id: id} = entry when id == job.operation_id -> apply_environment_result(state, entry, job.operation, {:error, {:unknown, :task_down}, entry.record})
+      _ -> state
+    end
+  end
+
+  defp apply_environment_result(state, entry, :prepare, {:ok, %ExecutionContext{mode: :managed} = context}) do
+    record = context.environment.record
+    if record.issue_id == entry.record.issue_id and record.attempt_id == entry.attempt_id do
+      state = put_environment(state, %{entry | context: context})
+      state = environment_step(state, entry.record.issue_id, {:prepared, entry.operation_id, record})
+      cond do
+        not is_nil(entry.completion) -> managed_stop(state, entry.record.issue_id, entry.completion)
+        entry.purpose == :cleanup -> revalidate_cleanup_prepared(state, entry.record.issue_id)
+        true -> revalidate_prepared_environment(state, entry.record.issue_id)
+      end
+    else
+      close_stale_prepared({:ok, context}, state)
+      apply_environment_result(state, entry, :prepare, {:error, {:invalid, :prepared_identity}, entry.record})
+    end
+  end
+
+  defp apply_environment_result(state, entry, :stop, {:ok, %Record{} = record}) do
+    close_stale_prepared({:ok, entry.context}, state)
+    state = environment_step(state, entry.record.issue_id, {:stopped, entry.operation_id, record})
+    enqueue_environment_poll(state)
+  end
+
+  defp apply_environment_result(state, entry, :destroy, {:ok, %Record{} = record}) do
+    if record.absent? and not Enum.any?(record.pending, &(&1.outcome in [:pending, :unknown])) do
+      state = environment_step(state, entry.record.issue_id, {:destroyed, entry.operation_id, record})
+      # Confirm a complete empty inventory, not just the last known record's absence.
+      if map_size(state.environment_entries) == 0 and map_size(state.environment_jobs) == 0, do: discover_environments(state), else: enqueue_environment_poll(state)
+    else
+      apply_environment_result(state, entry, :destroy, {:error, {:unknown, :absence_unconfirmed}, record})
+    end
+  end
+
+  defp apply_environment_result(state, entry, :cleanup_hook, {:ok, %Record{} = record}) do
+    state = environment_step(state, entry.record.issue_id, {:updated, entry.operation_id, record})
+    entry = state.environment_entries[entry.record.issue_id]
+    record = %{entry.record | metadata: Map.put(entry.record.metadata, "symphony_cleanup_hook_completed", true)}
+    entry = %{entry | record: record, metadata_intent: %{}}
+    state |> put_environment(entry) |> environment_step(entry.record.issue_id, {:reconcile, :metadata})
+  end
+
+  defp apply_environment_result(state, entry, :metadata, {:ok, %Record{} = record}) do
+    state = environment_step(state, entry.record.issue_id, {:updated, entry.operation_id, record})
+    current = state.environment_entries[entry.record.issue_id]
+    retry_at = if is_map(entry.metadata_intent) and Map.has_key?(entry.metadata_intent, :terminal_observed_at) and is_nil(entry.metadata_intent.terminal_observed_at), do: nil, else: current.cleanup_retry_at
+    state = put_environment(state, %{current | terminal_observation: nil, metadata_intent: nil, cleanup_retry_at: retry_at})
+    if entry.purpose == :cleanup and Lifecycle.occupied?(entry) do
+      managed_stop(state, entry.record.issue_id, :release)
+    else
+      enqueue_environment_poll(state)
+    end
+  end
+
+  defp apply_environment_result(state, entry, :inspect, {:ok, %Record{} = record}) do
+    cond do
+      record.absent? -> apply_environment_result(state, entry, :destroy, {:ok, record})
+      record.desired != :absent and qualified_stopped_record?(record) -> apply_environment_result(state, entry, :stop, {:ok, record})
+      true ->
+        state = environment_step(state, entry.record.issue_id, {:updated, entry.operation_id, record})
+        environment_step(state, entry.record.issue_id, {:reconcile, if(record.desired == :absent, do: :destroy, else: :stop)})
+    end
+  end
+
+  defp apply_environment_result(state, entry, operation, {:error, failure, %Record{} = record}) do
+    entry = cond do
+      operation == :prepare and entry.purpose == :agent and is_nil(entry.completion) ->
+        metadata = %{identifier: entry.record.issue_identifier, workspace_path: entry.record.workspace_path, error: "managed preparation failed"}
+        %{entry | completion: {:retry, normalize_retry_attempt(entry.retry_attempt) + 1, metadata}}
+      operation in [:prepare, :cleanup_hook, :metadata] and entry.purpose == :cleanup ->
+        %{entry | cleanup_retry_at: utc_ms() + state.poll_interval_ms}
+      true -> entry
+    end
+    state = put_environment(state, entry)
+    state = environment_step(state, entry.record.issue_id, {:failed, entry.operation_id, {operation, failure}, record})
+    if operation in [:prepare, :cleanup_hook] or (operation == :metadata and entry.purpose == :cleanup) do
+      environment_step(state, entry.record.issue_id, {:reconcile, :stop})
+    else
+      state
+    end
+  end
+
+  defp apply_environment_result(state, entry, operation, _result), do: apply_environment_result(state, entry, operation, {:error, {:unknown, :invalid_result}, entry.record})
+
+  defp revalidate_cleanup_prepared(state, id) do
+    with {:ok, [issue]} <- Tracker.fetch_issues_by_ids([id]),
+         true <- terminal_issue_state?(issue.state, terminal_state_set()) do
+      environment_step(state, id, {:reconcile, :cleanup_hook})
+    else
+      _ -> managed_stop(state, id, :release)
+    end
+  end
+
+  defp revalidate_prepared_environment(state, id) do
+    entry = state.environment_entries[id]
+    with {:ok, state} <- protect_environment(state),
+         {:ok, [issue]} <- Tracker.fetch_issues_by_ids([id]),
+         true <- candidate_issue?(issue, active_state_set(), terminal_state_set()),
+         true <- normalize_issue_state(issue.state) == normalize_issue_state(entry.issue.state),
+         {:ok, backend} <- backend_module_for_dispatch(issue),
+         true <- backend == entry.backend_module and selected_executable(backend) == entry.agent_executable do
+      state |> put_environment(%{entry | issue: issue}) |> environment_step(id, :launch)
+    else
+      {:error, %State{} = failed_state} -> managed_stop(failed_state, id, :release)
+      _ -> managed_stop(state, id, :release)
+    end
+  end
+
+  defp launch_environment_agent(state, entry) do
+    state = spawn_issue_with_context(state, entry.issue, entry.retry_attempt, self(), entry.context.worker_host, entry.backend_module, entry.context, entry.attempt_id, false)
+    if Map.has_key?(state.running, entry.record.issue_id), do: state, else: managed_stop(state, entry.record.issue_id, state.environment_entries[entry.record.issue_id].completion || :release)
+  end
+
+  defp managed_stop(state, id, completion) do
+    entry = Map.fetch!(state.environment_entries, id)
+    state = case Map.pop(state.running, id) do
+      {nil, _} -> state
+      {running, remaining} ->
+        stop_running_task(running.pid, running.ref, state.task_supervisor)
+        record_session_completion_totals(%{state | running: remaining}, running)
+    end
+    entry = %{entry | completion: completion}
+    state = put_environment(state, entry)
+    cond do
+      entry.phase == :stopped and not environment_job?(state, id) -> finish_environment_stop(state, entry, completion)
+      entry.phase in [:stopping, :deleting] -> state
+      environment_job?(state, id) ->
+        # In-flight prepare can mutate remotely. Invalidate launch now, then let its
+        # accounted result finish before issuing a fenced stop.
+        state
+      true -> environment_step(state, id, {:reconcile, :stop})
+    end
+  end
+
+  defp finish_environment_stop(state, entry, completion) do
+    error = if entry.purpose == :cleanup and not is_nil(entry.cleanup_retry_at), do: entry.last_error, else: nil
+    state = put_environment(state, %{entry | completion: nil, last_error: error})
+    case completion do
+      {:agent_down, reason, running} -> handle_agent_down(reason, state, entry.record.issue_id, running, running_entry_session_id(running))
+      {:retry, attempt, metadata} -> schedule_issue_retry(state, entry.record.issue_id, attempt, metadata)
+      {:block, running, error} -> block_issue_from_entry(state, entry.record.issue_id, running, error)
+      _ -> do_release_issue_claim(state, entry.record.issue_id)
+    end
+  end
+
+  defp safe_agent_reason(:normal), do: :normal
+  defp safe_agent_reason(_reason), do: :managed_agent_failed
+
+  defp close_stale_prepared({:ok, %ExecutionContext{connection: connection}}, state) when not is_nil(connection) do
+    owned? = Enum.any?(state.environment_entries, fn {_, entry} -> entry.phase in [:preparing, :running] and match?(%ExecutionContext{connection: ^connection}, entry.context) end)
+    unless owned?, do: Task.Supervisor.start_child(state.task_supervisor, fn -> Operations.close_connection(connection) end)
+    :ok
+  end
+  defp close_stale_prepared(_result, _state), do: :ok
+
+  defp enqueue_environment_poll(state) do
+    send(self(), :run_poll_cycle)
+    state
+  end
+
+  defp maybe_release_environment_guard(state, empty?) do
+    if empty? and map_size(state.environment_entries) == 0 and map_size(state.environment_jobs) == 0 and is_reference(state.environment_guard) do
+      case WorkflowStore.release_environment(state.environment_guard, :empty_inventory) do
+        :ok -> %{state | environment_guard: nil}
+        _ -> state
+      end
+    else
+      state
+    end
+  end
+
+  defp reconcile_environments(%State{environment_config: nil} = state), do: state
+  defp reconcile_environments(state) do
+    state = if match?({:error, _}, state.environment_discovery), do: refresh_environment_inventory(state), else: state
+    if state.environment_discovery == :pending, do: state, else: reconcile_environment_entries(state)
+  end
+
+  defp reconcile_environment_entries(state) do
+    ids = Map.keys(state.environment_entries)
+    case if(ids == [], do: {:ok, []}, else: Tracker.fetch_issues_by_ids(ids)) do
+      {:ok, issues} ->
+        by_id = Map.new(issues, &{&1.id, &1})
+        Enum.reduce(ids, state, fn id, acc -> reconcile_environment(acc, id, by_id[id]) end)
+      _ ->
+        Enum.reduce(ids, state, fn id, acc ->
+          entry = acc.environment_entries[id]
+          if entry.phase == :unknown and not environment_job?(acc, id), do: environment_step(acc, id, {:reconcile, :inspect}), else: acc
+        end)
+    end
+  end
+
+  defp reconcile_environment(state, id, issue) do
+    state = if match?(%Issue{}, issue) and terminal_issue_state?(issue.state, terminal_state_set()), do: observe_terminal(state, id), else: state
+    entry = state.environment_entries[id]
+    entry = if is_nil(entry.record.issue_state) and match?(%Issue{}, issue), do: %{entry | record: %{entry.record | issue_state: issue.state}, issue: issue}, else: entry
+    state = put_environment(state, entry)
+    cond do
+      environment_job?(state, id) ->
+        if entry.phase == :preparing and entry.purpose == :agent and (is_nil(issue) or not candidate_issue?(issue, active_state_set(), terminal_state_set()) or issue.state != entry.issue.state) do
+          managed_stop(state, id, :release)
+        else
+          state
+        end
+      entry.phase == :unknown ->
+        environment_step(state, id, {:reconcile, :inspect})
+      entry.phase == :running and (is_nil(issue) or not candidate_issue?(issue, active_state_set(), terminal_state_set())) ->
+        managed_stop(state, id, :release)
+      entry.phase != :stopped -> state
+      entry.record.desired == :absent -> environment_step(state, id, :destroy)
+      is_nil(issue) -> state
+      terminal_issue_state?(issue.state, terminal_state_set()) -> reconcile_terminal_environment(state, entry, issue)
+      not is_nil(entry.record.terminal_observed_at) or not is_nil(entry.terminal_observation) ->
+        record = %{entry.record | metadata: Map.put(entry.record.metadata, "symphony_cleanup_hook_completed", false)}
+        entry = %{entry | record: record, purpose: :agent, metadata_intent: %{terminal_observed_at: nil, desired: :stopped}}
+        state |> put_environment(entry) |> environment_step(id, {:reconcile, :metadata})
+      true -> state
+    end
+  end
+
+  defp observe_terminal(state, id) do
+    case state.environment_entries[id] do
+      %Entry{terminal_observation: nil, record: %{terminal_observed_at: nil}} = entry -> put_environment(state, %{entry | terminal_observation: utc_ms()})
+      _ -> state
+    end
+  end
+
+  defp refresh_environment_inventory(state, force? \\ false)
+  defp refresh_environment_inventory(%State{environment_config: nil} = state, _force?), do: state
+  defp refresh_environment_inventory(state, force?) do
+    due? = is_nil(state.environment_inventory_due_at_ms) or System.monotonic_time(:millisecond) >= state.environment_inventory_due_at_ms
+    if map_size(state.environment_jobs) == 0 and (force? or due? or match?({:error, _}, state.environment_discovery)) do
+      case protect_environment(state) do
+        {:ok, state} -> discover_environments(state)
+        {:error, state} -> state
+      end
+    else
+      state
+    end
+  end
+
+  defp reconcile_terminal_environment(state, entry, issue) do
+    id = entry.record.issue_id
+    cond do
+      is_nil(entry.record.terminal_observed_at) ->
+        entry = %{entry | issue: issue, metadata_intent: %{terminal_observed_at: entry.terminal_observation || utc_ms()}}
+        state |> put_environment(entry) |> environment_step(id, {:reconcile, :metadata})
+      not Lifecycle.deletion_due?(entry.record, :terminal, state.environment_config.terminal_retention_ms, utc_ms()) -> state
+      is_integer(entry.cleanup_retry_at) and utc_ms() < entry.cleanup_retry_at -> state
+      Config.settings!().hooks.before_remove in [nil, ""] or entry.record.metadata["symphony_cleanup_hook_completed"] == true ->
+        environment_step(state, id, :destroy)
+      managed_dispatch_ready?(state) and available_slots(state) > 0 and state_slots_available?(issue, capacity_running(state)) ->
+        {entry, _} = Lifecycle.step(entry, {:reserve, attempt_id(), :cleanup}, utc_ms())
+        entry = %{entry | issue: issue, record: %{entry.record | issue_state: issue.state}}
+        state |> put_environment(entry) |> environment_step(id, :prepare)
+      true -> state
+    end
+  end
+
+  defp environment_snapshot(entry) do
+    record = entry.record
+    %{environment_id: record.key, provider: record.kind, issue_id: record.issue_id, issue_identifier: record.issue_identifier,
+      phase: entry.phase, desired: record.desired, occupies_slot: Lifecycle.occupied?(entry), workspace_path: record.workspace_path,
+      provider_resource_id: safe_resource_id(record.provider_ref), terminal_observed_at: record.terminal_observed_at,
+      unresolved: safe_environment_failure(entry)}
+  end
+  defp safe_resource_id(%{name: name}) when is_binary(name), do: name
+  defp safe_resource_id(%{uid: uid}) when is_binary(uid), do: uid
+  defp safe_resource_id(value) when is_binary(value), do: value
+  defp safe_resource_id(_value), do: nil
+
+  defp safe_environment_failure(%Entry{last_error: {operation, {category, code}}}) do
+    operation = if operation in [:discover, :prepare, :stop, :destroy, :inspect, :metadata, :cleanup_hook], do: operation, else: :reconcile
+    category = if category in [:invalid, :denied, :retryable, :unknown], do: category, else: :unknown
+    code = if code in [:task_down, :invalid_result, :prepared_identity, :kubernetes_controller_cleanup_ordering_unproven], do: code, else: :environment_operation_unresolved
+    %{operation: operation, category: category, code: code}
+  end
+  defp safe_environment_failure(%Entry{phase: :unknown}), do: %{operation: :reconcile, category: :unknown, code: :environment_state_unknown}
+  defp safe_environment_failure(_entry), do: nil
 
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
@@ -1610,11 +2222,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec request_refresh(GenServer.server()) :: map() | :unavailable
   def request_refresh(server) do
-    if Process.whereis(server) do
-      GenServer.call(server, :request_refresh)
-    else
-      :unavailable
-    end
+    GenServer.call(server, :request_refresh)
+  catch
+    :exit, _ -> :unavailable
   end
 
   @spec snapshot() :: map() | :timeout | :unavailable
@@ -1622,16 +2232,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec snapshot(GenServer.server(), timeout()) :: map() | :timeout | :unavailable
   def snapshot(server, timeout) do
-    if Process.whereis(server) do
-      try do
-        GenServer.call(server, :snapshot, timeout)
-      catch
-        :exit, {:timeout, _} -> :timeout
-        :exit, _ -> :unavailable
-      end
-    else
-      :unavailable
-    end
+    GenServer.call(server, :snapshot, timeout)
+  catch
+    :exit, {:timeout, _} -> :timeout
+    :exit, _ -> :unavailable
   end
 
   @impl true
@@ -1703,6 +2307,7 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        blocked: blocked,
+       environments: Enum.map(state.environment_entries, fn {_id, entry} -> environment_snapshot(entry) end),
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
@@ -1714,6 +2319,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call(:request_refresh, _from, state) do
+    state = state |> refresh_runtime_config() |> refresh_environment_inventory(true)
     now_ms = System.monotonic_time(:millisecond)
     already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
     coalesced = state.poll_check_in_progress == true or already_due?
@@ -1879,6 +2485,7 @@ defmodule SymphonyElixir.Orchestrator do
       | poll_interval_ms: config.polling.interval_ms,
         max_concurrent_agents: config.agent.max_concurrent_agents
     }
+    |> capture_environment(config)
   end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
@@ -1886,7 +2493,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
-    available_slots(state) > 0 and state_slots_available?(issue, state.running)
+    available_slots(state) > 0 and state_slots_available?(issue, capacity_running(state))
   end
 
   defp apply_codex_token_delta(

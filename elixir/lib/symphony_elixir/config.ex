@@ -144,9 +144,23 @@ defmodule SymphonyElixir.Config do
     if is_nil(settings.tracker.kind) do
       {:error, :missing_tracker_kind}
     else
-      with :ok <- Tracker.validate_config(settings.tracker) do
+      with :ok <- Tracker.validate_config(settings.tracker),
+           :ok <- validate_environment(settings) do
         validate_backend_commands(settings)
       end
+    end
+  end
+
+  defp validate_environment(settings) do
+    case SymphonyElixir.ExecutionEnvironment.Config.runtime(settings) do
+      nil -> :ok
+      config ->
+        with {:ok, adapter} <- SymphonyElixir.ExecutionEnvironment.adapter(config.kind),
+             :ok <- adapter.validate_config(config.provider) do
+          :ok
+        else
+          _ -> {:error, {:invalid_workflow_config, "invalid worker.environment provider configuration"}}
+        end
     end
   end
 

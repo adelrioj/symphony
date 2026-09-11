@@ -297,7 +297,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     state = Jason.decode!(parent["metadata"]["annotations"]["symphony.dev/record"])
     state = Map.put(state, "pending", [%{"verb" => "unrecognized-provider-action", "id" => "unknown", "outcome" => "unknown"}])
     put_object("sandboxes", put_in(parent, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(state)))
-    assert {:error, {:unknown, :kubernetes_invalid_owned_record}} = Kubernetes.discover(config, opts)
+    assert {:error, {:unknown, {:kubernetes_invalid_owned_record, resource_ids}}} = Kubernetes.discover(config, opts)
+    assert record.key in resource_ids
     assert {:error, {:unknown, :kubernetes_ownership_changed}, _} = Kubernetes.ensure(config, record, opts)
   end
 

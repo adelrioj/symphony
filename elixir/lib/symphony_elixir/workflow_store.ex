@@ -67,6 +67,12 @@ defmodule SymphonyElixir.WorkflowStore do
     GenServer.call(__MODULE__, {:protect_environment, identity})
   end
 
+  @doc "Checks that a captured authority token still protects the published identity."
+  @spec protect_environment(binary(), reference()) :: {:ok, reference()} | {:error, term()}
+  def protect_environment(identity, token) when is_binary(identity) and is_reference(token) do
+    GenServer.call(__MODULE__, {:protect_environment, identity, token})
+  end
+
   @spec release_environment(reference(), :empty_inventory) :: :ok | {:error, term()}
   def release_environment(token, :empty_inventory) when is_reference(token) do
     GenServer.call(__MODULE__, {:release_environment, token, :empty_inventory})
@@ -113,6 +119,14 @@ defmodule SymphonyElixir.WorkflowStore do
       {:error, _reason, new_state} ->
         {:reply, {:ok, new_state.settings}, new_state}
     end
+  end
+
+  def handle_call({:protect_environment, identity, token}, _from, %State{environment_guard: %{identity: identity, token: token}} = state) do
+    {:reply, {:ok, token}, state}
+  end
+
+  def handle_call({:protect_environment, _identity, _token}, _from, state) do
+    {:reply, {:error, :invalid_environment_guard}, state}
   end
 
   def handle_call({:protect_environment, identity}, _from, %State{} = state) do

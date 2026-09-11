@@ -54,7 +54,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
               record = if parent, do: observe(record, parent), else: %{record | metadata: Map.put(record.metadata, "orphaned", true), proof: :unknown, phase: :unknown}
               {:cont, {:ok, Map.put(records, record.key, record)}}
             end
-          _ -> {:halt, {:error, {:unknown, :kubernetes_invalid_owned_record}}}
+          _ ->
+            resource_ids = Enum.filter([name(object), uid(object)], &is_binary/1)
+            {:halt, {:error, {:unknown, {:kubernetes_invalid_owned_record, resource_ids}}}}
         end
       end)
       |> case do
