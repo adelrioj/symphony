@@ -12,7 +12,7 @@ defmodule SymphonyElixir.Agent.Claude do
 
   alias SymphonyElixir.Agent.Claude.Stream
   alias SymphonyElixir.Agent.Result
-  alias SymphonyElixir.{Config, SSH, Tracker, Workflow}
+  alias SymphonyElixir.{Config, ExecutionContext, SSH, Tracker, Workflow, Workspace}
 
   @approval_tool "mcp__symphony__approval_prompt"
   @default_non_tracker_tools [
@@ -27,7 +27,7 @@ defmodule SymphonyElixir.Agent.Claude do
 
   @type session :: %{
           required(:workspace) => Path.t(),
-          required(:worker_host) => String.t() | nil,
+          required(:execution_context) => ExecutionContext.t(),
           required(:session_dir) => Path.t(),
           required(:mcp_config_path) => Path.t(),
           required(:workflow_snapshot_path) => Path.t(),
@@ -41,13 +41,15 @@ defmodule SymphonyElixir.Agent.Claude do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts) when is_binary(workspace) do
     owner = self()
-    expanded_workspace = Path.expand(workspace)
+    context = Keyword.get(opts, :execution_context)
     settings = Config.settings!()
     dynamic_tool_binding = Tracker.bind_agent_tools()
     secret_environment_names = valid_environment_names(dynamic_tool_binding.secret_environment_names)
     env_reader = Keyword.get(opts, :env_reader, &System.get_env/1)
 
-    with {:ok, tracker_env} <- capture_tracker_env(secret_environment_names, env_reader),
+    with :ok <- require_context(context),
+         {:ok, expanded_workspace} <- workspace_cwd(workspace, context),
+         {:ok, tracker_env} <- capture_tracker_env(secret_environment_names, env_reader),
          {:ok, workflow_snapshot} <- File.read(Workflow.current_path()),
          {:ok, parent_dir} <- mcp_config_dir(expanded_workspace),
          :ok <- ensure_private_directory(parent_dir),
@@ -59,7 +61,7 @@ defmodule SymphonyElixir.Agent.Claude do
           {:ok,
            %{
              workspace: expanded_workspace,
-             worker_host: Keyword.get(opts, :worker_host),
+             execution_context: context,
              session_dir: session_dir,
              cleanup_monitor: cleanup_monitor,
              mcp_config_path: mcp_config_path,
@@ -73,6 +75,23 @@ defmodule SymphonyElixir.Agent.Claude do
           cleanup_failed_session(session_dir, cleanup_monitor, error)
       end
     end
+  end
+
+  defp require_context(context) do
+    case {Map.get(Config.settings!().worker, :environment), context} do
+      {%{}, %ExecutionContext{mode: :managed}} -> :ok
+      {%{}, _} -> {:error, :managed_context_required}
+      {nil, %ExecutionContext{}} -> :ok
+      {nil, _} -> {:error, :execution_context_required}
+    end
+  end
+
+  defp workspace_cwd(workspace, %ExecutionContext{mode: :managed} = context) do
+    with :ok <- Workspace.validate_workspace_path(workspace, context), do: {:ok, workspace}
+  end
+
+  defp workspace_cwd(workspace, context) do
+    if ExecutionContext.remote?(context), do: {:ok, workspace}, else: {:ok, Path.expand(workspace)}
   end
 
   @impl true
@@ -269,9 +288,16 @@ defmodule SymphonyElixir.Agent.Claude do
 
   defp executable_regular_file?(_path), do: false
 
-  defp run_claude(
+  defp run_claude(%{execution_context: context} = session, workspace, prompt, on_message) do
+    if ExecutionContext.remote?(context) do
+      drive_ssh(session, workspace, prompt, on_message)
+    else
+      run_local_claude(session, workspace, prompt, on_message)
+    end
+  end
+
+  defp run_local_claude(
          %{
-           worker_host: nil,
            session_dir: session_dir,
            mcp_config_path: mcp_config_path,
            claude_settings: claude,
@@ -297,11 +323,6 @@ defmodule SymphonyElixir.Agent.Claude do
         _ = File.rm(prompt_path)
       end
     end
-  end
-
-  defp run_claude(%{worker_host: worker_host} = session, workspace, prompt, on_message)
-       when is_binary(worker_host) do
-    drive_ssh(session, workspace, prompt, on_message)
   end
 
   defp claude_executable(command) when is_binary(command) do
@@ -403,7 +424,7 @@ defmodule SymphonyElixir.Agent.Claude do
 
   defp drive_ssh(
          %{
-           worker_host: host,
+           execution_context: %ExecutionContext{target: host},
            workflow_snapshot_path: workflow_snapshot_path,
            mcp_config_path: mcp_config_path,
            claude_settings: claude,

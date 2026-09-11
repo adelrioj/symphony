@@ -24,6 +24,78 @@ polling:
   interval_ms: 5000
 workspace:
   root: ~/code/symphony-workspaces
+# Execution profile: this checked-in workflow remains local. Static SSH remains supported.
+# To select managed execution, merge ONE fragment below, replace workspace.root with the
+# worker-side persistent root, and set the existing agent.max_concurrent_agents to 5.
+# Do not uncomment both worker maps or duplicate agent/workspace keys.
+# These references name operator-created resources; they do not provision or approve them.
+#
+# Workstations example (workspace.root: /home/user/workspaces):
+# worker:
+#   environment:
+#     kind: google_workstations
+#     deployment_id: isolated-development
+#     startup_timeout_ms: 600000
+#     shutdown_timeout_ms: 120000
+#     terminal_retention_ms: 0
+#     provider:
+#       project: development-project
+#       location: europe-west1
+#       cluster: coding-workers
+#       config: linux-docker-v1
+#       credential_configuration: symphony-workers
+#       impersonate_service_account: symphony-workers@development-project.iam.gserviceaccount.com
+#       ssh_user: user
+#
+# Kubernetes example (workspace.root: /state/workspaces):
+# worker:
+#   environment:
+#     kind: kubernetes
+#     deployment_id: isolated-development
+#     startup_timeout_ms: 600000
+#     shutdown_timeout_ms: 120000
+#     terminal_retention_ms: 0
+#     provider:
+#       kubeconfig: /etc/symphony/kubeconfig
+#       context: development-cluster
+#       namespace: symphony-workers
+#       template: linux-kata-v1
+#       ssh_user: developer
+#       ssh_port: 2222
+#       ssh_auth_volume: ssh-auth
+#
+# Contract: omit worker.environment for unmanaged execution; explicit null/empty is invalid.
+# Managed mode conflicts with explicit worker.ssh_hosts/max_concurrent_agents_per_host,
+# including empty/null static values. Both deadlines are required positive milliseconds;
+# retention is nonnegative milliseconds, default 0 (eligibility, not guaranteed deletion).
+# All shown provider strings are required/nonblank; Kubernetes needs a regular kubeconfig
+# file, ssh_port 1..65535, and ssh_user matching ^[a-z_][a-z0-9_-]*[$]?$.
+# Stable deployment/tracker-kind/provider/root references are guarded against reload while owned
+# resources or unresolved operations remain. No local/provider fallback exists.
+# Startup inventories before dispatch. Possibly executing/unknown stop occupies capacity;
+# stopped retained storage does not, but may incur charges and holds the identity guard.
+# First terminal observation is persisted as UTC Unix milliseconds. Expiry needs a fresh
+# terminal observation; missing/nonactive issues do not authorize deletion. Reopen preserves
+# the path and clears terminal/cleanup intent conditionally before irreversible deletion.
+# Cleanup may start the worker for before_remove without an agent/before_run; managed hook
+# timeout remains unknown until qualified stop. Stop proof precedes compute+disk deletion.
+# GET /api/v1/state exposes safe environments; issue status retains remote path/provider
+# even without an agent. No metadata, SSH material or auth references belong in that API.
+# Workstations requires explicit noninteractive gcloud configuration + impersonation,
+# separate worker identity/provider-enforced credential isolation, persistent /home/private
+# Docker storage, DELETE reclaim, no archive/warm pool, and complete VM/disk inventory.
+# Kubernetes pins Agent Sandbox v1.0.1 and an immutable qualification ConfigMap referenced
+# by Template annotation symphony.dev/qualification; it requires qualified Kata guest
+# storage, admission/gates, enforcing NetworkPolicy, private SSH and kubelet/CSI evidence.
+# The candidate create-drain controller and consumer do not change those baseline pins:
+# production Kubernetes allocation remains unconditionally blocked pending separate approval.
+# Runtime requires kubectl and the same-source symphony-kubernetes-create helper on PATH.
+# Retained per-environment ConfigMap guards precede creates and are never deleted/reopened.
+# Namespace controller/provider service-account identities belong in annotations, not labels.
+# Neither profile is live/production-qualified here. No external mutation is authorized.
+# Full operator/ConfigMap/API field contract: README.md#managed-ticket-environments.
+# Image requires real GNU realpath -m --, Bash/Git/findmnt, agent/Compose/browser tools and
+# private persistent Docker. macOS managed-path tests need GNU coreutils realpath on PATH.
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/openai/symphony .

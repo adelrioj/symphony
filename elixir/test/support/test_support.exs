@@ -22,9 +22,19 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          write_workflow_file!: 1,
+          write_workflow_file!: 2,
+          restore_env: 2,
+          stop_default_http_server: 0,
+          start_test_orchestrator: 1
+        ]
 
-      setup do
+      setup context do
+        unless context[:owns_default_runtime] do
+          start_supervised!({Task.Supervisor, name: SymphonyElixir.TaskSupervisor})
+        end
+
         workflow_root =
           Path.join(
             System.tmp_dir!(),
@@ -50,6 +60,19 @@ defmodule SymphonyElixir.TestSupport do
         :ok
       end
     end
+  end
+
+  def start_test_orchestrator(opts) do
+    name = Keyword.fetch!(opts, :name)
+    runtime_name = Module.concat(name, RuntimeSupervisor)
+    task_name = Module.concat(name, TaskSupervisor)
+
+    ExUnit.Callbacks.start_supervised!(
+      {SymphonyElixir.AgentRuntimeSupervisor, Keyword.merge(opts, name: runtime_name, task_supervisor_name: task_name, orchestrator_name: name)},
+      id: runtime_name
+    )
+
+    {:ok, Process.whereis(name)}
   end
 
   def write_workflow_file!(path, overrides \\ []) do
@@ -208,7 +231,10 @@ defmodule SymphonyElixir.TestSupport do
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
-        worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
+        if(Keyword.has_key?(overrides, :worker_environment),
+          do: "worker:\n  environment: #{Jason.encode!(Keyword.fetch!(overrides, :worker_environment))}",
+          else: worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host)
+        ),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",

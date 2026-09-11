@@ -181,7 +181,7 @@ defmodule SymphonyElixir.LinearScopeLiveE2ETest do
         observability_enabled: false
       )
 
-      restart_agent_runtime_if_needed()
+      restart_agent_runtime_if_needed(runtime_pid)
     end)
 
     if is_pid(runtime_pid) do
@@ -195,7 +195,9 @@ defmodule SymphonyElixir.LinearScopeLiveE2ETest do
     :ok
   end
 
-  defp restart_agent_runtime_if_needed do
+  defp restart_agent_runtime_if_needed(nil), do: :ok
+
+  defp restart_agent_runtime_if_needed(runtime_pid) when is_pid(runtime_pid) do
     if is_nil(Process.whereis(SymphonyElixir.AgentRuntimeSupervisor)) do
       case Supervisor.restart_child(
              SymphonyElixir.Supervisor,

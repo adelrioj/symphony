@@ -25,11 +25,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
     orchestrator_name = Module.concat(__MODULE__, :InvalidBackendOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn ->
-      stop_orchestrator(pid)
-    end)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
     wait_for_state(pid, fn state ->
       state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
@@ -82,11 +78,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
     orchestrator_name = Module.concat(__MODULE__, :InvalidGlobalBackendOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn ->
-      stop_orchestrator(pid)
-    end)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
     wait_for_state(pid, fn state ->
       state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
@@ -153,11 +145,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
     orchestrator_name = Module.concat(__MODULE__, :ClaudeDispatchOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn ->
-      stop_orchestrator(pid)
-    end)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
     wait_for_state(pid, fn state ->
       state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
@@ -190,9 +178,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", tracker_api_token: nil)
 
     orchestrator_name = Module.concat(__MODULE__, :ScopeErrorOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn -> stop_orchestrator(pid) end)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
     wait_for_state(pid, fn state ->
       state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
@@ -268,9 +254,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_recipient) end)
 
     orchestrator_name = Module.concat(__MODULE__, :ExhaustionOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn -> stop_orchestrator(pid) end)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
     wait_for_state(pid, fn state ->
       state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
@@ -412,8 +396,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
     orchestrator_name = Module.concat(__MODULE__, :"ClaimOrchestrator#{System.unique_integer([:positive])}")
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-    on_exit(fn -> stop_orchestrator(pid) end)
+    {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
     wait_for_state(pid, fn state ->
       state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
@@ -466,26 +449,6 @@ defmodule SymphonyElixir.OrchestratorTest do
         Process.sleep(10)
         do_wait_until(predicate, deadline)
     end
-  end
-
-  defp stop_orchestrator(pid) do
-    if Process.alive?(pid) do
-      pid
-      |> :sys.get_state()
-      |> stop_running_tasks()
-
-      Process.exit(pid, :normal)
-    end
-  end
-
-  defp stop_running_tasks(%{running: running}) when is_map(running) do
-    Enum.each(running, fn
-      {_issue_id, %{pid: worker_pid}} when is_pid(worker_pid) ->
-        Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker_pid)
-
-      _entry ->
-        :ok
-    end)
   end
 
   defp write_claude_dispatch_workflow!(workspace_root, fake_claude, max_turn_exhaustions \\ 3, opts \\ []) do

@@ -297,6 +297,373 @@ codex:
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 
+### Managed ticket environments
+
+Managed mode is optional; omitting `worker.environment` preserves local/static SSH selection.
+Once selected, an invalid configuration, unavailable provider, missing execution context, or failed
+readiness check is an error, never a request to execute locally or on another provider. These are
+complete Linux environments with one private Docker daemon per ticket; repository Compose and
+Testcontainers workflows retain their existing commands. Infrastructure and images are supplied by
+the operator, not provisioned by these examples. Neither provider has live/production qualification
+from this change; authorization of a design is not authorization to create billable resources.
+
+#### Workflow settings
+
+Merge **one** of these fragments into a workflow with its existing tracker, agent backend, hooks,
+and prompt. All resource names below are illustrative references to operator-created resources.
+The Kubernetes example also requires the existing kubeconfig and qualification profile described
+below; it cannot bootstrap an empty cluster.
+
+```yaml
+agent:
+  max_concurrent_agents: 5
+workspace:
+  root: /home/user/workspaces
+worker:
+  environment:
+    kind: google_workstations
+    deployment_id: isolated-development
+    startup_timeout_ms: 600000
+    shutdown_timeout_ms: 120000
+    terminal_retention_ms: 0
+    provider:
+      project: development-project
+      location: europe-west1
+      cluster: coding-workers
+      config: linux-docker-v1
+      credential_configuration: symphony-workers
+      impersonate_service_account: symphony-workers@development-project.iam.gserviceaccount.com
+      ssh_user: user
+```
+
+```yaml
+agent:
+  max_concurrent_agents: 5
+workspace:
+  root: /state/workspaces
+worker:
+  environment:
+    kind: kubernetes
+    deployment_id: isolated-development
+    startup_timeout_ms: 600000
+    shutdown_timeout_ms: 120000
+    terminal_retention_ms: 0
+    provider:
+      kubeconfig: /etc/symphony/kubeconfig
+      context: development-cluster
+      namespace: symphony-workers
+      template: linux-kata-v1
+      ssh_user: developer
+      ssh_port: 2222
+      ssh_auth_volume: ssh-auth
+```
+
+- `kind` is exactly `google_workstations` or `kubernetes`; `deployment_id` is a required nonblank
+  string, stable across restarts and unique to this independent deployment.
+- `startup_timeout_ms` and `shutdown_timeout_ms` are required positive integer durations in
+  milliseconds. Provider jobs use one bounded monotonic deadline, not a fresh timeout for every
+  request. Expiry is not proof that a remote operation was canceled.
+- `terminal_retention_ms` is a nonnegative integer duration in milliseconds, default **0**. Zero
+  means eligible for cleanup on a fresh terminal observation, not synchronous or guaranteed deletion.
+- Explicit `worker.environment: null`, an empty/non-map environment, null required values, and
+  missing provider settings are invalid. Omit the environment key to choose unmanaged execution.
+  Do not combine managed mode with explicit `worker.ssh_hosts` or
+  `worker.max_concurrent_agents_per_host`, even empty/null static values; omission is intentional.
+- `provider` uses string keys. Workstations requires all seven nonblank strings shown above.
+  Kubernetes requires the six nonblank strings shown plus integer `ssh_port` in `1..65535`;
+  `kubeconfig` must name an existing regular local file and `ssh_user` must match
+  `^[a-z_][a-z0-9_-]*[$]?$`. No implicit current kube context, active gcloud configuration,
+  credential discovery, or provider fallback replaces these references.
+- `workspace.root` is an absolute worker-side root after normal configuration resolution. Persisted
+  ticket paths must stay strictly beneath it, never equal it, traverse a symlink outside it, or use
+  the source checkout. Display-identifier changes never rename a retained managed checkout.
+
+The reload identity includes provider kind, deployment ID, tracker kind, workspace root, and every provider
+reference in the selected example (including auth-selection references). Workstations
+project/location/cluster and Kubernetes kubeconfig/context/namespace are deployment boundaries,
+not agent-controlled scheduling choices. While inventory or jobs remain, identity-changing reloads
+are rejected atomically and the last good workflow remains active. Owner death does not unlock this
+guard. Only authoritative empty compute-and-storage inventory with no unresolved operations permits
+release, and protection is reacquired before subsequent allocation. Mutable polling, concurrency,
+deadlines and retention are not identity changes; in-flight work retains its captured configuration.
+Existing environments retain and validate their captured template identity rather than silently
+adopting edited infrastructure.
+A surviving orchestrator can reacquire its same accepted identity after a real WorkflowStore process
+replacement. A competing owner in the same live store remains fenced, and a previously rejected
+on-disk identity migration does not become accepted merely because the store restarted.
+
+#### Recovery, capacity, retention, and hooks
+
+Startup performs provider preflight and complete owned-resource discovery before dispatch. Denied,
+partial, malformed, or unknown inventory is not an empty deployment. Recovery reconstructs durable
+identity, paths, desired state, attempts, first terminal timestamp, and pending operations; it
+reconciles potentially running resources before reuse instead of trusting a lost local agent PID.
+Unknown create/start outcomes block duplicate allocation.
+Workstations metadata-only updates can be confirmed by their owned annotation payload without
+depending indefinitely on retained completed-operation history. This does not clear uncertain
+compute mutations. A definitively denied initial create can retry through ordinary stop/intent
+handling only after complete parent and backing/child absence evidence, with no earlier ambiguity;
+denial alone never releases a slot.
+
+The existing `agent.max_concurrent_agents` and per-state limits remain the execution budget.
+Reservations, preparation, running, stopping, and unresolved possibly executing environments occupy
+slots. Five active executions are independent of how many stopped environments are retained.
+Qualified remote quiescence releases execution capacity; closing SSH, losing a local holder, killing
+an agent, cancellation, or a stop request alone does not. A quiescent environment with unresolved
+disk deletion can release its execution slot but still holds the identity guard and may incur charges.
+Newly observed possible execution invalidates an older stop proof and occupies capacity again;
+cleanup-only storage uncertainty does not invalidate qualified compute quiescence.
+Existing agent `running`, `retrying`, and `blocked` status meanings do not change.
+
+Terminal observation is persisted once as UTC Unix milliseconds and survives restart. An expired
+retention clock alone does not authorize deletion: the tracker must affirmatively still report a
+terminal state. Missing issues, failed tracker reads, or nonactive nonterminal states do not authorize
+destruction. A genuine reopen conditionally clears terminal/cleanup intent before restart if deletion
+has not become irreversible, retaining the same workspace. A prior completed cleanup-hook marker
+does not suppress a new cleanup after a genuine reopen.
+
+`after_create` still bootstraps only a new checkout; `before_run`/`after_run` keep their existing
+failure policies. All run on the selected worker through the captured execution context.
+Ordinary backend exceptions/exits still attempt best-effort `after_run` before propagating the
+original failure. Explicit managed-execution uncertainty skips follow-on remote hooks.
+Cleanup needing `before_remove` prepares the retained environment under the same capacity budget,
+without launching an agent or `before_run`, runs that hook best-effort, persists a confirmed completion
+marker, stops remotely, then attempts destruction. A managed hook timeout is unknown execution:
+do not run follow-on hooks, retry in-place, or delete until qualified stop. Failure/timeout to stop
+remains unresolved; it cannot be reported as successful cancellation or free execution capacity.
+
+#### Linux image and operator tooling
+
+Each repository supplies its development image, Bash, Git, **GNU** `realpath`, `findmnt`, both agent
+executables if routing to both backends, Docker/Compose, Testcontainers prerequisites, and browser
+dependencies. Remote Claude also needs its configured Symphony MCP executable. Preserve the repo's
+unchanged setup/test commands. Readiness checks the selected backend, authenticated SSH, a mounted
+writable workspace, actual GNU `realpath -m --` behavior (including nonexistent path components),
+and a usable local Unix Docker endpoint with writable Docker data. Cleanup preparation does not
+require an agent executable. These probes are not independent proof of persistence or daemon
+isolation: qualify those properties in the infrastructure/image.
+
+Local macOS development tests that exercise managed path safety also need GNU coreutils `realpath`
+on `PATH` (for example, the coreutils `gnubin` directory ahead of the system tools). A BSD utility or
+a wrapper printing GNU version text is insufficient; the real `-m --` semantics must work. This is
+a local test prerequisite, not a relaxation of the Linux worker requirement.
+
+#### Cloud Workstations profile
+
+Workstations remains the preferred Google-managed worker to qualify even if Symphony and review
+apps run on GKE. Install noninteractive gcloud and SSH on the orchestrator. The required
+`credential_configuration` names an already configured gcloud profile selected by `--configuration`;
+the adapter never changes the user's active configuration or performs interactive login.
+Required `impersonate_service_account` selects the same explicit lifecycle identity for token
+acquisition and the tunnel. Supply Workstations API/resource/operation read and lifecycle permissions,
+impersonation permission, and read-only project-wide Compute instance/disk inventory permissions.
+Do not grant worker code those lifecycle or inventory credentials.
+
+Use distinct lifecycle and worker VM identities. Never attach the lifecycle service account to a
+worker VM or put its credentials in the image. Qualification must demonstrate **provider-enforced**
+isolation from usable cloud metadata credentials for privileged ticket code, or report the profile
+unavailable. An in-worker firewall controlled by root is not such an isolation boundary.
+
+The qualified config must persist `/home`, with the checkout and private Docker data on persistent
+storage, `gcePd.reclaimPolicy: DELETE`, `archiveTimeout: 0s`, no normal or boost warm pool, no suspension
+policy, and disabled idle/running timeouts for this serialized execution profile. Plain TCP must not
+be disabled and container port 22 must be allowed. The image's SSH user must support the documented
+gateway/none-auth flow; the adapter uses an authenticated gcloud tunnel on loopback, noninteractive
+SSH, no forwarding, and per-connection host trust pinned after the gateway handshake. Private tunnels
+and trust files are owned by supervised holders, not by the short-lived preparation job.
+
+Qualification must also establish backing VM/disk ownership-label propagation. Recovery inventories
+all configs in the cluster, regional operations, and all pages of project-wide Compute instances and
+disks. Deletion needs qualified stop, completed provider deletion, parent absence, and complete absence
+of owned/captured backing resources; a missing workstation is not proof of deleted disks. Captured
+IDs continue to count even after labels disappear. The adapter does not delete clusters/configs or
+issue Compute writes. Plan quotas and charges for startup, active VMs, retained disks, and partial
+create/deletion leftovers; five execution slots is not a storage or billing cap. Archival/warm-pool
+retention is not a substitute for the supported disk-only policy.
+
+#### Kubernetes Agent Sandbox qualification contract
+
+The baseline is Kubernetes >=1.30 with Agent Sandbox **v1.0.1**, source commit
+`3e77ccbac4db8a12b0157eafcad0d1ad5872f32a`, using direct `agents.x-k8s.io/v1beta1` Sandboxes and
+read-only `extensions.agents.x-k8s.io/v1beta1` SandboxTemplates. Both CRDs must serve/store only that
+pinned version. Symphony does not use Claims or WarmPools. Installed schema canonical SHA-256
+prefixes must be Sandbox `37f0b89594ba20ca4d37b93714c362bcd694369f` and Template
+`6c5c594b1a0cddda9b330bb094272e1c465d11c2`. Canonicalization recursively turns maps into sorted
+`[key, value]` pair arrays, preserves array order, compact-JSON encodes, hashes, and takes the first
+40 lowercase hexadecimal characters; the same procedure binds the template spec digest.
+
+The operator-owned Template annotation `symphony.dev/qualification` names an **immutable ConfigMap**
+in the configured namespace. Its `data["contract.json"]` must contain the following JSON fields;
+these describe actual audited resources, not values to invent to bypass preflight:
+
+| Field | Required value or binding |
+| --- | --- |
+| `release` | Exactly `v1.0.1` |
+| `template_uid` | Actual SandboxTemplate UID |
+| `template_digest` | Canonical digest of actual Template spec |
+| `qualification_report` | Nonblank reference to audited operator qualification evidence |
+| `termination_contract` | Exactly `qualified-kubelet-all-containers-v1` |
+| `controller_namespace` | Namespace of actual controller Deployment |
+| `controller_name` | Actual controller Deployment name |
+| `controller_uid` | Actual controller Deployment UID |
+| `controller_source_commit` | Exactly `3e77ccbac4db8a12b0157eafcad0d1ad5872f32a` |
+| `controller_image` | Audited digest-pinned `registry.k8s.io/agent-sandbox/agent-sandbox-controller@sha256:...`, matching actual containers |
+| `runtime_class_uid` | Actual Template-selected RuntimeClass UID |
+| `runtime_handler` | Actual qualified RuntimeClass handler |
+| `storage_class_uids` | Array of actual qualified claim-template StorageClass UIDs |
+| `csi_driver` | Exact qualified CSI driver/provisioner; StorageClasses use Delete reclaim |
+| `network_policy_uid` | Actual operator-owned NetworkPolicy UID |
+| `network_profile_label` | Ordinary profile label on Template Pods and policy selector, not a controller label |
+
+Symphony reads but never writes this ConfigMap. It is evidence of prerequisites, **not** a remote
+operation fence or per-Pod/per-volume proof. Preflight reads the actual available controller, version,
+schemas, runtime, storage classes and policy, rejecting mismatches instead of trusting arbitrary
+operator booleans. Keep qualification data, lifecycle annotations, finalizers, authorization and
+status evidence inaccessible to workers.
+
+Qualify a Kata VM boundary with `privileged_without_host_devices=true`. Guest-contained privileged
+DinD must never become unrestricted privileged runc access to the node. Runtime/admission must fail
+closed if Kata is missing. GKE Standard with a qualified Kata setup is distinct from managed gVisor
+or Autopilot; hosting Symphony on GKE proves none of these worker prerequisites. Kata virtiofs and
+overlayfs are incompatible for this purpose: persistent Docker data needs a qualified guest
+filesystem/storage driver. An ephemeral memory directory is not a persistent-storage solution.
+
+Provide enforcing NetworkPolicy, a trusted admission/scheduling path, privately reachable Pod SSH
+(no public LoadBalancer/NodePort or implicit port-forward), and the declared read-only `ssh_auth_volume`
+for the owned SSH Secret. Do not mount Kubernetes lifecycle credentials or service-account tokens in
+the guest. Admission must preserve `symphony.dev/start-authorized`, never directly set `nodeName`,
+inject host namespaces/hostPath/node sockets/host ports, or project service-account credentials.
+The permanent blueprint gate remains in the Template-derived Sandbox; only a revalidated exact Pod
+UID/resourceVersion may have Symphony's gate removed after durable release authorization.
+
+The orchestrator needs read-only Template/qualification/CRD/controller/RuntimeClass/StorageClass/
+NetworkPolicy access, complete Sandbox/Pod/PVC/Service/Secret/PV and guard ConfigMap inventory,
+conditional Sandbox intent and finalizer writes, exact Pod CAS/gate/stop-fence writes, normal
+conditional child deletion, owned SSH Secret lifecycle, and Pod/PV watch permissions. It also owns
+CAS updates to its retained create guards, but never deletes them. Keep this separate from workload RBAC.
+No broad node mutation or automated node-fencing permission is part of this implementation.
+
+Stop requires qualified kubelet termination for every regular/init/ephemeral container of every
+possibly released UID, or proof a fenced unscheduled Pod was never released. A `kubelet` manager
+string is not authentication: audited RBAC/admission/recovery must prevent forged status,
+unverified force-deletion, out-of-service recovery, and unverified node removal/fencing. API
+disappearance or generic Failed/ContainerStatusUnknown is not stop evidence.
+
+Qualify the CSI driver's DeleteVolume and deletion-protection behavior. Bound PV identity,
+claimRef/volumeHandle and `external-provisioner.volume.kubernetes.io/finalizer` must be observed
+before deletion; a complete exact-UID PV deletion watch must show finalizer removal. PVC disappearance,
+missing PVs, unbound claims with unknown provisioning, denied inventory, or compacted watch history
+do not establish disk absence. Never strip protection finalizers to force progress.
+
+**Pinned baseline and production stop:** upstream v1.0.1 has no authoritative per-Sandbox acknowledgment
+ordering all earlier child-create requests before final cleanup. Its
+[deletionTimestamp branch](https://github.com/kubernetes-sigs/agent-sandbox/blob/v1.0.1/controllers/sandbox_controller.go#L303-L308)
+does not supply that witness. Timeout, qualification ConfigMaps, empty inventory and parent 404 are
+not substitutes. The candidate controller extension and consumer described below do not change the
+approved source/image/schema pins above or qualify a replacement baseline.
+
+Production `Kubernetes.preflight/2` returns
+`{:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}}` even when every
+read-only profile and inventory check succeeds. The normal discovery path remains blocked and
+the scheduler admits no Kubernetes tickets; this is not merely a qualification-harness restriction.
+The harness preserves the same blocker. No workflow field or operator ConfigMap can override it.
+Local/static SSH operation and the existing VM deployment do not depend on this managed-provider gate.
+
+##### Candidate create-drain protocol
+
+The controller extension opts in through `spec.creationControl.protocol: symphony-create-drain-v1`
+at Sandbox creation, with `symphony.dev/environment-cleanup` already present. Its UID-bound
+`status.creationJournal` serializes child issuance and irreversible closure with resourceVersion CAS.
+Only a positively acknowledged issuance permits one POST; a recovered `Issued` entry is never replayed.
+Timeouts, API rejections and missing objects leave it unresolved until exact attributed commitment is
+positively observed. History is retained, bounded to 128 operations and 128 KiB with completion space
+reserved. Exhaustion blocks further issuance rather than pruning evidence.
+
+Symphony creates a deterministic `symphony-guard-<identity digest>` ConfigMap before any parent POST,
+then journals its Sandbox and Secret attempts in `data["guard.json"]`. The guard, not the parent
+annotation, owns durable lifecycle state. Guards progress through `Open`, `Closing`, `ReadyToFinalize`
+and `Complete`; they have no garbage-collection owner and are never deleted or reopened. Completed
+receipts do not count as active inventory, but still reject reuse of that environment identity.
+
+Cleanup closes provider issuance and validates the controller's complete `Drained` acknowledgement:
+exact parent UID, close-request ID, revision, operation count and immutable committed membership.
+It retains storage before that acknowledgement. Every committed Pod needs durable physical safety
+classification, including Pods never authorized to start; missing/unclassified Pods remain unknown.
+Every committed PVC retains its qualified backing-storage obligation. Newly discovered physical
+uncertainty invalidates any older compute-stop proof. Closure cleanup uses these proofs rather than
+waiting for a new `Suspended` condition from a controller that has already drained.
+
+The full `ReadyToFinalize` receipt must be CAS-persisted and exactly read back before finalizer
+removal. Exact parent, child and backing absence precedes the durable `Complete` readback. Recovery
+can resume finalization through the normal operation path even if the parent disappeared; bare parent
+absence never proves cleanup. Genuinely unknown issuance can retain the guard indefinitely.
+
+The candidate controller checkout supplies `k8s/symphony-create-drain-policy.yaml`, installed separately
+only after approval. It selects the namespace label `symphony.dev/create-drain=symphony-create-drain-v1`.
+Namespace **annotations** `symphony.dev/creation-controller` and `symphony.dev/creation-provider` hold
+distinct exact `system:serviceaccount:<namespace>:<name>` identities. They are not label values.
+Protect namespace configuration, original attribution, journals and guards from workers; admission
+authenticates writers and attribution but is not a commit-time create fence.
+
+The Symphony runtime needs both `kubectl` and `symphony-kubernetes-create` on `PATH`. Build the helper
+from the same reviewed controller source with `make build-symphony-kubernetes-create`; the output is
+`bin/symphony-kubernetes-create`. The generic Symphony Dockerfile does not bundle these tools.
+All POSTs use that helper; there is no `kubectl create` fallback. GET/watch/CAS/delete retain kubectl.
+The helper requires the configured explicit kubeconfig/context and private JSON request file. It uses
+verified HTTPS over one fresh HTTP/1.1 connection, with no redirect, proxy, authentication-refresh or
+client-go retry path. Static bearer/token-file snapshots, basic auth and client certificates are
+supported; exec/auth-provider plugins, impersonation, custom transports and insecure TLS are rejected.
+Controller token files are snapshotted at client construction, not refreshed after rejection.
+The helper accepts a bare API path; the shared transport always adds `fieldValidation=Strict`.
+
+#### Managed observability API
+
+Enable the existing service with `--port` or `server.port`.
+
+`GET /api/v1/state` also exposes `environment_discovery`: null for local/static execution, otherwise:
+
+```json
+{"provider_kind":"google_workstations","status":"blocked","error_code":"denied"}
+```
+
+`status` is `pending`, `ready`, or `blocked`. Pending/ready have a null error; blocked uses only
+`denied`, `invalid`, `retryable`, `unknown`, `authority_replaced`, or `unresolved`. The Phoenix
+dashboard and terminal status show this global discovery condition even with zero environment
+entries, so paused admission is distinguishable from an idle deployment. Agent counts are unchanged.
+
+`GET /api/v1/state` adds `environments` (an array, empty with no managed entries). Each entry is an
+explicit safe projection, never a serialized provider Record, config, SSH target, or CLI response:
+
+| Field | Meaning |
+| --- | --- |
+| `environment_id` | Stable deterministic environment key, independent of display identifier |
+| `provider` | `google_workstations` or `kubernetes` |
+| `issue_id` | Opaque tracker issue ID |
+| `issue_identifier` | Display identifier, nullable |
+| `phase` | `reserved`, `preparing`, `running`, `stopping`, `stopped`, `deleting`, or `unknown` |
+| `desired` | Durable desired state: `running`, `stopped`, or `absent` |
+| `occupies_slot` | Boolean: possibly executing/reserved capacity, not a storage/billing count |
+| `workspace_path` | Persisted worker-side path, never derived from the current display identifier |
+| `provider_resource_id` | Safe Workstations resource name or Kubernetes UID, nullable |
+| `terminal_observed_at` | First terminal observation, **UTC Unix milliseconds**, nullable |
+| `unresolved` | Null, or fixed safe `category`, `code`, `operation` fields; no raw error text |
+
+`unresolved` distinguishes invalid configuration, provider denial, retryable failure, and unknown
+operation/cleanup state. Unknown phase without a captured failure still reports a safe unknown
+state. Fixed redacted codes are diagnostic classifications, not cloud error payloads. A reported
+failure is not a successful cancellation, and deletion uncertainty is not proof of running compute.
+No access token, private key path, SSH argv/environment, authentication reference, private metadata,
+or provider diagnostic body is exposed.
+
+`GET /api/v1/<issue_identifier>` also finds stopped retained environments with no active agent.
+It adds `environment` (the same projection, null for unmanaged issues); managed `workspace.path`
+comes from persisted environment state and `workspace.host` is the safe provider label. When no
+running/retrying/blocked agent entry exists, `status` is the environment phase string and those
+three agent fields are null, with no active session or invented event. Otherwise their existing
+precedence and meanings remain unchanged. The existing state counts still count agents, not
+environments. All other API timestamp formats remain unchanged; only `terminal_observed_at` is
+introduced as UTC Unix milliseconds. Unknown issue identifiers still return not-found.
+
 ### Agent backends
 
 `agent.backend` selects the default backend. Supported values are `codex` and `claude`; the default
@@ -629,6 +996,154 @@ export GITLAB_PAT=...
 export SYMPHONY_LIVE_GITLAB_PROJECT_ID=...
 SYMPHONY_RUN_GITLAB_LIVE_E2E=1 mix test test/symphony_elixir/gitlab_live_e2e_test.exs
 ```
+
+### Opt-in managed-worker provider qualification
+
+`managed_environment_live_e2e_test.exs` is a **real, billable qualification harness**, not
+a simulated provider test. Ordinary test loading skips it and does not read its live
+workflow, credentials, or evidence path. It uses a Memory tracker (no production issue
+mutations), the real Orchestrator and provider adapters, and separate real Codex and
+Claude runs under the workflow's existing approval/sandbox policies. Do not weaken those
+policies to obtain a pass.
+
+Neither provider has a live qualification result from this change. **Kubernetes Agent
+Sandbox v1.0.1 remains blocked before allocation by unproven controller cleanup
+ordering.** No `qualification` flag bypasses that production preflight blocker. The
+gate-hold and dedicated-node fault protocols are implemented for qualification, not
+permission to exercise a currently unqualified cluster. Workstations also remains
+blocked until an operator supplies and authorizes every prerequisite below.
+
+Obtain explicit authorization for the selected disposable project/region/cluster or
+Kubernetes context/namespace, five concurrent workers, at least six retained
+environments, paid model sessions, deletion, and the specified physical fault scope.
+Possession of credentials is not authorization. Use a separately scoped workflow and
+fresh output directory for each provider/run. The selected provider comes exclusively
+from `worker.environment.kind`, through Config; there is no provider override variable.
+
+From `elixir/`, invoke with these **exact three opt-in variables**:
+
+```bash
+# AUTHORIZED_WORKFLOW must name the reviewed absolute workflow path.
+# Resolve symlinks in the output parent (including macOS /var and /tmp aliases).
+umask 077
+EVIDENCE_DIR="$(mktemp -d)"
+EVIDENCE_DIR="$(cd "$EVIDENCE_DIR" && pwd -P)"
+EVIDENCE_JSON="$EVIDENCE_DIR/evidence.json"
+env SYMPHONY_RUN_MANAGED_E2E=1 \
+  SYMPHONY_MANAGED_E2E_WORKFLOW="$AUTHORIZED_WORKFLOW" \
+  SYMPHONY_MANAGED_E2E_OUTPUT="$EVIDENCE_JSON" \
+  mise exec -- mix test test/symphony_elixir/managed_environment_live_e2e_test.exs \
+  --include live_e2e --timeout 1800000
+```
+
+The output must be a **new absolute file in an empty, private temporary directory**,
+not a repository path, symlink, or an existing evidence file. The harness rejects
+symlink ancestors and group/world-accessible output directories. Evidence and its
+staged recovery workflow are written privately and atomically. Allocation intent is
+persisted before publishing Memory issues; interruption recovery gets a separate
+bounded cleanup deadline. Keep the private directory if cleanup is unresolved and
+use its deployment/resource IDs for authorized remediation. Successful cleanup removes
+the staged workflow; never commit evidence, credentials, or generated infrastructure IDs.
+
+The private evidence keeps `captured_resources` separately from
+`remaining_owned_resources`. Captured environment, Workstations VM/disk, Kubernetes
+PVC/PV/CSI volume-handle and cleanup-child identifiers survive later inventory
+failure and interrupted recovery. They are historical remediation clues, **not**
+proof those resources remain present. Successful current inventory labels current
+resources `observed_present`; unresolved inventory labels retained clues `captured`
+and includes `inventory_unresolved`. Never treat a generic inventory error or missing
+parent as proof of absence. Only bounded, allowlisted non-secret identifiers are
+retained; provider/request bodies and credential material are not evidence.
+
+Supply the following **test-only** map at
+`worker.environment.provider.qualification` in the selected workflow. This is not a new
+production provider mode or an authorization bypass:
+
+| Field | Required operator input |
+| --- | --- |
+| `paid_model_calls_authorized` | Literal `true`, covering real Codex and Claude calls. |
+| `max_concurrent_workers` | Exactly `5`; the harness also queues a sixth ticket. |
+| `max_retained_environments` | Integer at least `6`. |
+| `max_backend_sessions` | Integer at least `20`; an enforced ceiling including recovery/restarts. |
+| `qualification_report` | Non-secret reference to the operator's authorization, runtime/controller evidence, quota assessment and cleanup plan. |
+| `quota_evidence` | Numeric `concurrent_workers >= 5`, `retained_environments >= 6`, and optional nonnegative `persistent_disk_gib`. Only these fields enter evidence. |
+| `runtime_version` | Operator-qualified worker/runtime version; recorded as operator-reported, separately from versions actually observed over SSH. |
+| `worker_image` | Exact digest-pinned image matching the actual provider template/config, including `@sha256:` and 64 lowercase hex digits. |
+| `node_modules_path` | Absolute **remote** directory containing the pinned compatible Playwright installation. No dependency-path fallback is supplied. |
+| `review_app_url` | Independently deployed deterministic HTTPS health endpoint, with no URL credentials, query or fragment; redirects are not followed. Its response must remain available and identical while **all** disposable workers are physically stopped. |
+| `unrelated_resource_paths` | Nonempty list of existing, unrelated negative-control API resource paths in the selected scope. Immutable identities and stable configuration/ownership/lifecycle fingerprints must remain unchanged after cleanup. |
+| `fault_driver` | Absolute local path to the operator's audited, self-contained physical-fault executable. |
+| `fault_driver_sha256` | SHA-256 of that executable's bytes. The helper executes a private snapshot of precisely those bytes; do not depend on sibling files beside the executable. |
+| `storage_fault_authorized` | Literal `true`, authorizing scoped physical storage-deletion delay and restoration. |
+| `node_fault_authorized` | Kubernetes only: literal `true` for the dedicated-node disconnection scenario. |
+| `authorized_node_uids` | Kubernetes only: explicit nonempty allowlist of dedicated node UIDs; unrelated workload sharing is rejected. |
+| `denied_identity` | Kubernetes only: deliberately denied, non-`system:` Kubernetes username that the authorized caller can impersonate for the real stop-rejection probe, without impersonated groups. |
+
+The rest of the workflow must satisfy the normal provider configuration and credential
+requirements documented above. Its `hooks.after_create` must clone an authorized
+disposable Git repository into the managed checkout. Supply functional real backend
+installations/authentication on the worker without mounting cloud/cluster administrative
+credentials into it. Pin compatible Python Testcontainers, Node Playwright and Chromium
+dependencies in the qualified worker image; install Docker Engine, Compose, Python 3,
+Node, Git, SSH and the fixture-required command-line tools. The three workload fixtures
+already bind PostgreSQL 16, Alpine 3.20 and Ryuk 0.8.1 to exact image digests. Review those
+digests and architecture availability before authorizing the run; do not silently
+substitute tags, disable Ryuk, or download changing dependencies between comparisons.
+Evidence records fixture hashes/images and actual worker tool versions. A local fixture
+smoke run is not evidence that either real backend can invoke Docker under its policy.
+
+Isolation checks use bounded concurrent probes to the other owned workers' private
+Docker/SSH endpoints and to narrowly scoped credential endpoints: GCP metadata DNS and
+link-local IP, AWS IMDSv2/instance-role credentials, and Azure managed-identity tokens.
+Returned tokens are never printed. A denied connection/authorization is distinct from
+an unexpected usable credential response; ambiguous successful responses fail the check.
+Workstations prerequisite reads also require Compute regional quota visibility and an
+installed `gcloud` CLI whose JSON version output can be observed.
+
+The physical-fault helper protocol is `fault_driver --request <private-json-file>`.
+Its JSON contains `scenario` (`storage_deletion`, `node_disconnection`, or `all`),
+`phase` (`apply` or `restore`), the generated `deployment_id`, selected `scope`,
+`resource` (safe backing-storage/volume/node identities, or `null` for `all/restore`),
+and `credential_references`. References select the operator's existing credential
+configuration/impersonation identity or kubeconfig/context; they are **not credential
+values**. Never print or copy credential-reference maps into public evidence. The selected
+Kubernetes context name is recorded separately with its namespace as required target audit
+identity; credential file paths, configurations and impersonation selectors stay private. Emit only
+`{"applied":true}` on stdout after successful application/restoration. This acknowledgment
+and the executable hash are **not physical-effect proof**. `all/restore` must be
+idempotent, confined to this deployment/scope, and work even after the original provider
+record is lost.
+
+The harness observes accepted deletion followed by a real failed/uncertain deletion
+operation with the captured physical storage still present, restarts the runtime, then
+requires eventual provider-certified absence after restoration. Merely withholding a
+client DELETE or observing ordinary asynchronous deletion latency does not qualify.
+Node `NotReady`, a closed SSH connection, CLI success prose and absent parent objects
+are never substitutes for physical-stop/deletion proof. Never force-delete an unverified
+node or invent broad IAM changes to make the test proceed.
+
+Every runner invocation, including response-loss recovery and cleanup/restart paths,
+is checked before the real `AgentRunner` is called. The context must be a valid live
+managed lease for the selected deployment/scope and issue, with the matching attempt.
+Missing, local, static SSH, forged or stale contexts are rejected without starting
+that backend. Evidence records only safe mode/outcome enums and opaque issue/attempt
+IDs; targets, options and credentials are never serialized. `runner_rejected` latches
+permanently: later valid runs, successful checks or complete cleanup cannot erase it.
+Both this latch and invocation count are persisted for interruption recovery.
+
+Unrelated-resource baselines retain `{path, uid, fingerprint}`. The SHA-256 fingerprint
+covers stable non-secret configuration, ownership and meaningful lifecycle fields,
+not volatile versions, timestamps or heartbeats. In-place changes therefore fail even
+when the UID is unchanged. Recovery restores the fingerprint; legacy UID-only or
+invalid baselines fail closed rather than silently weakening the comparison.
+
+Every required check is individually recorded. A blocked, failed or unrun check makes
+`qualified?` false, as does incomplete inventory, interruption, any rejected runner
+invocation or any remaining owned resource. Missing service-managed disk evidence
+requires operator action, not a successful
+summary. Unavailable authorization, audited fault helper, scoped infrastructure,
+quota/image/dependency evidence, real backend access, physical deletion evidence, or
+the Kubernetes cleanup-ordering guarantee remain explicit qualification blockers.
 
 ## FAQ
 

@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunnerStubBackend do
 
   @impl true
   def start_session(_workspace, opts) do
-    if pid = opts[:test_pid], do: send(pid, {:stub_backend, :start_session, opts[:worker_host]})
+    if pid = opts[:test_pid], do: send(pid, {:stub_backend, :start_session, opts[:execution_context].worker_host})
 
     case opts[:start_result] do
       {:error, _reason} = error -> error
@@ -63,6 +63,35 @@ defmodule SymphonyElixir.AgentRunnerTest do
     :ok
   end
 
+  test "managed settings reject missing or local contexts before workspace and hooks" do
+    root = Path.join(System.tmp_dir!(), "symphony-managed-guard-#{System.unique_integer([:positive])}")
+    sentinel = Path.join(root, "hook-ran")
+    on_exit(fn -> File.rm_rf(root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_create: "touch #{sentinel}")
+    settings = Config.settings!()
+    original = :sys.get_state(SymphonyElixir.WorkflowStore)
+    on_exit(fn -> :sys.replace_state(SymphonyElixir.WorkflowStore, fn _ -> original end) end)
+
+    :sys.replace_state(SymphonyElixir.WorkflowStore, fn state ->
+      %{state | settings: %{settings | worker: Map.put(settings.worker, :environment, %{})}}
+    end)
+
+    assert {:error, :managed_context_required} = AgentRunner.run(build_issue([]), nil, [])
+
+    assert {:error, :managed_context_required} =
+             AgentRunner.run(build_issue([]), nil, execution_context: SymphonyElixir.ExecutionContext.local(root))
+
+    for backend <- [SymphonyElixir.Agent.Codex, SymphonyElixir.Agent.Claude] do
+      assert {:error, :managed_context_required} = backend.start_session(root, [])
+
+      assert {:error, :managed_context_required} =
+               backend.start_session(root, execution_context: SymphonyElixir.ExecutionContext.local(root))
+    end
+
+    refute File.exists?(sentinel)
+    refute File.exists?(root)
+  end
+
   test "run/3 drives the injected backend module" do
     workspace_root =
       Path.join(
@@ -89,15 +118,18 @@ defmodule SymphonyElixir.AgentRunnerTest do
                issue,
                self(),
                backend_module: SymphonyElixir.AgentRunnerStubBackend,
-               worker_host: nil,
+               attempt_id: "runner-attempt",
+               execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
                issue_state_fetcher: fn _ids -> {:ok, [issue]} end,
                test_pid: self()
              )
 
     assert_received :stub_turn_ran
+    assert_received {:worker_runtime_info, "issue-stub-backend", "runner-attempt", %{workspace_path: workspace}}
+    assert File.dir?(workspace)
     assert_received :stub_session_stopped
 
-    assert_received {:codex_worker_update, "issue-stub-backend",
+    assert_received {:codex_worker_update, "issue-stub-backend", "runner-attempt",
                      %{
                        event: :usage_updated,
                        timestamp: %DateTime{},
@@ -122,7 +154,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
                test_message: native_update
              )
 
-    assert_received {:codex_worker_update, "issue-blocked", ^native_update}
+    assert_received {:codex_worker_update, "issue-blocked", _attempt_id, ^native_update}
   end
 
   test "run/3 reports start_session errors without calling stop_session" do
@@ -164,9 +196,9 @@ defmodule SymphonyElixir.AgentRunnerTest do
   test "exhausting the turn budget on a still-active issue notifies the orchestrator" do
     issue = build_issue(state: "In Progress")
 
-    assert :ok = run_stub!(issue, max_turns: 1)
+    assert :ok = run_stub!(issue, max_turns: 1, attempt_id: "exhausted-attempt")
 
-    assert_received {:agent_turns_exhausted, "issue-blocked", "In Progress"}
+    assert_received {:agent_turns_exhausted, "issue-blocked", "exhausted-attempt", "In Progress"}
   end
 
   test "an issue that leaves its active state does not notify the orchestrator" do
@@ -174,7 +206,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
     assert :ok = run_stub!(issue, max_turns: 1)
 
-    refute_received {:agent_turns_exhausted, _issue_id, _state}
+    refute_received {:agent_turns_exhausted, _issue_id, _attempt_id, _state}
   end
 
   test "blocked result posts a comment then sets the blocked state, in order" do
@@ -314,7 +346,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
     assert :ok =
              AgentRunner.run(issue, nil,
                backend_module: SymphonyElixir.Agent.Claude,
-               worker_host: nil,
+               execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
                issue_state_fetcher: state_fetcher
              )
 
@@ -373,7 +405,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       opts ++
         [
           backend_module: SymphonyElixir.AgentRunnerStubBackend,
-          worker_host: nil,
+          execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
           issue_state_fetcher: fn _ids -> {:ok, [issue]} end
         ]
     )
@@ -407,7 +439,7 @@ defmodule SymphonyElixir.AgentRunnerTest do
       issue,
       nil,
       backend_module: SymphonyElixir.AgentRunnerStubBackend,
-      worker_host: nil,
+      execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
       issue_state_fetcher: fn _ids -> {:ok, [issue]} end,
       test_result: result,
       test_pid: self()

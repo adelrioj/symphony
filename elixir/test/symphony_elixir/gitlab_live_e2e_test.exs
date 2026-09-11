@@ -66,7 +66,15 @@ defmodule SymphonyElixir.GitLab.LiveE2ETest do
       assert issue_id == issue.id
       assert identifier == issue.identifier
 
-      assert :ok = AgentRunner.run(issue, self(), max_turns: 3)
+      assert :ok =
+               AgentRunner.run(issue, self(),
+                 max_turns: 3,
+                 execution_context:
+                   case SymphonyElixir.Config.settings!().worker.ssh_hosts do
+                     [] -> SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+                     [host | _] -> SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, host)
+                   end
+               )
 
       runtime_info = receive_runtime_info!(issue.id)
       tool_calls = completed_gitlab_tool_calls(issue.id)
@@ -294,11 +302,11 @@ defmodule SymphonyElixir.GitLab.LiveE2ETest do
 
   defp receive_runtime_info!(issue_id) do
     receive do
-      {:worker_runtime_info, ^issue_id, %{workspace_path: workspace_path} = runtime_info}
+      {:worker_runtime_info, ^issue_id, _attempt_id, %{workspace_path: workspace_path} = runtime_info}
       when is_binary(workspace_path) ->
         runtime_info
 
-      {:codex_worker_update, ^issue_id, _message} ->
+      {:codex_worker_update, ^issue_id, _attempt_id, _message} ->
         receive_runtime_info!(issue_id)
     after
       5_000 ->
@@ -308,10 +316,10 @@ defmodule SymphonyElixir.GitLab.LiveE2ETest do
 
   defp completed_gitlab_tool_calls(issue_id, calls \\ []) do
     receive do
-      {:codex_worker_update, ^issue_id, %{event: :tool_call_completed, payload: %{"params" => params}}} ->
+      {:codex_worker_update, ^issue_id, _attempt_id, %{event: :tool_call_completed, payload: %{"params" => params}}} ->
         completed_gitlab_tool_calls(issue_id, [params | calls])
 
-      {:codex_worker_update, ^issue_id, _message} ->
+      {:codex_worker_update, ^issue_id, _attempt_id, _message} ->
         completed_gitlab_tool_calls(issue_id, calls)
     after
       0 ->
