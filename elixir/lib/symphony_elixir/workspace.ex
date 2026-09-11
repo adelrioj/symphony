@@ -169,7 +169,9 @@ defmodule SymphonyElixir.Workspace do
           {:error, {:managed_execution_unknown, _detail} = reason, _path} -> {:error, reason}
           _ -> :ok
         end
-      {:error, _reason} -> :ok
+
+      {:error, _reason} ->
+        :ok
     end
   end
 
@@ -297,7 +299,9 @@ defmodule SymphonyElixir.Workspace do
   @spec run_before_remove_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) :: :ok | {:error, {:managed_execution_unknown, term()}}
   def run_before_remove_hook(workspace, issue, %ExecutionContext{} = context) do
     case Config.settings!().hooks.before_remove do
-      nil -> :ok
+      nil ->
+        :ok
+
       command ->
         if ExecutionContext.remote?(context) or File.dir?(workspace) do
           run_hook(command, workspace, issue_context(issue), "before_remove", context)
@@ -341,6 +345,7 @@ defmodule SymphonyElixir.Workspace do
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
 
     script = remote_workspace_guard(workspace, worker_host) <> "\ncd \"$workspace\"\n" <> command
+
     case run_remote_command(worker_host, script, timeout_ms, hook_name) do
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
@@ -386,17 +391,22 @@ defmodule SymphonyElixir.Workspace do
     cond do
       String.trim(workspace) == "" ->
         {:error, {:workspace_path_unreadable, workspace, :empty}}
+
       invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root) ->
         {:error, {:workspace_path_unreadable, workspace, :invalid_characters}}
+
       context.mode == :managed and workspace != context.workspace_path ->
         {:error, {:workspace_path_unreadable, workspace, :identity_mismatch}}
+
       context.mode == :managed ->
         case run_remote_command(context, remote_workspace_guard(workspace, context), Config.settings!().hooks.timeout_ms) do
           {:ok, {_output, 0}} -> :ok
           {:ok, {output, status}} -> {:error, {:workspace_path_unreadable, workspace, {status, output}}}
           {:error, _reason} = error -> error
         end
-      true -> :ok
+
+      true ->
+        :ok
     end
   end
 
@@ -417,7 +427,8 @@ defmodule SymphonyElixir.Workspace do
         "  \"$root_real\"/*) test \"$workspace_real\" != \"$root_real\" ;;",
         "  *) exit 64 ;;",
         "esac"
-      ] |> Enum.join("\n")
+      ]
+      |> Enum.join("\n")
     end
   end
 
@@ -506,6 +517,7 @@ defmodule SymphonyElixir.Workspace do
 
       nil ->
         Task.shutdown(task, :brutal_kill)
+
         if context.mode == :managed do
           {:error, {:managed_execution_unknown, {:remote_command_timeout, operation, timeout_ms}}}
         else

@@ -153,7 +153,9 @@ defmodule SymphonyElixir.Config do
 
   defp validate_environment(settings) do
     case SymphonyElixir.ExecutionEnvironment.Config.runtime(settings) do
-      nil -> :ok
+      nil ->
+        :ok
+
       config ->
         with {:ok, adapter} <- SymphonyElixir.ExecutionEnvironment.adapter(config.kind),
              :ok <- adapter.validate_config(config.provider) do

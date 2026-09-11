@@ -223,7 +223,15 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
   end
 
   defp kubernetes_provider do
-    %{"kubeconfig" => "/operator/kubeconfig", "context" => "test", "namespace" => "workers", "template" => "/operator/template.yaml", "ssh_user" => "worker", "ssh_auth_volume" => "operator-key", "ssh_port" => 2222}
+    %{
+      "kubeconfig" => "/operator/kubeconfig",
+      "context" => "test",
+      "namespace" => "workers",
+      "template" => "/operator/template.yaml",
+      "ssh_user" => "worker",
+      "ssh_auth_volume" => "operator-key",
+      "ssh_port" => 2222
+    }
   end
 
   defp record(config) do

@@ -60,10 +60,12 @@ defmodule SymphonyElixir.TestSupport do
     name = Keyword.fetch!(opts, :name)
     runtime_name = Module.concat(name, RuntimeSupervisor)
     task_name = Module.concat(name, TaskSupervisor)
+
     ExUnit.Callbacks.start_supervised!(
       {SymphonyElixir.AgentRuntimeSupervisor, Keyword.merge(opts, name: runtime_name, task_supervisor_name: task_name, orchestrator_name: name)},
       id: runtime_name
     )
+
     {:ok, Process.whereis(name)}
   end
 
@@ -223,7 +225,10 @@ defmodule SymphonyElixir.TestSupport do
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
-        if(Keyword.has_key?(overrides, :worker_environment), do: "worker:\n  environment: #{Jason.encode!(Keyword.fetch!(overrides, :worker_environment))}", else: worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host)),
+        if(Keyword.has_key?(overrides, :worker_environment),
+          do: "worker:\n  environment: #{Jason.encode!(Keyword.fetch!(overrides, :worker_environment))}",
+          else: worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host)
+        ),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",

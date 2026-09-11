@@ -3,9 +3,12 @@ defmodule SymphonyElixir.SSH.Target do
   @enforce_keys [:executable, :prefix, :label]
   @derive {Inspect, only: [:label]}
   defstruct [:executable, :prefix, :label, env: []]
+
   @type t :: %__MODULE__{
-          executable: String.t(), prefix: [String.t()],
-          label: String.t(), env: [{String.t(), String.t() | nil}]
+          executable: String.t(),
+          prefix: [String.t()],
+          label: String.t(),
+          env: [{String.t(), String.t() | nil}]
         }
 end
 

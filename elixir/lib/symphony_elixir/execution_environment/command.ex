@@ -116,13 +116,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
         {:os_pid, pid} ->
           # Signal only the child of this still-owned port, never a process-name match.
           case System.find_executable("kill") do
-            nil -> {:error, :local_process_termination_unconfirmed}
+            nil ->
+              {:error, :local_process_termination_unconfirmed}
+
             executable ->
               System.cmd(executable, ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
               await_port_exit(port)
           end
 
-        nil -> :ok
+        nil ->
+          :ok
       end
     rescue
       _ -> {:error, :local_process_termination_unconfirmed}
@@ -145,5 +148,4 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
   rescue
     ArgumentError -> :ok
   end
-
 end

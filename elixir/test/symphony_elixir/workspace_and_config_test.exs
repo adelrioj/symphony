@@ -10,10 +10,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     on_exit(fn -> File.rm_rf(root) end)
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_create: "printf retained > retained")
     target = managed_shell_target!(root)
+
     context = %SymphonyElixir.ExecutionContext{
-      mode: :managed, workspace_root: root, workspace_path: Path.join(root, "persisted-key"),
-      target: target, worker_host: "fixture"
+      mode: :managed,
+      workspace_root: root,
+      workspace_path: Path.join(root, "persisted-key"),
+      target: target,
+      worker_host: "fixture"
     }
+
     assert {:ok, first} = Workspace.create_for_issue(%Issue{id: "stable", identifier: "OLD-1"}, context)
     File.write!(Path.join(first, "retained"), "local changes")
     assert {:ok, ^first} = Workspace.create_for_issue(%Issue{id: "stable", identifier: "NEW-1"}, context)
@@ -24,18 +29,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "managed remote safety rejects root equality and symlink escape before hooks or deletion" do
     root = Path.join(System.tmp_dir!(), "symphony-managed-safety-#{System.unique_integer([:positive])}")
     outside = root <> "-outside"
-    on_exit(fn -> File.rm_rf(root); File.rm_rf(outside) end)
+
+    on_exit(fn ->
+      File.rm_rf(root)
+      File.rm_rf(outside)
+    end)
+
     File.mkdir_p!(root)
     File.mkdir_p!(outside)
     File.write!(Path.join(outside, "keep"), "safe")
     File.ln_s!(outside, Path.join(root, "escape"))
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_remove: "touch hook-ran")
     target = managed_shell_target!(root)
+
     for path <- [root, Path.join(root, "escape")] do
       context = %SymphonyElixir.ExecutionContext{mode: :managed, workspace_root: root, workspace_path: path, target: target}
       assert {:error, _} = Workspace.create_for_issue("IGNORED", context)
       assert {:error, _, _} = Workspace.remove(path, context)
     end
+
     assert File.read!(Path.join(outside, "keep")) == "safe"
     refute File.exists?(Path.join(outside, "hook-ran"))
   end
@@ -56,13 +68,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "managed before-run timeout reports unknown execution without running after-run" do
     {root, context, hook, release} = delayed_managed_hook_fixture!()
-    write_workflow_file!(Workflow.workflow_file_path(),
-      workspace_root: root, hook_before_run: hook,
-      hook_after_run: "touch after-run", hook_timeout_ms: 2_000
-    )
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_run: hook, hook_after_run: "touch after-run", hook_timeout_ms: 2_000)
     issue = %Issue{id: "managed-timeout", identifier: "TIMEOUT-1", state: "In Progress"}
+
     assert {:managed_execution_unknown, {:remote_command_timeout, "before_run", 2_000}} =
              catch_exit(AgentRunner.run(issue, nil, execution_context: context))
+
     assert File.exists?(Path.join(root, "started"))
     refute File.exists?(Path.join(context.workspace_path, "after-run"))
     release.()
@@ -72,8 +83,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "managed after-create timeout retains workspace while the remote hook is unconfirmed" do
     {root, context, hook, release} = delayed_managed_hook_fixture!()
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_create: hook, hook_timeout_ms: 2_000)
+
     assert {:error, {:managed_execution_unknown, {:remote_command_timeout, "after_create", 2_000}}} =
              Workspace.create_for_issue("TIMEOUT-2", context)
+
     assert File.exists?(Path.join(root, "started"))
     assert File.dir?(context.workspace_path)
     release.()
@@ -85,8 +98,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     File.mkdir_p!(context.workspace_path)
     File.write!(Path.join(context.workspace_path, "retained"), "keep")
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_remove: hook, hook_timeout_ms: 2_000)
+
     assert {:error, {:managed_execution_unknown, {:remote_command_timeout, "before_remove", 2_000}}, ""} =
              Workspace.remove(context.workspace_path, context)
+
     assert File.read!(Path.join(context.workspace_path, "retained")) == "keep"
     release.()
     assert File.read!(Path.join(context.workspace_path, "delayed")) == "finished"
@@ -100,29 +115,40 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     gate = Path.join(root, "release")
     started = Path.join(root, "started")
     assert {_, 0} = System.cmd("mkfifo", [gate])
+
     on_exit(fn ->
       # The blocked hook uses shell builtins only; its recorded shell has no child
       # work to orphan. Kill it before deleting the FIFO/workspace on a failed test.
       if File.exists?(pidfile) and not File.exists?(Path.join(workspace, "delayed")) do
         System.cmd("kill", ["-KILL", String.trim(File.read!(pidfile))], stderr_to_stdout: true)
       end
+
       File.rm_rf(root)
     end)
+
     hook = "trap '' HUP; printf '%s' \"$$\" > '#{pidfile}'; printf started > '#{started}'; IFS= read -r token < '#{gate}'; printf finished > delayed"
     context = %SymphonyElixir.ExecutionContext{mode: :managed, workspace_root: root, workspace_path: workspace, target: target}
+
     release = fn ->
       assert {_, 0} = System.cmd("kill", ["-0", String.trim(File.read!(pidfile))], stderr_to_stdout: true)
       Task.async(fn -> File.write!(gate, "continue\n") end) |> Task.await(2_000)
       await_delayed_hook!(Path.join(workspace, "delayed"), 200)
     end
+
     {root, context, hook, release}
   end
 
   defp await_delayed_hook!(path, attempts) do
     cond do
-      File.read(path) == {:ok, "finished"} -> :ok
-      attempts == 0 -> flunk("remote hook did not finish after release")
-      true -> Process.sleep(10); await_delayed_hook!(path, attempts - 1)
+      File.read(path) == {:ok, "finished"} ->
+        :ok
+
+      attempts == 0 ->
+        flunk("remote hook did not finish after release")
+
+      true ->
+        Process.sleep(10)
+        await_delayed_hook!(path, attempts - 1)
     end
   end
 

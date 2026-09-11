@@ -79,7 +79,15 @@ defmodule SymphonyElixir.Jira.LiveE2ETest do
       assert refreshed_id == issue.id
       assert refreshed_identifier == issue.identifier
 
-      assert :ok = AgentRunner.run(issue, self(), max_turns: 3, execution_context: case SymphonyElixir.Config.settings!().worker.ssh_hosts do [] -> SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()); [host | _] -> SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, host) end)
+      assert :ok =
+               AgentRunner.run(issue, self(),
+                 max_turns: 3,
+                 execution_context:
+                   case SymphonyElixir.Config.settings!().worker.ssh_hosts do
+                     [] -> SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+                     [host | _] -> SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, host)
+                   end
+               )
 
       runtime_info = receive_runtime_info!(issue.id)
       tool_calls = completed_jira_tool_calls(issue.id)

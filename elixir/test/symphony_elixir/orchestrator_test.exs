@@ -27,7 +27,6 @@ defmodule SymphonyElixir.OrchestratorTest do
     orchestrator_name = Module.concat(__MODULE__, :InvalidBackendOrchestrator)
     {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-
     wait_for_state(pid, fn state ->
       state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
     end)
@@ -80,7 +79,6 @@ defmodule SymphonyElixir.OrchestratorTest do
 
     orchestrator_name = Module.concat(__MODULE__, :InvalidGlobalBackendOrchestrator)
     {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
-
 
     wait_for_state(pid, fn state ->
       state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
@@ -149,7 +147,6 @@ defmodule SymphonyElixir.OrchestratorTest do
     orchestrator_name = Module.concat(__MODULE__, :ClaudeDispatchOrchestrator)
     {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-
     wait_for_state(pid, fn state ->
       state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
     end)
@@ -182,7 +179,6 @@ defmodule SymphonyElixir.OrchestratorTest do
 
     orchestrator_name = Module.concat(__MODULE__, :ScopeErrorOrchestrator)
     {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
-
 
     wait_for_state(pid, fn state ->
       state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
@@ -259,7 +255,6 @@ defmodule SymphonyElixir.OrchestratorTest do
 
     orchestrator_name = Module.concat(__MODULE__, :ExhaustionOrchestrator)
     {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
-
 
     wait_for_state(pid, fn state ->
       state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
@@ -455,7 +450,6 @@ defmodule SymphonyElixir.OrchestratorTest do
         do_wait_until(predicate, deadline)
     end
   end
-
 
   defp write_claude_dispatch_workflow!(workspace_root, fake_claude, max_turn_exhaustions \\ 3, opts \\ []) do
     active_states = Keyword.get(opts, :active_states, ["Implemented"])

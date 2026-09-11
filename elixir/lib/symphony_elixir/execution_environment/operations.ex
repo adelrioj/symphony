@@ -73,6 +73,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
   def run(adapter, config, %Lifecycle.Entry{} = entry, :metadata, opts) do
     opts = deadline_options(config, :metadata, opts)
+
     case invoke(adapter, :put_intent, [config, entry.record, entry.metadata_intent || %{}], opts) do
       {:ok, latest} -> {:ok, latest}
       {:error, failure, latest} -> {:error, failure, latest}
@@ -177,11 +178,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
   defp acknowledge_staged_paths({:staged_paths, owner, id} = lease) do
     case GenServer.call(owner, {:stage_paths, id}, 1_000) do
-      :ok -> {:ok, lease}
-      _ -> release_staged_paths(lease); {:error, {:unknown, :private_paths_staging_failed}}
+      :ok ->
+        {:ok, lease}
+
+      _ ->
+        release_staged_paths(lease)
+        {:error, {:unknown, :private_paths_staging_failed}}
     end
   catch
-    :exit, _ -> release_staged_paths(lease); {:error, {:unknown, :private_paths_staging_failed}}
+    :exit, _ ->
+      release_staged_paths(lease)
+      {:error, {:unknown, :private_paths_staging_failed}}
   end
 
   defp promote_connection(owner, id, authority, donor, target, ports, paths) do
@@ -199,13 +206,21 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
       end)
 
       case GenServer.call(owner, {:adopt_connection, id}, 1_000) do
-        :ok -> {:ok, %Connection{owner: owner, id: id, target: target}}
-        _ -> close_connection(%Connection{owner: owner, id: id, target: target}); {:error, {:unknown, :connection_adoption_failed}}
+        :ok ->
+          {:ok, %Connection{owner: owner, id: id, target: target}}
+
+        _ ->
+          close_connection(%Connection{owner: owner, id: id, target: target})
+          {:error, {:unknown, :connection_adoption_failed}}
       end
     rescue
-      _ -> close_connection(%Connection{owner: owner, id: id, target: target}); {:error, {:unknown, :connection_adoption_failed}}
+      _ ->
+        close_connection(%Connection{owner: owner, id: id, target: target})
+        {:error, {:unknown, :connection_adoption_failed}}
     catch
-      :exit, _ -> close_connection(%Connection{owner: owner, id: id, target: target}); {:error, {:unknown, :connection_adoption_failed}}
+      :exit, _ ->
+        close_connection(%Connection{owner: owner, id: id, target: target})
+        {:error, {:unknown, :connection_adoption_failed}}
     end
   end
 
@@ -297,9 +312,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
         GenServer.reply(from, {:error, :invalid_connection})
         holder_loop(state)
 
-      {:DOWN, ref, :process, _, _} when ref == state.authority_ref -> :ok
-      {:DOWN, ref, :process, _, :normal} when ref == state.donor_ref and state.adopted? -> holder_loop(%{state | donor_ref: nil})
-      {:DOWN, ref, :process, _, _} when ref == state.donor_ref -> :ok
+      {:DOWN, ref, :process, _, _} when ref == state.authority_ref ->
+        :ok
+
+      {:DOWN, ref, :process, _, :normal} when ref == state.donor_ref and state.adopted? ->
+        holder_loop(%{state | donor_ref: nil})
+
+      {:DOWN, ref, :process, _, _} when ref == state.donor_ref ->
+        :ok
+
       {port, {:data, data}} when is_port(port) ->
         if not state.adopted?, do: send(state.donor, {port, {:data, data}})
         holder_loop(state)
@@ -312,8 +333,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
         retain? = not state.adopted? and port in state.retained_ports
         if not state.adopted? and (not retain? or reason != :normal), do: send(state.donor, {:EXIT, port, reason})
         if retain?, do: holder_loop(state), else: :ok
-      {:EXIT, _, _} -> :ok
-      _ -> holder_loop(state)
+
+      {:EXIT, _, _} ->
+        :ok
+
+      _ ->
+        holder_loop(state)
     end
   end
 
@@ -353,16 +378,25 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
           context = ExecutionContext.managed(config, record, connection)
 
           case readiness(context, purpose, opts) do
-            :ok -> {:ok, context}
-            {:error, failure} -> close_connection(connection); {:error, failure, record}
+            :ok ->
+              {:ok, context}
+
+            {:error, failure} ->
+              close_connection(connection)
+              {:error, failure, record}
           end
         rescue
-          _ -> close_connection(connection); {:error, {:invalid, :managed_execution_context}, record}
+          _ ->
+            close_connection(connection)
+            {:error, {:invalid, :managed_execution_context}, record}
         catch
-          :exit, _ -> close_connection(connection); {:error, {:unknown, :connection_closed}, record}
+          :exit, _ ->
+            close_connection(connection)
+            {:error, {:unknown, :connection_closed}, record}
         end
 
-      {:error, failure} -> {:error, failure, record}
+      {:error, failure} ->
+        {:error, failure, record}
     end
   end
 
@@ -393,21 +427,24 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   defp readiness_command(root, executable, purpose) do
     backend = if purpose == :cleanup, do: ":", else: "command -v -- " <> quote_shell(executable) <> " >/dev/null"
 
-    Enum.join([
-      "set -eu",
-      "root=" <> quote_shell(root),
-      "test -d \"$root\" && test -w \"$root\"",
-      "mount=$(findmnt -n -o TARGET -T \"$root\"); test -n \"$mount\" && test \"$mount\" != /",
-      "probe=$(mktemp \"$root/.symphony-readiness.XXXXXXXX\"); trap 'rm -f -- \"$probe\"' EXIT; printf readiness >\"$probe\"",
-      "realpath --version | grep -q 'GNU coreutils'",
-      "test \"$(realpath -m -- \"$root/.symphony-missing/../.symphony-realpath-probe\")\" = \"$root/.symphony-realpath-probe\"",
-      backend,
-      "test \"${DOCKER_HOST:-unix:///var/run/docker.sock}\" = unix:///var/run/docker.sock",
-      "test -S /var/run/docker.sock",
-      "docker_root=$(docker --host unix:///var/run/docker.sock info --format '{{.DockerRootDir}}')",
-      "test -n \"$docker_root\" && test -d \"$docker_root\" && test -w \"$docker_root\"",
-      "docker_mount=$(findmnt -n -o TARGET -T \"$docker_root\"); test -n \"$docker_mount\" && test \"$docker_mount\" != /"
-    ], "; ")
+    Enum.join(
+      [
+        "set -eu",
+        "root=" <> quote_shell(root),
+        "test -d \"$root\" && test -w \"$root\"",
+        "mount=$(findmnt -n -o TARGET -T \"$root\"); test -n \"$mount\" && test \"$mount\" != /",
+        "probe=$(mktemp \"$root/.symphony-readiness.XXXXXXXX\"); trap 'rm -f -- \"$probe\"' EXIT; printf readiness >\"$probe\"",
+        "realpath --version | grep -q 'GNU coreutils'",
+        "test \"$(realpath -m -- \"$root/.symphony-missing/../.symphony-realpath-probe\")\" = \"$root/.symphony-realpath-probe\"",
+        backend,
+        "test \"${DOCKER_HOST:-unix:///var/run/docker.sock}\" = unix:///var/run/docker.sock",
+        "test -S /var/run/docker.sock",
+        "docker_root=$(docker --host unix:///var/run/docker.sock info --format '{{.DockerRootDir}}')",
+        "test -n \"$docker_root\" && test -d \"$docker_root\" && test -w \"$docker_root\"",
+        "docker_mount=$(findmnt -n -o TARGET -T \"$docker_root\"); test -n \"$docker_mount\" && test \"$docker_mount\" != /"
+      ],
+      "; "
+    )
   end
 
   defp intent(adapter, config, record, desired, opts) do
@@ -443,7 +480,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
             poll(adapter, config, latest, expected, opts)
           end
 
-        error -> error
+        error ->
+          error
       end
     end
   end

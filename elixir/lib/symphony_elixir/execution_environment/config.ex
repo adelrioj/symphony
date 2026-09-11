@@ -65,7 +65,6 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
     end)
   end
 
-
   @spec runtime(map()) :: map() | nil
   def runtime(settings) do
     case value(value(settings, :worker), :environment) do

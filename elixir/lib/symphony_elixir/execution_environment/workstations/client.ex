@@ -37,10 +37,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations.Client do
             Process.put(key, value)
             {:ok, value}
 
-          _ -> {:error, {:denied, :workstations_credentials}}
+          _ ->
+            {:error, {:denied, :workstations_credentials}}
         end
 
-      value -> {:ok, value}
+      value ->
+        {:ok, value}
     end
   end
 
@@ -59,9 +61,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations.Client do
   end
 
   defp perform_request(config, method, path, query, body, opts, token) do
-    request_opts = [method: method, url: endpoint(path), params: query,
-      headers: [{"authorization", "Bearer " <> token}], retry: false,
-      receive_timeout: remaining(opts), connect_options: [timeout: min(remaining(opts), 30_000)]]
+    request_opts = [
+      method: method,
+      url: endpoint(path),
+      params: query,
+      headers: [{"authorization", "Bearer " <> token}],
+      retry: false,
+      receive_timeout: remaining(opts),
+      connect_options: [timeout: min(remaining(opts), 30_000)]
+    ]
+
     request_opts = if is_nil(body), do: request_opts, else: Keyword.put(request_opts, :json, body)
     request_fun = Keyword.get(opts, :request_fun, &Req.request/1)
 
@@ -77,8 +86,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations.Client do
           with {:ok, refreshed} <- token(config, opts), do: perform(config, method, path, query, body, opts, refreshed)
         end
 
-      {:ok, %{status: status, body: response}} when is_integer(status) -> {:ok, %{status: status, body: response}}
-      _ -> {:error, {:unknown, :workstations_transport}}
+      {:ok, %{status: status, body: response}} when is_integer(status) ->
+        {:ok, %{status: status, body: response}}
+
+      _ ->
+        {:error, {:unknown, :workstations_transport}}
     end
   rescue
     _ -> {:error, {:unknown, :workstations_transport}}

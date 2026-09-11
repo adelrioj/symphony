@@ -63,7 +63,6 @@ defmodule SymphonyElixir.AgentRunnerTest do
     :ok
   end
 
-
   test "managed settings reject missing or local contexts before workspace and hooks" do
     root = Path.join(System.tmp_dir!(), "symphony-managed-guard-#{System.unique_integer([:positive])}")
     sentinel = Path.join(root, "hook-ran")
@@ -72,21 +71,27 @@ defmodule SymphonyElixir.AgentRunnerTest do
     settings = Config.settings!()
     original = :sys.get_state(SymphonyElixir.WorkflowStore)
     on_exit(fn -> :sys.replace_state(SymphonyElixir.WorkflowStore, fn _ -> original end) end)
+
     :sys.replace_state(SymphonyElixir.WorkflowStore, fn state ->
       %{state | settings: %{settings | worker: Map.put(settings.worker, :environment, %{})}}
     end)
 
     assert {:error, :managed_context_required} = AgentRunner.run(build_issue([]), nil, [])
+
     assert {:error, :managed_context_required} =
              AgentRunner.run(build_issue([]), nil, execution_context: SymphonyElixir.ExecutionContext.local(root))
+
     for backend <- [SymphonyElixir.Agent.Codex, SymphonyElixir.Agent.Claude] do
       assert {:error, :managed_context_required} = backend.start_session(root, [])
+
       assert {:error, :managed_context_required} =
                backend.start_session(root, execution_context: SymphonyElixir.ExecutionContext.local(root))
     end
+
     refute File.exists?(sentinel)
     refute File.exists?(root)
   end
+
   test "run/3 drives the injected backend module" do
     workspace_root =
       Path.join(

@@ -11,10 +11,13 @@ defmodule SymphonyElixir.EnvironmentReloadTest do
 
   test "guard survives acquiring owner death and only newest token releases it" do
     parent = self()
-    owner = spawn(fn ->
-      {:ok, token} = WorkflowStore.protect_environment(nil)
-      send(parent, {:guard, token})
-    end)
+
+    owner =
+      spawn(fn ->
+        {:ok, token} = WorkflowStore.protect_environment(nil)
+        send(parent, {:guard, token})
+      end)
+
     monitor = Process.monitor(owner)
     assert_receive {:guard, old}
     assert_receive {:DOWN, ^monitor, :process, ^owner, _}

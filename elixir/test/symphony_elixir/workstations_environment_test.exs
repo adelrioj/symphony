@@ -5,8 +5,18 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   alias SymphonyElixir.ExecutionEnvironment.Workstations.Client
 
   test "STOPPED with no listed operations cannot erase an unknown start" do
-    record = %Record{key: "se-ticket", deployment_id: "deployment", tracker_kind: "memory", issue_id: "ticket", kind: "google_workstations", scope: %{},
-      workspace_path: "/home/user/workspaces/se-ticket", template_identity: "config-uid", pending: [%{verb: :start, id: nil, outcome: :unknown}]}
+    record = %Record{
+      key: "se-ticket",
+      deployment_id: "deployment",
+      tracker_kind: "memory",
+      issue_id: "ticket",
+      kind: "google_workstations",
+      scope: %{},
+      workspace_path: "/home/user/workspaces/se-ticket",
+      template_identity: "config-uid",
+      pending: [%{verb: :start, id: nil, outcome: :unknown}]
+    }
+
     workstation = %{"uid" => "ws-uid", "etag" => "v2", "state" => "STATE_STOPPED", "reconciling" => false}
     observed = Workstations.normalize(record, workstation, [])
     assert observed.phase == :unknown
@@ -47,12 +57,14 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
   test "missing resource does not authorize replay of lost create" do
     record = %{record() | pending: [%{verb: :create, id: nil, outcome: :unknown}]}
+
     request = fn req ->
       case req[:method] do
         :get -> response(404, %{})
         _ -> flunk("ambiguous create was replayed")
       end
     end
+
     assert {:error, {:unknown, _}, returned} = Workstations.ensure(config(), record, opts(request))
     assert returned.pending == record.pending
     refute returned.absent?
@@ -60,6 +72,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
   test "page two orphan disk blocks discovery rather than manufacturing issue identity" do
     disk = %{"id" => "123", "selfLink" => "https://www.googleapis.com/compute/v1/projects/p/zones/z/disks/orphan", "labels" => labels()}
+
     request = fn req ->
       cond do
         String.ends_with?(req[:url], "/workstationConfigs") -> response(200, %{"workstationConfigs" => []})
@@ -69,6 +82,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
         String.ends_with?(req[:url], "/disks") -> response(200, %{"items" => %{}, "nextPageToken" => "next"})
       end
     end
+
     assert {:error, {:unknown, {:orphan_backing_resources, ids}}} = Workstations.discover(config(), opts(request))
     assert Enum.any?(ids, &(&1["id"] == "123"))
   end
@@ -81,6 +95,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "parent 404 with a labeled disk remains billable cleanup, never absence" do
     disk = %{"id" => "456", "selfLink" => "https://www.googleapis.com/compute/v1/projects/p/zones/z/disks/d", "labels" => labels()}
     record = %{record() | pending: [%{verb: :delete, id: operation_name(), outcome: :succeeded}], provider_ref: %{name: name(), uid: "ws-uid"}}
+
     request = fn req ->
       cond do
         String.ends_with?(req[:url], "/disks") -> response(200, %{"items" => %{"zones/z" => %{"disks" => [disk]}}})
@@ -89,6 +104,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
         true -> response(404, %{})
       end
     end
+
     assert {:error, {:unknown, {:backing_resources_remaining, _}}, returned} = Workstations.destroy(config(), record, opts(request))
     refute returned.absent?
     assert returned.metadata["backing_resources"] != []
@@ -161,12 +177,14 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
       Process.put(:tokens, count)
       {:ok, "token-#{count}"}
     end
+
     request = fn req ->
       case req[:headers] do
         [{"authorization", "Bearer token-1"}] -> response(401, %{})
         [{"authorization", "Bearer token-2"}] -> response(200, %{"done" => true})
       end
     end
+
     options = [request_fun: request, token_fun: token_fun, timeout_ms: 1_000]
     assert {:ok, %{status: 200}} = Client.request(config(), :get, "/v1/" <> operation_name(), [], nil, options)
     assert {:ok, %{status: 200}} = Client.request(config(), :get, "/v1/" <> operation_name(), [], nil, options)
@@ -177,18 +195,21 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
   test "an expired lifecycle deadline cannot issue a provider request" do
     request = fn _ -> flunk("provider request after deadline") end
-    assert {:error, {:unknown, :workstations_deadline}} = Client.request(config(), :post, "/v1/" <> name() <> ":start", [], %{},
-      Keyword.put(opts(request), :deadline, System.monotonic_time(:millisecond) - 1))
+
+    assert {:error, {:unknown, :workstations_deadline}} =
+             Client.request(config(), :post, "/v1/" <> name() <> ":start", [], %{}, Keyword.put(opts(request), :deadline, System.monotonic_time(:millisecond) - 1))
   end
 
   test "configuration page two finds retained resources after configured name changes" do
     {_server, base} = provider()
     assert {:ok, _} = Workstations.ensure(config(), record(), opts(base))
+
     request = fn req ->
       if String.ends_with?(req[:url], "/workstationConfigs") and req[:params][:pageToken] == nil,
         do: response(200, %{"workstationConfigs" => [], "nextPageToken" => "old-config"}),
         else: base.(req)
     end
+
     changed = put_in(config(), [:provider, "config"], "new-version")
     assert {:ok, [retained]} = Workstations.discover(changed, opts(request))
     assert retained.metadata["config_name"] == "projects/p/locations/l/workstationClusters/c/workstationConfigs/cfg"
@@ -199,26 +220,34 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     request = fn req ->
       if String.contains?(req[:url], "/aggregated/"), do: response(403, %{}), else: response(200, %{})
     end
+
     assert {:error, {:denied, :workstations_authorization}} = Workstations.discover(config(), opts(request))
   end
 
   test "metadata LRO timeout prevents a second intent mutation" do
     {_server, base} = provider()
     assert {:ok, created} = Workstations.ensure(config(), record(), opts(base))
+
     stalled = fn req ->
       case base.(req) do
         {:ok, %{status: 200, body: %{"metadata" => %{"verb" => "update"}} = body}} ->
           if req[:method] == :get, do: {:error, :timeout}, else: response(200, Map.put(body, "done", false))
+
         {:ok, %{status: 200, body: %{"operations" => operations}}} ->
           response(200, %{"operations" => Enum.map(operations, fn op -> if get_in(op, ["metadata", "verb"]) == "update", do: Map.put(op, "done", false), else: op end)})
-        other -> other
+
+        other ->
+          other
       end
     end
+
     assert {:error, {:unknown, _}, uncertain} = Workstations.put_intent(config(), created, %{desired: :running}, opts(stalled))
+
     no_replay = fn req ->
       if req[:method] == :patch, do: Process.put(:replayed_metadata, true)
       stalled.(req)
     end
+
     assert {:error, {:unknown, _}, _} = Workstations.put_intent(config(), uncertain, %{desired: :stopped}, opts(no_replay))
     refute Process.get(:replayed_metadata, false)
   end
@@ -233,11 +262,21 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     {:ok, port} = :inet.port(listener)
     directory = Path.join(System.tmp_dir!(), "workstation-cli-test-#{System.unique_integer([:positive])}")
     File.mkdir!(directory)
-    on_exit(fn -> :gen_tcp.close(listener); File.rm_rf!(directory) end)
+
+    on_exit(fn ->
+      :gen_tcp.close(listener)
+      File.rm_rf!(directory)
+    end)
+
     gcloud = Path.join(directory, "gcloud")
     ssh = Path.join(directory, "ssh")
     File.write!(gcloud, "#!/bin/sh\nprintf 'Listening on port [#{port}].\\n'\nread ignored\n")
-    File.write!(ssh, "#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in\nUserKnownHostsFile=*) hosts=${arg#UserKnownHostsFile=} ;;\nesac\ndone\nprintf 'pinned-test-key\\n' > \"$hosts\"\nprintf 'authenticated-worker\\n'\n")
+
+    File.write!(
+      ssh,
+      "#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in\nUserKnownHostsFile=*) hosts=${arg#UserKnownHostsFile=} ;;\nesac\ndone\nprintf 'pinned-test-key\\n' > \"$hosts\"\nprintf 'authenticated-worker\\n'\n"
+    )
+
     File.chmod!(gcloud, 0o700)
     File.chmod!(ssh, 0o700)
     supervisor = start_supervised!(Task.Supervisor)
@@ -261,12 +300,22 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     {:ok, port} = :inet.port(listener)
     directory = Path.join(System.tmp_dir!(), "workstation-stage-test-#{System.unique_integer([:positive])}")
     File.mkdir!(directory)
-    on_exit(fn -> :gen_tcp.close(listener); File.rm_rf!(directory) end)
+
+    on_exit(fn ->
+      :gen_tcp.close(listener)
+      File.rm_rf!(directory)
+    end)
+
     marker = Path.join(directory, "staged-path")
     gcloud = Path.join(directory, "gcloud")
     ssh = Path.join(directory, "ssh")
     File.write!(gcloud, "#!/bin/sh\nprintf 'Listening on port [#{port}].\\n'\nread ignored\n")
-    File.write!(ssh, "#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in\nUserKnownHostsFile=*) hosts=${arg#UserKnownHostsFile=} ;;\nesac\ndone\nprintf 'pinned-test-key\\n' > \"$hosts\"\nprintf '%s' \"$hosts\" > '#{marker}'\nread ignored\n")
+
+    File.write!(
+      ssh,
+      "#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in\nUserKnownHostsFile=*) hosts=${arg#UserKnownHostsFile=} ;;\nesac\ndone\nprintf 'pinned-test-key\\n' > \"$hosts\"\nprintf '%s' \"$hosts\" > '#{marker}'\nread ignored\n"
+    )
+
     File.chmod!(gcloud, 0o700)
     File.chmod!(ssh, 0o700)
     supervisor = start_supervised!(Task.Supervisor)
@@ -314,6 +363,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "invalid succeeded operation metadata cannot authorize destruction" do
     {server, request} = provider()
     assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+
     for id <- [nil, "", "projects/foreign/locations/l/operations/op"] do
       change_annotation(server, &Map.put(&1, "pending", [%{"verb" => "stop", "id" => id, "outcome" => "succeeded"}]))
       before = Agent.get(server, & &1.operations)
@@ -326,6 +376,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     {server, request} = provider()
     assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
     original = Agent.get(server, &get_in(&1, [:workstation, "annotations", "symphony.dev/record"]))
+
     changes = [
       &Map.delete(&1, "template_identity"),
       &Map.put(&1, "template_identity", " "),
@@ -333,6 +384,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
       &update_in(&1, ["metadata"], fn metadata -> Map.delete(metadata, "config_name") end),
       &put_in(&1, ["metadata", "config_fingerprint"], "")
     ]
+
     for change <- changes do
       Agent.update(server, &put_in(&1, [:workstation, "annotations", "symphony.dev/record"], original))
       change_annotation(server, change)
@@ -352,8 +404,17 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     File.chmod!(executable, 0o700)
     supervisor = start_supervised!(Task.Supervisor)
     request = fn _ -> response(200, %{"observed" => true}) end
-    options = [gcloud_executable: executable, task_supervisor: supervisor, authority: self(), request_fun: request,
-      deadline: System.monotonic_time(:millisecond) + 5_000, timeout_ms: 5_000, env: [{"WORKSTATION_TEST_CONTEXT", "scoped"}]]
+
+    options = [
+      gcloud_executable: executable,
+      task_supervisor: supervisor,
+      authority: self(),
+      request_fun: request,
+      deadline: System.monotonic_time(:millisecond) + 5_000,
+      timeout_ms: 5_000,
+      env: [{"WORKSTATION_TEST_CONTEXT", "scoped"}]
+    ]
+
     assert {:ok, %{status: 200, body: %{"observed" => true}}} = Client.request(config(), :get, "/v1/" <> operation_name(), [], nil, options)
   end
 
@@ -365,16 +426,30 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
   defp eventually(predicate, attempts \\ 200) do
     cond do
-      predicate.() -> :ok
-      attempts == 0 -> flunk("bounded asynchronous condition was not observed")
-      true -> Process.sleep(5); eventually(predicate, attempts - 1)
+      predicate.() ->
+        :ok
+
+      attempts == 0 ->
+        flunk("bounded asynchronous condition was not observed")
+
+      true ->
+        Process.sleep(5)
+        eventually(predicate, attempts - 1)
     end
   end
 
   defp provider(overrides \\ %{}) do
-    template = %{"name" => "projects/p/locations/l/workstationClusters/c/workstationConfigs/cfg", "uid" => "config-uid", "reconciling" => false,
-      "container" => %{"image" => "pinned-image"}, "host" => %{"gceInstance" => %{"poolSize" => 0}}, "idleTimeout" => "0s", "runningTimeout" => "0s",
-      "persistentDirectories" => [%{"mountPath" => "/home", "gcePd" => %{"reclaimPolicy" => "DELETE", "archiveTimeout" => "0s"}}]}
+    template = %{
+      "name" => "projects/p/locations/l/workstationClusters/c/workstationConfigs/cfg",
+      "uid" => "config-uid",
+      "reconciling" => false,
+      "container" => %{"image" => "pinned-image"},
+      "host" => %{"gceInstance" => %{"poolSize" => 0}},
+      "idleTimeout" => "0s",
+      "runningTimeout" => "0s",
+      "persistentDirectories" => [%{"mountPath" => "/home", "gcePd" => %{"reclaimPolicy" => "DELETE", "archiveTimeout" => "0s"}}]
+    }
+
     {:ok, server} = Agent.start_link(fn -> Map.merge(%{template: template, workstation: nil, operations: [], creates: 0, lose_create: false, stop_error: false}, overrides) end)
     request = fn req -> Agent.get_and_update(server, &respond(req, &1)) end
     {server, request}
@@ -382,47 +457,65 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
   defp respond(req, state) do
     url = req[:url]
+
     cond do
       req[:method] == :get and String.ends_with?(url, "/workstationConfigs") ->
         {response(200, %{"workstationConfigs" => [state.template]}), state}
-      req[:method] == :get and String.ends_with?(url, "/cfg") -> {response(200, state.template), state}
+
+      req[:method] == :get and String.ends_with?(url, "/cfg") ->
+        {response(200, state.template), state}
+
       req[:method] == :get and String.ends_with?(url, "/workstations") ->
         {response(200, %{"workstations" => if(state.workstation, do: [state.workstation], else: [])}), state}
-      req[:method] == :get and String.ends_with?(url, "/operations") -> {response(200, %{"operations" => state.operations}), state}
+
+      req[:method] == :get and String.ends_with?(url, "/operations") ->
+        {response(200, %{"operations" => state.operations}), state}
+
       req[:method] == :get and String.contains?(url, "/operations/") ->
         op = Enum.find(state.operations, &String.ends_with?(url, &1["name"]))
         {if(op, do: response(200, op), else: response(404, %{})), state}
+
       req[:method] == :get and String.contains?(url, "/aggregated/") ->
         kind = List.last(String.split(url, "/"))
         resource = %{"id" => kind, "selfLink" => "https://www.googleapis.com/compute/v1/projects/p/zones/z/" <> kind <> "/backing", "labels" => labels()}
         items = if state.workstation, do: [resource], else: []
         {response(200, %{"items" => %{"zones/z" => %{kind => items}}}), state}
-      req[:method] == :get -> {if(state.workstation, do: response(200, state.workstation), else: response(404, %{})), state}
-      true -> mutate_response(req, state)
+
+      req[:method] == :get ->
+        {if(state.workstation, do: response(200, state.workstation), else: response(404, %{})), state}
+
+      true ->
+        mutate_response(req, state)
     end
   end
 
   defp mutate_response(req, state) do
-    verb = cond do
-      req[:method] == :patch -> "update"
-      req[:method] == :delete -> "delete"
-      String.ends_with?(req[:url], ":start") -> "start"
-      String.ends_with?(req[:url], ":stop") -> "stop"
-      true -> "create"
-    end
+    verb =
+      cond do
+        req[:method] == :patch -> "update"
+        req[:method] == :delete -> "delete"
+        String.ends_with?(req[:url], ":start") -> "start"
+        String.ends_with?(req[:url], ":stop") -> "stop"
+        true -> "create"
+      end
+
     if verb != "create" do
       expected_etag = if verb == "delete", do: req[:params][:etag], else: req[:json]["etag"]
       assert expected_etag == state.workstation["etag"]
     end
+
     op = operation(verb, true) |> Map.put("name", operation_name() <> Integer.to_string(length(state.operations))) |> put_in(["metadata", "createTime"], DateTime.to_iso8601(DateTime.utc_now()))
     op = if verb == "stop" and state.stop_error, do: Map.put(op, "error", %{"code" => 13}), else: op
-    workstation = case verb do
-      "create" -> Map.merge(workstation(), req[:json])
-      "update" -> Map.merge(state.workstation, req[:json])
-      "start" -> Map.put(state.workstation, "state", "STATE_RUNNING")
-      "stop" -> Map.put(state.workstation, "state", "STATE_STOPPED")
-      "delete" -> nil
-    end
+
+    workstation =
+      case verb do
+        "create" -> Map.merge(workstation(), req[:json])
+        "update" -> Map.merge(state.workstation, req[:json])
+        "start" -> Map.put(state.workstation, "state", "STATE_RUNNING")
+        "stop" -> Map.put(state.workstation, "state", "STATE_STOPPED")
+        "delete" -> nil
+      end
+
     workstation = if workstation, do: Map.put(workstation, "etag", "etag-" <> Integer.to_string(length(state.operations))), else: nil
     next = %{state | workstation: workstation, operations: state.operations ++ [op], creates: state.creates + if(verb == "create", do: 1, else: 0)}
     result = if verb == "create" and state.lose_create, do: {:error, :timeout}, else: response(200, op)
@@ -430,14 +523,37 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   end
 
   defp config do
-    %{kind: "google_workstations", deployment_id: "deployment", tracker_kind: "memory", workspace_root: "/home/user/workspaces", startup_timeout_ms: 10_000,
-      shutdown_timeout_ms: 10_000, terminal_retention_ms: 60_000,
-      provider: %{"project" => "p", "location" => "l", "cluster" => "c", "config" => "cfg", "credential_configuration" => "deploy", "impersonate_service_account" => "sa@example.com", "ssh_user" => "user"}}
+    %{
+      kind: "google_workstations",
+      deployment_id: "deployment",
+      tracker_kind: "memory",
+      workspace_root: "/home/user/workspaces",
+      startup_timeout_ms: 10_000,
+      shutdown_timeout_ms: 10_000,
+      terminal_retention_ms: 60_000,
+      provider: %{
+        "project" => "p",
+        "location" => "l",
+        "cluster" => "c",
+        "config" => "cfg",
+        "credential_configuration" => "deploy",
+        "impersonate_service_account" => "sa@example.com",
+        "ssh_user" => "user"
+      }
+    }
   end
 
   defp record do
-    %Record{key: SymphonyElixir.ExecutionEnvironment.resource_key("deployment", "memory", "ticket"), deployment_id: "deployment", tracker_kind: "memory", issue_id: "ticket",
-      kind: "google_workstations", scope: Map.take(config().provider, ["project", "location", "cluster"]), workspace_path: "/home/user/workspaces/ticket", template_identity: "config-uid"}
+    %Record{
+      key: SymphonyElixir.ExecutionEnvironment.resource_key("deployment", "memory", "ticket"),
+      deployment_id: "deployment",
+      tracker_kind: "memory",
+      issue_id: "ticket",
+      kind: "google_workstations",
+      scope: Map.take(config().provider, ["project", "location", "cluster"]),
+      workspace_path: "/home/user/workspaces/ticket",
+      template_identity: "config-uid"
+    }
   end
 
   defp name, do: "projects/p/locations/l/workstationClusters/c/workstationConfigs/cfg/workstations/" <> record().key

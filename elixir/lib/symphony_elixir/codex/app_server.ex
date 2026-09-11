@@ -310,7 +310,6 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-
   defp do_start_session(port, workspace, session_policies, dynamic_tool_binding) do
     case send_initialize(port) do
       :ok -> start_thread(port, workspace, session_policies, dynamic_tool_binding)

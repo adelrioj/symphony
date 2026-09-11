@@ -325,7 +325,6 @@ defmodule SymphonyElixir.Agent.Claude do
     end
   end
 
-
   defp claude_executable(command) when is_binary(command) do
     command = String.trim(command)
 

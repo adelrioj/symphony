@@ -23,9 +23,12 @@ defmodule SymphonyElixir.AgentRunner do
       Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(context.worker_host)}")
 
       case run_on_worker_host(issue, codex_update_recipient, opts, context) do
-        :ok -> :ok
+        :ok ->
+          :ok
+
         {:error, {:managed_execution_unknown, _detail} = reason} ->
           exit(reason)
+
         {:error, reason} ->
           Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
           raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"

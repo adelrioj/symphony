@@ -6,8 +6,43 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
     @moduledoc false
     @enforce_keys [:record, :attempt_id, :purpose]
     @derive {Inspect, only: [:record, :attempt_id, :operation_id, :purpose, :phase]}
-    defstruct [:record, :context, :attempt_id, :operation_id, :purpose, :completion, :last_error, :issue, :backend_module, :agent_executable, :retry_attempt, :metadata_intent, :terminal_observation, :cleanup_retry_at, phase: :reserved, operation_seq: 0]
-    @type t :: %__MODULE__{record: Record.t(), context: SymphonyElixir.ExecutionContext.t() | nil, attempt_id: String.t(), operation_id: {String.t(), non_neg_integer()} | nil, purpose: :agent | :cleanup, phase: atom(), completion: term(), last_error: term(), issue: term(), backend_module: module() | nil, agent_executable: String.t() | nil, retry_attempt: term(), metadata_intent: map() | nil, terminal_observation: integer() | nil, cleanup_retry_at: integer() | nil, operation_seq: non_neg_integer()}
+    defstruct [
+      :record,
+      :context,
+      :attempt_id,
+      :operation_id,
+      :purpose,
+      :completion,
+      :last_error,
+      :issue,
+      :backend_module,
+      :agent_executable,
+      :retry_attempt,
+      :metadata_intent,
+      :terminal_observation,
+      :cleanup_retry_at,
+      phase: :reserved,
+      operation_seq: 0
+    ]
+
+    @type t :: %__MODULE__{
+            record: Record.t(),
+            context: SymphonyElixir.ExecutionContext.t() | nil,
+            attempt_id: String.t(),
+            operation_id: {String.t(), non_neg_integer()} | nil,
+            purpose: :agent | :cleanup,
+            phase: atom(),
+            completion: term(),
+            last_error: term(),
+            issue: term(),
+            backend_module: module() | nil,
+            agent_executable: String.t() | nil,
+            retry_attempt: term(),
+            metadata_intent: map() | nil,
+            terminal_observation: integer() | nil,
+            cleanup_retry_at: integer() | nil,
+            operation_seq: non_neg_integer()
+          }
   end
 
   @spec new(Record.t(), String.t(), :agent | :cleanup) :: Entry.t()
@@ -19,11 +54,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   def step(%Entry{phase: :reserved} = entry, :prepare, _now), do: operation(entry, :prepare, :preparing)
 
   def step(%Entry{} = entry, {:reconcile, operation}, _now) when operation in [:stop, :destroy, :inspect, :metadata, :cleanup_hook] do
-    phase = case operation do
-      :stop -> :stopping
-      :destroy -> :deleting
-      _ -> entry.phase
-    end
+    phase =
+      case operation do
+        :stop -> :stopping
+        :destroy -> :deleting
+        _ -> entry.phase
+      end
+
     operation(entry, operation, phase)
   end
 

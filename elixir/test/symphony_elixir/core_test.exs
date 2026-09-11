@@ -307,11 +307,14 @@ defmodule SymphonyElixir.CoreTest do
   test "SymphonyElixir.start_link starts the agent runtime" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
-    pid = start_supervised!(%{
-      id: SymphonyElixir.AgentRuntimeSupervisor,
-      start: {SymphonyElixir, :start_link, []},
-      type: :supervisor
-    })
+
+    pid =
+      start_supervised!(%{
+        id: SymphonyElixir.AgentRuntimeSupervisor,
+        start: {SymphonyElixir, :start_link, []},
+        type: :supervisor
+      })
+
     assert Process.whereis(SymphonyElixir.AgentRuntimeSupervisor) == pid
     assert is_pid(Process.whereis(SymphonyElixir.TaskSupervisor))
     assert is_pid(Process.whereis(SymphonyElixir.Orchestrator))
@@ -324,7 +327,14 @@ defmodule SymphonyElixir.CoreTest do
     name = Module.concat(__MODULE__, OwnedFixtureOrchestrator)
     {:ok, pid} = start_test_orchestrator(name: name)
     task_supervisor = :sys.get_state(pid).task_supervisor
-    {:ok, worker} = Task.Supervisor.start_child(task_supervisor, fn -> receive do :stop -> :ok end end)
+
+    {:ok, worker} =
+      Task.Supervisor.start_child(task_supervisor, fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
     monitor = Process.monitor(worker)
     stop_supervised!(Module.concat(name, RuntimeSupervisor))
     assert_receive {:DOWN, ^monitor, :process, ^worker, :shutdown}
@@ -347,7 +357,6 @@ defmodule SymphonyElixir.CoreTest do
       if is_nil(Process.whereis(WorkflowStore)) do
         assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
       end
-
     end)
 
     assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
@@ -373,15 +382,11 @@ defmodule SymphonyElixir.CoreTest do
     task_supervisor_name = Module.concat(__MODULE__, "ReloadTaskSupervisor#{issue_suffix}")
     orchestrator_name = Module.concat(__MODULE__, "ReloadOrchestrator#{issue_suffix}")
 
-
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
     runtime_pid =
-      start_supervised!({SymphonyElixir.AgentRuntimeSupervisor,
-        name: runtime_supervisor_name,
-        task_supervisor_name: task_supervisor_name,
-        orchestrator_name: orchestrator_name
-      })
+      start_supervised!({SymphonyElixir.AgentRuntimeSupervisor, name: runtime_supervisor_name, task_supervisor_name: task_supervisor_name, orchestrator_name: orchestrator_name})
+
     original_orchestrator_pid = Process.whereis(orchestrator_name)
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -447,7 +452,6 @@ defmodule SymphonyElixir.CoreTest do
       File.rm_rf(test_root)
     end)
 
-
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       workspace_root: test_root,
@@ -458,11 +462,7 @@ defmodule SymphonyElixir.CoreTest do
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
-      start_supervised!({SymphonyElixir.AgentRuntimeSupervisor,
-        name: runtime_supervisor_name,
-        task_supervisor_name: task_supervisor_name,
-        orchestrator_name: orchestrator_name
-      })
+    start_supervised!({SymphonyElixir.AgentRuntimeSupervisor, name: runtime_supervisor_name, task_supervisor_name: task_supervisor_name, orchestrator_name: orchestrator_name})
 
     orchestrator_pid = Process.whereis(orchestrator_name)
     task_supervisor_pid = Process.whereis(task_supervisor_name)
@@ -760,7 +760,6 @@ defmodule SymphonyElixir.CoreTest do
 
       on_exit(fn ->
         restore_app_env(:memory_tracker_issues, previous_memory_issues)
-
       end)
 
       Process.sleep(50)
@@ -1075,7 +1074,6 @@ defmodule SymphonyElixir.CoreTest do
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
     {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-
     initial_state = :sys.get_state(pid)
 
     running_entry = %{
@@ -1247,7 +1245,6 @@ defmodule SymphonyElixir.CoreTest do
     orchestrator_name = Module.concat(__MODULE__, :CrashRetryOrchestrator)
     {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-
     initial_state = :sys.get_state(pid)
 
     running_entry = %{
@@ -1284,7 +1281,6 @@ defmodule SymphonyElixir.CoreTest do
     orchestrator_name = Module.concat(__MODULE__, :InitialCrashRetryOrchestrator)
     {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
 
-
     initial_state = :sys.get_state(pid)
 
     running_entry = %{
@@ -1318,7 +1314,6 @@ defmodule SymphonyElixir.CoreTest do
     issue_id = "issue-stale-retry"
     orchestrator_name = Module.concat(__MODULE__, :StaleRetryOrchestrator)
     {:ok, pid} = start_test_orchestrator(name: orchestrator_name)
-
 
     initial_state = :sys.get_state(pid)
     current_retry_token = make_ref()
@@ -1429,7 +1424,6 @@ defmodule SymphonyElixir.CoreTest do
   defp start_orchestrator!(name) do
     {:ok, pid} = start_test_orchestrator(name: Module.concat(__MODULE__, name))
 
-
     pid
   end
 
@@ -1505,7 +1499,6 @@ defmodule SymphonyElixir.CoreTest do
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
-
 
   defp eventually_value(fun, attempts \\ 100)
 

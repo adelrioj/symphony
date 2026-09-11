@@ -3,7 +3,16 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
   alias SymphonyElixir.ExecutionEnvironment.{Lifecycle, Record}
 
   defp record do
-    %Record{key: "se-ticket", deployment_id: "deployment", tracker_kind: "memory", issue_id: "ticket", kind: "kubernetes", scope: %{}, workspace_path: "/state/workspaces/se-ticket", template_identity: "template-v1"}
+    %Record{
+      key: "se-ticket",
+      deployment_id: "deployment",
+      tracker_kind: "memory",
+      issue_id: "ticket",
+      kind: "kubernetes",
+      scope: %{},
+      workspace_path: "/state/workspaces/se-ticket",
+      template_identity: "template-v1"
+    }
   end
 
   test "agent exit cannot release capacity until remote stop is proved" do

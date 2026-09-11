@@ -344,6 +344,7 @@ defmodule SymphonyElixir.Config.Schema do
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
   def parse(config) when is_map(config) do
     attrs = normalize_keys(config)
+
     with :ok <- validate_worker_source(attrs) do
       attrs
       |> drop_nil_values()
@@ -361,8 +362,10 @@ defmodule SymphonyElixir.Config.Schema do
       cond do
         Enum.any?(["ssh_hosts", "max_concurrent_agents_per_host"], &Map.has_key?(worker, &1)) ->
           {:error, {:invalid_workflow_config, "managed and static worker settings conflict"}}
+
         not is_map(worker["environment"]) or map_size(worker["environment"]) == 0 ->
           {:error, {:invalid_workflow_config, "worker.environment must be a nonempty managed configuration"}}
+
         true ->
           case SymphonyElixir.ExecutionEnvironment.Config.parse(worker["environment"]) do
             {:ok, _} -> :ok
@@ -373,6 +376,7 @@ defmodule SymphonyElixir.Config.Schema do
       :ok
     end
   end
+
   defp validate_worker_source(_attrs), do: :ok
 
   @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil) :: map()

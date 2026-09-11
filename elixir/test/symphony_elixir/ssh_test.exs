@@ -5,6 +5,7 @@ defmodule SymphonyElixir.SSHTest do
 
   test "structured targets preserve shell arguments without local interpolation" do
     target = %SSH.Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture"}
+
     assert {:ok, {"literal ' quote\n", 0}} =
              SSH.run(target, "printf '%s\\n' \"literal ' quote\"")
   end
@@ -176,7 +177,6 @@ defmodule SymphonyElixir.SSHTest do
     File.chmod!(fake_ssh, 0o755)
     System.put_env("PATH", fake_bin_dir <> ":" <> (System.get_env("PATH") || ""))
   end
-
 
   defp restore_env(key, nil), do: System.delete_env(key)
   defp restore_env(key, value), do: System.put_env(key, value)

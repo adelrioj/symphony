@@ -17,7 +17,16 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
   end
 
   defp record do
-    %Record{key: "se-ticket", deployment_id: "deployment", tracker_kind: "memory", issue_id: "ticket", kind: "kubernetes", scope: %{}, workspace_path: "/state/workspaces/se-ticket", template_identity: "template-v1"}
+    %Record{
+      key: "se-ticket",
+      deployment_id: "deployment",
+      tracker_kind: "memory",
+      issue_id: "ticket",
+      kind: "kubernetes",
+      scope: %{},
+      workspace_path: "/state/workspaces/se-ticket",
+      template_identity: "template-v1"
+    }
   end
 
   test "blocked provider work does not block its orchestrator-style authority" do
@@ -25,10 +34,15 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     owner = start_supervised!({Agent, fn -> :responsive end})
     parent = self()
     entry = Lifecycle.new(record(), "a", :agent)
+
     operation_fun = fn _, _, _, _, opts ->
       send(parent, {:blocked, self(), opts[:authority], opts[:task_supervisor]})
-      receive do :finish -> {:error, {:unknown, :blocked}, entry.record} end
+
+      receive do
+        :finish -> {:error, {:unknown, :blocked}, entry.record}
+      end
     end
+
     assert {:ok, task} = Operations.start(supervisor, Provider, %{}, entry, :prepare, authority: owner, operation_fun: operation_fun)
     assert_receive {:blocked, job, ^owner, ^supervisor}
     assert Agent.get(owner, & &1) == :responsive
@@ -50,11 +64,14 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     File.write!(path, "private")
     on_exit(fn -> File.rm(path) end)
     authority = self()
-    task = Task.Supervisor.async_nolink(supervisor, fn ->
-      port = Port.open({:spawn_executable, System.find_executable("cat")}, [:binary, :exit_status])
-      {:ok, lease} = Operations.open_connection(supervisor, authority, target, ports: [port], private_paths: [path])
-      {lease, port}
-    end)
+
+    task =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        port = Port.open({:spawn_executable, System.find_executable("cat")}, [:binary, :exit_status])
+        {:ok, lease} = Operations.open_connection(supervisor, authority, target, ports: [port], private_paths: [path])
+        {lease, port}
+      end)
+
     {lease, port} = Task.await(task)
     assert Port.info(port, :connected) == {:connected, lease.owner}
     assert GenServer.call(lease.owner, {:validate_connection, lease.id, target}) == :ok
@@ -72,11 +89,17 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     File.mkdir_p!(path)
     File.write!(Path.join(path, "key"), "private")
     on_exit(fn -> File.rm_rf(path) end)
-    donor = spawn(fn ->
-      {:ok, lease} = Operations.stage_private_paths(supervisor, parent, self(), [path])
-      send(parent, {:staged, lease})
-      receive do :finish -> :ok end
-    end)
+
+    donor =
+      spawn(fn ->
+        {:ok, lease} = Operations.stage_private_paths(supervisor, parent, self(), [path])
+        send(parent, {:staged, lease})
+
+        receive do
+          :finish -> :ok
+        end
+      end)
+
     assert_receive {:staged, {:staged_paths, owner, id}}
     monitor = Process.monitor(owner)
     assert {:error, :invalid_connection} = GenServer.call(owner, {:adopt_connection, id})
@@ -88,7 +111,14 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
 
   test "staged lease release is ID checked and authority death cleans unreleased paths" do
     supervisor = start_supervised!(Task.Supervisor)
-    authority = spawn(fn -> receive do :stop -> :ok end end)
+
+    authority =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
     path = Path.join(System.tmp_dir!(), "symphony-staged-authority-#{System.unique_integer([:positive])}")
     File.mkdir_p!(path)
     on_exit(fn -> File.rm_rf(path) end)
@@ -114,13 +144,19 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     File.mkdir_p!(path)
     File.write!(Path.join(path, "key"), "private")
     on_exit(fn -> File.rm_rf(path) end)
-    task = Task.Supervisor.async_nolink(supervisor, fn ->
-      {:ok, {:staged_paths, owner, id} = stage} = Operations.stage_private_paths(supervisor, authority, self(), [path])
-      {:ok, connection} = Operations.open_connection(supervisor, authority, target, private_paths: [path], staged_paths: stage)
-      assert connection.owner == owner
-      assert connection.id == id
-      receive do :return -> connection end
-    end)
+
+    task =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        {:ok, {:staged_paths, owner, id} = stage} = Operations.stage_private_paths(supervisor, authority, self(), [path])
+        {:ok, connection} = Operations.open_connection(supervisor, authority, target, private_paths: [path], staged_paths: stage)
+        assert connection.owner == owner
+        assert connection.id == id
+
+        receive do
+          :return -> connection
+        end
+      end)
+
     monitor = Process.monitor(task.pid)
     send(task.pid, :return)
     connection = Task.await(task)
@@ -138,13 +174,19 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     path = Path.join(System.tmp_dir!(), "symphony-promoted-crash-#{System.unique_integer([:positive])}")
     File.mkdir_p!(path)
     on_exit(fn -> File.rm_rf(path) end)
-    donor = spawn(fn ->
-      {:ok, stage} = Operations.stage_private_paths(supervisor, authority, self(), [path])
-      {:ok, port} = Operations.start_staged_port(stage, System.find_executable("cat"), [], [])
-      {:ok, connection} = Operations.open_connection(supervisor, authority, target, ports: [port], private_paths: [path], staged_paths: stage)
-      send(authority, {:promoted, connection, port})
-      receive do :finish -> :ok end
-    end)
+
+    donor =
+      spawn(fn ->
+        {:ok, stage} = Operations.stage_private_paths(supervisor, authority, self(), [path])
+        {:ok, port} = Operations.start_staged_port(stage, System.find_executable("cat"), [], [])
+        {:ok, connection} = Operations.open_connection(supervisor, authority, target, ports: [port], private_paths: [path], staged_paths: stage)
+        send(authority, {:promoted, connection, port})
+
+        receive do
+          :finish -> :ok
+        end
+      end)
+
     on_exit(fn -> Process.exit(donor, :kill) end)
     assert_receive {:promoted, connection, port}
     monitor = Process.monitor(connection.owner)
@@ -160,16 +202,23 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     path = Path.join(System.tmp_dir!(), "symphony-staged-port-#{System.unique_integer([:positive])}")
     File.mkdir_p!(path)
     on_exit(fn -> File.rm_rf(path) end)
-    donor = spawn(fn ->
-      {:ok, {:staged_paths, owner, _} = stage} = Operations.stage_private_paths(supervisor, authority, self(), [path])
-      {:ok, port} = Operations.start_staged_port(stage, "/bin/sh", ["-c", "printf ready; exec sleep 10"], [])
-      receive do
-        {^port, {:data, "ready"}} ->
-          {:os_pid, pid} = Port.info(port, :os_pid)
-          send(authority, {:staged_tunnel, owner, port, pid})
-      end
-      receive do :finish -> :ok end
-    end)
+
+    donor =
+      spawn(fn ->
+        {:ok, {:staged_paths, owner, _} = stage} = Operations.stage_private_paths(supervisor, authority, self(), [path])
+        {:ok, port} = Operations.start_staged_port(stage, "/bin/sh", ["-c", "printf ready; exec sleep 10"], [])
+
+        receive do
+          {^port, {:data, "ready"}} ->
+            {:os_pid, pid} = Port.info(port, :os_pid)
+            send(authority, {:staged_tunnel, owner, port, pid})
+        end
+
+        receive do
+          :finish -> :ok
+        end
+      end)
+
     on_exit(fn -> Process.exit(donor, :kill) end)
     assert_receive {:staged_tunnel, owner, port, pid}
     assert Port.info(port, :connected) == {:connected, owner}
@@ -188,7 +237,14 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     path = Path.join(System.tmp_dir!(), "symphony-promotion-check-#{System.unique_integer([:positive])}")
     File.mkdir_p!(path)
     on_exit(fn -> File.rm_rf(path) end)
-    other_authority = spawn(fn -> receive do :finish -> :ok end end)
+
+    other_authority =
+      spawn(fn ->
+        receive do
+          :finish -> :ok
+        end
+      end)
+
     on_exit(fn -> Process.exit(other_authority, :kill) end)
     {:ok, {:staged_paths, owner, _id} = stage} = Operations.stage_private_paths(supervisor, self(), self(), [path])
     assert {:error, _} = Operations.open_connection(supervisor, other_authority, target, private_paths: [path], staged_paths: stage)
@@ -200,7 +256,14 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
 
   test "authority death invalidates lease and removes owned local resources" do
     supervisor = start_supervised!(Task.Supervisor)
-    authority = spawn(fn -> receive do :stop -> :ok end end)
+
+    authority =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
     target = %Target{executable: "/usr/bin/ssh", prefix: ["worker"], label: "worker"}
     {:ok, lease} = Operations.open_connection(supervisor, authority, target, [])
     monitor = Process.monitor(lease.owner)
@@ -227,10 +290,12 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     {:ok, lease} = Operations.open_connection(supervisor, self(), target, [])
     pending = %{record() | pending: [%{verb: :start, id: "late-start", outcome: :unknown}]}
     entry = %{Lifecycle.new(pending, "a", :agent) | context: %{connection: lease}}
+
     request = fn
       {:intent, %{desired: :stopped}}, record, _ -> {:ok, %{record | desired: :stopped}}
       :stop, record, _ -> {:error, {:unknown, :still_starting}, record}
     end
+
     assert {:error, {:unknown, :still_starting}, latest} = Operations.run(Provider, %{shutdown_timeout_ms: 100}, entry, :stop, request_fun: request)
     assert latest.pending == pending.pending
     assert latest.proof == :unknown
@@ -244,18 +309,22 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     on_exit(fn -> File.rm_rf(root) end)
     shell_env = Path.join(root, "worker-environment")
     probe_observation = Path.join(root, "realpath-behavior-observed")
+
     File.write!(shell_env, """
     findmnt() { printf '/persistent\\n'; }
     realpath() {
       if [ "$1" = --version ]; then printf 'GNU coreutils\\n'; else printf called > "$SYMPHONY_REALPATH_PROBE"; printf '/incorrect-result\\n'; fi
     }
     """)
+
     target = %Target{executable: "/bin/sh", prefix: ["-c", "eval \"$1\"", "fake-ssh"], label: "worker", env: [{"BASH_ENV", shell_env}, {"SYMPHONY_REALPATH_PROBE", probe_observation}]}
     {config, entry} = preparation(root)
     parent = self()
     request = prepare_request(supervisor, target, parent)
+
     assert {:error, {:invalid, :worker_readiness}, latest} =
              Operations.run(Provider, config, entry, :prepare, task_supervisor: supervisor, authority: self(), agent_executable: "sh", request_fun: request)
+
     assert latest.phase == :running
     assert latest.version == "observed-running"
     assert latest.proof == :unknown
@@ -300,21 +369,45 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     {config, entry} = preparation("/state/workspaces")
     entry = %{entry | attempt_id: "current-attempt", record: %{entry.record | issue_state: "In Review", issue_identifier: "ISSUE-42"}}
     fallback = prepare_request(supervisor, target, self())
+
     request = fn
       :ensure, record, _ ->
-        {:ok, %{record | attempt_id: "durable-old-attempt", issue_state: "Implemented", issue_identifier: "OLD-7", template_identity: "retained-template", workspace_path: "/state/workspaces/retained-ticket", terminal_observed_at: 123}}
+        {:ok,
+         %{
+           record
+           | attempt_id: "durable-old-attempt",
+             issue_state: "Implemented",
+             issue_identifier: "OLD-7",
+             template_identity: "retained-template",
+             workspace_path: "/state/workspaces/retained-ticket",
+             terminal_observed_at: 123
+         }}
+
       {:intent, %{desired: :running, terminal_observed_at: 123}}, %{attempt_id: "current-attempt", issue_state: "In Review", issue_identifier: "ISSUE-42"} = record, _ ->
         {:ok, %{record | desired: :running, metadata: Map.put(record.metadata, "accepted_attempt", "current-attempt")}}
+
       {:intent, _}, record, _ ->
         {:error, {:denied, :stale_attempt_intent}, record}
+
       :start, %{attempt_id: "current-attempt", issue_state: "In Review", issue_identifier: "ISSUE-42", metadata: %{"accepted_attempt" => "current-attempt"}} = record, _ ->
         {:ok, %{record | phase: :running}}
+
       :start, record, _ ->
         {:error, {:denied, :stale_attempt_start}, record}
-      operation, record, opts -> fallback.(operation, record, opts)
+
+      operation, record, opts ->
+        fallback.(operation, record, opts)
     end
-    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare,
-      task_supervisor: supervisor, authority: self(), request_fun: request, agent_executable: "claude", command_fun: fn _, _, _ -> {:ok, %{output: "", status: 0}} end)
+
+    assert {:ok, context} =
+             Operations.run(Provider, config, entry, :prepare,
+               task_supervisor: supervisor,
+               authority: self(),
+               request_fun: request,
+               agent_executable: "claude",
+               command_fun: fn _, _, _ -> {:ok, %{output: "", status: 0}} end
+             )
+
     assert context.workspace_path == "/state/workspaces/retained-ticket"
     assert context.environment.record.template_identity == "retained-template"
     assert context.environment.record.terminal_observed_at == 123
@@ -322,17 +415,49 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
   end
 
   defp preparation(root) do
-    config = %{kind: "kubernetes", deployment_id: "deployment", tracker_kind: "memory", workspace_root: root, provider: %{"kubeconfig" => "/operator/config", "context" => "test", "namespace" => "workers", "template" => "/operator/template", "ssh_user" => "worker", "ssh_auth_volume" => "key", "ssh_port" => 2222}, startup_timeout_ms: 5_000, shutdown_timeout_ms: 5_000, terminal_retention_ms: 0}
-    record = %{record() | key: SymphonyElixir.ExecutionEnvironment.resource_key("deployment", "memory", "ticket"), scope: SymphonyElixir.ExecutionEnvironment.Config.scope(config), workspace_path: Path.join(root, "ticket")}
+    config = %{
+      kind: "kubernetes",
+      deployment_id: "deployment",
+      tracker_kind: "memory",
+      workspace_root: root,
+      provider: %{
+        "kubeconfig" => "/operator/config",
+        "context" => "test",
+        "namespace" => "workers",
+        "template" => "/operator/template",
+        "ssh_user" => "worker",
+        "ssh_auth_volume" => "key",
+        "ssh_port" => 2222
+      },
+      startup_timeout_ms: 5_000,
+      shutdown_timeout_ms: 5_000,
+      terminal_retention_ms: 0
+    }
+
+    record = %{
+      record()
+      | key: SymphonyElixir.ExecutionEnvironment.resource_key("deployment", "memory", "ticket"),
+        scope: SymphonyElixir.ExecutionEnvironment.Config.scope(config),
+        workspace_path: Path.join(root, "ticket")
+    }
+
     {config, Lifecycle.new(record, "attempt", :agent)}
   end
 
   defp prepare_request(supervisor, target, parent) do
     fn
-      :ensure, record, _ -> {:ok, record}
-      {:intent, %{desired: :running}}, record, _ -> {:ok, %{record | desired: :running}}
-      :start, record, _ -> {:ok, %{record | phase: :running}}
-      :inspect, record, _ -> {:ok, %{record | version: "observed-running"}}
+      :ensure, record, _ ->
+        {:ok, record}
+
+      {:intent, %{desired: :running}}, record, _ ->
+        {:ok, %{record | desired: :running}}
+
+      :start, record, _ ->
+        {:ok, %{record | phase: :running}}
+
+      :inspect, record, _ ->
+        {:ok, %{record | version: "observed-running"}}
+
       :connect, _, opts ->
         {:ok, lease} = Operations.open_connection(supervisor, opts[:authority], target, [])
         send(parent, {:connected, lease})
@@ -344,11 +469,13 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     clock = start_supervised!({Agent, fn -> 0 end})
     pending = %{record() | terminal_observed_at: 1_000, pending: [%{verb: :stop, id: "stop", outcome: :pending}]}
     entry = Lifecycle.new(pending, "a", :cleanup)
+
     request = fn
       {:intent, %{desired: :stopped, terminal_observed_at: 1_000}}, record, _ -> {:ok, record}
       :stop, record, _ -> {:ok, record}
       :inspect, record, opts -> {:ok, %{record | version: opts[:timeout_ms]}}
     end
+
     opts = [request_fun: request, clock: fn -> Agent.get(clock, & &1) end, sleep_fun: fn milliseconds -> Agent.update(clock, &(&1 + milliseconds)) end]
     assert {:error, {:unknown, {:operation_timeout, :stopped}}, latest} = Operations.run(Provider, %{shutdown_timeout_ms: 1_500}, entry, :stop, opts)
     assert latest.version == 500
@@ -359,7 +486,10 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
   test "argv helper does not interpret shell metacharacters and bounds diagnostics" do
     supervisor = start_supervised!(Task.Supervisor)
     assert {:ok, %{output: "$(echo forbidden)", status: 0}} = Command.run(System.find_executable("printf"), ["%s", "$(echo forbidden)"], task_supervisor: supervisor, timeout_ms: 1_000)
-    assert {:error, {:unknown, {:output_limit, output}}} = Command.run(System.find_executable("printf"), ["%s", String.duplicate("x", 100)], task_supervisor: supervisor, timeout_ms: 1_000, max_output_bytes: 8)
+
+    assert {:error, {:unknown, {:output_limit, output}}} =
+             Command.run(System.find_executable("printf"), ["%s", String.duplicate("x", 100)], task_supervisor: supervisor, timeout_ms: 1_000, max_output_bytes: 8)
+
     assert byte_size(output) <= 8
     assert {:error, {:unknown, {:timeout, _}}} = Command.run(System.find_executable("sleep"), ["10"], task_supervisor: supervisor, timeout_ms: 10)
   end
@@ -376,15 +506,19 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
   test "JSON request bodies are private and removed even when the consumer raises" do
     supervisor = start_supervised!(Task.Supervisor)
     parent = self()
+
     assert_raise RuntimeError, fn ->
-      Command.with_json_file(%{"safe" => true}, fn path ->
-        send(parent, {:private_file, path})
-        assert {:ok, %{mode: mode}} = File.stat(path)
-        assert Bitwise.band(mode, 0o777) == 0o600
-        assert Jason.decode!(File.read!(path)) == %{"safe" => true}
-        raise "consumer failure"
-      end, task_supervisor: supervisor)
+      Command.with_json_file(
+        %{"safe" => true},
+        fn path ->
+          send(parent, {:private_file, path})
+          assert {:ok, %{mode: mode}} = File.stat(path)
+          assert Bitwise.band(mode, 0o777) == 0o600
+          assert Jason.decode!(File.read!(path)) == %{"safe" => true}
+          raise "consumer failure"
+        end, task_supervisor: supervisor)
     end
+
     assert_receive {:private_file, path}
     refute File.exists?(path)
   end
@@ -396,10 +530,12 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     on_exit(fn -> File.rm_rf(root) end)
     pid_path = Path.join(root, "pid")
     authority = self()
-    task = Task.Supervisor.async_nolink(supervisor, fn ->
-      Command.run("/bin/sh", ["-c", "printf '%s\\n' \"$$\" > \"$PID_FILE\"; exec sleep 30"],
-        task_supervisor: supervisor, authority: authority, timeout_ms: 30_000, env: [{"PID_FILE", pid_path}])
-    end)
+
+    task =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Command.run("/bin/sh", ["-c", "printf '%s\\n' \"$$\" > \"$PID_FILE\"; exec sleep 30"], task_supervisor: supervisor, authority: authority, timeout_ms: 30_000, env: [{"PID_FILE", pid_path}])
+      end)
+
     eventually(fn -> match?({:ok, content} when byte_size(content) > 0, File.read(pid_path)) end)
     pid = pid_path |> File.read!() |> String.trim() |> String.to_integer()
     assert {_diagnostic, 0} = System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true)
@@ -411,12 +547,20 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
   test "brutal JSON callback cancellation removes the protected request directory" do
     supervisor = start_supervised!(Task.Supervisor)
     authority = self()
-    task = Task.Supervisor.async_nolink(supervisor, fn ->
-      Command.with_json_file(%{"secret" => "private"}, fn path ->
-        send(authority, {:json_callback_blocked, path})
-        receive do :finish -> :ok end
-      end, task_supervisor: supervisor, authority: authority)
-    end)
+
+    task =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Command.with_json_file(
+          %{"secret" => "private"},
+          fn path ->
+            send(authority, {:json_callback_blocked, path})
+
+            receive do
+              :finish -> :ok
+            end
+          end, task_supervisor: supervisor, authority: authority)
+      end)
+
     assert_receive {:json_callback_blocked, path}
     assert Jason.decode!(File.read!(path)) == %{"secret" => "private"}
     Task.shutdown(task, :brutal_kill)
@@ -439,6 +583,7 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
 
   defp eventually(fun, remaining \\ 100)
   defp eventually(fun, 0), do: assert(fun.())
+
   defp eventually(fun, remaining) do
     unless fun.() do
       Process.sleep(10)

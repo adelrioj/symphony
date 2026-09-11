@@ -248,7 +248,8 @@ defmodule SymphonyElixir.AppServerTest do
           codex_turn_sandbox_policy: configured_policy
         )
 
-        assert {:ok, _result} = AppServer.run(workspace, "Validate supported turn policy", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+        assert {:ok, _result} =
+                 AppServer.run(workspace, "Validate supported turn policy", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
 
         trace = File.read!(trace_file)
         lines = String.split(trace, "\n", trim: true)
@@ -1051,7 +1052,10 @@ defmodule SymphonyElixir.AppServerTest do
       end
 
       assert {:ok, _result} =
-               AppServer.run(workspace, "Handle supported tool calls", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()), tool_executor: tool_executor)
+               AppServer.run(workspace, "Handle supported tool calls", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
+                 tool_executor: tool_executor
+               )
 
       assert_received {:tool_called, "linear_graphql",
                        %{
@@ -1247,7 +1251,8 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Validate newline-delimited buffering", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Validate newline-delimited buffering", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
     after
       File.rm_rf(test_root)
     end
@@ -1390,7 +1395,10 @@ defmodule SymphonyElixir.AppServerTest do
       on_message = fn message -> send(test_pid, {:app_server_message, message}) end
 
       assert {:ok, _result} =
-               AppServer.run(workspace, "Capture malformed protocol line", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()), on_message: on_message)
+               AppServer.run(workspace, "Capture malformed protocol line", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
+                 on_message: on_message
+               )
 
       assert_received {:app_server_message, %{event: :malformed, payload: "{\"method\":\"turn/completed\""}}
       assert_received {:app_server_message, %{event: :turn_completed}}
@@ -1502,142 +1510,144 @@ defmodule SymphonyElixir.AppServerTest do
   end
 
   for transport <- [:static, :structured] do
-  test "Codex backend launches over #{transport} ssh for remote workers" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-app-server-remote-ssh-#{System.unique_integer([:positive])}"
-      )
+    test "Codex backend launches over #{transport} ssh for remote workers" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-app-server-remote-ssh-#{System.unique_integer([:positive])}"
+        )
 
-    previous_path = System.get_env("PATH")
-    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+      previous_path = System.get_env("PATH")
+      previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
 
-    on_exit(fn ->
-      restore_env("PATH", previous_path)
-      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
-    end)
+      on_exit(fn ->
+        restore_env("PATH", previous_path)
+        restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+      end)
 
-    try do
-      trace_file = Path.join(test_root, "ssh.trace")
-      fake_ssh = Path.join(test_root, "ssh")
-      remote_workspace = "/remote/workspaces/MT-REMOTE"
-
-      File.mkdir_p!(test_root)
-      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
-      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
-
-      File.write!(fake_ssh, """
-      #!/bin/sh
-      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
-      count=0
-      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
-
-      while IFS= read -r line; do
-        count=$((count + 1))
-        printf 'JSON:%s\\n' "$line" >> "$trace_file"
-
-        case "$count" in
-          1)
-            printf '%s\\n' '{"id":1,"result":{}}'
-            ;;
-          2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-remote"}}}'
-            ;;
-          3)
-            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-remote"}}}'
-            ;;
-          4)
-            printf '%s\\n' '{"method":"turn/completed"}'
-            exit 0
-            ;;
-          *)
-            exit 0
-            ;;
-        esac
-      done
-      """)
-
-      File.chmod!(fake_ssh, 0o755)
-
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: "/remote/workspaces",
-        codex_command: "fake-remote-codex app-server"
-      )
-
-      issue = %Issue{
-        id: "issue-remote",
-        identifier: "MT-REMOTE",
-        title: "Run remote app server",
-        description: "Validate ssh-backed codex startup",
-        state: "In Progress",
-        url: "https://example.org/issues/MT-REMOTE",
-        labels: ["backend"]
-      }
-
-      target =
-        case unquote(transport) do
-          :static -> "worker-01:2200"
-          :structured -> %SymphonyElixir.SSH.Target{executable: fake_ssh, prefix: [], label: "fixture"}
-        end
-      context = SymphonyElixir.ExecutionContext.ssh("/remote/workspaces", target)
-      assert {:ok, session} = SymphonyElixir.Agent.Codex.start_session(remote_workspace, execution_context: context)
       try do
-        assert {:ok, %SymphonyElixir.Agent.Result{status: :done, session_id: "thread-remote-turn-remote"}} =
-                 SymphonyElixir.Agent.Codex.run_turn(session, "Run remote worker", issue, [])
+        trace_file = Path.join(test_root, "ssh.trace")
+        fake_ssh = Path.join(test_root, "ssh")
+        remote_workspace = "/remote/workspaces/MT-REMOTE"
+
+        File.mkdir_p!(test_root)
+        System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+        System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+        File.write!(fake_ssh, """
+        #!/bin/sh
+        trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+        count=0
+        printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+
+        while IFS= read -r line; do
+          count=$((count + 1))
+          printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+          case "$count" in
+            1)
+              printf '%s\\n' '{"id":1,"result":{}}'
+              ;;
+            2)
+              printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-remote"}}}'
+              ;;
+            3)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-remote"}}}'
+              ;;
+            4)
+              printf '%s\\n' '{"method":"turn/completed"}'
+              exit 0
+              ;;
+            *)
+              exit 0
+              ;;
+          esac
+        done
+        """)
+
+        File.chmod!(fake_ssh, 0o755)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: "/remote/workspaces",
+          codex_command: "fake-remote-codex app-server"
+        )
+
+        issue = %Issue{
+          id: "issue-remote",
+          identifier: "MT-REMOTE",
+          title: "Run remote app server",
+          description: "Validate ssh-backed codex startup",
+          state: "In Progress",
+          url: "https://example.org/issues/MT-REMOTE",
+          labels: ["backend"]
+        }
+
+        target =
+          case unquote(transport) do
+            :static -> "worker-01:2200"
+            :structured -> %SymphonyElixir.SSH.Target{executable: fake_ssh, prefix: [], label: "fixture"}
+          end
+
+        context = SymphonyElixir.ExecutionContext.ssh("/remote/workspaces", target)
+        assert {:ok, session} = SymphonyElixir.Agent.Codex.start_session(remote_workspace, execution_context: context)
+
+        try do
+          assert {:ok, %SymphonyElixir.Agent.Result{status: :done, session_id: "thread-remote-turn-remote"}} =
+                   SymphonyElixir.Agent.Codex.run_turn(session, "Run remote worker", issue, [])
+        after
+          SymphonyElixir.Agent.Codex.stop_session(session)
+        end
+
+        trace = File.read!(trace_file)
+        lines = String.split(trace, "\n", trim: true)
+
+        assert argv_line = Enum.find(lines, &String.starts_with?(&1, "ARGV:"))
+        assert argv_line =~ "cd "
+        assert argv_line =~ remote_workspace
+        assert argv_line =~ "unset LINEAR_API_KEY"
+        assert argv_line =~ "exec "
+        assert argv_line =~ "fake-remote-codex app-server"
+
+        expected_turn_policy = %{
+          "type" => "workspaceWrite",
+          "writableRoots" => [remote_workspace],
+          "readOnlyAccess" => %{"type" => "fullAccess"},
+          "networkAccess" => false,
+          "excludeTmpdirEnvVar" => false,
+          "excludeSlashTmp" => false
+        }
+
+        assert Enum.any?(lines, fn line ->
+                 if String.starts_with?(line, "JSON:") do
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+                   |> then(fn payload ->
+                     payload["method"] == "thread/start" &&
+                       get_in(payload, ["params", "cwd"]) == remote_workspace
+                   end)
+                 else
+                   false
+                 end
+               end)
+
+        assert Enum.any?(lines, fn line ->
+                 if String.starts_with?(line, "JSON:") do
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+                   |> then(fn payload ->
+                     payload["method"] == "turn/start" &&
+                       get_in(payload, ["params", "cwd"]) == remote_workspace &&
+                       get_in(payload, ["params", "sandboxPolicy"]) == expected_turn_policy
+                   end)
+                 else
+                   false
+                 end
+               end)
       after
-        SymphonyElixir.Agent.Codex.stop_session(session)
+        File.rm_rf(test_root)
       end
-
-      trace = File.read!(trace_file)
-      lines = String.split(trace, "\n", trim: true)
-
-      assert argv_line = Enum.find(lines, &String.starts_with?(&1, "ARGV:"))
-      assert argv_line =~ "cd "
-      assert argv_line =~ remote_workspace
-      assert argv_line =~ "unset LINEAR_API_KEY"
-      assert argv_line =~ "exec "
-      assert argv_line =~ "fake-remote-codex app-server"
-
-      expected_turn_policy = %{
-        "type" => "workspaceWrite",
-        "writableRoots" => [remote_workspace],
-        "readOnlyAccess" => %{"type" => "fullAccess"},
-        "networkAccess" => false,
-        "excludeTmpdirEnvVar" => false,
-        "excludeSlashTmp" => false
-      }
-
-      assert Enum.any?(lines, fn line ->
-               if String.starts_with?(line, "JSON:") do
-                 line
-                 |> String.trim_leading("JSON:")
-                 |> Jason.decode!()
-                 |> then(fn payload ->
-                   payload["method"] == "thread/start" &&
-                     get_in(payload, ["params", "cwd"]) == remote_workspace
-                 end)
-               else
-                 false
-               end
-             end)
-
-      assert Enum.any?(lines, fn line ->
-               if String.starts_with?(line, "JSON:") do
-                 line
-                 |> String.trim_leading("JSON:")
-                 |> Jason.decode!()
-                 |> then(fn payload ->
-                   payload["method"] == "turn/start" &&
-                     get_in(payload, ["params", "cwd"]) == remote_workspace &&
-                     get_in(payload, ["params", "sandboxPolicy"]) == expected_turn_policy
-                 end)
-               else
-                 false
-               end
-             end)
-    after
-      File.rm_rf(test_root)
     end
-  end
   end
 end
