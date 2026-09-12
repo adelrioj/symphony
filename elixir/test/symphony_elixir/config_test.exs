@@ -155,6 +155,27 @@ defmodule SymphonyElixir.ConfigTest do
     end
   end
 
+  test "schema errors identify invalid fields in changesets and early worker validation" do
+    cases = [
+      {%{"polling" => %{"interval_ms" => "nope"}, "server" => %{"port" => "nope"}}, ["polling.interval_ms", "server.port"]},
+      {%{"worker" => %{"environment" => %{}, "ssh_hosts" => []}}, ["worker"]},
+      {%{"worker" => %{"environment" => nil}}, ["worker.environment"]},
+      {%{"worker" => %{"environment" => %{}}}, ["worker.environment"]},
+      {%{"worker" => %{"environment" => %{"kind" => "unsupported"}}}, ["worker.environment"]}
+    ]
+
+    for {config, paths} <- cases do
+      config = Map.put(config, "tracker", %{"kind" => "memory"})
+
+      assert {:error, {:invalid_workflow_config, errors}} = Schema.parse(config, errors: :list)
+      assert Enum.sort(Enum.map(errors, &elem(&1, 0))) == paths
+      assert Enum.all?(errors, fn {_path, message} -> is_binary(message) end)
+      assert {:error, {:invalid_workflow_config, message}} = Schema.parse(config)
+      assert is_binary(message)
+      assert Schema.parse(config, errors: :string) == Schema.parse(config)
+    end
+  end
+
   defp write_workflow!(content) do
     File.write!(Workflow.workflow_file_path(), content)
 

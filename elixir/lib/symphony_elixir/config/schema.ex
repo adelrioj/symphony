@@ -343,9 +343,10 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
 
-  @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
-  def parse(config) when is_map(config) do
+  @spec parse(map(), keyword()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t() | [{String.t(), String.t()}]}}
+  def parse(config, opts \\ []) when is_map(config) do
     attrs = normalize_keys(config)
+    error_format = Keyword.get(opts, :errors, :string)
 
     with :ok <- validate_worker_source(attrs) do
       attrs
@@ -354,18 +355,27 @@ defmodule SymphonyElixir.Config.Schema do
       |> apply_action(:validate)
       |> case do
         {:ok, settings} -> {:ok, finalize_settings(settings)}
-        {:error, changeset} -> {:error, {:invalid_workflow_config, format_errors(changeset)}}
+        {:error, changeset} -> {:error, {:invalid_workflow_config, format_errors(changeset, error_format)}}
       end
+    else
+      {:error, {path, message}} ->
+        errors =
+          case error_format do
+            :string -> message
+            :list -> [{path, message}]
+          end
+
+        {:error, {:invalid_workflow_config, errors}}
     end
   end
 
   defp validate_worker_source(%{"worker" => %{"environment" => environment} = worker}) do
     cond do
       Enum.any?(["ssh_hosts", "max_concurrent_agents_per_host"], &Map.has_key?(worker, &1)) ->
-        {:error, {:invalid_workflow_config, "managed and static worker settings conflict"}}
+        {:error, {"worker", "managed and static worker settings conflict"}}
 
       not is_map(environment) or map_size(environment) == 0 ->
-        {:error, {:invalid_workflow_config, "worker.environment must be a nonempty managed configuration"}}
+        {:error, {"worker.environment", "worker.environment must be a nonempty managed configuration"}}
 
       true ->
         validate_managed_environment(environment)
@@ -377,7 +387,7 @@ defmodule SymphonyElixir.Config.Schema do
   defp validate_managed_environment(environment) do
     case EnvironmentConfig.parse(environment) do
       {:ok, _} -> :ok
-      {:error, _} -> {:error, {:invalid_workflow_config, "invalid worker.environment configuration"}}
+      {:error, _} -> {:error, {"worker.environment", "invalid worker.environment configuration"}}
     end
   end
 
@@ -684,11 +694,18 @@ defmodule SymphonyElixir.Config.Schema do
     Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
   end
 
-  defp format_errors(changeset) do
+  defp format_errors(changeset, :string) do
+    changeset
+    |> error_pairs()
+    |> Enum.map_join(", ", fn {path, message} -> path <> " " <> message end)
+  end
+
+  defp format_errors(changeset, :list), do: error_pairs(changeset)
+
+  defp error_pairs(changeset) do
     changeset
     |> traverse_errors(&translate_error/1)
     |> flatten_errors()
-    |> Enum.join(", ")
   end
 
   defp flatten_errors(errors, prefix \\ nil)
@@ -706,7 +723,7 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp flatten_errors(errors, prefix) when is_list(errors) do
-    Enum.map(errors, &(prefix <> " " <> &1))
+    Enum.map(errors, &{prefix, &1})
   end
 
   defp translate_error({message, options}) do

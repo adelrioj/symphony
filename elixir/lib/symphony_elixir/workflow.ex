@@ -66,19 +66,50 @@ defmodule SymphonyElixir.Workflow do
     end
   end
 
-  defp parse(content) do
-    {front_matter_lines, prompt_lines} = split_front_matter(content)
+  @doc """
+  Splits a workflow into raw YAML and prompt text without normalizing either section.
 
-    case front_matter_yaml_to_map(front_matter_lines) do
-      {:ok, front_matter} ->
-        prompt = Enum.join(prompt_lines, "\n") |> String.trim()
+  Delimiter lines and their adjacent line breaks are not part of the returned text.
+  The two strings do not retain envelope metadata: CRLF delimiters, an empty front
+  matter block, a closing delimiter at EOF, and an unterminated block cannot all be
+  distinguished from their canonical LF or prompt-only equivalents by `render/2`.
+  """
+  @spec split(String.t()) :: %{front_matter: String.t(), prompt: String.t()}
+  def split(content) when is_binary(content) do
+    case Regex.run(~r/\A---(?:\R|\z)/u, content, return: :index) do
+      [{0, opening_size}] ->
+        tail = binary_part(content, opening_size, byte_size(content) - opening_size)
+        split_front_matter(tail)
 
-        {:ok,
-         %{
-           config: front_matter,
-           prompt: prompt,
-           prompt_template: prompt
-         }}
+      nil ->
+        %{front_matter: "", prompt: content}
+    end
+  end
+
+  @doc """
+  Renders ordinary YAML and prompt strings using LF-delimited front matter.
+
+  Empty YAML renders as a prompt-only file. `split/1` round-trips byte for byte for
+  nonempty front matter enclosed by LF delimiter lines with a newline after the
+  closing delimiter, and for prompt-only files. Other envelopes are canonicalized;
+  leading blank lines in YAML remain content, never hidden envelope metadata.
+  """
+  @spec render(String.t(), String.t()) :: String.t()
+  def render("", prompt) when is_binary(prompt), do: prompt
+  def render(front_matter, prompt) when is_binary(front_matter) and is_binary(prompt), do: "---\n" <> front_matter <> "\n---\n" <> prompt
+
+  @spec parse(String.t()) :: {:ok, loaded_workflow()} | {:error, term()}
+  def parse(content) when is_binary(content) do
+    %{front_matter: front_matter, prompt: prompt} = split(content)
+    parse_parts(front_matter, prompt)
+  end
+
+  @spec parse_parts(String.t(), String.t()) :: {:ok, loaded_workflow()} | {:error, term()}
+  def parse_parts(front_matter, prompt) when is_binary(front_matter) and is_binary(prompt) do
+    case front_matter_yaml_to_map(String.replace(front_matter, ~r/\R/u, "\n")) do
+      {:ok, config} ->
+        trimmed = prompt |> String.replace(~r/\R/u, "\n") |> String.trim()
+        {:ok, %{config: config, prompt: trimmed, prompt_template: trimmed}}
 
       {:error, :workflow_front_matter_not_a_map} ->
         {:error, :workflow_front_matter_not_a_map}
@@ -88,25 +119,26 @@ defmodule SymphonyElixir.Workflow do
     end
   end
 
-  defp split_front_matter(content) do
-    lines = String.split(content, ~r/\R/, trim: false)
+  defp split_front_matter(tail) do
+    case Regex.run(~r/(?:\A|\R)---(?=\R|\z)/u, tail, return: :index) do
+      [{offset, delimiter_size}] ->
+        after_delimiter = offset + delimiter_size
+        rest = binary_part(tail, after_delimiter, byte_size(tail) - after_delimiter)
 
-    case lines do
-      ["---" | tail] ->
-        {front, rest} = Enum.split_while(tail, &(&1 != "---"))
+        prompt =
+          case Regex.run(~r/\A\R/u, rest, return: :index) do
+            [{0, newline_size}] -> binary_part(rest, newline_size, byte_size(rest) - newline_size)
+            nil -> rest
+          end
 
-        case rest do
-          ["---" | prompt_lines] -> {front, prompt_lines}
-          _ -> {front, []}
-        end
+        %{front_matter: binary_part(tail, 0, offset), prompt: prompt}
 
-      _ ->
-        {[], lines}
+      nil ->
+        %{front_matter: tail, prompt: ""}
     end
   end
 
-  defp front_matter_yaml_to_map(lines) do
-    yaml = Enum.join(lines, "\n")
+  defp front_matter_yaml_to_map(yaml) when is_binary(yaml) do
 
     if String.trim(yaml) == "" do
       {:ok, %{}}
