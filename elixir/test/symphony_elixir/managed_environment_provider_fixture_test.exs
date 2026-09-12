@@ -4,6 +4,211 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.ManagedEnvironmentFixture.Provider
+  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Client
+
+  test "single-attempt helper response loss retains exact accepted create attribution", context do
+    config = kubernetes_config(context)
+    entry = %{attempt_id: "worker-attempt", record: %{key: "se-ticket", issue_id: "issue-1"}}
+
+    body = %{
+      "apiVersion" => "agents.x-k8s.io/v1beta1",
+      "kind" => "Sandbox",
+      "metadata" => %{
+        "name" => "se-ticket",
+        "namespace" => "workers",
+        "labels" => %{"symphony.dev/deployment" => digest(Jason.encode!(config.deployment_id), 40)},
+        "annotations" => %{
+          "symphony.dev/create-protocol" => "symphony-create-drain-v1",
+          "symphony.dev/create-guard-uid" => "guard-uid",
+          "symphony.dev/create-attempt-id" => "create-attempt"
+        }
+      }
+    }
+
+    Process.put(:fault_armed, true)
+
+    command = fn executable, args, _opts ->
+      assert Path.basename(executable) == "symphony-kubernetes-create"
+
+      assert Enum.at(args, Enum.find_index(args, &(&1 == "--path")) + 1) ==
+               "/apis/agents.x-k8s.io/v1beta1/namespaces/workers/sandboxes"
+
+      file = Enum.at(args, Enum.find_index(args, &(&1 == "--file")) + 1)
+      accepted = File.read!(file) |> Jason.decode!() |> put_in(["metadata", "uid"], "sandbox-uid")
+      accepted = if Process.get(:changed_guard), do: put_in(accepted, ["metadata", "annotations", "symphony.dev/create-guard-uid"], "replacement"), else: accepted
+      send(self(), :create_sent)
+      {:ok, %{status: 0, output: Jason.encode!(accepted)}}
+    end
+
+    callbacks = %{
+      armed?: fn {:lose_create, "issue-1"} -> Process.get(:fault_armed) end,
+      disarm: fn _ -> Process.put(:fault_armed, false) end,
+      event: fn event -> send(self(), {:event, event}) end
+    }
+
+    opts = [timeout_ms: 10_000, task_supervisor: start_supervised!(Task.Supervisor), command_fun: command]
+    opts = Provider.fault_options(config, entry, :prepare, opts, callbacks)
+
+    assert {:error, {:unknown, :kubernetes_command_failed}} =
+             Client.request(config, :post, "/apis/agents.x-k8s.io/v1beta1/namespaces/workers/sandboxes", body, opts)
+
+    assert_receive :create_sent
+    refute_receive :create_sent
+    assert_receive {:event, %{event: :create_accepted, attempt_id: "worker-attempt", create_attempt_id: "create-attempt", guard_uid: "guard-uid", resource_uid: "sandbox-uid"}}
+    assert_receive {:event, %{event: :create_response_lost, create_attempt_id: "create-attempt", guard_uid: "guard-uid"}}
+    refute Process.get(:fault_armed)
+    Process.put(:fault_armed, true)
+    Process.put(:changed_guard, true)
+    assert {:ok, %{status: 200}} = Client.request(config, :post, "/apis/agents.x-k8s.io/v1beta1/namespaces/workers/sandboxes", body, opts)
+    assert_receive :create_sent
+    refute_receive {:event, %{event: :create_accepted}}
+    refute_receive {:event, %{event: :create_response_lost}}
+    assert Process.get(:fault_armed)
+  end
+
+  test "stop guard patch denial uses impersonated kubectl authorization and mutation", context do
+    config = put_in(kubernetes_config(context), [:provider, "qualification"], %{"denied_identity" => "qualification-denied"})
+    entry = %{attempt_id: "worker-attempt", record: %{key: "se-ticket", issue_id: "issue-1"}}
+    patch = [%{"op" => "test", "path" => "/metadata/uid", "value" => "guard-uid"}]
+
+    command = fn executable, args, _opts ->
+      assert Path.basename(executable) == "kubectl"
+      assert "--as=qualification-denied" in args
+
+      if "create" in args do
+        assert Enum.at(args, Enum.find_index(args, &(&1 == "--raw")) + 1) ==
+                 "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+
+        file = Enum.at(args, Enum.find_index(args, &(&1 == "-f")) + 1)
+        review = File.read!(file) |> Jason.decode!()
+        assert review["spec"]["resourceAttributes"] == %{"namespace" => "workers", "verb" => "patch", "group" => "", "resource" => "configmaps", "name" => "symphony-guard-test"}
+        {:ok, %{status: 0, output: Jason.encode!(%{"status" => %{"allowed" => false}})}}
+      else
+        send(self(), :guard_patch_denied)
+        output = if Process.get(:local_parse_error), do: "error: unknown flag: --as", else: "Error from server (Forbidden): configmaps is forbidden"
+        {:ok, %{status: 1, output: output}}
+      end
+    end
+
+    callbacks = %{armed?: fn _ -> true end, event: fn event -> send(self(), {:event, event}) end}
+    opts = [timeout_ms: 10_000, task_supervisor: start_supervised!(Task.Supervisor), command_fun: command]
+    opts = Provider.fault_options(config, entry, :stop, opts, callbacks)
+
+    assert {:error, {:unknown, :kubernetes_unstructured_response}} =
+             Client.request(config, :patch, "/api/v1/namespaces/workers/configmaps/symphony-guard-test", patch, opts)
+
+    assert_receive :guard_patch_denied
+    assert_receive {:event, %{event: :stop_denied, attempt_id: "worker-attempt", guard_uid: "guard-uid", resource_name: "symphony-guard-test"}}
+    refute_receive :guard_patch_denied
+    Process.put(:local_parse_error, true)
+
+    assert {:error, {:unknown, :kubernetes_command_failed}} =
+             Client.request(config, :patch, "/api/v1/namespaces/workers/configmaps/symphony-guard-test", patch, opts)
+
+    refute_receive {:event, %{event: :stop_denied}}
+  end
+
+  test "guard-only and post-parent ownership remain unknown inventory obligations", context do
+    config = kubernetes_config(context)
+    scope = Map.take(config.provider, ~w(kubeconfig context namespace))
+
+    record = %{
+      key: "se-ticket",
+      deployment_id: config.deployment_id,
+      tracker_kind: "memory",
+      issue_id: "ticket",
+      kind: "kubernetes",
+      scope: scope,
+      workspace_path: "/workspaces/se-ticket",
+      template_identity: "template",
+      metadata: %{},
+      pending: [],
+      provider_ref: nil,
+      desired: :stopped
+    }
+
+    guard_name = SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard.name(record)
+
+    for phase <- ["Open", "ReadyToFinalize"] do
+      parent_uid = if phase == "Open", do: nil, else: "parent-uid"
+
+      operations =
+        if parent_uid do
+          [
+            %{
+              "id" => "create-parent",
+              "issuerId" => "issuer",
+              "resource" => "sandboxes",
+              "namespace" => "workers",
+              "name" => record.key,
+              "guardUID" => "guard-uid",
+              "parentUID" => nil,
+              "state" => "Committed",
+              "objectUID" => parent_uid
+            }
+          ]
+        else
+          []
+        end
+
+      saved = %{record | desired: if(phase == "Open", do: :stopped, else: :absent), provider_ref: parent_uid}
+
+      data = %{
+        "protocol" => "symphony-create-drain-v1",
+        "identity" => %{"deploymentID" => config.deployment_id, "environmentKey" => record.key, "scope" => scope},
+        "phase" => phase,
+        "operations" => operations,
+        "parentUID" => parent_uid,
+        "closeRequestId" => if(phase == "Open", do: nil, else: "close-request"),
+        "record" => saved,
+        "evidence" => %{}
+      }
+
+      guard = %{
+        "apiVersion" => "v1",
+        "kind" => "ConfigMap",
+        "metadata" => %{
+          "name" => guard_name,
+          "namespace" => "workers",
+          "uid" => "guard-uid",
+          "resourceVersion" => "7",
+          "labels" => %{"symphony.dev/create-guard" => "true", "symphony.dev/environment" => record.key}
+        },
+        "data" => %{"guard.json" => Jason.encode!(data)}
+      }
+
+      pods =
+        if parent_uid do
+          owner = %{"apiVersion" => "agents.x-k8s.io/v1beta1", "kind" => "Sandbox", "name" => record.key, "uid" => parent_uid}
+
+          [
+            pod()
+            |> put_in(["metadata", "labels"], %{"symphony.dev/environment" => record.key})
+            |> put_in(["metadata", "ownerReferences"], [owner])
+          ]
+        else
+          []
+        end
+
+      opts =
+        kubernetes_opts(fn path ->
+          items =
+            case Path.basename(path) do
+              "configmaps" -> [guard]
+              "pods" -> pods
+              _ -> []
+            end
+
+          %{"items" => items, "metadata" => %{}}
+        end)
+
+      assert {:ok, %{records: [observed], live_worker_counts: counts}} = Provider.inventory(config, opts)
+      assert counts == %{"se-ticket" => length(pods)}
+      assert observed.phase == :unknown
+      refute observed.absent?
+      assert observed.metadata["guard"] == %{"kind" => "ConfigMap", "name" => guard_name, "uid" => "guard-uid", "namespace" => "workers", "phase" => phase}
+    end
+  end
 
   @workstation_path "/v1/projects/p/locations/l/workstationClusters/c/workstationConfigs/other/workstations/control"
   @pod_path "/api/v1/namespaces/workers/pods/control"

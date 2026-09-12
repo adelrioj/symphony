@@ -16,6 +16,64 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @children ["pods", "persistentvolumeclaims", "services", "secrets"]
   @protocol "symphony-create-drain-v1"
 
+  @stock_baseline %{
+    release: "v1.0.1",
+    termination_contract: "qualified-kubelet-all-containers-v1",
+    controller_source_commit: "3e77ccbac4db8a12b0157eafcad0d1ad5872f32a",
+    controller_image_prefix: "registry.k8s.io/agent-sandbox/agent-sandbox-controller@sha256:",
+    schemas: [
+      {"sandboxes.agents.x-k8s.io", "37f0b89594ba20ca4d37b93714c362bcd694369f"},
+      {"sandboxtemplates.extensions.agents.x-k8s.io", "6c5c594b1a0cddda9b330bb094272e1c465d11c2"}
+    ]
+  }
+
+  # The release artifact has neither this entrypoint nor the candidate validator.
+  if Mix.env() == :test do
+    @spec candidate_preflight(map(), map(), keyword()) :: :ok | {:error, term()}
+    def candidate_preflight(config, pins, opts \\ []) do
+      opts = opts |> Keyword.put(:candidate_baseline, pins) |> with_deadline()
+
+      with {:ok, _} <- qualification(config, opts),
+           :ok <- validate_config(config.provider),
+           {:ok, _} <- inventory(config, opts),
+           do: :ok
+    end
+
+    defp baseline(config, opts) do
+      case Keyword.fetch(opts, :candidate_baseline) do
+        {:ok, pins} -> SymphonyElixir.ExecutionEnvironment.Kubernetes.Candidate.validate(config, pins)
+        :error -> {:ok, @stock_baseline}
+      end
+    end
+
+    defp candidate_contract(config, q, template, baseline, opts) do
+      case baseline do
+        %{candidate: pins} -> SymphonyElixir.ExecutionEnvironment.Kubernetes.Candidate.contract(config, q, template, pins, opts)
+        _ -> :ok
+      end
+    end
+  else
+    defp baseline(_config, opts) do
+      with :ok <- ordinary_options(opts), do: {:ok, @stock_baseline}
+    end
+
+    defp candidate_contract(_config, _q, _template, _baseline, _opts), do: :ok
+  end
+
+  defp ordinary_options(opts) do
+    if Keyword.has_key?(opts, :candidate_baseline),
+      do: {:error, {:invalid, :kubernetes_candidate_options_forbidden}},
+      else: :ok
+  end
+
+  defp candidate_operation(config, opts) do
+    if Keyword.has_key?(opts, :candidate_baseline) do
+      with {:ok, _} <- qualification(config, opts), do: :ok
+    else
+      :ok
+    end
+  end
+
   @verbs [:create, :start, :stop, :delete, :update]
   @outcomes [:pending, :unknown, :succeeded, :failed]
   @spec validate_config(map()) :: :ok | {:error, term()}
@@ -37,7 +95,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   def preflight(config, opts) do
     opts = with_deadline(opts)
 
-    with :ok <- validate_config(config.provider),
+    with :ok <- ordinary_options(opts),
+         :ok <- validate_config(config.provider),
          {:ok, _} <- qualification(config, opts),
          {:ok, _} <- inventory(config, opts),
          do: {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}}
@@ -47,7 +106,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   def discover(config, opts) do
     opts = with_deadline(opts)
 
-    with {:ok, objects} <- inventory(config, opts),
+    with :ok <- candidate_operation(config, opts),
+         {:ok, objects} <- inventory(config, opts),
          {:ok, records} <- discover_guards(config, objects, opts),
          :ok <- inventory_guard_ownership(config, objects, records) do
       {:ok, records |> Map.values() |> Enum.reject(& &1.absent?)}
@@ -285,7 +345,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       end)
 
     result =
-      with {:ok, guard} <- Guard.fetch(config, record, opts) do
+      with :ok <- candidate_operation(config, opts),
+           {:ok, guard} <- Guard.fetch(config, record, opts) do
         write_intent(config, record, updated, guard, opts)
       end
 
@@ -323,8 +384,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     opts = with_deadline(opts)
 
     result =
-      with :ok <- Guard.open(config, record, opts),
-           {:ok, q} <- qualification(config, opts),
+      with {:ok, q} <- qualification(config, opts),
+           :ok <- Guard.open(config, record, opts),
            {:ok, sandbox} <- fetch_parent(config, record, opts),
            {:ok, record} <- observe_guard(config, record, sandbox, opts),
            true <- record.desired == :running and get_in(sandbox, ["metadata", "deletionTimestamp"]) == nil,
@@ -1098,21 +1159,23 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp qualification(config, opts) do
-    with {:ok, %{status: 200, body: version}} <- Client.request(config, :get, "/version", nil, opts),
+    with {:ok, baseline} <- baseline(config, opts),
+         {:ok, %{status: 200, body: version}} <- Client.request(config, :get, "/version", nil, opts),
          true <- kubernetes_version?(version),
          {:ok, template} when is_map(template) <- Client.lookup(config, collection(config, "sandboxtemplates"), config.provider["template"], opts),
          qualification_name when is_binary(qualification_name) <- get_in(template, ["metadata", "annotations", @qualification]),
          {:ok, cm} when is_map(cm) <- Client.lookup(config, collection(config, "configmaps"), qualification_name, opts),
          true <- cm["immutable"] == true,
          {:ok, q} <- Jason.decode(get_in(cm, ["data", "contract.json"]) || ""),
-         true <- q["release"] == "v1.0.1" and q["template_uid"] == uid(template) and q["template_digest"] == digest(template["spec"]),
+         true <- q["release"] == baseline.release and q["template_uid"] == uid(template) and q["template_digest"] == digest(template["spec"]),
          true <- is_binary(q["qualification_report"]) and String.trim(q["qualification_report"]) != "",
-         true <- q["termination_contract"] == "qualified-kubelet-all-containers-v1",
+         true <- q["termination_contract"] == baseline.termination_contract,
+         :ok <- candidate_contract(config, q, template, baseline, opts),
          {:ok, crds} <- Client.list(config, "/apis/apiextensions.k8s.io/v1/customresourcedefinitions", opts),
-         :ok <- schemas(crds),
+         :ok <- schemas(crds, baseline),
          {:ok, deployments} <- Client.list(config, "/apis/apps/v1/namespaces/#{segment(q["controller_namespace"])}/deployments", opts),
          controller when is_map(controller) <- Enum.find(deployments, &(name(&1) == q["controller_name"])),
-         true <- uid(controller) == q["controller_uid"] and controller_image?(controller, q),
+         true <- uid(controller) == q["controller_uid"] and controller_image?(controller, q, baseline),
          {:ok, runtimes} <- Client.list(config, "/apis/node.k8s.io/v1/runtimeclasses", opts),
          runtime when is_map(runtime) <- Enum.find(runtimes, &(name(&1) == get_in(template, ["spec", "podTemplate", "spec", "runtimeClassName"]))),
          true <- uid(runtime) == q["runtime_class_uid"] and runtime["handler"] == q["runtime_handler"],
@@ -1130,13 +1193,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     _ -> {:error, {:invalid, :kubernetes_profile_not_qualified}}
   end
 
-  defp schemas(crds) do
-    expected = [
-      {"sandboxes.agents.x-k8s.io", "37f0b89594ba20ca4d37b93714c362bcd694369f"},
-      {"sandboxtemplates.extensions.agents.x-k8s.io", "6c5c594b1a0cddda9b330bb094272e1c465d11c2"}
-    ]
-
-    valid = Enum.all?(expected, fn {name, hash} -> qualified_schema?(crds, name, hash) end)
+  defp schemas(crds, baseline) do
+    valid = Enum.all?(baseline.schemas, fn {name, hash} -> qualified_schema?(crds, name, hash) end)
     if valid, do: :ok, else: {:error, {:invalid, :kubernetes_schema_mismatch}}
   end
 
@@ -1162,20 +1220,23 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp kubernetes_version?(_), do: false
 
-  defp controller_image?(controller, q) do
+  defp controller_image?(controller, q, baseline) do
     containers = get_in(controller, ["spec", "template", "spec", "containers"]) || []
     desired = get_in(controller, ["spec", "replicas"])
     available = get_in(controller, ["status", "availableReplicas"])
 
     is_integer(desired) and desired > 0 and is_integer(available) and available >= desired and
-      q["controller_source_commit"] == "3e77ccbac4db8a12b0157eafcad0d1ad5872f32a" and
-      Enum.any?(containers, &pinned_controller_image?(&1, q)) and
+      q["controller_source_commit"] == baseline.controller_source_commit and
+      Enum.any?(containers, &pinned_controller_image?(&1, q, baseline)) and
       get_in(controller, ["status", "observedGeneration"]) == get_in(controller, ["metadata", "generation"])
   end
 
-  defp pinned_controller_image?(container, q) do
-    prefix = "registry.k8s.io/agent-sandbox/agent-sandbox-controller@sha256:"
-    container["image"] == q["controller_image"] and String.starts_with?(container["image"] || "", prefix)
+  defp pinned_controller_image?(container, q, baseline) do
+    container["image"] == q["controller_image"] and
+      case baseline do
+        %{controller_image: image} -> container["image"] == image
+        %{controller_image_prefix: prefix} -> String.starts_with?(container["image"] || "", prefix)
+      end
   end
 
   defp storage_classes(template, classes, q) do

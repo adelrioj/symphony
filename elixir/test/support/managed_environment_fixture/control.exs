@@ -5,9 +5,10 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixir.Tracker.Memory
+  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard
 
   @resource_keys ~w(kind id name uid selfLink zone region namespace volume_handle)
-  @event_keys [:event, :issue_id, :operation, :attempt_id, :outcome, :mode, :environment_id]
+  @event_keys [:event, :issue_id, :operation, :attempt_id, :outcome, :mode, :environment_id, :create_attempt_id, :guard_uid, :resource_uid, :resource_name, :resource, :namespace]
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
@@ -37,6 +38,7 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
        allocation_started: false,
        interrupted: false,
        captured_resources: [],
+       retained_guards: [],
        observed_resources: [],
        inventory_complete: false,
        runner_rejected: false,
@@ -89,12 +91,12 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
     resources = result_resources(result)
     complete = match?({:ok, %{records: _, live_worker_counts: _}}, result)
     observed = if complete, do: observed_resources(result), else: []
-    state = capture(state, resources)
+    state = state |> capture(resources) |> capture_guards(result)
     {:reply, :ok, %{state | inventory_complete: complete, observed_resources: observed}}
   end
 
   def handle_call({:event, %{event: :record_observation, result: result}}, _from, state) do
-    {:reply, :ok, capture(state, result_resources(result))}
+    {:reply, :ok, state |> capture(result_resources(result)) |> capture_guards(result)}
   end
 
   def handle_call({:event, event}, _from, state), do: {:reply, :ok, append_event(state, event)}
@@ -110,6 +112,15 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
   def handle_call({:interrupted, evidence}, _from, state) do
     state = capture(state, safe_resources(evidence["captured_resources"] || []))
     state = capture(state, safe_resources(evidence["remaining_owned_resources"] || []))
+    state = %{state | retained_guards: Enum.uniq(state.retained_guards ++ safe_resources(evidence["retained_guards"] || []))}
+
+    cleanup_issues =
+      (evidence["cleanup_issue_ids"] || [])
+      |> Enum.filter(&safe_opaque_id?/1)
+      |> Enum.uniq()
+      |> Enum.map(&%SymphonyElixir.Tracker.Issue{id: &1, identifier: &1, state: "Done", dispatchable: false})
+
+    state = %{state | issues: Enum.uniq_by(state.issues ++ cleanup_issues, & &1.id)}
     restored_events = Enum.reduce(evidence["events"] || [], %{state | events: []}, &append_event(&2, &1))
 
     state = %{
@@ -201,12 +212,12 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
        when kind in [:qualification_inventory_unresolved, :orphan_backing_resources], do: safe_resources(resources)
 
   defp result_resources({:error, {:unknown, {:kubernetes_invalid_owned_record, ids}}}) when is_list(ids) do
-    ids |> Enum.map(&%{"id" => &1}) |> safe_resources()
+    safe_resources(ids)
   end
 
   defp result_resources(_), do: []
 
-  defp record_resources(%{key: key, metadata: metadata, provider_ref: ref}) do
+  defp record_resources(%{key: key, metadata: metadata, provider_ref: ref} = record) do
     metadata = if is_map(metadata), do: metadata, else: %{}
 
     parent =
@@ -224,10 +235,36 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
     backing = safe_resources(metadata["backing_resources"] || [])
     volumes = metadata |> Map.get("volumes") |> resource_entries() |> Enum.flat_map(fn {_, value} -> volume_resources(value) end)
     cleanup = metadata |> Map.get("cleanup_remaining") |> resource_entries() |> Enum.flat_map(&cleanup_resources/1)
-    safe_resources([parent]) ++ backing ++ volumes ++ cleanup
+    guard = if Map.get(record, :absent?) == true, do: [], else: safe_resources([metadata["guard"] || %{}])
+    safe_resources([parent]) ++ backing ++ volumes ++ cleanup ++ guard
   end
 
   defp record_resources(_), do: []
+
+  defp capture_guards(state, result) do
+    receipts = Enum.uniq(state.retained_guards ++ result_guards(result))
+
+    resources =
+      Enum.reject(state.captured_resources, fn resource ->
+        resource["kind"] == "ConfigMap" and Enum.any?(receipts, &(&1["uid"] == resource["uid"] and is_binary(resource["uid"])))
+      end)
+
+    %{state | retained_guards: receipts, captured_resources: resources}
+  end
+
+  defp result_guards({:ok, %{records: records} = inventory}) do
+    safe_resources(Map.get(inventory, :retained_guards, [])) ++ Enum.flat_map(records, &record_guards/1)
+  end
+
+  defp result_guards({:ok, %{key: _} = record}), do: record_guards(record)
+  defp result_guards({:error, _, record}), do: record_guards(record)
+  defp result_guards(_), do: []
+
+  defp record_guards(%{kind: "kubernetes", absent?: true, proof: {:quiescent, %{guard_uid: uid}}} = record) do
+    safe_resources([%{"kind" => "ConfigMap", "name" => Guard.name(record), "uid" => uid, "namespace" => record.scope["namespace"]}])
+  end
+
+  defp record_guards(_), do: []
 
   defp volume_resources(volume) when is_map(volume) do
     safe_resources([
@@ -257,14 +294,18 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
   end
 
   defp safe_resources(resources) when is_list(resources) do
-    resources |> Enum.filter(&is_map/1) |> Enum.map(&safe_resource/1) |> Enum.filter(&identified_resource?/1)
+    resources |> Enum.map(&safe_resource/1) |> Enum.filter(&identified_resource?/1)
   end
 
   defp safe_resources(_), do: []
 
-  defp safe_resource(resource) do
+  defp safe_resource(resource) when is_binary(resource), do: safe_resource(%{"id" => resource})
+
+  defp safe_resource(resource) when is_map(resource) do
     resource |> Map.take(@resource_keys) |> Map.filter(&safe_resource_field?/1)
   end
+
+  defp safe_resource(_), do: %{}
 
   # Keep exact CSI handles across JSON persistence; the provider response bounds their size.
   defp safe_resource_field?({"volume_handle", value}) when is_binary(value) do

@@ -272,13 +272,18 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       begin_check("lost_create")
       for other <- Enum.take(ctx.issues, 4), do: transition(ctx, other, "In Review")
       await(ctx, "fault_scope_quiescent", fn -> Enum.all?(Enum.take(ctx.issues, 4), &stopped?(&1.id)) end)
-      sixth = issue(ctx, 6)
+      # Completed guard identities are permanent tombstones, never reusable tickets.
+      sixth = %{issue(ctx, 6) | id: "#{ctx.run_id}-recovery", identifier: "QUAL-RECOVERY", state: "In Review"}
+      GenServer.call(ctx.control, {:issues, control_snapshot(ctx).issues ++ [sixth]})
+      # Persist its cleanup identity before the fresh issue can allocate.
+      write_evidence(ctx, [], false)
       arm(ctx, {:lose_create, sixth.id})
       transition(ctx, sixth, "Qualification Codex")
-      await(ctx, "accepted_create_response_lost", fn -> event?(ctx, :create_response_lost, sixth.id) and unknown_occupied?(sixth.id) end)
+      await(ctx, "accepted_create_response_lost", fn -> event?(ctx, :create_response_lost, sixth.id) end)
       assert_no_duplicate_resources!(ctx)
       await(ctx, "lost_create_recovered", fn -> running?(sixth.id) end, ctx.config.startup_timeout_ms * 3)
       assert_no_duplicate_resources!(ctx)
+      if ctx.config.kind == "kubernetes", do: assert_exact_create_recovery!(ctx, sixth)
       pass(ctx, "lost_create", %{environment_id: entry!(sixth.id).record.key})
       begin_check("lost_start")
       transition(ctx, sixth, "In Review")
@@ -735,7 +740,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
         GenServer.call(ctx.control, :clear_faults)
         fault_driver!(ctx, "all", "restore", nil)
         set_retention(ctx, 0)
-        GenServer.call(ctx.control, {:issues, Enum.map(ctx.issues, &%{&1 | state: "Done"})})
+        GenServer.call(ctx.control, {:issues, Enum.map(control_snapshot(ctx).issues, &%{&1 | state: "Done"})})
         start_runtime(ctx)
         refresh()
         deletion_ctx = %{ctx | deadline: ctx.deadline - 20_000}
@@ -913,6 +918,8 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       runner_rejected: state.runner_rejected,
       runner_invocations: state.runner_invocations,
       captured_resources: state.captured_resources,
+      retained_guards: state.retained_guards,
+      cleanup_issue_ids: Enum.uniq(Enum.map(ctx.issues ++ state.issues, & &1.id)),
       events: Enum.reverse(state.events),
       allocation_started: state.allocation_started,
       interrupted: state.interrupted,
@@ -1097,9 +1104,25 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   defp arm(ctx, key), do: GenServer.call(ctx.control, {:fault, :arm, key})
   defp disarm(ctx, key), do: GenServer.call(ctx.control, {:fault, :disarm, key})
   defp armed?(ctx, key), do: GenServer.call(ctx.control, {:armed?, key})
-  defp event(ctx, data), do: GenServer.call(ctx.control, {:event, Map.take(data, [:event, :issue_id, :operation, :attempt_id, :outcome])})
+  defp event(ctx, data), do: GenServer.call(ctx.control, {:event, data})
   defp event?(ctx, event, id), do: Enum.any?(control_snapshot(ctx).events, &(&1[:event] == event and &1[:issue_id] == id))
   defp control_snapshot(ctx), do: GenServer.call(ctx.control, :snapshot)
+
+  defp assert_exact_create_recovery!(ctx, issue) do
+    invoked = Enum.filter(control_snapshot(ctx).events, &(&1[:event] == :create_invoked and &1[:issue_id] == issue.id))
+    require!(length(invoked) == 1, "create_transport_replayed")
+    events = Enum.filter(control_snapshot(ctx).events, &(&1[:event] == :create_accepted and &1[:issue_id] == issue.id))
+    require!(length(events) == 1, "create_replayed")
+    [accepted] = events
+    record = entry!(issue.id).record
+    require!(accepted[:resource_uid] == record.provider_ref and accepted[:environment_id] == record.key, "create_recovery_identity_changed")
+    lost = Enum.filter(control_snapshot(ctx).events, &(&1[:event] == :create_response_lost and &1[:issue_id] == issue.id))
+    require!(length(lost) == 1, "create_loss_not_exact")
+    [lost] = lost
+    keys = [:attempt_id, :create_attempt_id, :guard_uid, :resource_uid, :environment_id]
+    require!(Enum.all?(keys, &(nonblank?(accepted[&1]) and accepted[&1] == lost[&1])), "create_recovery_attribution_changed")
+  end
+
   defp begin_check(name), do: Process.put(:qualification_check, name)
 
   defp pass(ctx, name, evidence) do
