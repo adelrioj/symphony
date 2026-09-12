@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Config do
   @moduledoc """
-  Runtime configuration loaded from `WORKFLOW.md`.
+  Workflow settings and installation-level runtime configuration.
   """
 
   alias SymphonyElixir.Config.Schema
@@ -37,6 +37,19 @@ defmodule SymphonyElixir.Config do
           thread_sandbox: String.t(),
           turn_sandbox_policy: map()
         }
+
+  @doc "Directory holding `symphony.sqlite3` and `log/`; defaults to the current working directory."
+  @spec data_root() :: Path.t()
+  def data_root, do: Application.get_env(:symphony_elixir, :data_root) || File.cwd!()
+
+  @spec server_host() :: String.t()
+  def server_host, do: Application.get_env(:symphony_elixir, :server_host) || "127.0.0.1"
+
+  @spec operator_token() :: String.t() | nil
+  def operator_token, do: Application.get_env(:symphony_elixir, :operator_token)
+
+  @spec events_retention_days() :: pos_integer()
+  def events_retention_days, do: Application.get_env(:symphony_elixir, :events_retention_days) || 30
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
@@ -106,11 +119,18 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @doc "Installation HTTP port; explicit `nil` disables HTTP. File-mode settings remain until runtime cutover."
   @spec server_port() :: non_neg_integer() | nil
   def server_port do
-    case Application.get_env(:symphony_elixir, :server_port_override) do
-      port when is_integer(port) and port >= 0 -> port
-      _ -> settings!().server.port
+    case Application.fetch_env(:symphony_elixir, :server_port) do
+      {:ok, port} ->
+        port
+
+      :error ->
+        case Application.get_env(:symphony_elixir, :server_port_override) do
+          port when is_integer(port) and port >= 0 -> port
+          _ -> settings!().server.port
+        end
     end
   end
 
