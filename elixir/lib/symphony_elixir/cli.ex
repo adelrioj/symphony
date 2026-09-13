@@ -1,30 +1,31 @@
 defmodule SymphonyElixir.CLI do
   @moduledoc """
-  Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
+  Entrypoint for the installation daemon, lane commands, and standalone Linear MCP.
   """
 
-  alias SymphonyElixir.Config
   alias SymphonyElixir.LogFile
   alias SymphonyElixir.MCP.LinearServer
-  alias SymphonyElixir.Tracker
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
-  @switches [
+  @serve_switches [
     {@acknowledgement_switch, :boolean},
-    logs_root: :string,
+    data_root: :string,
     port: :integer,
-    linear_mcp: :boolean,
-    workflow: :string
+    host: :string,
+    events_retention_days: :integer
   ]
+  @import_switches [slug: :string, name: :string, note: :string, data_root: :string]
+  @export_switches [data_root: :string]
+  @mcp_switches [linear_mcp: :boolean, workflow: :string]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
-          required(:file_regular?) => (String.t() -> boolean()),
-          required(:set_workflow_file_path) => (String.t() -> :ok | {:error, term()}),
-          required(:set_logs_root) => (String.t() -> :ok | {:error, term()}),
-          required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
           required(:ensure_all_started) => (-> ensure_started_result()),
-          required(:preflight) => (-> :ok | {:error, term()}),
+          required(:start_repo) => (-> :ok | {:error, term()}),
+          required(:import_lane) => (Path.t(), keyword() -> {:ok, SymphonyElixir.Lanes.Lane.t(), [String.t()]} | {:error, [SymphonyElixir.Lanes.error()]}),
+          required(:export_lane) => (String.t() -> {:ok, String.t()} | {:error, :not_found | :no_version}),
+          required(:operator_token) => (-> String.t() | nil),
+          required(:write_output) => (String.t() -> :ok),
           optional(:ensure_linear_mcp_started) => (-> ensure_started_result()),
           optional(:configure_linear_mcp_logger) => (-> :ok),
           optional(:serve_linear_mcp) => (-> :ok)
@@ -45,6 +46,9 @@ defmodule SymphonyElixir.CLI do
       {:ok, :linear_mcp} ->
         System.halt(0)
 
+      {:ok, :command} ->
+        System.halt(0)
+
       {:error, message} ->
         IO.puts(:stderr, message)
         System.halt(1)
@@ -59,164 +63,236 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  @spec evaluate_mode([String.t()], deps()) :: {:ok, :daemon | :linear_mcp} | {:error, String.t()}
+  defp evaluate_mode(["serve" | args], deps) do
+    with :ok <- evaluate_serve(args, deps), do: {:ok, :daemon}
+  end
+
+  defp evaluate_mode(["lanes", "import" | args], deps) do
+    with :ok <- evaluate_import(args, deps), do: {:ok, :command}
+  end
+
+  defp evaluate_mode(["lanes", "export" | args], deps) do
+    with :ok <- evaluate_export(args, deps), do: {:ok, :command}
+  end
+
   defp evaluate_mode(args, deps) do
-    case OptionParser.parse(args, strict: @switches) do
-      {opts, positional, []} ->
-        opts
-        |> Keyword.get(:linear_mcp, false)
-        |> evaluate_parsed_mode(opts, positional, deps)
+    with {:ok, opts, []} <- parse(args, @mcp_switches, 0),
+         true <- Keyword.get(opts, :linear_mcp, false),
+         :ok <- evaluate_linear_mcp(opts, deps) do
+      {:ok, :linear_mcp}
+    else
+      false -> {:error, usage_message()}
+      {:error, _message} = error -> error
+    end
+  end
+
+  defp evaluate_serve(args, deps) do
+    with {:ok, opts, []} <- parse(args, @serve_switches, 0),
+         :ok <- validate_serve_options(opts),
+         :ok <- require_guardrails_acknowledgement(opts),
+         {:ok, token} <- require_operator_token(deps),
+         {:ok, root} <- prepare_data_root(opts),
+         :ok <- create_directory(Path.join(root, "log")) do
+      Application.put_env(:symphony_elixir, :data_root, root)
+      Application.put_env(:symphony_elixir, :log_file, LogFile.default_log_file(root))
+      Application.put_env(:symphony_elixir, :server_port, Keyword.get(opts, :port, 4000))
+      Application.put_env(:symphony_elixir, :server_host, Keyword.get(opts, :host, "127.0.0.1"))
+      Application.put_env(:symphony_elixir, :events_retention_days, Keyword.get(opts, :events_retention_days, 30))
+      Application.put_env(:symphony_elixir, :operator_token, token)
+
+      case deps.ensure_all_started.() do
+        {:ok, _apps} -> :ok
+        {:error, reason} -> {:error, "Failed to start Symphony: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  defp evaluate_import(args, deps) do
+    with {:ok, opts, [path]} <- parse(args, @import_switches, 1),
+         {:ok, slug} <- require_option(opts, :slug),
+         :ok <- start_repo(opts, deps) do
+      case deps.import_lane.(Path.expand(path), Keyword.take(opts, [:name, :note]) |> Keyword.put(:slug, slug)) do
+        {:ok, lane, warnings} ->
+          lines = ["imported lane #{lane.slug} version #{lane.current_version_id}" | Enum.map(warnings, &("warning: " <> &1))]
+          deps.write_output.(Enum.join(lines, "\n") <> "\n")
+
+        {:error, errors} ->
+          {:error, "Invalid lane configuration in #{path}:\n" <> Enum.map_join(errors, "\n", &"  #{&1.path}: #{&1.message}")}
+      end
+    end
+  end
+
+  defp evaluate_export(args, deps) do
+    with {:ok, opts, [slug]} <- parse(args, @export_switches, 1),
+         :ok <- start_repo(opts, deps) do
+      case deps.export_lane.(slug) do
+        {:ok, content} -> deps.write_output.(content)
+        {:error, :not_found} -> {:error, "no lane with slug #{slug}"}
+        {:error, :no_version} -> {:error, "lane #{slug} has no version"}
+      end
+    end
+  end
+
+  defp evaluate_linear_mcp(opts, deps) do
+    with {:ok, workflow} <- require_option(opts, :workflow) do
+      expanded_workflow = Path.expand(workflow)
+      :ok = SymphonyElixir.Workflow.set_workflow_file_path(expanded_workflow)
+      :ok = configure_linear_mcp_logger(deps)
+
+      case ensure_linear_mcp_started(deps) do
+        {:ok, _apps} ->
+          serve = Map.get(deps, :serve_linear_mcp, &serve_linear_mcp/0)
+          serve.()
+
+        {:error, reason} ->
+          {:error, "Failed to start Symphony linear MCP runtime with workflow #{expanded_workflow}: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  defp parse(args, switches, count) do
+    case OptionParser.parse(args, strict: switches) do
+      {opts, positional, []} when length(positional) == count ->
+        if valid_data_root?(opts) and Enum.all?(positional, &(String.trim(&1) != "")),
+          do: {:ok, opts, positional},
+          else: {:error, usage_message()}
 
       _ ->
         {:error, usage_message()}
     end
   end
 
-  defp evaluate_parsed_mode(true, opts, positional, deps) do
-    with :ok <- evaluate_linear_mcp(opts, positional, deps), do: {:ok, :linear_mcp}
+  defp valid_data_root?(opts) do
+    case Keyword.get(opts, :data_root) do
+      nil -> true
+      root -> String.trim(root) != ""
+    end
   end
 
-  defp evaluate_parsed_mode(false, opts, positional, deps) do
-    with :ok <- evaluate_daemon(opts, positional, deps), do: {:ok, :daemon}
-  end
+  defp validate_serve_options(opts) do
+    port = Keyword.get(opts, :port, 4000)
+    retention = Keyword.get(opts, :events_retention_days, 30)
+    host = Keyword.get(opts, :host, "127.0.0.1")
 
-  @spec run(String.t(), deps()) :: :ok | {:error, String.t()}
-  def run(workflow_path, deps) do
-    expanded_path = Path.expand(workflow_path)
-
-    if deps.file_regular?.(expanded_path) do
-      :ok = deps.set_workflow_file_path.(expanded_path)
-
-      # Resolve the scope before starting the scheduling loop: a bad scope would otherwise
-      # dispatch work (workspace, clone, agent) before preflight could halt the VM.
-      with :ok <- handle_preflight(expanded_path, deps), do: start_application(expanded_path, deps)
+    if port in 0..65_535 and retention > 0 and valid_host?(host) do
+      :ok
     else
-      {:error, "Workflow file not found: #{expanded_path}"}
+      {:error, usage_message()}
     end
   end
 
-  defp handle_preflight(expanded_path, deps) do
-    case deps.preflight.() do
-      :ok ->
-        :ok
+  defp valid_host?(host), do: match?({:ok, _address}, :inet.parse_strict_address(String.to_charlist(host)))
 
-      {:error, reason} ->
-        {:error, "Tracker preflight failed for workflow #{expanded_path}: #{format_preflight_error(reason)}"}
+  defp require_option(opts, key) do
+    case Keyword.get(opts, key) do
+      value when is_binary(value) ->
+        if String.trim(value) != "", do: {:ok, value}, else: {:error, "--#{key} is required\n" <> usage_message()}
+
+      _ ->
+        {:error, "--#{key} is required\n" <> usage_message()}
     end
   end
 
-  # Runs before the supervision tree, so it starts only the HTTP client it needs.
-  defp run_tracker_preflight do
-    # The rotating disk handler is installed by `SymphonyElixir.start_runtime/0`, which has not run
-    # yet, so without this every preflight warning would reach stdout only and never the durable
-    # log file operators are told to read. `configure/0` removes the handler it owns before adding
-    # it again, so `start_runtime/0`'s later call stays correct.
-    :ok = LogFile.configure()
+  defp require_operator_token(deps) do
+    case deps.operator_token.() do
+      token when is_binary(token) ->
+        if String.trim(token) == "", do: {:error, operator_token_message()}, else: {:ok, token}
 
-    case offline_tracker_settings() do
-      {:ok, settings} ->
-        with {:ok, _started_apps} <- Application.ensure_all_started(:req) do
-          Tracker.preflight(settings.tracker)
-        end
-
-      # An unloadable or invalid workflow is left to application start, which stops on the same
-      # reason and reports it with the message that names the real problem. Preflighting first
-      # would replace that message with whatever Linear said, and would issue a live request for
-      # a configuration about to be rejected offline.
-      {:error, _reason} ->
-        :ok
+      _ ->
+        {:error, operator_token_message()}
     end
   end
 
-  # `Config.validate!/0` reloads and validates `WORKFLOW.md` entirely offline, so the whole gate
-  # runs before the supervision tree and before any tracker request.
-  defp offline_tracker_settings do
-    with :ok <- Config.validate!(), do: Config.settings()
+  defp operator_token_message do
+    "SYMPHONY_OPERATOR_TOKEN is not set. The web UI can change lane configuration, so serve refuses to start without an operator token."
   end
 
-  defp format_preflight_error({:linear_preflight_failed, reasons}) when is_list(reasons) do
-    Enum.join(reasons, "; ")
+  defp prepare_data_root(opts) do
+    root = Path.expand(Keyword.get(opts, :data_root, File.cwd!()))
+    with :ok <- create_directory(root), do: {:ok, root}
   end
 
-  defp format_preflight_error(reason), do: inspect(reason)
-
-  defp start_application(expanded_path, deps) do
-    case deps.ensure_all_started.() do
-      {:ok, _started_apps} ->
-        :ok
-
-      {:error, reason} ->
-        {:error, "Failed to start Symphony with workflow #{expanded_path}: #{inspect(reason)}"}
+  defp create_directory(path) do
+    case File.mkdir_p(path) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Failed to create Symphony data directory #{path}: #{:file.format_error(reason)}"}
     end
   end
 
-  @spec usage_message() :: String.t()
+  defp start_repo(opts, deps) do
+    with {:ok, root} <- prepare_data_root(opts) do
+      Application.put_env(:symphony_elixir, :data_root, root)
+
+      case deps.start_repo.() do
+        :ok -> :ok
+        {:error, reason} -> {:error, "Failed to open the Symphony database: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  # Offline commands must not boot schedulers or leak SQL/migration logs into exports.
+  defp start_repo_standalone do
+    :ok = configure_linear_mcp_logger()
+
+    with {:ok, _apps} <- Application.ensure_all_started(:ecto_sqlite3),
+         {:ok, _pid} <- start_repo_process() do
+      SymphonyElixir.Repo.migrate()
+    end
+  rescue
+    exception -> {:error, exception}
+  end
+
+  defp start_repo_process do
+    case SymphonyElixir.Repo.start_link() do
+      {:ok, pid} -> {:ok, pid}
+      {:error, {:already_started, pid}} -> {:ok, pid}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp export_lane(slug) do
+    case SymphonyElixir.Lanes.get_by_slug(slug) do
+      nil -> {:error, :not_found}
+      lane -> SymphonyElixir.Lanes.export(lane)
+    end
+  end
+
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]\n       symphony --linear-mcp --workflow <path-to-WORKFLOW.md>"
+    """
+    Usage: symphony serve [--data-root <dir>] [--port <port>] [--host <ip>] [--events-retention-days <n>] --i-understand-that-this-will-be-running-without-the-usual-guardrails
+           symphony lanes import <WORKFLOW.md> --slug <slug> [--name <name>] [--note <text>] [--data-root <dir>]
+           symphony lanes export <slug> [--data-root <dir>]
+           symphony --linear-mcp --workflow <path-to-WORKFLOW.md>
+    The daemon no longer takes a WORKFLOW.md path: import it as a lane first.
+    """
+    |> String.trim_trailing()
   end
 
-  @spec runtime_deps() :: deps()
   defp runtime_deps(ensure_all_started \\ fn -> Application.ensure_all_started(:symphony_elixir) end) do
     %{
-      file_regular?: &File.regular?/1,
-      set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
-      set_logs_root: &set_logs_root/1,
-      set_server_port_override: &set_server_port_override/1,
       ensure_all_started: ensure_all_started,
-      preflight: &run_tracker_preflight/0,
-      ensure_linear_mcp_started: fn -> Application.ensure_all_started(:req) end,
+      start_repo: &start_repo_standalone/0,
+      import_lane: &SymphonyElixir.Lanes.import_file/2,
+      export_lane: &export_lane/1,
+      operator_token: fn -> System.get_env("SYMPHONY_OPERATOR_TOKEN") end,
+      write_output: &IO.write/1,
+      ensure_linear_mcp_started: &start_linear_mcp_runtime/0,
       configure_linear_mcp_logger: &configure_linear_mcp_logger/0,
       serve_linear_mcp: &serve_linear_mcp/0
     }
   end
 
-  defp evaluate_daemon(opts, positional, deps) do
-    case positional do
-      [] ->
-        with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- maybe_set_logs_root(opts, deps),
-             :ok <- maybe_set_server_port(opts, deps) do
-          run(Path.expand("WORKFLOW.md"), deps)
-        end
-
-      [workflow_path] ->
-        with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- maybe_set_logs_root(opts, deps),
-             :ok <- maybe_set_server_port(opts, deps) do
-          run(workflow_path, deps)
-        end
-
-      _other ->
-        {:error, usage_message()}
+  defp start_linear_mcp_runtime do
+    with {:ok, apps} <- Application.ensure_all_started(:req),
+         {:ok, _pid} <- SymphonyElixir.LaneStore.start_link(file: SymphonyElixir.Workflow.workflow_file_path()) do
+      :ok = SymphonyElixir.LaneContext.put(SymphonyElixir.LaneStore.file_lane_id())
+      {:ok, apps}
     end
   end
-
-  defp evaluate_linear_mcp(opts, [], deps) do
-    case Keyword.get(opts, :workflow) do
-      workflow when is_binary(workflow) and workflow != "" ->
-        expanded_workflow = Path.expand(workflow)
-        :ok = deps.set_workflow_file_path.(expanded_workflow)
-
-        case ensure_linear_mcp_started(deps) do
-          {:ok, _started_apps} ->
-            :ok = configure_linear_mcp_logger(deps)
-            serve_linear_mcp = Map.get(deps, :serve_linear_mcp, &serve_linear_mcp/0)
-            serve_linear_mcp.()
-
-          {:error, reason} ->
-            {:error, "Failed to start Symphony linear MCP runtime with workflow #{expanded_workflow}: #{inspect(reason)}"}
-        end
-
-      _missing ->
-        {:error, usage_message()}
-    end
-  end
-
-  defp evaluate_linear_mcp(_opts, _positional, _deps), do: {:error, usage_message()}
 
   defp ensure_linear_mcp_started(deps) do
     deps
-    |> Map.get(:ensure_linear_mcp_started, fn -> {:ok, []} end)
+    |> Map.get(:ensure_linear_mcp_started, &start_linear_mcp_runtime/0)
     |> then(& &1.())
   end
 
@@ -227,26 +303,12 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp configure_linear_mcp_logger do
+    {:ok, _apps} = Application.ensure_all_started(:logger)
+
     case :logger.remove_handler(:default) do
       :ok -> :ok
       {:error, {:not_found, :default}} -> :ok
       {:error, _reason} -> :ok
-    end
-  end
-
-  defp maybe_set_logs_root(opts, deps) do
-    case Keyword.get_values(opts, :logs_root) do
-      [] ->
-        :ok
-
-      values ->
-        logs_root = values |> List.last() |> String.trim()
-
-        if logs_root == "" do
-          {:error, usage_message()}
-        else
-          :ok = deps.set_logs_root.(Path.expand(logs_root))
-        end
     end
   end
 
@@ -289,32 +351,6 @@ defmodule SymphonyElixir.CLI do
       IO.ANSI.reset()
     ]
     |> IO.iodata_to_binary()
-  end
-
-  defp set_logs_root(logs_root) do
-    Application.put_env(:symphony_elixir, :log_file, LogFile.default_log_file(logs_root))
-    :ok
-  end
-
-  defp maybe_set_server_port(opts, deps) do
-    case Keyword.get_values(opts, :port) do
-      [] ->
-        :ok
-
-      values ->
-        port = List.last(values)
-
-        if is_integer(port) and port >= 0 do
-          :ok = deps.set_server_port_override.(port)
-        else
-          {:error, usage_message()}
-        end
-    end
-  end
-
-  defp set_server_port_override(port) when is_integer(port) and port >= 0 do
-    Application.put_env(:symphony_elixir, :server_port_override, port)
-    :ok
   end
 
   defp serve_linear_mcp do

@@ -13,5 +13,6 @@ defmodule Mix.Tasks.Symphony do
   @requirements ["app.config"]
 
   @impl Mix.Task
+  @spec run([String.t()]) :: no_return()
   defdelegate run(args), to: SymphonyElixir.CLI, as: :main
 end
