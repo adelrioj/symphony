@@ -1,7 +1,7 @@
 ---
-# Your Symphony pipeline. Edit the marked lines; everything else is a working default.
-# Symphony re-reads this file about once a second — saving it applies the change live.
-# A broken edit is logged and ignored; the last valid version keeps running.
+# Import this file as one lane, then edit its live configuration through the UI or API.
+# Saving this file does not update a running installation; import it while offline.
+# Invalid UI/API saves are rejected and the current version remains effective.
 # Blank body below => Symphony's default Codex prompt template. Write a prompt body here
 # to drive a custom pipeline.
 tracker:
@@ -14,14 +14,14 @@ tracker:
     #     Startup preflight cannot help here — it does not resolve project slugs.
     project_slug: "REPLACE-with-your-linear-project-slug"
     # Or scope by team instead, so epics can come and go without a config change. Unlike a
-    # project slug, a team key IS checked at startup: a wrong one fails the boot with a named
-    # error instead of idling silently.
+    # project slug, a team key IS checked when its lane starts: a wrong one disables
+    # that lane with a named error instead of idling silently.
     # team_keys: ["REPLACE-with-your-team-key"]
     # current_cycle: true       # requires team_keys; the team's active sprint becomes the queue
     # At least one of project_slug / team_keys / current_cycle is required.
     # BEFORE you uncomment team_keys, prune the active_states / terminal_states lists below to
     # names that really exist in those teams — that check only runs once team_keys is set, and it
-    # fails the boot rather than warning. The shipped lists will not survive it as-is: Merging and
+    # disables the lane rather than warning. The shipped lists will not survive it as-is: Merging and
     # Rework do not exist in a default workspace, and Cancelled / Canceled are two spellings of one
     # state, so at most one of them can resolve.
   required_labels: []
@@ -29,7 +29,7 @@ tracker:
   # active_states / terminal_states must match the workflow state names in YOUR Linear workspace
   # exactly. Merging and Rework do not exist in a default workspace, and Cancelled / Canceled are
   # two spellings of one state. With team_keys set, a state name that exists in no listed team
-  # fails the boot with a named error; with only project_slug set there is nothing to check it
+  # disables the lane with a named error; with only project_slug set there is nothing to check it
   # against, and it is silently never matched — the same idle-container symptom as a wrong slug.
   active_states:
     - Todo
@@ -45,14 +45,11 @@ tracker:
 polling:
   interval_ms: 5000
 server:
-  host: "0.0.0.0"             # <-- bind all interfaces INSIDE the container; do NOT change.
-                              #     Docker forwards the published port to the container's eth0
-                              #     address, so a loopback bind here makes the dashboard
-                              #     unreachable. Exposure is controlled on the host side, by the
-                              #     ports: entry in docker-compose.yml: container binds all
-                              #     interfaces, host publishes loopback only.
+  host: "0.0.0.0"             # Legacy import example: server is ignored with a warning.
+                              # Bind with `serve --host`; compose supplies 0.0.0.0 inside
+                              # the container and publishes only host-side loopback.
 workspace:
-  root: /workspaces            # <-- container volume; do NOT change (must match compose)
+  root: /workspaces            # Container volume; use distinct subdirectories for additional lanes.
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/your-org/your-repo .   # <-- this project's repo

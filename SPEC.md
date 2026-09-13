@@ -15,17 +15,17 @@ behavior.
 
 ## 1. Problem Statement
 
-Symphony is a long-running automation service that continuously reads work from a configured issue
-tracker, creates an isolated workspace for each issue, and runs a coding agent session for that
-issue inside the workspace.
+Symphony is a long-running automation service with independently scheduled lanes. Each lane reads
+its configured issue tracker scope, creates an isolated workspace for each issue, and runs a coding
+agent session for that issue inside the workspace.
 
 The service solves four operational problems:
 
 - It turns issue execution into a repeatable daemon workflow instead of manual scripts.
 - It isolates agent execution in per-issue workspaces so agent commands run only inside per-issue
   workspace directories.
-- It keeps the workflow policy in-repo (`WORKFLOW.md`) so teams version the agent prompt and runtime
-  settings with their code.
+- It stores lane policy as immutable database versions, with `WORKFLOW.md` as an import/export
+  format teams can also version with their code.
 - It provides enough observability to operate and debug multiple concurrent agent runs.
 
 Implementations are expected to document their trust and safety posture explicitly. This
@@ -48,18 +48,19 @@ Important boundary:
 ### 2.1 Goals
 
 - Poll the issue tracker on a fixed cadence and dispatch work with bounded concurrency.
-- Maintain a single authoritative orchestrator state for dispatch, retries, and reconciliation.
+- Maintain one authoritative orchestrator state per lane for dispatch, retries, and reconciliation.
 - Create deterministic per-issue workspaces and preserve them across runs.
 - Stop active runs when issue state changes make them ineligible.
 - Recover from transient failures with exponential backoff.
-- Load runtime behavior from a repository-owned `WORKFLOW.md` contract.
+- Load runtime behavior per lane from a database of immutable workflow versions; `WORKFLOW.md` is
+  the import/export format of one lane.
 - Expose operator-visible observability (at minimum structured logs).
-- Support tracker/filesystem-driven restart recovery without requiring a persistent database; exact
-  in-memory scheduler state is not restored.
+- Rebuild scheduler state from the tracker on restart; the database records lane configuration and
+  run history and never drives scheduling. Exact in-memory scheduler state is not restored.
 
 ### 2.2 Non-Goals
 
-- Rich web UI or multi-tenant control plane.
+- Multi-tenant control plane: one installation serves one client.
 - Prescribing a specific dashboard or terminal UI implementation.
 - General-purpose workflow engine or distributed job scheduler.
 - Built-in business logic for how to edit tickets, PRs, or comments. (That logic lives in the
@@ -72,10 +73,10 @@ Important boundary:
 
 ### 3.1 Main Components
 
-1. `Workflow Loader`
-   - Reads `WORKFLOW.md`.
-   - Parses YAML front matter and prompt body.
-   - Returns `{config, prompt_template}`.
+1. `Lane Configuration Store and Workflow Loader`
+   - Imports/exports `WORKFLOW.md` as YAML front matter and prompt body.
+   - Stores lane metadata, immutable workflow versions, and the current-version pointer.
+   - Validates writes and publishes effective per-lane `{config, prompt_template}` values.
 
 2. `Config Layer`
    - Exposes typed getters for workflow config values.
@@ -90,9 +91,9 @@ Important boundary:
    - MAY expose provider-native agent tools without adding provider-specific write APIs to the
      orchestrator.
 
-4. `Orchestrator`
-   - Owns the poll tick.
-   - Owns the in-memory runtime state.
+4. `Orchestrator` (one per enabled lane)
+   - Owns that lane's poll tick.
+   - Owns that lane's in-memory runtime state.
    - Decides which issues to dispatch, retry, stop, or release.
    - Resolves the configured agent backend for an issue state before claiming the issue.
    - Tracks session metrics and retry queue state.
@@ -116,12 +117,17 @@ Important boundary:
 8. `Logging`
    - Emits structured runtime logs to one or more configured sinks.
 
+
+9. `Run History`
+   - Records attempts/events durably for observability, not scheduling.
+   - Writes MUST NOT block scheduling; failed or uncommitted writes can be lost with a visible error.
+
 ### 3.2 Abstraction Levels
 
 Symphony is easiest to port when kept in these layers:
 
-1. `Policy Layer` (repo-defined)
-   - `WORKFLOW.md` prompt body.
+1. `Policy Layer` (lane-defined, importable from a repository)
+   - Current immutable workflow version's prompt body.
    - Team-specific rules for ticket handling, validation, and handoff.
 
 2. `Configuration Layer` (typed getters)
@@ -143,8 +149,8 @@ Symphony is easiest to port when kept in these layers:
 
 ### 3.3 External Dependencies
 
-- One configured issue tracker API.
-- Local filesystem for workspaces and logs.
+- One configured issue tracker API per lane.
+- A database for lane configuration/history, plus local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
 - Coding-agent executable(s) for the configured backend(s), such as Codex app-server mode for
   `agent.backend: codex` and the Claude Code CLI for `agent.backend: claude`.
@@ -209,16 +215,19 @@ Fields:
 
 #### 4.1.2 Workflow Definition
 
-Parsed `WORKFLOW.md` payload:
+Parsed workflow version, imported from `WORKFLOW.md` or saved through the lane configuration API:
 
 - `config` (map)
   - YAML front matter root object.
 - `prompt_template` (string)
   - Markdown body after front matter, trimmed.
 
+- `front_matter` and `prompt` (raw strings retained separately for editing/export)
+- `lane_id` and immutable `version_id`
+
 #### 4.1.3 Service Config (Typed View)
 
-Typed runtime values derived from `WorkflowDefinition.config` plus environment resolution.
+Typed per-lane runtime values derived from `WorkflowDefinition.config` plus environment resolution.
 
 Examples:
 
@@ -241,10 +250,14 @@ Fields (logical):
 
 #### 4.1.5 Run Attempt
 
-One execution attempt for one issue.
+One execution attempt for one issue within a lane, bound to an immutable dispatch snapshot.
 
 Fields (logical):
 
+- `lane_id`
+- `lane_version_id`
+- `attempt_id` (stable history identifier)
+- `executor`
 - `issue_id`
 - `issue_identifier`
 - `attempt` (integer or null, `null` for first run, `>=1` for retries/continuation)
@@ -290,7 +303,7 @@ Fields:
 
 #### 4.1.8 Orchestrator Runtime State
 
-Single authoritative in-memory state owned by the orchestrator.
+One authoritative in-memory state per lane, owned by that lane's orchestrator.
 
 Fields:
 
@@ -326,19 +339,28 @@ Fields:
 - `Session ID`
   - Compose from coding-agent `thread_id` and `turn_id` as `<thread_id>-<turn_id>`.
 
-## 5. Workflow Specification (Repository Contract)
+## 5. Workflow Specification (Lane Import/Export Contract)
 
-### 5.1 File Discovery and Path Resolution
+### 5.1 Import Format and Path Resolution
 
-Workflow file path precedence:
+`WORKFLOW.md` describes one lane, not the running installation. Import it explicitly with
+`symphony lanes import <file> --slug <slug> --data-root <dir>`; export the current version with
+`symphony lanes export <slug> --data-root <dir>`. Use the same data root as `symphony serve`.
+The command spelling is illustrative; implementations MAY expose equivalent host entrypoints.
 
-1. Explicit application/runtime setting (set by CLI startup path).
-2. Default: `WORKFLOW.md` in the current process working directory.
-
-Loader behavior:
-
-- If the file cannot be read, return `missing_workflow_file` error.
-- The workflow file is expected to be repository-owned and version-controlled.
+- Import creates a disabled lane, or saves a new version for an existing slug.
+- Lane slugs follow the create/update rules below: `^[a-z][a-z0-9-]{1,40}$`, excluding the reserved
+  word `new` so `/lanes/new` remains the creation page. Imports reject it with a slug field error.
+- Import/export are offline database operations, not filesystem watches. An import in another
+  process is not a live update; use the running installation's UI/API, or restart after import.
+- Files MAY be repository-owned and version-controlled, but daemon startup requires no workflow path.
+- Relative local `workspace.root` resolves against the installation data root, not the import directory.
+- Unreadable import files retain the loader error class `missing_workflow_file`; parsing retains
+  `workflow_parse_error` and `workflow_front_matter_not_a_map`.
+- Raw YAML and prompt strings are retained for editing/export. Canonical nonempty LF-delimited
+  front matter with a newline after the closing delimiter round-trips byte-for-byte. Arbitrary
+  envelopes (including CRLF delimiters, empty YAML blocks, or a closing delimiter at EOF) may
+  normalize on export; exact byte identity for every accepted file is not guaranteed.
 
 ### 5.2 File Format
 
@@ -346,9 +368,8 @@ Loader behavior:
 
 Design note:
 
-- `WORKFLOW.md` SHOULD be self-contained enough to describe and run different workflows (prompt,
-  runtime settings, hooks, and tracker selection/config) without requiring out-of-band
-  service-specific configuration.
+- `WORKFLOW.md` SHOULD describe one lane's prompt, runtime settings, hooks and tracker selection.
+  Installation-level listener, authentication, data-root and retention settings are out of band.
 
 Parsing rules:
 
@@ -356,7 +377,7 @@ Parsing rules:
 - Remaining lines become the prompt body.
 - If front matter is absent, treat the entire file as prompt body and use an empty config map.
 - YAML front matter MUST decode to a map/object; non-map YAML is an error.
-- Prompt body is trimmed before use.
+- Preserve raw prompt text for export; normalize line breaks and trim the runtime template before use.
 
 Returned workflow object:
 
@@ -436,7 +457,7 @@ Fields:
 - `root` (path string or `$VAR`)
   - Default: `<system-temp>/symphony_workspaces`
   - `~` is expanded.
-  - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
+  - Relative local paths are resolved against the installation data root.
   - The effective workspace root is normalized to an absolute path before use.
 
 #### 5.3.4 `hooks` (object)
@@ -612,7 +633,8 @@ Error classes:
 
 Dispatch gating behavior:
 
-- Workflow file read/YAML errors block new dispatches until fixed.
+- File/YAML/schema errors reject the import or save without inserting an invalid version. Invalid
+  persisted boot configuration prevents dispatch only for that lane, with an operator-visible error.
 - Template errors fail only the affected run attempt.
 
 ## 6. Configuration Specification
@@ -621,8 +643,8 @@ Dispatch gating behavior:
 
 Configuration is resolved in this order:
 
-1. Select the workflow file path (explicit runtime setting, otherwise cwd default).
-2. Parse YAML front matter into a raw config map.
+1. Select the lane's current immutable database version (or the attempt's captured version).
+2. Parse its YAML front matter into a raw config map; retain raw YAML/prompt separately for export.
 3. Apply built-in defaults for missing OPTIONAL fields.
 4. Resolve `$VAR_NAME` indirection for config values that explicitly contain `$VAR_NAME`, plus any
    adapter-owned fallback environment names documented for omitted provider fields.
@@ -639,28 +661,28 @@ Value coercion semantics:
   - `$VAR` expansion for env-backed path values
   - Apply expansion only to values intended to be local filesystem paths; do not rewrite URIs or
     arbitrary shell command strings.
-- Relative `workspace.root` values resolve relative to the directory containing the selected
-  `WORKFLOW.md`.
+- Relative local `workspace.root` values resolve against the installation data root.
 
-### 6.2 Dynamic Reload Semantics
+### 6.2 Dynamic Lane Configuration Semantics
 
-Dynamic reload is REQUIRED:
+Live application of saved lane versions is REQUIRED:
 
-- The software MUST detect `WORKFLOW.md` changes.
-- On change, it MUST re-read and re-apply workflow config and prompt template without restart.
-- The software MUST attempt to adjust live behavior to the new config (for example polling
-  cadence, concurrency limits, active/terminal states, agent backend settings, workspace
-  paths/hooks, and prompt content for future runs).
-- Reloaded config applies to future dispatch, retry scheduling, reconciliation decisions, hook
-  execution, and agent launches.
-- Implementations are not REQUIRED to restart in-flight agent sessions automatically when config
-  changes.
-- Extensions that manage their own listeners/resources (for example an HTTP server port change) MAY
-  require restart unless the implementation explicitly supports live rebind.
-- Implementations SHOULD also re-validate/reload defensively during runtime operations (for example
-  before dispatch) in case filesystem watch events are missed.
-- Invalid reloads MUST NOT crash the service; keep operating with the last known good effective
-  configuration and emit an operator-visible error.
+- A valid save MUST be published without restarting the service or its active attempts.
+- The lane scheduler uses the current effective config for future dispatches (including retries),
+  polling cadence, concurrency, and reconciliation decisions.
+- An attempt MUST capture a complete immutable configuration before its worker is spawned, including
+  workflow, version identity, backend/tools, workspace, hooks and completion policy. Its helpers,
+  multi-turn continuation and deferred completion work MUST retain that same snapshot.
+- A later retry dispatch captures a new snapshot; saving a lane MUST NOT switch the configuration
+  underneath an already active attempt or implicitly restart it.
+- Invalid saves MUST NOT insert a version, move the current pointer, or crash the service; return
+  field-path validation errors and retain the last good effective configuration.
+- Managed-resource identity guards (Appendix B) MUST serialize with mutation and publication:
+  rejected identity changes MUST roll back, including version activation.
+- Asynchronous tracker preflight and delayed runtime restarts MUST be fenced by current publication
+  generation. A newer edit supersedes a pending check, even when only metadata/prompt changed.
+  Stale success or failure MUST NOT start or disable the lane.
+- Installation listener settings MAY require restart. Filesystem changes are not live configuration.
 
 ### 6.3 Dispatch Preflight Validation
 
@@ -668,10 +690,10 @@ This validation is a scheduler preflight run before attempting to dispatch new w
 the workflow/config needed to poll and launch workers, not a full audit of all possible workflow
 behavior.
 
-Startup validation:
+Lane startup validation:
 
-- Validate configuration before starting the scheduling loop.
-- If startup validation fails, fail startup and emit an operator-visible error.
+- Validate each lane's persisted configuration before starting its scheduling loop.
+- An invalid lane is disabled with an operator-visible error; other valid lanes continue to start.
 
 Per-tick dispatch validation:
 
@@ -681,7 +703,7 @@ Per-tick dispatch validation:
 
 Validation checks:
 
-- Workflow file can be loaded and parsed.
+- The lane has a current workflow version that parses and validates.
 - `tracker.kind` is present and supported.
 - The selected adapter accepts `tracker.provider` after documented defaults and `$VAR`
   resolution.
@@ -733,10 +755,34 @@ not require recognizing or validating extension fields unless that extension is 
 - `claude.allowed_tools`: list of strings or null
 - `claude.extra_mcp_servers`: map of MCP server name to server object, default `{}`
 
+### 6.5 Lane Configuration Store
+
+One service process runs zero or more enabled lanes. A lane is a named configuration unit (tracker
+scope, workspace root, agent settings, hooks, prompt) with its own scheduler authority.
+
+- The database stores lanes and immutable versions under the installation data root. A workflow
+  save inserts a version and advances the pointer; metadata-only edits do not insert a version.
+  Rollback validates and activates an existing version of the same lane, never another lane's version.
+- New lanes default disabled. Enabling validates and preflights before runtime start. Disabling stops
+  the lane runtime and its agents; soft deletion requires a disabled, stopped lane, retains history,
+  and reserves the slug.
+- Each enabled lane has its own coupled scheduler/worker supervision boundary. Workers MUST NOT
+  outlive their claim authority. Lane runtime crashes MUST NOT stop other lanes. Repeated crashes
+  leave only the affected lane disabled with an operator-visible reason.
+- Tracker preflight (11.6) runs at lane runtime start and after tracker changes. A current failure
+  disables the lane with the adapter's message; generations prevent stale outcomes taking effect.
+- Runtime reads resolve through lane context; active attempts use immutable dispatch snapshots.
+- Data root, HTTP host/port, operator credential and event-retention window are installation settings.
+  Imported `server` settings are ignored with a warning, not applied to the installation.
+- Durable attempts/events are observability records only. Scheduling state is rebuilt from the
+  tracker on restart; history MUST NOT be replayed into claims, sessions or retry timers.
+- The HTTP extension (13.7), when provided, protects lane reads/writes with one operator credential
+  per installation and exposes list/create/update/activation/export/soft-delete operations.
+
 ## 7. Orchestration State Machine
 
-The orchestrator is the only component that mutates scheduling state. All worker outcomes are
-reported back to it and converted into explicit state transitions.
+Each lane's orchestrator is the only component that mutates its scheduling state. All worker
+outcomes are reported back to that authority and converted into explicit state transitions.
 
 ### 7.1 Issue Orchestration States
 
@@ -831,18 +877,18 @@ Distinct terminal reasons are important because retry logic and logs differ.
 
 ### 7.4 Idempotency and Recovery Rules
 
-- The orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
+- Each lane's orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
 - `claimed` and `running` checks are REQUIRED before launching any worker.
 - Reconciliation runs before dispatch on every tick.
-- Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
+- Restart recovery is tracker/filesystem-driven; durable configuration/history is not scheduler state.
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
 
 ## 8. Polling, Scheduling, and Reconciliation
 
 ### 8.1 Poll Loop
 
-At startup, the service validates config, performs startup cleanup, schedules an immediate tick, and
-then repeats every `polling.interval_ms`.
+At lane runtime startup, validate config, perform startup cleanup, schedule an immediate tick, and
+then repeat every `polling.interval_ms`.
 
 The effective poll interval SHOULD be updated when workflow config changes are re-applied.
 
@@ -885,7 +931,7 @@ Sorting order (stable intent):
 
 ### 8.3 Concurrency Control
 
-Global limit:
+Per-lane total limit (not an installation-wide pool):
 
 - `available_slots = max(max_concurrent_agents - running_count, 0)`
 
@@ -958,7 +1004,7 @@ Part B: Tracker state refresh
 
 ### 8.6 Startup Terminal Workspace Cleanup
 
-When the service starts:
+When a lane runtime starts:
 
 1. Query tracker for issues in terminal states.
 2. For each returned issue identifier, remove the corresponding workspace directory.
@@ -1219,7 +1265,7 @@ Optional provider-native agent tool extension:
   mechanism supported by that backend. Codex can receive tools through its app-server protocol;
   Claude can receive them through the standalone Symphony MCP server.
 - Tool specs, adapter selection, and effective tracker settings MUST be bound to one session
-  snapshot. A workflow reload applies to future sessions; it MUST NOT make an in-flight session
+  snapshot. A lane save applies to future attempts; it MUST NOT make an in-flight session
   advertise one provider and execute another.
 - Tool names, schemas, and result payloads are adapter-owned. Symphony does not standardize a
   lowest-common-denominator CRUD API.
@@ -1484,19 +1530,19 @@ REQUIRED for conformance, and an adapter that implements neither MUST keep worki
 Startup scope resolution — `preflight(tracker_config)`:
 
 - An adapter MAY implement `preflight`, resolving its configured scope selectors, state names, and
-  label names against the live provider once, before the scheduling loop starts. An adapter that
-  does not implement it behaves as though it returned success. Failure MUST fail startup with an
-  operator-visible error, per Section 6.3.
+  label names against the live provider before the lane scheduling loop starts and after tracker
+  changes. An adapter without it behaves as though it returned success. A current failure MUST
+  disable only that lane with an operator-visible error, per Sections 6.2–6.3.
 - Resolution MUST report every unresolved value in one error rather than the first, so an operator
-  fixes one boot's worth of mistakes at a time. It MAY suppress reasons that are merely derived
+  fixes one lane's configuration mistakes at a time. It MAY suppress reasons that are merely derived
   from an earlier one — for example every configured state and label when no container resolved at
   all — so the one actionable reason is not buried.
 - Resolution MUST distinguish a typo from a legitimate provider state. A selector that cannot
-  exist — an unknown container key — is a boot failure. A selector that exists but is currently
-  empty — for example a team between sprints with no active cycle — is a warning, and the service
-  MUST still boot: refusing to start would turn a routine tracker state into an outage.
+  exist — an unknown container key — prevents that lane starting. A selector that exists but is
+  currently empty — for example a team between sprints with no active cycle — is a warning, and
+  MUST NOT prevent the lane starting: refusing would turn routine tracker state into an outage.
 - When a scope names several containers, a state or label name absent from ALL of them can never
-  match and MUST be a boot failure. Absent from only SOME of them narrows the scope rather than
+  match and MUST prevent lane startup. Absent from only SOME narrows the scope rather than
   emptying it, and MUST be a warning that names the containers concerned.
 - When the provider cannot prove absence — for example a non-paginated nested result that came back
   full — the adapter MUST warn rather than fail.
@@ -1581,8 +1627,8 @@ Requirements:
 
 ### 13.3 Runtime Snapshot / Monitoring Interface (OPTIONAL but RECOMMENDED)
 
-If the implementation exposes a synchronous runtime snapshot (for dashboards or monitoring), it
-SHOULD return:
+If the implementation exposes synchronous runtime snapshots (for dashboards or monitoring), each
+snapshot is scoped to one lane. An installation view aggregates those lane snapshots. Each SHOULD return:
 
 - `running` (list of running session rows)
 - each running row SHOULD include `turn_count`
@@ -1607,7 +1653,7 @@ implementation-defined.
 
 If present, it SHOULD draw from orchestrator state/metrics plus the effective configuration, and
 MUST NOT be REQUIRED for correctness. It MAY render the adapter's OPTIONAL scope description from
-Section 11.6, so an operator can see what the instance is actually reading; it MUST NOT render
+Section 11.6, so an operator can see what each lane is actually reading; it MUST NOT render
 credentials, and any provider link it renders MUST be one the implementation can construct
 correctly rather than guess.
 
@@ -1662,29 +1708,28 @@ If implemented:
 - The dashboard/API MUST be observability/control surfaces only and MUST NOT become REQUIRED for
   orchestrator correctness.
 
-Extension config:
+Installation settings and authentication:
 
-- `server.port` (integer, OPTIONAL)
-  - Enables the HTTP server extension.
-  - `0` requests an ephemeral port for local development and tests.
-  - CLI `--port` overrides `server.port` when both are present.
-
-Enablement (extension):
-
-- Start the HTTP server when a CLI `--port` argument is provided.
-- Start the HTTP server when `server.port` is present in `WORKFLOW.md` front matter.
-- The `server` top-level key is owned by this extension.
-- Positive `server.port` values bind that port.
-- Implementations SHOULD bind loopback by default (`127.0.0.1` or host equivalent) unless explicitly
-  configured otherwise.
-- Changes to HTTP listener settings (for example `server.port`) do not need to hot-rebind;
-  restart-required behavior is conformant.
+- Listener host/port are installation-level settings (for example `serve --port 4000 --host
+  127.0.0.1`), never taken from lane `server` front matter. Imported `server` is ignored with a warning.
+- Port `0` requests an ephemeral port; positive ports bind that port. Implementations SHOULD bind
+  loopback by default. Listener changes MAY require restart.
+- An HTTP-enabled installation MUST require a nonblank operator credential before startup.
+- All operational UI/API routes MUST authenticate. Browser login MAY exchange the credential for
+  a signed HTTP-only session; API clients MAY use `Authorization: Bearer <token>`.
+- Unauthenticated browser requests redirect to login; unauthenticated API requests return `401`.
+  Login and cookie-authenticated mutations MUST be CSRF-protected; explicit bearer-authenticated
+  API requests may bypass CSRF. Session signing MUST use an installation-specific secret, not a
+  public source-code default. Rotating the credential MUST invalidate existing operator sessions.
+- Login and static assets may be public. Remote exposure requires appropriate transport/network
+  protection; authentication does not make arbitrary lane hooks safe.
 
 #### 13.7.1 Human-Readable Dashboard (`/`)
 
-- Host a human-readable dashboard at `/`.
-- The returned document SHOULD depict the current state of the system (for example active sessions,
-  retry delays, token consumption, runtime totals, recent events, and health/error indicators).
+- Host the lane list at `/`, with creation at `/lanes/new`, per-lane runtime at `/lanes/:slug`,
+  editing at `/lanes/:slug/edit`, versions at `/lanes/:slug/versions`, attempt details at
+  `/runs/:attempt_id`, and login at `/login`.
+- Show per-lane sessions, retries, totals, events, health/error indicators and durable attempt history.
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
   consumes the JSON API below.
 
@@ -1695,13 +1740,15 @@ Provide a JSON REST API under `/api/v1/*` for current runtime state and operatio
 Minimum endpoints:
 
 - `GET /api/v1/state`
-  - Returns a summary view of the current system state (running sessions, retry queue/delays,
-    aggregate token/runtime totals, latest rate limits, and any additional tracked summary fields).
+  - Returns `{"generated_at": "...", "lanes": [...]}`. Each element carries `"lane"` (the slug)
+    plus that lane's sessions, retry queue, totals, rate limits, health and extension fields.
   - Suggested response shape:
 
     ```json
     {
       "generated_at": "2026-02-24T20:15:30Z",
+      "lanes": [{
+      "lane": "main",
       "counts": {
         "running": 2,
         "retrying": 1
@@ -1742,16 +1789,19 @@ Minimum endpoints:
         "seconds_running": 1834.2
       },
       "rate_limits": null
+      }]
     }
     ```
 
-- `GET /api/v1/<issue_identifier>`
-  - Returns issue-specific runtime/debug details for the identified issue, including any information
-    the implementation tracks that is useful for debugging.
+- `GET /api/v1/lanes/:slug/:issue_identifier`
+  - Returns issue-specific runtime/debug details scoped to the named lane, including `"lane"`.
+  - `GET /api/v1/:issue_identifier` searches lanes and returns the first match; clients SHOULD use
+    the scoped route to avoid ambiguous identifiers.
   - Suggested response shape:
 
     ```json
     {
+      "lane": "main",
       "issue_identifier": "MT-649",
       "issue_id": "abc123",
       "status": "running",
@@ -1802,17 +1852,20 @@ Minimum endpoints:
     example `{\"error\":{\"code\":\"issue_not_found\",\"message\":\"...\"}}`).
 
 - `POST /api/v1/refresh`
-  - Queues an immediate tracker poll + reconciliation cycle (best-effort trigger; implementations
-    MAY coalesce repeated requests).
+  - Queues an immediate tracker poll + reconciliation cycle for available lanes (best-effort;
+    implementations MAY coalesce repeated requests). Returns `503` if no lane runtime is available.
   - Suggested request body: empty body or `{}`.
   - Suggested response (`202 Accepted`) shape:
 
     ```json
     {
+      "lanes": [{
+      "lane": "main",
       "queued": true,
       "coalesced": false,
       "requested_at": "2026-02-24T20:15:30Z",
       "operations": ["poll", "reconcile"]
+      }]
     }
     ```
 
@@ -1820,18 +1873,58 @@ API design notes:
 
 - The JSON shapes above are the RECOMMENDED baseline for interoperability and debugging ergonomics.
 - Implementations MAY add fields, but SHOULD avoid breaking existing fields within a version.
-- Endpoints SHOULD be read-only except for operational triggers like `/refresh`.
+- Observability reads MUST NOT mutate lane/scheduler state. Explicit refresh and lane-write routes
+  below are authenticated operational controls.
 - Unsupported methods on defined routes SHOULD return `405 Method Not Allowed`.
 - API errors SHOULD use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it SHOULD consume this API rather than duplicating state
   logic.
+
+#### 13.7.3 Lane Write API
+
+All routes require the same installation authentication:
+
+| Method | Route | Success |
+| --- | --- | --- |
+| GET | `/api/v1/lanes` | `200 {"lanes":[...]}` |
+| POST | `/api/v1/lanes` | `201` lane object |
+| PUT | `/api/v1/lanes/:slug` | `200` updated lane object |
+| POST | `/api/v1/lanes/:slug/versions/:id/activate` | `200` lane object |
+| GET | `/api/v1/lanes/:slug/export` | `200 text/markdown` current workflow |
+| DELETE | `/api/v1/lanes/:slug` | `204`; `409` if enabled or still running |
+
+Create/update accepts `slug`, `name`, `enabled`, `executor`, `front_matter`, `prompt`, and `note`.
+Workflow fields are raw strings (YAML without delimiters and Markdown prompt); `enabled` is boolean,
+`note` is string or null. The reference profile requires slugs matching `^[a-z][a-z0-9-]{1,40}$`,
+excluding exactly `new`, which is reserved for `/lanes/new`. Create, import, and slug updates MUST
+reject that value with a slug field error before persisting a lane or version. Only executor `"local"`
+is accepted; workflow worker settings still select local/SSH/managed execution.
+Partial updates preserve omitted values. Either submitted workflow field creates an immutable version;
+metadata-only updates do not. New lanes default disabled. Missing lanes return `404`; invalid writes
+or version activation return `422 {"errors":[{"path":"...","message":"..."}]}`. Version IDs must belong
+to the addressed lane. Soft deletion retains its versions/history and reserves its slug.
+
+Lane objects include identity, name, enabled/executor, current version ID, update time and runtime
+health (`running`, `error`, `warnings`, restart count and last crash). For example, enable a reviewed
+lane with authenticated `PUT /api/v1/lanes/main` and body `{"enabled":true}`.
+
+### 13.8 Durable Attempt History
+
+Attempts and events MAY be recorded in the installation database. Attempts retain their immutable
+lane/version identity, executor, issue identity, status, timing, turn count and token totals including
+cached usage. Event categories include agent messages, turns, blocked results, hooks and errors.
+Writes MUST be ordered and asynchronous relative to scheduling. Failed writes are logged; pending
+uncommitted commands may be lost and need not be retried. History MUST NOT gate dispatch or cleanup.
+Lane disable finalizes active attempts as stopped; abnormal runtime death finalizes them as failed.
+Retention prunes old events, not run summaries or workflow versions. The reference retention window
+defaults to 30 days, with an initial sweep after one minute and daily sweeps thereafter.
 
 ## 14. Failure Model and Recovery Strategy
 
 ### 14.1 Failure Classes
 
 1. `Workflow/Config Failures`
-   - Missing `WORKFLOW.md`
+   - Unreadable workflow import or missing/invalid persisted lane version
    - Invalid YAML front matter
    - Unsupported tracker kind or invalid adapter-owned tracker configuration
    - Missing coding-agent executable
@@ -1898,13 +1991,16 @@ After restart:
   - fresh polling of active issues
   - re-dispatching eligible work
 
+- Lane configuration and committed run history survive restart; retry queues and live token/rate
+  counters do not. Preserved history is for observation only, not scheduling recovery.
+
 ### 14.4 Operator Intervention Points
 
 Operators can control behavior by:
 
-- Editing `WORKFLOW.md` (prompt and most runtime settings).
-- `WORKFLOW.md` changes are detected and re-applied automatically without restart according to
-  Section 6.2.
+- Saving lane configuration/prompt through the UI/API, or activating a prior immutable version,
+  applies without restart according to Section 6.2.
+- Enabling/disabling lanes or importing workflow files offline into the installation database.
 - Changing issue states in the tracker:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
   - non-active state -> running session is stopped without cleanup
@@ -1997,11 +2093,37 @@ treat harness hardening as part of the core safety model rather than an optional
 
 ```text
 function start_service():
+  validate_installation_settings_and_operator_credential()
   configure_logging()
-  start_observability_outputs()
-  start_workflow_watch(on_change=reload_and_reapply_workflow)
+  open_and_migrate_lane_database()
+  start_ordered_history_writer_and_retention()
+  start_lane_registry_and_runtime_supervisor()
+  start_lane_store()
+  start_authenticated_observability_outputs()
+  for lane in persisted_lanes():
+    publish_validated_current_version_or_disabled_error(lane)
+    if lane.enabled and lane.valid:
+      request_lane_start(lane.id)
 
+function request_lane_start(lane_id):
+  snapshot = capture_current_lane_entry(lane_id)
+  # Optional adapter preflight defaults to success. Do not block the lane-store authority.
+  preflight_async(snapshot.tracker, fn result ->
+    serialize_with_lane_mutations(fn ->
+      current = current_lane_entry(lane_id)
+      if current.generation != snapshot.generation or not current.enabled:
+        return  # A later save/disable superseded this check.
+      if result failed:
+        disable_lane_with_error(lane_id, result)
+        return
+      start_coupled_scheduler_and_workers_and_attach_monitor(current)
+    end)
+  end)
+
+function start_lane_scheduler(lane_id):
+  install_lane_context(lane_id)
   state = {
+    lane_id: lane_id,
     poll_interval_ms: get_config_poll_interval_ms(),
     max_concurrent_agents: get_config_max_concurrent_agents(),
     running: {},
@@ -2011,25 +2133,16 @@ function start_service():
     codex_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
     codex_rate_limits: null
   }
-
-  validation = validate_dispatch_config()
-  if validation is not ok:
-    log_validation_error(validation)
-    fail_startup(validation)
-
-  # OPTIONAL, Section 11.6: resolve adapter scope selectors against the live provider before any
-  # dispatch can create a workspace or launch an agent. An adapter that does not implement
-  # `preflight` returns ok.
-  resolution = tracker.preflight(tracker_config)
-  if resolution is not ok:
-    log_validation_error(resolution)
-    fail_startup(resolution)
-
   startup_terminal_workspace_cleanup()
   schedule_tick(delay_ms=0)
-
   event_loop(state)
 ```
+
+Saved configuration is validated and committed under the same authority as identity-guard checks,
+then published with a new generation. If preflight is pending, replace it for that generation even
+when only metadata/prompt changed; otherwise tracker edits request a new check and ordinary edits
+notify the scheduler. Explicit disable invalidates pending checks/restarts and stops the coupled
+runtime. Runtime start and monitor attachment are one serialized transition.
 
 ### 16.2 Poll-and-Dispatch Tick
 
@@ -2097,13 +2210,14 @@ function reconcile_running_issues(state):
 
 ```text
 function dispatch_issue(issue, state, attempt):
-  backend = config.agent_backend_for_state(issue.state)
+  snapshot = capture_current_lane_entry(state.lane_id)
+  backend = snapshot.config.agent_backend_for_state(issue.state)
   if backend failed:
     log_error("invalid agent backend")
     return state
 
   worker = spawn_worker(
-    fn -> run_agent_attempt(issue, attempt, parent_orchestrator_pid, backend) end
+    fn -> run_agent_attempt(issue, attempt, parent_orchestrator_pid, backend, snapshot) end
   )
 
   if worker spawn failed:
@@ -2113,6 +2227,7 @@ function dispatch_issue(issue, state, attempt):
     })
 
   state.running[issue.id] = {
+    config_snapshot: snapshot,
     worker_handle,
     monitor_handle,
     identifier: issue.identifier,
@@ -2134,13 +2249,16 @@ function dispatch_issue(issue, state, attempt):
 
   state.claimed.add(issue.id)
   state.retry_attempts.remove(issue.id)
+  enqueue_history_started(issue, attempt, snapshot.version_id, snapshot.executor)
   return state
 ```
 
 ### 16.5 Worker Attempt (Workspace + Prompt + Agent)
 
 ```text
-function run_agent_attempt(issue, attempt, orchestrator_channel, backend):
+function run_agent_attempt(issue, attempt, orchestrator_channel, backend, snapshot):
+  install_immutable_attempt_context(snapshot)
+  # Hooks, prompts, tools and helper tasks resolve through this captured context.
   workspace = workspace_manager.create_for_issue(issue.identifier)
   if workspace failed:
     fail_worker("workspace error")
@@ -2218,9 +2336,13 @@ on_worker_exit(issue_id, reason, state):
   if reason == normal:
     exhaustions = count_consecutive_turn_exhaustions(state, running_entry)
 
-    if exhaustions >= config.agent.max_turn_exhaustions:
-      if post_blocked_comment(issue_id, turn_budget_detail) succeeded:
-        update_issue_state(issue_id, config.agent.blocked_state)
+    attempt_config = running_entry.config_snapshot.config
+    if attempt_config.agent.max_turn_exhaustions > 0 and
+       exhaustions >= attempt_config.agent.max_turn_exhaustions:
+      with_immutable_attempt_context(running_entry.config_snapshot, fn ->
+        if post_blocked_comment(issue_id, turn_budget_detail) succeeded:
+          update_issue_state(issue_id, attempt_config.agent.blocked_state)
+      end)
       state = block_issue(state, issue_id, running_entry)
     else:
       state.completed.add(issue_id)  # bookkeeping only
@@ -2237,6 +2359,11 @@ on_worker_exit(issue_id, reason, state):
   notify_observers()
   return state
 ```
+
+If managed completion must wait for remote stop proof, retain `running_entry.config_snapshot`
+alongside the pending completion and reinstall it when that work resumes. Do not re-resolve the
+completed attempt's blocked-state/hook policy from the newly saved lane. Retry scheduling and the
+next dispatch remain scheduler operations using current lane settings.
 
 ```text
 on_retry_timer(issue_id, state):
@@ -2287,13 +2414,19 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.1 Workflow and Config Parsing
 
-- Workflow file path precedence:
-  - explicit runtime path is used when provided
-  - cwd default is `WORKFLOW.md` when no explicit runtime path is provided
-- Workflow file changes are detected and trigger re-read/re-apply without restart
-- Invalid workflow reload keeps last known good effective configuration and emits an
-  operator-visible error
-- Missing `WORKFLOW.md` returns typed error
+- Explicit workflow import and same-data-root export round-trip canonical LF fixtures exactly
+- Noncanonical accepted envelopes normalize without hidden metadata in editable YAML/prompt strings
+- Lane saves apply without restart; file edits and another process's offline import do not hot-apply
+- Invalid saves/activations leave current configuration/version count unchanged and report field paths
+- Metadata-only edits do not create versions; submitted workflow text does
+- Version activation cannot select another lane's version; soft-deleted slugs remain reserved
+- Relative local workspace roots resolve against the data root
+- Active attempts and their helpers retain immutable snapshots across save, retry dispatch races,
+  and deferred managed completion; later attempts capture the newer version
+- Pending preflight is replaced on every newer publication; stale outcomes cannot start/disable a lane
+- Coupled runtime failure stops its workers without stopping other lanes; intentional stops do not
+  consume crash allowance; repeated abnormal deaths disable only the affected lane
+- Invalid persisted configuration disables only that lane; missing import files return typed errors
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
 - Config defaults apply when OPTIONAL values are missing
@@ -2343,7 +2476,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Error mapping covers config, request, non-success response, malformed payload, pagination, and
   rate limiting, including documented category/message mappings for language-native errors
 - If startup scope resolution is implemented: every unresolved value is reported in one error, an
-  unknown container key fails the boot, an existing-but-empty container only warns, and a state or
+  unknown container key disables only the affected lane, an existing-but-empty container only warns, and a state or
   label absent from some but not all containers only warns
 - If a scope description is implemented: an adapter with no configured scope renders an explicit
   sentinel rather than an omitted line
@@ -2416,9 +2549,12 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.7 CLI and Host Lifecycle
 
-- CLI accepts a positional workflow path argument (`path-to-WORKFLOW.md`)
-- CLI uses `./WORKFLOW.md` when no workflow path argument is provided
-- CLI errors on nonexistent explicit workflow path or missing default `./WORKFLOW.md`
+- CLI separates `serve`, `lanes import`, `lanes export`, and standalone MCP modes
+- Serve rejects a positional workflow path and starts from the installation database
+- Serve requires the safety acknowledgement and nonblank operator credential before runtime startup
+- Import/export use the same data root as serve, start no schedulers, and export only workflow bytes
+- Listener/retention flag types and bounds are validated; per-lane `server` is ignored with a warning
+- Real daemon entrypoints can load the database's native dependencies; escript packaging is MCP-only
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
@@ -2454,11 +2590,12 @@ Use the same validation profiles as Section 17:
 
 ### 18.1 REQUIRED for Conformance
 
-- Workflow path selection supports explicit runtime path and cwd default
-- `WORKFLOW.md` loader with YAML front matter + prompt body split
+- DB-backed lanes with explicit workflow import/export and immutable validated versions
+- `WORKFLOW.md` loader with raw YAML/prompt preservation and canonical export semantics
 - Typed config layer with defaults and `$` resolution
-- Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
-- Polling orchestrator with single-authority mutable state
+- Live lane-save/activation publication, managed identity guards and stale-preflight generation fencing
+- Per-lane polling orchestrators with isolated coupled workers and single-authority mutable state
+- Immutable dispatch snapshots for attempts, retries and deferred completion helpers
 - Issue tracker adapter with state-list + ID-refresh reads
 - Workspace manager with sanitized, collision-resistant per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
@@ -2479,8 +2616,8 @@ Use the same validation profiles as Section 17:
 
 ### 18.2 RECOMMENDED Extensions (Not REQUIRED for Conformance)
 
-- HTTP server extension honors CLI `--port` over `server.port`, uses a safe default bind host, and
-  exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
+- HTTP server extension uses installation host/port settings, safe loopback defaults and operator
+  authentication/CSRF protection, and exposes Section 13.7 lane/scoped-issue endpoints and errors.
 - Provider-native agent tools, when shipped, execute through the selected backend session using
   host-side configured adapter auth without passing tracker secrets to the child.
 - The `linear_graphql` provider tool can expose raw Linear GraphQL access through a Codex app-server
@@ -2489,24 +2626,25 @@ Use the same validation profiles as Section 17:
   (for example a design spec) through the same broker using configured Symphony auth, returning
   the file to the agent without exposing the token.
 - Startup scope resolution and the operator-facing scope description in Section 11.6, when shipped,
-  fail the boot only on values that cannot exist and warn on values that are merely empty.
-- TODO: Persist retry queue and session metadata across process restarts.
-- TODO: Make observability settings configurable in workflow front matter without prescribing UI
-  implementation details.
+  disable only the affected lane on values that cannot exist and warn on values merely empty.
+- Durable run/event history, with nonblocking ordered writes and event-only retention, never drives
+  scheduling. Committed history survives restarts; retry queues and live sessions are not restored.
+- Installation terminal settings may select a documented lane's `observability` values without
+  prescribing a particular UI implementation.
 - TODO: Extract common semantic helper tools only after multiple adapters demonstrate real
   duplication; do not preemptively replace provider-native tools with generic CRUD.
 
 ### 18.3 Operational Validation Before Production (RECOMMENDED)
 
 - Run the `Real Integration Profile` from Section 17.8 with valid credentials and network access.
-- Verify hook execution and workflow path resolution on the target host OS/shell environment.
+- Verify hook execution, data-root resolution, import/export and live lane edits on the target host.
 - If the OPTIONAL HTTP server is shipped, verify the configured port behavior and loopback/default
   bind expectations on the target environment.
 
 ## Appendix A. SSH Worker Extension (OPTIONAL)
 
-This appendix describes a common extension profile in which Symphony keeps one central
-orchestrator but executes worker runs on one or more remote hosts over SSH.
+This appendix describes an extension profile in which each lane keeps its central orchestrator
+but executes worker runs on one or more remote hosts over SSH.
 
 Extension config:
 
@@ -2615,7 +2753,7 @@ opaque issue ID, never its mutable display identifier. The persisted worker-side
 template identity MUST survive rename, retry, and restart. Path validation MUST remain strictly under
 the configured root, reject root equality/symlink escape, and never execute in the source repository.
 
-Reload identity covers provider kind, deployment ID, tracker kind, workspace root and all listed
+Guarded lane identity covers provider kind, deployment ID, tracker kind, workspace root and all listed
 provider reference fields, including explicit auth selection. Cluster/namespace scope is an operator deployment boundary,
 not an agent scheduling option. Publication MUST atomically reject an identity change while owned
 resources or unresolved jobs remain, retaining the complete last-good workflow. Owner restart/death
@@ -2627,7 +2765,7 @@ Provider template drift MUST NOT silently redefine retained environments.
 A surviving orchestrator may reacquire the same accepted identity after replacement of the identity
 authority only when that replacement is established. An invalid token alone is insufficient:
 replacement by a competing owner within the same authority generation MUST continue to fence the
-old owner. Authority recovery MUST NOT adopt a previously rejected on-disk identity change while
+old owner. Authority recovery MUST NOT adopt a previously rejected persisted lane identity change while
 owned resources or unresolved operations may survive.
 
 ### B.2 Startup, Execution Capacity, and Recovery
@@ -2689,7 +2827,7 @@ is not full absence.
 
 ### B.4 Operator Status Contract
 
-Snapshots and `GET /api/v1/state` add `environments: []` with only explicit safe projections:
+Per-lane snapshots and each lane entry in `GET /api/v1/state` add `environments: []` with only explicit safe projections:
 
 | Field | Public meaning |
 | --- | --- |
@@ -2711,14 +2849,14 @@ Records, metadata, credentials/auth references, SSH arguments/environment, conne
 raw CLI/provider output MUST NOT be serialized. Logs likewise use redacted categories while
 retaining issue ID/identifier and agent session ID where applicable.
 
-Snapshots and `GET /api/v1/state` also expose `environment_discovery`: null for local/static execution,
+Per-lane snapshots and each lane entry in `GET /api/v1/state` also expose `environment_discovery`: null for local/static execution,
 otherwise a safe map containing `provider_kind`, `status` (`pending`, `ready`, or `blocked`), and
 `error_code`. The error code is null or a fixed category (`denied`, `invalid`, `retryable`, `unknown`,
 `authority_replaced`, or `unresolved`), never raw provider/configuration text. Pending or blocked
 discovery MUST remain visible in the dashboard and terminal status even when `environments` is
-empty. This global status does not change the meaning of agent running/retrying/blocked counts.
+empty. This lane-level status does not change the meaning of agent running/retrying/blocked counts.
 
-`GET /api/v1/<issue_identifier>` MUST find retained environments even without running/retrying/blocked
+Authenticated `GET /api/v1/lanes/:slug/:issue_identifier` MUST find retained environments even without running/retrying/blocked
 agent entries. It adds `environment` with the same projection (null for unmanaged issues), reports
 the persisted remote `workspace.path` and provider kind as the safe `workspace.host` label.
 With no agent entry, `status` is the environment phase string; `running`, `retry`, and `blocked`

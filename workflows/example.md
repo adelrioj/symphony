@@ -1,5 +1,5 @@
 ---
-# Sanitized example workflow — the only workflow kept in the product repo.
+# Sanitized workflow for importing one lane; live edits use the UI or lane API.
 # Real client deployments live in their own private repos: copy deploy/client-template/.
 # Blank body below => Symphony's default Codex prompt template.
 tracker:
@@ -11,7 +11,7 @@ tracker:
     # current_cycle: true       # requires team_keys; the team's sprint becomes the queue
     # At least one of project_slug / team_keys / current_cycle is required.
     # BEFORE enabling team_keys, prune active_states / terminal_states below to names that really
-    # exist in those teams: with team_keys set, startup preflight fails the boot on any state name
+    # exist in those teams: with team_keys set, startup preflight disables the lane on any state name
     # absent from every listed team. Merging and Rework do not exist in a default Linear workspace,
     # and Cancelled / Canceled are two spellings of one state — at most one of them can resolve.
   required_labels: []
@@ -30,15 +30,12 @@ tracker:
 polling:
   interval_ms: 5000
 server:
-  host: "0.0.0.0"              # <-- bind all interfaces inside the container; a loopback bind
-                               #     is unreachable from the published port. Host-side exposure
-                               #     is controlled by the port mapping in compose. The 0.0.0.0
-                               #     value is for the container only: when you run this workflow
-                               #     from source, set 127.0.0.1: there is no --host flag, so
-                               #     0.0.0.0 publishes the unauthenticated dashboard and JSON API
-                               #     on every interface of your machine.
+  host: "0.0.0.0"              # Legacy import example: server is ignored with a warning.
+                               # Compose uses `serve --host 0.0.0.0` inside the container
+                               # and publishes only host-side loopback. Source runs
+                               # default to 127.0.0.1; use --host explicitly to change it.
 workspace:
-  root: /workspaces            # <-- container volume; do NOT change (must match compose)
+  root: /workspaces            # Container volume; use distinct subdirectories for additional lanes.
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/your-org/your-repo .   # <-- this project's repo

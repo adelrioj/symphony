@@ -1,4 +1,8 @@
 ---
+# Import format for one lane: mix symphony lanes import WORKFLOW.md --slug main.
+# Running configuration lives in the database; edit it in the UI or with
+# PUT /api/v1/lanes/:slug. File edits do not update a running installation.
+# server: is ignored; use serve --port/--host. Use the same --data-root for import and serve.
 tracker:
   kind: linear
   provider:
@@ -70,7 +74,7 @@ workspace:
 # retention is nonnegative milliseconds, default 0 (eligibility, not guaranteed deletion).
 # All shown provider strings are required/nonblank; Kubernetes needs a regular kubeconfig
 # file, ssh_port 1..65535, and ssh_user matching ^[a-z_][a-z0-9_-]*[$]?$.
-# Stable deployment/tracker-kind/provider/root references are guarded against reload while owned
+# Stable deployment/tracker-kind/provider/root references are guarded against lane saves while owned
 # resources or unresolved operations remain. No local/provider fallback exists.
 # Startup inventories before dispatch. Possibly executing/unknown stop occupies capacity;
 # stopped retained storage does not, but may incur charges and holds the identity guard.

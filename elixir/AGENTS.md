@@ -11,7 +11,7 @@ This directory contains the Elixir agent orchestration service that polls an iss
 
 ## Codebase-Specific Conventions
 
-- Runtime config is loaded from `WORKFLOW.md` front matter via `SymphonyElixir.Workflow` and `SymphonyElixir.Config`.
+- Runtime lane config comes from SQLite-backed `LaneStore` through `Workflow`, `Config`, and `LaneContext`; `WORKFLOW.md` is an explicit import/export format, not a watched runtime file.
 - Keep the implementation aligned with [`../SPEC.md`](../SPEC.md) where practical.
   - The implementation may be a superset of the spec.
   - The implementation must not conflict with the spec.
