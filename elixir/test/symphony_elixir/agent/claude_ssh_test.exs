@@ -39,7 +39,6 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       File.mkdir_p!(workspace)
       write_fake_ssh!(tmp, ssh_trace)
       write_fake_claude!(fake_claude)
-      write_claude_workflow!(fake_claude)
 
       on_exit(fn ->
         restore_env("PATH", previous_path)
@@ -56,6 +55,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       System.put_env("CLAUDE_MCP_CONFIG_CAPTURE", mcp_config_capture)
       System.put_env("CLAUDE_SECRET_CAPTURE", secret_capture)
       System.put_env(secret_name, secret_value)
+      write_claude_workflow!(fake_claude)
 
       target =
         case unquote(transport) do
