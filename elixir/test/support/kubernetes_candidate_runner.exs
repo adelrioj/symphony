@@ -178,7 +178,8 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     operation = fn adapter, config, entry, op, opts ->
       true = adapter == Kubernetes and config == ctx.config
       if entry, do: capture(ctx, {:ok, entry.record})
-      opts = Keyword.put(opts, :candidate_baseline, ctx.input["pins"])
+      timeout = if op in [:stop, :destroy], do: config.shutdown_timeout_ms, else: config.startup_timeout_ms
+      opts = opts |> Keyword.put_new(:timeout_ms, timeout) |> Keyword.put(:candidate_baseline, ctx.input["pins"])
       callbacks = %{armed?: fn _ -> false end, disarm: fn _ -> :ok end, event: fn event -> GenServer.call(ctx.control, {:event, event}) end}
       opts = Provider.fault_options(config, entry, op, opts, callbacks)
 
