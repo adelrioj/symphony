@@ -163,8 +163,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
     params = page_params(token)
 
     case request(config, :get, query(path, params), nil, opts) do
-      {:ok, %{status: 200, body: %{"items" => items, "metadata" => metadata}}} when is_list(items) and is_map(metadata) ->
-        continue_page(config, path, opts, items, metadata, acc, seen, restarts)
+      {:ok, %{status: 200, body: %{"items" => items, "metadata" => metadata} = body}} when is_list(items) and is_map(metadata) ->
+        with {:ok, items} <- typed_items(body, items) do
+          continue_page(config, path, opts, items, metadata, acc, seen, restarts)
+        end
 
       {:ok, %{status: 410}} when restarts < 2 ->
         pages(config, path, opts, nil, [], %{}, restarts + 1)
@@ -182,6 +184,25 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
         {:error, {:unknown, :kubernetes_incomplete_inventory}}
     end
   end
+
+  # Typed API lists omit per-item TypeMeta; object consumers still validate it.
+  defp typed_items(%{"apiVersion" => version, "kind" => kind}, items) when is_binary(version) and is_binary(kind) do
+    item_kind = String.replace_suffix(kind, "List", "")
+
+    valid =
+      version != "" and item_kind != "" and item_kind != kind and
+        Enum.all?(items, fn item ->
+          is_map(item) and Map.get(item, "apiVersion", version) == version and Map.get(item, "kind", item_kind) == item_kind
+        end)
+
+    if valid do
+      {:ok, Enum.map(items, &(Map.put_new(&1, "apiVersion", version) |> Map.put_new("kind", item_kind)))}
+    else
+      {:error, {:unknown, :kubernetes_incomplete_inventory}}
+    end
+  end
+
+  defp typed_items(_body, items), do: {:ok, items}
 
   defp page_params(nil), do: %{"limit" => "100"}
   defp page_params(token), do: %{"limit" => "100", "continue" => token}

@@ -46,6 +46,23 @@ defmodule SymphonyElixir.KubernetesGuardTest do
     assert {:error, {:unknown, :kubernetes_guard_invalid}} = Guard.decode(bound, %{record() | provider_ref: "replacement-parent"})
   end
 
+  test "typed Kubernetes lists preserve guard authorization without per-item type metadata", %{opts: opts} do
+    item = Map.drop(object(), ["apiVersion", "kind"])
+    body = %{"apiVersion" => "v1", "kind" => "ConfigMapList", "metadata" => %{}, "items" => [item]}
+    requests([{:get, "configmaps", body}])
+
+    assert :ok = Guard.open(config(), record(), opts)
+    assert_finished()
+  end
+
+  test "contradictory list and object types cannot authorize a guard", %{opts: opts} do
+    body = %{"apiVersion" => "v1", "kind" => "SecretList", "metadata" => %{}, "items" => [object()]}
+    requests([{:get, "configmaps", body}])
+
+    assert {:error, {:unknown, _}} = Guard.open(config(), record(), opts)
+    assert_finished()
+  end
+
   test "lookup denial is preserved by every guard acquisition entry point", %{opts: opts} do
     for action <- [:fetch, :establish, :open, :save, :close, :create] do
       requests([{:get, "configmaps", status(403)}])

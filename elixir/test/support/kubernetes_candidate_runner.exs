@@ -221,7 +221,9 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       end
     end
 
-    {:ok, runtime} = AgentRuntimeSupervisor.start_link(lane_id: ctx.lane_id, name: @runtime, task_supervisor_name: @tasks, orchestrator_name: @scheduler, environment_operation_fun: operation, runner_fun: runner)
+    {:ok, runtime} =
+      AgentRuntimeSupervisor.start_link(lane_id: ctx.lane_id, name: @runtime, task_supervisor_name: @tasks, orchestrator_name: @scheduler, environment_operation_fun: operation, runner_fun: runner)
+
     owner = self()
 
     spawn(fn ->
