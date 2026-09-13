@@ -6,6 +6,86 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   alias SymphonyElixir.SSH.Target
   alias SymphonyElixirWeb.Presenter
 
+  defmodule HistoryBackend do
+    @behaviour SymphonyElixir.Agent
+    alias SymphonyElixir.Agent.Claude.Stream
+
+    @impl true
+    def start_session(_workspace, opts), do: {:ok, opts}
+
+    @impl true
+    def run_turn(session, _prompt, issue, opts) do
+      send(Keyword.fetch!(session, :history_parent), {:history_backend, self()})
+
+      receive do
+        :complete_history -> :ok
+      end
+
+      blocked? = issue.title == "blocked"
+
+      content =
+        if blocked?,
+          do: [%{"type" => "tool_use", "name" => "mcp__symphony__approval_prompt", "input" => %{"action" => "Need approval"}}],
+          else: [%{"type" => "text", "text" => "Completed work"}]
+
+      events = [
+        %{"type" => "system", "subtype" => "init", "session_id" => "history-session"},
+        %{"type" => "assistant", "message" => %{"content" => content}},
+        %{"type" => "result", "subtype" => if(blocked?, do: "error_during_execution", else: "success"), "is_error" => blocked?, "result" => "Finished"}
+      ]
+
+      acc =
+        Enum.reduce(events, Stream.new(), fn event, acc ->
+          {acc, update} = Stream.step(event, acc)
+          if update, do: Keyword.fetch!(opts, :on_message).(update)
+          acc
+        end)
+
+      Stream.finalize(acc, 0)
+    end
+
+    @impl true
+    def stop_session(_session), do: :ok
+  end
+
+  for outcome <- ["done", "blocked"] do
+    @tag history_contract: true
+    test "real runner records #{outcome} Claude history and configured hook outcomes" do
+      outcome = unquote(outcome)
+      root = Path.join(System.tmp_dir!(), "history-contract-#{System.unique_integer([:positive, :monotonic])}")
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: root,
+        hook_after_create: "printf created",
+        hook_before_run: "printf before",
+        hook_after_run: "printf after; exit 7"
+      )
+
+      issue = %Issue{id: "history-#{outcome}", identifier: "HIST-#{outcome}", title: outcome, state: "Todo", dispatchable: true}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      parent = self()
+
+      runner = fn issue, recipient, opts ->
+        opts = Keyword.merge(opts, backend_module: HistoryBackend, history_parent: parent, issue_state_fetcher: fn _ids -> {:ok, []} end)
+        AgentRunner.run(issue, recipient, opts)
+      end
+
+      {:ok, pid} = start_test_orchestrator(name: Module.concat(__MODULE__, HistoryContract), runner_fun: runner)
+      assert_receive {:history_backend, backend}, 5_000
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      send(backend, :complete_history)
+      wait_for_snapshot(pid, &(&1.running == []), 5_000)
+
+      [run] = SymphonyElixir.Runs.list_for_lane(LaneContext.current!(), 10)
+      assert run.status == outcome
+      events = SymphonyElixir.Runs.events(run.id)
+      assert Enum.count(events, &(&1.kind == "hook")) == 6
+      assert Enum.any?(events, &(&1.kind == if(outcome == "blocked", do: "blocked", else: "turn_finished")))
+    end
+  end
+
   test "Presenter redacts private managed records and connections while reporting unresolved stop occupancy" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
@@ -1392,17 +1472,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "status dashboard renders dashboard url on its own line when server port is configured" do
-    previous_port_override = Application.get_env(:symphony_elixir, :server_port_override)
+    previous_port_override = Application.get_env(:symphony_elixir, :server_port)
 
     on_exit(fn ->
       if is_nil(previous_port_override) do
-        Application.delete_env(:symphony_elixir, :server_port_override)
+        Application.delete_env(:symphony_elixir, :server_port)
       else
-        Application.put_env(:symphony_elixir, :server_port_override, previous_port_override)
+        Application.put_env(:symphony_elixir, :server_port, previous_port_override)
       end
     end)
 
-    Application.put_env(:symphony_elixir, :server_port_override, 4000)
+    Application.put_env(:symphony_elixir, :server_port, 4000)
 
     snapshot_data =
       {:ok,

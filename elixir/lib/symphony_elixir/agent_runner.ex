@@ -49,22 +49,23 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host.worker_host)}")
+    on_hook = agent_message_handler(codex_update_recipient, issue, opts[:attempt_id])
 
-    case Workspace.create_for_issue(issue, worker_host) do
+    case Workspace.create_for_issue(issue, worker_host, on_hook) do
       {:ok, workspace} ->
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace, opts[:attempt_id])
 
-        run_with_workspace_hooks(workspace, issue, codex_update_recipient, opts, worker_host)
+        run_with_workspace_hooks(workspace, issue, codex_update_recipient, opts, worker_host, on_hook)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp run_with_workspace_hooks(workspace, issue, recipient, opts, %ExecutionContext{mode: :managed} = context) do
+  defp run_with_workspace_hooks(workspace, issue, recipient, opts, %ExecutionContext{mode: :managed} = context, on_hook) do
     outcome =
       try do
-        with :ok <- Workspace.run_before_run_hook(workspace, issue, context) do
+        with :ok <- Workspace.run_before_run_hook(workspace, issue, context, on_hook) do
           run_agent_turns(workspace, issue, recipient, opts, context)
         end
       catch
@@ -72,7 +73,7 @@ defmodule SymphonyElixir.AgentRunner do
           :erlang.raise(:exit, reason, __STACKTRACE__)
 
         kind, reason ->
-          propagate_run_failure(workspace, issue, context, {kind, reason, __STACKTRACE__})
+          propagate_run_failure(workspace, issue, context, on_hook, {kind, reason, __STACKTRACE__})
       end
 
     case outcome do
@@ -80,26 +81,32 @@ defmodule SymphonyElixir.AgentRunner do
         unknown
 
       _ ->
-        with :ok <- Workspace.run_after_run_hook(workspace, issue, context) do
+        with :ok <- Workspace.run_after_run_hook(workspace, issue, context, on_hook) do
           handle_run_outcome(outcome, issue)
         end
     end
   end
 
-  defp run_with_workspace_hooks(workspace, issue, recipient, opts, context) do
+  defp run_with_workspace_hooks(workspace, issue, recipient, opts, context, on_hook) do
     outcome =
-      with :ok <- Workspace.run_before_run_hook(workspace, issue, context) do
+      with :ok <- Workspace.run_before_run_hook(workspace, issue, context, on_hook) do
         run_agent_turns(workspace, issue, recipient, opts, context)
       end
 
     handle_run_outcome(outcome, issue)
   after
-    Workspace.run_after_run_hook(workspace, issue, context)
+    Workspace.run_after_run_hook(workspace, issue, context, on_hook)
   end
 
-  @spec propagate_run_failure(Path.t(), Issue.t(), ExecutionContext.t(), {atom(), term(), list()}) :: no_return()
-  defp propagate_run_failure(workspace, issue, context, {kind, reason, stacktrace}) do
-    Workspace.run_after_run_hook(workspace, issue, context)
+  @spec propagate_run_failure(
+          Path.t(),
+          Issue.t(),
+          ExecutionContext.t(),
+          Workspace.hook_observer(),
+          {atom(), term(), list()}
+        ) :: no_return()
+  defp propagate_run_failure(workspace, issue, context, on_hook, {kind, reason, stacktrace}) do
+    Workspace.run_after_run_hook(workspace, issue, context, on_hook)
   after
     :erlang.raise(kind, reason, stacktrace)
   end
@@ -108,10 +115,10 @@ defmodule SymphonyElixir.AgentRunner do
   defp handle_run_outcome(other, _issue), do: other
 
   defp post_blocked_state(%Issue{} = issue, result) do
-    detail = result.blocked_action || result.summary || "No blocked action detail was provided."
-
-    BlockedIssue.park(issue.id, issue.identifier, detail, result.session_id)
+    BlockedIssue.park(issue.id, issue.identifier, blocked_detail(result), result.session_id)
   end
+
+  defp blocked_detail(result), do: result.blocked_action || result.summary || "No blocked action detail was provided."
 
   defp agent_message_handler(recipient, issue, attempt_id) do
     fn message ->
@@ -210,7 +217,18 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp handle_turn_result(_context, %Result{status: :blocked} = result, _turn_number), do: {:blocked, result}
+  defp handle_turn_result(context, %Result{status: :blocked} = result, _turn_number) do
+    update = %{
+      event: :attempt_blocked,
+      timestamp: DateTime.utc_now(),
+      session_id: result.session_id,
+      payload: blocked_detail(result)
+    }
+
+    send_codex_update(context.recipient, context.issue, update, context.opts[:attempt_id])
+
+    {:blocked, result}
+  end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns, _backend), do: PromptBuilder.build_prompt(issue, opts)
 

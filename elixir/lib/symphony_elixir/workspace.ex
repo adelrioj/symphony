@@ -8,10 +8,11 @@ defmodule SymphonyElixir.Workspace do
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @type hook_result :: :ok | {:error, {:managed_execution_unknown, term()}}
+  @type hook_observer :: (%{event: :hook, timestamp: DateTime.t(), payload: String.t()} -> term()) | nil
 
-  @spec create_for_issue(map() | String.t() | nil, ExecutionContext.t()) ::
+  @spec create_for_issue(map() | String.t() | nil, ExecutionContext.t(), hook_observer()) ::
           {:ok, Path.t()} | {:error, term()}
-  def create_for_issue(issue_or_identifier, %ExecutionContext{} = worker_host) do
+  def create_for_issue(issue_or_identifier, %ExecutionContext{} = worker_host, on_hook \\ nil) do
     issue_context = issue_context(issue_or_identifier)
 
     try do
@@ -20,7 +21,7 @@ defmodule SymphonyElixir.Workspace do
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host) do
-        case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
+        case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, on_hook) do
           :ok ->
             {:ok, workspace}
 
@@ -181,9 +182,9 @@ defmodule SymphonyElixir.Workspace do
 
   def remove_issue_workspaces(_issue_or_identifier, %ExecutionContext{}), do: :ok
 
-  @spec run_before_run_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) ::
+  @spec run_before_run_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t(), hook_observer()) ::
           :ok | {:error, term()}
-  def run_before_run_hook(workspace, issue_or_identifier, %ExecutionContext{} = worker_host) when is_binary(workspace) do
+  def run_before_run_hook(workspace, issue_or_identifier, %ExecutionContext{} = worker_host, on_hook \\ nil) when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
 
@@ -192,12 +193,12 @@ defmodule SymphonyElixir.Workspace do
         :ok
 
       command ->
-        run_hook(command, workspace, issue_context, "before_run", worker_host)
+        run_hook(command, workspace, issue_context, "before_run", worker_host, on_hook)
     end
   end
 
-  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) :: hook_result()
-  def run_after_run_hook(workspace, issue_or_identifier, %ExecutionContext{} = worker_host) when is_binary(workspace) do
+  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t(), hook_observer()) :: hook_result()
+  def run_after_run_hook(workspace, issue_or_identifier, %ExecutionContext{} = worker_host, on_hook \\ nil) when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
 
@@ -206,7 +207,7 @@ defmodule SymphonyElixir.Workspace do
         :ok
 
       command ->
-        run_hook(command, workspace, issue_context, "after_run", worker_host)
+        run_hook(command, workspace, issue_context, "after_run", worker_host, on_hook)
         |> ignore_hook_failure()
     end
   end
@@ -255,7 +256,7 @@ defmodule SymphonyElixir.Workspace do
     |> binary_part(0, 16)
   end
 
-  defp maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
+  defp maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, on_hook) do
     hooks = Config.settings!().hooks
 
     case created? do
@@ -265,7 +266,7 @@ defmodule SymphonyElixir.Workspace do
             :ok
 
           command ->
-            run_hook(command, workspace, issue_context, "after_create", worker_host)
+            run_hook(command, workspace, issue_context, "after_create", worker_host, on_hook)
         end
 
       false ->
@@ -308,7 +309,7 @@ defmodule SymphonyElixir.Workspace do
 
       command ->
         if ExecutionContext.remote?(context) or File.dir?(workspace) do
-          run_hook(command, workspace, issue_context(issue), "before_remove", context)
+          run_hook(command, workspace, issue_context(issue), "before_remove", context, nil)
           |> ignore_hook_failure()
         else
           :ok
@@ -320,16 +321,63 @@ defmodule SymphonyElixir.Workspace do
   defp ignore_hook_failure({:error, {:managed_execution_unknown, _detail}} = unknown), do: unknown
   defp ignore_hook_failure({:error, _reason}), do: :ok
 
-  defp run_hook(command, workspace, issue_context, hook_name, %ExecutionContext{mode: :local} = context) do
+  defp run_hook(command, workspace, issue_context, hook_name, context, nil) do
+    execute_hook(command, workspace, issue_context, hook_name, context, nil)
+  end
+
+  defp run_hook(command, workspace, issue_context, hook_name, context, on_hook) do
+    on_hook = isolate_hook_observer(on_hook, hook_name, issue_context)
+    notify_hook(on_hook, hook_name, "started")
+
+    result = execute_hook(command, workspace, issue_context, hook_name, context, on_hook)
+
+    case result do
+      :ok -> notify_hook(on_hook, hook_name, "finished")
+      {:error, reason} -> notify_hook(on_hook, hook_name, "failed: #{inspect(reason)}")
+    end
+
+    result
+  catch
+    kind, reason ->
+      notify_hook(on_hook, hook_name, "failed: #{Exception.format_banner(kind, reason)}")
+      :erlang.raise(kind, reason, __STACKTRACE__)
+  end
+
+  defp notify_hook(on_hook, hook_name, outcome) do
+    on_hook.(%{event: :hook, timestamp: DateTime.utc_now(), payload: "#{hook_name} #{outcome}"})
+  end
+
+  defp isolate_hook_observer(on_hook, hook_name, issue_context) do
+    fn event ->
+      try do
+        on_hook.(event)
+      catch
+        kind, reason ->
+          Logger.warning("Hook observer failed hook=#{hook_name} #{issue_log_context(issue_context)} reason=#{Exception.format_banner(kind, reason)}")
+          :ok
+      end
+    end
+  end
+
+  # Command tasks are linked: report exceptions here before their exit can kill the caller.
+  defp execute_hook_task(command, nil, _hook_name), do: command.()
+
+  defp execute_hook_task(command, on_hook, hook_name) do
+    command.()
+  catch
+    kind, reason ->
+      notify_hook(on_hook, hook_name, "failed: #{Exception.format_banner(kind, reason)}")
+      :erlang.raise(kind, reason, __STACKTRACE__)
+  end
+
+  defp execute_hook(command, workspace, issue_context, hook_name, %ExecutionContext{mode: :local} = context, on_hook) do
     timeout_ms = Config.settings!().hooks.timeout_ms
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
 
     with :ok <- validate_workspace_path(workspace, context) do
-      task =
-        Task.async(fn ->
-          System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
-        end)
+      run_command = fn -> System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true) end
+      task = Task.async(fn -> execute_hook_task(run_command, on_hook, hook_name) end)
 
       case Task.yield(task, timeout_ms) do
         {:ok, cmd_result} ->
@@ -343,14 +391,14 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp run_hook(command, workspace, issue_context, hook_name, %ExecutionContext{} = worker_host) do
+  defp execute_hook(command, workspace, issue_context, hook_name, %ExecutionContext{} = worker_host, on_hook) do
     timeout_ms = Config.settings!().hooks.timeout_ms
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
 
     script = remote_workspace_guard(workspace, worker_host) <> "\ncd \"$workspace\"\n" <> command
 
-    case run_remote_command(worker_host, script, timeout_ms, hook_name) do
+    case run_remote_command(worker_host, script, timeout_ms, hook_name, on_hook) do
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
@@ -517,11 +565,11 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp run_remote_command(%ExecutionContext{target: target} = context, script, timeout_ms, operation \\ :remote_command)
+  defp run_remote_command(%ExecutionContext{target: target} = context, script, timeout_ms, operation \\ :remote_command, on_hook \\ nil)
        when is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
     task =
       Task.async(fn ->
-        SSH.run(target, script, stderr_to_stdout: true)
+        execute_hook_task(fn -> SSH.run(target, script, stderr_to_stdout: true) end, on_hook, operation)
       end)
 
     case Task.yield(task, timeout_ms) do
