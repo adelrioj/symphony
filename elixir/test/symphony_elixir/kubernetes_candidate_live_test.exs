@@ -17,5 +17,9 @@ defmodule SymphonyElixir.KubernetesCandidateLiveTest do
     assert evidence["backend_sessions"] == 0
     assert evidence["cleanup"] == "complete"
     assert evidence["status"] == "candidate_stage_complete"
+    lane = SymphonyElixir.Lanes.get!(evidence["lane_id"])
+    refute lane.enabled
+    refute SymphonyElixir.LaneSupervisor.running?(lane.id)
+    assert lane.current_version_id == evidence["lane_version_id"]
   end
 end

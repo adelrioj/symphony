@@ -10,30 +10,41 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   @spec state(Conn.t(), map()) :: Conn.t()
   def state(conn, _params) do
-    json(conn, Presenter.state_payload(orchestrator(), snapshot_timeout_ms()))
+    generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    json(conn, %{generated_at: generated_at, lanes: Enum.map(Presenter.lanes(), &Presenter.lane_payload(&1, snapshot_timeout_ms()))})
   end
 
   @spec issue(Conn.t(), map()) :: Conn.t()
   def issue(conn, %{"issue_identifier" => issue_identifier}) do
-    case Presenter.issue_payload(issue_identifier, orchestrator(), snapshot_timeout_ms()) do
-      {:ok, payload} ->
-        json(conn, payload)
+    Presenter.lanes()
+    |> Enum.find_value(fn entry -> issue_in_lane(entry, issue_identifier) end)
+    |> issue_response(conn)
+  end
 
-      {:error, :issue_not_found} ->
-        error_response(conn, 404, "issue_not_found", "Issue not found")
+  @spec lane_issue(Conn.t(), map()) :: Conn.t()
+  def lane_issue(conn, _params) do
+    %{"slug" => slug, "issue_identifier" => identifier} = conn.path_params
+
+    case SymphonyElixir.LaneStore.by_slug(slug) do
+      {:ok, entry} -> entry |> issue_in_lane(identifier) |> issue_response(conn)
+      :error -> error_response(conn, 404, "lane_not_found", "Lane not found")
     end
   end
 
   @spec refresh(Conn.t(), map()) :: Conn.t()
   def refresh(conn, _params) do
-    case Presenter.refresh_payload(orchestrator()) do
-      {:ok, payload} ->
-        conn
-        |> put_status(202)
-        |> json(payload)
+    refreshed =
+      Enum.flat_map(Presenter.lanes(), fn entry ->
+        case Presenter.refresh_payload(Presenter.orchestrator_for(entry)) do
+          {:ok, payload} -> [Map.put(payload, :lane, entry.slug)]
+          {:error, :unavailable} -> []
+        end
+      end)
 
-      {:error, :unavailable} ->
-        error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
+    if refreshed == [] do
+      error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
+    else
+      conn |> put_status(202) |> json(%{lanes: refreshed})
     end
   end
 
@@ -53,9 +64,15 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     |> json(%{error: %{code: code, message: message}})
   end
 
-  defp orchestrator do
-    Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
+  defp issue_in_lane(entry, identifier) do
+    case Presenter.issue_payload(identifier, Presenter.orchestrator_for(entry), snapshot_timeout_ms()) do
+      {:ok, payload} -> Map.put(payload, :lane, entry.slug)
+      {:error, :issue_not_found} -> nil
+    end
   end
+
+  defp issue_response(nil, conn), do: error_response(conn, 404, "issue_not_found", "Issue not found")
+  defp issue_response(payload, conn), do: json(conn, payload)
 
   defp snapshot_timeout_ms do
     Endpoint.config(:snapshot_timeout_ms) || 15_000

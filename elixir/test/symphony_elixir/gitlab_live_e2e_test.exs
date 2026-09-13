@@ -145,7 +145,7 @@ defmodule SymphonyElixir.GitLab.LiveE2ETest do
       """
     )
 
-    assert :ok = SymphonyElixir.WorkflowStore.force_reload()
+    assert :ok = reload_workflow!()
   end
 
   defp live_prompt(project_id, expected_comment) do

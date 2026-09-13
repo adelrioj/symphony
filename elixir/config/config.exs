@@ -2,6 +2,10 @@ import Config
 
 config :phoenix, :json_library, Jason
 
+config :logger, :default_formatter, metadata: [:issue_id, :issue_identifier, :session_id, :attempt_id]
+
+config :symphony_elixir, ecto_repos: [SymphonyElixir.Repo]
+
 config :symphony_elixir, SymphonyElixirWeb.Endpoint,
   adapter: Bandit.PhoenixAdapter,
   url: [host: "localhost"],
@@ -16,6 +20,9 @@ config :symphony_elixir, SymphonyElixirWeb.Endpoint,
   server: false
 
 if config_env() == :test do
+  # A single connection keeps the in-memory database shared by serial tests.
+  config :symphony_elixir, SymphonyElixir.Repo, database: ":memory:", pool_size: 1, journal_mode: :memory
+
   config :symphony_elixir,
     workflow_file_path: Path.expand("../test/fixtures/startup_workflow.md", __DIR__)
 end

@@ -23,67 +23,42 @@ defmodule SymphonyElixir.CoreTest do
     assert config.agent.max_turns == 20
     assert config.agent.max_turn_exhaustions == 3
 
-    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
-
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "polling.interval_ms"
+    assert {:error, errors} = write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
+    assert Enum.any?(errors, &(&1.path == "polling.interval_ms"))
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 45_000)
     assert Config.settings!().polling.interval_ms == 45_000
 
-    write_workflow_file!(Workflow.workflow_file_path(), max_turns: 0)
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "agent.max_turns"
+    assert {:error, errors} = write_workflow_file!(Workflow.workflow_file_path(), max_turns: 0)
+    assert Enum.any?(errors, &(&1.path == "agent.max_turns"))
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
     assert Config.settings!().agent.max_turns == 5
 
-    write_workflow_file!(Workflow.workflow_file_path(), max_turn_exhaustions: 0)
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "agent.max_turn_exhaustions"
+    assert {:error, errors} = write_workflow_file!(Workflow.workflow_file_path(), max_turn_exhaustions: -1)
+    assert Enum.any?(errors, &(&1.path == "agent.max_turn_exhaustions"))
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turn_exhaustions: 4)
     assert Config.settings!().agent.max_turn_exhaustions == 4
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "tracker.active_states"
+    assert {:error, errors} = write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
+    assert Enum.any?(errors, &(&1.path == "tracker.active_states"))
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "token",
-      tracker_project_slug: nil
-    )
+    assert {:error, [%{path: "tracker", message: "missing linear scope"}]} =
+             write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: "token", tracker_project_slug: nil)
 
-    assert {:error, :missing_linear_scope} = Config.validate!()
+    assert {:error, [%{path: "tracker", message: "missing linear api token"}]} =
+             write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: "   ", tracker_project_slug: "project")
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "   ",
-      tracker_project_slug: "project"
-    )
+    assert {:error, [%{path: "tracker", message: "missing linear scope"}]} =
+             write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: "token", tracker_project_slug: "")
 
-    assert {:error, :missing_linear_api_token} = Config.validate!()
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "token",
-      tracker_project_slug: ""
-    )
-
-    assert {:error, :missing_linear_scope} = Config.validate!()
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_project_slug: "project",
-      codex_command: ""
-    )
-
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.command"
-    assert message =~ "can't be blank"
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "   ")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.command"
-    assert Config.settings!().codex.command == "codex app-server"
-    assert message =~ "can't be blank"
+    for command <- ["", "   "] do
+      assert {:error, errors} = write_workflow_file!(Workflow.workflow_file_path(), codex_command: command)
+      assert Enum.any?(errors, &(&1.path == "codex.command"))
+      assert Config.settings!().codex.command == "codex app-server"
+      assert :ok = Config.validate!()
+    end
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "/bin/sh app-server")
     assert :ok = Config.validate!()
@@ -100,16 +75,14 @@ defmodule SymphonyElixir.CoreTest do
 
     assert :ok = Config.validate!()
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: 123)
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.approval_policy"
+    assert {:error, errors} = write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: 123)
+    assert Enum.any?(errors, &(&1.path == "codex.approval_policy"))
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: 123)
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.thread_sandbox"
+    assert {:error, errors} = write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: 123)
+    assert Enum.any?(errors, &(&1.path == "codex.thread_sandbox"))
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
-    assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+    assert {:error, errors} = write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
+    assert Enum.any?(errors, &(&1.path == "tracker.kind"))
   end
 
   # The two gates used to disagree: config-time validation demanded a project slug via
@@ -166,30 +139,27 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "current_cycle without team_keys is rejected" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_project_slug: nil,
-      tracker_provider: %{"current_cycle" => true}
-    )
+    options = [tracker_project_slug: nil, tracker_provider: %{"current_cycle" => true}]
 
-    assert {:error, :missing_linear_team_keys} = Config.validate!()
+    assert {:error, [%{path: "tracker", message: "missing linear team keys"}]} =
+             write_workflow_file!(Workflow.workflow_file_path(), options)
   end
 
   test "a non-boolean current_cycle is rejected" do
-    write_workflow_file!(Workflow.workflow_file_path(),
+    options = [
       tracker_project_slug: nil,
       tracker_provider: %{"team_keys" => ["MDZ"], "current_cycle" => "yes"}
-    )
+    ]
 
-    assert {:error, :invalid_linear_current_cycle} = Config.validate!()
+    assert {:error, [%{path: "tracker", message: "invalid linear current cycle"}]} =
+             write_workflow_file!(Workflow.workflow_file_path(), options)
   end
 
   test "a scalar team_keys is rejected" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_project_slug: nil,
-      tracker_provider: %{"team_keys" => "MDZ"}
-    )
+    options = [tracker_project_slug: nil, tracker_provider: %{"team_keys" => "MDZ"}]
 
-    assert {:error, :invalid_linear_team_keys} = Config.validate!()
+    assert {:error, [%{path: "tracker", message: "invalid linear team keys"}]} =
+             write_workflow_file!(Workflow.workflow_file_path(), options)
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -220,8 +190,8 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
 
     assert String.trim(prompt) != ""
-    assert is_binary(Config.workflow_prompt())
-    assert Config.workflow_prompt() == prompt
+    assert {:ok, lane, _warnings} = Lanes.import_file(Workflow.workflow_file_path(), slug: "repo")
+    assert {:ok, %{prompt: ^prompt}} = LaneStore.workflow(lane.id)
   end
 
   test "linear api token resolves from LINEAR_API_KEY env var" do
@@ -310,18 +280,13 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
-    pid =
-      start_supervised!(%{
-        id: SymphonyElixir.AgentRuntimeSupervisor,
-        start: {SymphonyElixir, :start_link, []},
-        type: :supervisor
-      })
+    {:ok, pid} = SymphonyElixir.start_link()
+    on_exit(fn -> if Process.alive?(pid), do: Supervisor.stop(pid) end)
 
     assert Process.whereis(SymphonyElixir.AgentRuntimeSupervisor) == pid
-    assert is_pid(Process.whereis(SymphonyElixir.TaskSupervisor))
-    assert is_pid(Process.whereis(SymphonyElixir.Orchestrator))
+    assert %{running: [], polling: %{poll_interval_ms: 30_000}} = Orchestrator.snapshot()
 
-    stop_supervised!(SymphonyElixir.AgentRuntimeSupervisor)
+    Supervisor.stop(pid)
   end
 
   test "scheduler fixture teardown terminates its private workers" do
@@ -344,38 +309,12 @@ defmodule SymphonyElixir.CoreTest do
     refute Process.whereis(task_supervisor)
   end
 
-  test "orchestrator fails startup when semantic preflight fails" do
-    issue_suffix = System.unique_integer([:positive])
-    orchestrator_name = Module.concat(__MODULE__, "InvalidOrchestrator#{issue_suffix}")
-    workflow_path = Workflow.workflow_file_path()
-
-    on_exit(fn ->
-      if pid = Process.whereis(orchestrator_name) do
-        GenServer.stop(pid)
-      end
-
-      write_workflow_file!(workflow_path, tracker_kind: "memory")
-
-      if is_nil(Process.whereis(WorkflowStore)) do
-        assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
-      end
-    end)
-
-    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "token",
-      tracker_project_slug: nil
-    )
-
+  test "orchestrator rejects startup for an unavailable lane" do
+    name = Module.concat(__MODULE__, "InvalidOrchestrator#{System.unique_integer([:positive])}")
     previous_trap_exit = Process.flag(:trap_exit, true)
-
-    assert {:error, :missing_linear_scope} =
-             Orchestrator.start_link(name: orchestrator_name)
-
+    assert {:error, {:lane_unavailable, 999_999}} = Orchestrator.start_link(name: name, lane_id: 999_999)
     Process.flag(:trap_exit, previous_trap_exit)
-
-    refute Process.whereis(orchestrator_name)
+    refute Process.whereis(name)
   end
 
   test "runtime restart keeps last good settings after an invalid reload" do
@@ -396,13 +335,14 @@ defmodule SymphonyElixir.CoreTest do
 
     original_orchestrator_pid = Process.whereis(orchestrator_name)
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "linear",
-      tracker_api_token: "token",
-      tracker_project_slug: nil
-    )
+    assert {:error, [%{path: "tracker", message: "missing linear scope"}]} =
+             write_workflow_file!(Workflow.workflow_file_path(),
+               tracker_kind: "linear",
+               tracker_api_token: "token",
+               tracker_project_slug: nil
+             )
 
-    assert {:error, :missing_linear_scope} = Config.validate!()
+    assert :ok = Config.validate!()
     assert Config.settings!().tracker.kind == "memory"
 
     Process.exit(original_orchestrator_pid, :kill)
@@ -572,6 +512,7 @@ defmodule SymphonyElixir.CoreTest do
           issue_id => %{
             pid: agent_pid,
             ref: nil,
+            attempt_id: "reconcile-attempt",
             identifier: issue_identifier,
             issue: %Issue{id: issue_id, state: "Todo", identifier: issue_identifier},
             started_at: DateTime.utc_now()
@@ -648,6 +589,7 @@ defmodule SymphonyElixir.CoreTest do
           issue_id => %{
             pid: agent_pid,
             ref: nil,
+            attempt_id: "reconcile-attempt",
             identifier: issue_identifier,
             issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
             started_at: DateTime.utc_now()
@@ -715,6 +657,7 @@ defmodule SymphonyElixir.CoreTest do
           issue_id => %{
             pid: agent_pid,
             ref: nil,
+            attempt_id: "reconcile-attempt",
             identifier: issue_identifier,
             issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
             workspace_path: old_workspace,
@@ -794,6 +737,7 @@ defmodule SymphonyElixir.CoreTest do
       running_entry = %{
         pid: agent_pid,
         ref: nil,
+        attempt_id: "reconcile-attempt",
         identifier: issue_identifier,
         issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
         started_at: DateTime.utc_now()
@@ -828,6 +772,7 @@ defmodule SymphonyElixir.CoreTest do
         issue_id => %{
           pid: self(),
           ref: nil,
+          attempt_id: "reconcile-attempt",
           identifier: "MT-557",
           issue: %Issue{
             id: issue_id,
@@ -875,6 +820,7 @@ defmodule SymphonyElixir.CoreTest do
         issue_id => %{
           pid: agent_pid,
           ref: nil,
+          attempt_id: "reconcile-attempt",
           identifier: "MT-561",
           issue: %Issue{
             id: issue_id,
@@ -924,6 +870,7 @@ defmodule SymphonyElixir.CoreTest do
         issue_id => %{
           pid: agent_pid,
           ref: nil,
+          attempt_id: "reconcile-attempt",
           identifier: "MT-562",
           issue: %Issue{
             id: issue_id,
@@ -1151,6 +1098,34 @@ defmodule SymphonyElixir.CoreTest do
     assert body =~ "session_id: thread-turn-budget"
     assert body =~ "Symphony parked this work item"
     assert_receive {:memory_tracker_state_update, "issue-turn-budget", "Blocked / Needs Attention"}
+  end
+
+  test "zero exhaustion limit keeps a waiting issue active and can be re-enabled" do
+    options = [tracker_kind: "memory", tracker_active_states: ["In Review"]]
+    write_workflow_file!(Workflow.workflow_file_path(), options ++ [max_turn_exhaustions: 2])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_recipient) end)
+
+    issue = %Issue{id: "qa-waiting", identifier: "MT-564", state: "In Review"}
+    pid = start_orchestrator!(:QaWaitOrchestrator)
+    exhaust_turn_budget!(pid, issue)
+
+    write_workflow_file!(Workflow.workflow_file_path(), options ++ [max_turn_exhaustions: 0])
+
+    for _attempt <- 1..4 do
+      state = exhaust_turn_budget!(pid, issue)
+      assert Map.has_key?(state.retry_attempts, issue.id)
+      refute Map.has_key?(state.blocked, issue.id)
+    end
+
+    refute_receive {:memory_tracker_comment, "qa-waiting", _}
+    refute_receive {:memory_tracker_state_update, "qa-waiting", _}
+
+    write_workflow_file!(Workflow.workflow_file_path(), options ++ [max_turn_exhaustions: 2])
+    state = exhaust_turn_budget!(pid, issue)
+    refute Map.has_key?(state.blocked, issue.id)
+    exhaust_turn_budget!(pid, issue)
+    assert_receive {:memory_tracker_state_update, "qa-waiting", "Blocked / Needs Attention"}
   end
 
   test "turn budget exhaustions in a new state restart the count" do
@@ -1712,36 +1687,6 @@ defmodule SymphonyElixir.CoreTest do
     refute prompt =~ "linear_fetch_attachment"
   end
 
-  test "prompt builder reports workflow load failures separately from template parse errors" do
-    original_workflow_path = Workflow.workflow_file_path()
-    workflow_store_pid = Process.whereis(SymphonyElixir.WorkflowStore)
-
-    on_exit(fn ->
-      Workflow.set_workflow_file_path(original_workflow_path)
-
-      if is_pid(workflow_store_pid) and is_nil(Process.whereis(SymphonyElixir.WorkflowStore)) do
-        Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
-      end
-    end)
-
-    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
-
-    Workflow.set_workflow_file_path(Path.join(System.tmp_dir!(), "missing-workflow-#{System.unique_integer([:positive])}.md"))
-
-    issue = %Issue{
-      identifier: "MT-780",
-      title: "Workflow unavailable",
-      description: "Missing workflow file",
-      state: "Todo",
-      url: "https://example.org/issues/MT-780",
-      labels: []
-    }
-
-    assert_raise RuntimeError, ~r/workflow_unavailable:/, fn ->
-      PromptBuilder.build_prompt(issue)
-    end
-  end
-
   test "in-repo WORKFLOW.md renders correctly" do
     workflow_path = Workflow.workflow_file_path()
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
@@ -1750,6 +1695,7 @@ defmodule SymphonyElixir.CoreTest do
 
     System.put_env("LINEAR_API_KEY", "test-linear-api-key")
     Workflow.set_workflow_file_path(Path.expand("WORKFLOW.md", File.cwd!()))
+    assert :ok = reload_workflow!()
 
     issue = %Issue{
       identifier: "MT-616",

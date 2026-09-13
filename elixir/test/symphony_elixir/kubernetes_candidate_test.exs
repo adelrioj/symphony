@@ -1,3 +1,5 @@
+Code.require_file("../support/kubernetes_candidate_runner.exs", __DIR__)
+
 defmodule SymphonyElixir.KubernetesCandidateTest do
   use ExUnit.Case, async: false
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes
@@ -18,7 +20,49 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     end)
 
     {config, pins, objects} = fixture(helper)
-    %{config: config, pins: pins, objects: objects}
+    %{config: config, pins: pins, objects: objects, root: root}
+  end
+
+  test "runner imports a disabled DB lane before rejecting invalid candidate pins", ctx do
+    alias SymphonyElixir.{KubernetesCandidateRunner, Lanes, LaneStore, LaneSupervisor, TestSupport}
+    TestSupport.reset_lanes!()
+    enabled = System.get_env("SYMPHONY_RUN_KUBERNETES_CANDIDATE")
+    System.put_env("SYMPHONY_RUN_KUBERNETES_CANDIDATE", "1")
+
+    on_exit(fn ->
+      TestSupport.restore_env("SYMPHONY_RUN_KUBERNETES_CANDIDATE", enabled)
+      TestSupport.reset_lanes!()
+    end)
+
+    File.chmod!(ctx.root, 0o700)
+    workflow = Path.join(ctx.root, "WORKFLOW")
+    output = Path.join(ctx.root, "evidence.json")
+    environment = %{kind: "kubernetes", deployment_id: "ignored", provider: ctx.config.provider, startup_timeout_ms: 1_000, shutdown_timeout_ms: 1_000}
+    File.write!(workflow, SymphonyElixir.Workflow.render(Jason.encode!(%{worker: %{environment: environment}, hooks: %{before_run: "must-not-run"}}), "Must not reach an agent."))
+    input = %{
+      "authorization" => "disposable-namespace-non-model",
+      "mode" => "run",
+      "workflow_path" => workflow,
+      "output_path" => output,
+      "pins" => %{"deployment_id" => "candidate-db-probe"},
+      "timeout_ms" => 1_000,
+      "cleanup_timeout_ms" => 1_000,
+      "runner_sha256" => Candidate.sha256(File.read!(Path.expand("../support/kubernetes_candidate_runner.exs", __DIR__))),
+      "negative_control_paths" => ["/api/v1/namespaces/unrelated"]
+    }
+    input_path = Path.join(ctx.root, "input.json")
+    File.write!(input_path, Jason.encode!(input))
+
+    assert {:error, :candidate_setup_failed} = KubernetesCandidateRunner.run_file(input_path)
+    [lane] = Lanes.list()
+    refute lane.enabled
+    refute LaneSupervisor.running?(lane.id)
+    settings = LaneStore.settings!(lane.id)
+    assert settings.tracker.kind == "memory"
+    assert settings.agent.max_concurrent_agents == 1
+    assert settings.hooks.before_run == nil
+    assert settings.worker.environment.deployment_id == "candidate-db-probe"
+    assert Jason.decode!(File.read!(output))["backend_sessions"] == 0
   end
 
   test "incomplete candidate identity is rejected without contacting the provider", %{config: config} do
@@ -64,6 +108,7 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
   test "operator artifact, helper, scope and qualification claims cannot be substituted", ctx do
     wrong = [
       put_in(ctx.pins, ["namespace"], "elsewhere"),
+      put_in(ctx.pins, ["contract", "controller_namespace"], ctx.pins["namespace"]),
       put_in(ctx.pins, ["deployment_id"], "elsewhere"),
       put_in(ctx.pins, ["consumer_artifact_sha256"], String.duplicate("0", 64)),
       put_in(ctx.pins, ["helper_sha256"], String.duplicate("0", 64)),

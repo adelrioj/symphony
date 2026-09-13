@@ -1,350 +1,294 @@
 defmodule SymphonyElixir.CLITest do
-  use SymphonyElixir.TestSupport
+  use ExUnit.Case, async: false
 
   require Logger
 
-  alias SymphonyElixir.CLI
+  alias SymphonyElixir.{CLI, Config, Lanes, TestSupport, Workflow}
+  import ExUnit.CaptureIO
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
+  @installation_keys [
+    :data_root,
+    :server_port,
+    :server_host,
+    :events_retention_days,
+    :operator_token,
+    :log_file,
+    :workflow_file_path
+  ]
 
   setup do
-    default_logger_handler = :logger.get_handler_config(:default)
+    logger = :logger.get_handler_config(:default)
+    previous = Map.new(@installation_keys, &{&1, Application.fetch_env(:symphony_elixir, &1)})
+    root = Path.join(System.tmp_dir!(), "symphony-cli-#{System.unique_integer([:positive, :monotonic])}")
 
     on_exit(fn ->
-      restore_default_logger_handler(default_logger_handler)
+      restore_default_logger_handler(logger)
+
+      for {key, value} <- previous do
+        case value do
+          {:ok, value} -> Application.put_env(:symphony_elixir, key, value)
+          :error -> Application.delete_env(:symphony_elixir, key)
+        end
+      end
+
+      File.rm_rf!(root)
     end)
 
-    :ok
+    {:ok, root: root}
   end
 
-  test "returns the guardrails acknowledgement banner when the flag is missing" do
-    parent = self()
+  defp deps(overrides \\ %{}) do
+    Map.merge(
+      %{
+        ensure_all_started: fn -> flunk("daemon startup must not be reached") end,
+        start_repo: fn -> flunk("database startup must not be reached") end,
+        import_lane: &Lanes.import_file/2,
+        export_lane: fn slug ->
+          case Lanes.get_by_slug(slug) do
+            nil -> {:error, :not_found}
+            lane -> Lanes.export(lane)
+          end
+        end,
+        operator_token: fn -> "test-token" end,
+        write_output: &IO.write/1
+      },
+      overrides
+    )
+  end
 
-    deps = %{
-      file_regular?: fn _path ->
-        send(parent, :file_checked)
-        true
-      end,
-      set_workflow_file_path: fn _path ->
-        send(parent, :workflow_set)
-        :ok
-      end,
-      set_logs_root: fn _path ->
-        send(parent, :logs_root_set)
-        :ok
-      end,
-      set_server_port_override: fn _port ->
-        send(parent, :port_set)
-        :ok
-      end,
-      ensure_all_started: fn ->
-        send(parent, :started)
-        {:ok, [:symphony_elixir]}
-      end,
-      preflight: fn -> :ok end
-    }
+  test "arguments are rejected before acknowledgement, credentials, or filesystem changes", %{root: root} do
+    invalid = [
+      [],
+      ["WORKFLOW.md", @ack_flag],
+      ["serve", "--bogus"],
+      ["serve", "WORKFLOW.md"],
+      ["serve", "--port", "-1"],
+      ["serve", "--port", "65536"],
+      ["serve", "--port", "not-a-port"],
+      ["serve", "--events-retention-days", "0"],
+      ["serve", "--events-retention-days", "-1"],
+      ["serve", "--events-retention-days", "1.5"],
+      ["serve", "--host", "localhost"],
+      ["serve", "--host", "999.1.1.1"],
+      ["serve", "--host", "127.0.0.1:4000"],
+      ["serve", "--host", " 127.0.0.1"],
+      ["serve", "--data-root", "  "],
+      ["lanes", "frobnicate"],
+      ["lanes", "import", "WORKFLOW.md", "--slug", "features", "--port", "4000"],
+      ["lanes", "export"],
+      ["lanes", "export", "features", "extra"],
+      ["--linear-mcp", "--workflow", "WORKFLOW.md", "extra"],
+      ["--linear-mcp", "--workflow", "WORKFLOW.md", "--port", "4000"],
+      ["--linear-mcp", "--workflow", " "],
+      ["--no-linear-mcp"]
+    ]
 
-    assert {:error, banner} = CLI.evaluate(["WORKFLOW.md"], deps)
-    assert banner =~ "This Symphony implementation is a low key engineering preview."
-    assert banner =~ "Codex will run without any guardrails."
-    assert banner =~ "SymphonyElixir is not a supported product and is presented as-is."
+    for args <- invalid do
+      assert {:error, message} = CLI.evaluate(args, deps(%{operator_token: fn -> flunk("credentials read before parsing") end}))
+      assert message =~ "Usage: symphony serve"
+    end
+
+    assert {:error, message} = CLI.evaluate(["WORKFLOW.md", @ack_flag], deps())
+    assert message =~ "import it as a lane first"
+    refute File.exists?(root)
+  end
+
+  test "serve requires acknowledgement before reading credentials or creating directories", %{root: root} do
+    assert {:error, banner} =
+             CLI.evaluate(["serve", "--data-root", root], deps(%{operator_token: fn -> flunk("credentials read before acknowledgement") end}))
+
     assert banner =~ @ack_flag
-    refute_received :file_checked
-    refute_received :workflow_set
-    refute_received :logs_root_set
-    refute_received :port_set
-    refute_received :started
+    refute File.exists?(root)
   end
 
-  test "defaults to WORKFLOW.md when workflow path is missing" do
-    deps = %{
-      file_regular?: fn path -> Path.basename(path) == "WORKFLOW.md" end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
-      preflight: fn -> :ok end
-    }
-
-    assert :ok = CLI.evaluate([@ack_flag], deps)
-  end
-
-  test "uses an explicit workflow path override when provided" do
-    parent = self()
-    workflow_path = "tmp/custom/WORKFLOW.md"
-    expanded_path = Path.expand(workflow_path)
-
-    deps = %{
-      file_regular?: fn path ->
-        send(parent, {:workflow_checked, path})
-        path == expanded_path
-      end,
-      set_workflow_file_path: fn path ->
-        send(parent, {:workflow_set, path})
-        :ok
-      end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
-      preflight: fn -> :ok end
-    }
-
-    assert :ok = CLI.evaluate([@ack_flag, workflow_path], deps)
-    assert_received {:workflow_checked, ^expanded_path}
-    assert_received {:workflow_set, ^expanded_path}
-  end
-
-  test "accepts --logs-root and passes an expanded root to runtime deps" do
-    parent = self()
-
-    deps = %{
-      file_regular?: fn _path -> true end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn path ->
-        send(parent, {:logs_root, path})
-        :ok
-      end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
-      preflight: fn -> :ok end
-    }
-
-    assert :ok = CLI.evaluate([@ack_flag, "--logs-root", "tmp/custom-logs", "WORKFLOW.md"], deps)
-    assert_received {:logs_root, expanded_path}
-    assert expanded_path == Path.expand("tmp/custom-logs")
-  end
-
-  test "returns not found when workflow file does not exist" do
-    deps = %{
-      file_regular?: fn _path -> false end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
-      preflight: fn -> :ok end
-    }
-
-    assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
-    assert message =~ "Workflow file not found:"
-  end
-
-  test "returns startup error when app cannot start" do
-    deps = %{
-      file_regular?: fn _path -> true end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:error, :boom} end,
-      preflight: fn -> :ok end
-    }
-
-    assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
-    assert message =~ "Failed to start Symphony with workflow"
-    assert message =~ ":boom"
-  end
-
-  test "returns ok when workflow exists and app starts" do
-    deps = %{
-      file_regular?: fn _path -> true end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
-      preflight: fn -> :ok end
-    }
-
-    assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
-  end
-
-  test "a failing preflight prevents the supervision tree from starting" do
-    deps = %{
-      file_regular?: fn _path -> true end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> flunk("application must not start when preflight fails") end,
-      preflight: fn -> {:error, {:linear_preflight_failed, ["unknown Linear team key \"NOPE\""]}} end
-    }
-
-    assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
-    assert message =~ "Tracker preflight failed"
-    assert message =~ "NOPE"
-  end
-
-  test "a passing preflight starts the supervision tree" do
-    parent = self()
-
-    deps = %{
-      file_regular?: fn _path -> true end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn ->
-        send(parent, :started)
-        {:ok, [:symphony_elixir]}
-      end,
-      preflight: fn ->
-        send(parent, :preflighted)
-        :ok
-      end
-    }
-
-    assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
-
-    # Drained in mailbox order: preflight must run before the supervision tree starts.
-    markers =
-      Enum.map(1..2, fn _ ->
-        receive do
-          marker -> marker
-        after
-          0 -> :no_message
-        end
-      end)
-
-    assert markers == [:preflighted, :started]
-  end
-
-  defmodule NeverCalledLinearClient do
-    def graphql(query, variables) do
-      send(self(), {:linear_request, query, variables})
-
-      # Also breaks the `:ok` assertion below if it is ever reached: an empty team page makes
-      # preflight fail, so a reintroduced ordering bug cannot pass quietly.
-      {:ok, %{"data" => %{"teams" => %{"nodes" => []}}}}
+  test "serve refuses missing or blank operator tokens before touching disk", %{root: root} do
+    for token <- [nil, "", " \t\n"] do
+      assert {:error, message} = CLI.evaluate(["serve", "--data-root", root, @ack_flag], deps(%{operator_token: fn -> token end}))
+      assert message =~ "SYMPHONY_OPERATOR_TOKEN"
+      refute File.exists?(root)
     end
   end
 
-  # `run/2` preflights before `deps.ensure_all_started` reaches `WorkflowStore.init/1`, where
-  # `Config.validate!/0` runs. Without an explicit offline gate, an operator with a blank endpoint
-  # got a Linear error instead of the config error that names the real problem, and Symphony
-  # issued a live request for a configuration it was about to reject offline.
-  test "an offline-invalid tracker config is never preflighted" do
-    previous_client = Application.get_env(:symphony_elixir, :linear_client_module)
-    Application.put_env(:symphony_elixir, :linear_client_module, NeverCalledLinearClient)
+  test "serve creates installation directories and publishes configuration before starting", %{root: root} do
+    File.mkdir_p!(root)
 
-    on_exit(fn ->
-      if is_nil(previous_client) do
-        Application.delete_env(:symphony_elixir, :linear_client_module)
-      else
-        Application.put_env(:symphony_elixir, :linear_client_module, previous_client)
-      end
+    File.cd!(root, fn ->
+      assert :ok =
+               CLI.evaluate(
+                 ["serve", @ack_flag],
+                 deps(%{
+                   ensure_all_started: fn ->
+                     assert Config.data_root() == File.cwd!()
+                     assert Config.server_port() == 4000
+                     assert Config.server_host() == "127.0.0.1"
+                     assert Config.events_retention_days() == 30
+                     assert Config.operator_token() == "test-token"
+                     assert File.dir?(Path.join(Config.data_root(), "log"))
+                     assert Application.fetch_env!(:symphony_elixir, :log_file) == Path.join(Config.data_root(), "log/symphony.log")
+                     {:ok, []}
+                   end
+                 })
+               )
     end)
+  end
 
-    workflow_path = Workflow.workflow_file_path()
+  test "serve accepts explicit installation values, ephemeral ports, and IPv6", %{root: root} do
+    assert :ok =
+             CLI.evaluate(
+               ["serve", "--data-root", root, "--port", "0", "--host", "::1", "--events-retention-days", "1", @ack_flag],
+               deps(%{
+                 ensure_all_started: fn ->
+                   assert Config.data_root() == Path.expand(root)
+                   assert Config.server_port() == 0
+                   assert Config.server_host() == "::1"
+                   assert Config.events_retention_days() == 1
+                   assert File.dir?(Path.join(root, "log"))
+                   {:ok, []}
+                 end
+               })
+             )
+  end
 
-    # Seeded valid first: `WorkflowStore` runs during tests, so `Config.settings/0` answers with
-    # the last known good config even after the file goes bad. Seeding a team-scoped config makes
-    # those stale settings the ones that DO query Linear, so only a real offline gate can keep the
-    # request from happening.
-    write_workflow_file!(workflow_path, tracker_project_slug: nil, tracker_provider: %{"team_keys" => ["MDZ"]})
-    assert :ok = Config.validate!()
+  test "serve reports application and directory failures", %{root: root} do
+    assert {:error, message} =
+             CLI.evaluate(["serve", "--data-root", root, @ack_flag], deps(%{ensure_all_started: fn -> {:error, :boom} end}))
 
-    log =
-      capture_log(fn ->
-        # Blank endpoint: rejected by `Linear.Adapter.validate_config/1` with no request at all,
-        # while `team_keys` stays non-empty so preflight would otherwise query Linear.
-        write_workflow_file!(workflow_path,
-          tracker_endpoint: "",
-          tracker_project_slug: nil,
-          tracker_provider: %{"team_keys" => ["MDZ"]}
-        )
+    assert message =~ "Failed to start Symphony"
+    assert message =~ "boom"
+    file = Path.join(root, "not-a-directory")
+    File.write!(file, "")
+    assert {:error, message} = CLI.evaluate(["serve", "--data-root", file, @ack_flag], deps())
+    assert message =~ "Failed to create Symphony data directory"
+  end
 
-        assert {:error, :invalid_linear_endpoint} = Config.validate!()
-        assert :ok = CLI.evaluate([@ack_flag, workflow_path])
+  test "import requires a nonblank slug before opening the database" do
+    for suffix <- [[], ["--slug", ""], ["--slug", "   "]] do
+      assert {:error, message} = CLI.evaluate(["lanes", "import", "WORKFLOW.md" | suffix], deps())
+      assert message =~ "--slug"
+    end
+  end
+
+  test "import persists a disabled version and export returns exact workflow bytes", %{root: root} do
+    File.mkdir_p!(root)
+    path = Path.join(root, "WORKFLOW.md")
+    content = "---\ntracker:\n  kind: memory\nserver:\n  port: 9999\n---\nPrompt with trailing spaces  \n"
+    File.write!(path, content)
+    slug = "cli-#{System.unique_integer([:positive, :monotonic])}"
+    offline = deps(%{start_repo: fn -> :ok end})
+
+    output =
+      capture_io(fn ->
+        assert :ok =
+                 CLI.evaluate(
+                   ["lanes", "import", path, "--slug", slug, "--name", "Imported lane", "--note", "initial", "--data-root", root],
+                   offline
+                 )
       end)
 
-    refute_received {:linear_request, _query, _variables}
+    lane = Lanes.get_by_slug(slug)
+    assert lane.name == "Imported lane"
+    refute lane.enabled
+    assert Lanes.current_version(lane).note == "initial"
+    assert output =~ "imported lane #{slug} version #{lane.current_version_id}"
+    assert output =~ "warning:"
+    assert capture_io(fn -> assert :ok = CLI.evaluate(["lanes", "export", slug, "--data-root", root], offline) end) == content
+  end
 
-    # Deferred, not swallowed: `WorkflowStore.init/1` is the boot step `deps.ensure_all_started`
-    # reaches, and it stops on the reason the CLI then reports verbatim.
-    assert {:stop, :invalid_linear_endpoint} = WorkflowStore.init([])
-    assert log =~ "invalid_linear_endpoint"
+  test "import reports real field validation and unreadable files", %{root: root} do
+    File.mkdir_p!(root)
+    path = Path.join(root, "WORKFLOW.md")
+    File.write!(path, "---\ntracker:\n  kind: unsupported\n---\nPrompt")
+    offline = deps(%{start_repo: fn -> :ok end})
+    assert {:error, message} = CLI.evaluate(["lanes", "import", path, "--slug", "invalid-cli", "--data-root", root], offline)
+    assert message =~ "tracker.kind:"
+    assert is_nil(Lanes.get_by_slug("invalid-cli"))
+    assert {:error, message} = CLI.evaluate(["lanes", "import", path <> ".missing", "--slug", "missing-cli", "--data-root", root], offline)
+    assert message =~ "Invalid lane configuration"
+  end
+
+  test "offline commands report database and export errors without starting the daemon", %{root: root} do
+    assert {:error, message} =
+             CLI.evaluate(["lanes", "export", "missing", "--data-root", root], deps(%{start_repo: fn -> {:error, :locked} end}))
+
+    assert message =~ "Failed to open the Symphony database"
+    assert message =~ "locked"
+
+    offline = deps(%{start_repo: fn -> :ok end})
+    assert {:error, "no lane with slug missing-cli-lane"} = CLI.evaluate(["lanes", "export", "missing-cli-lane", "--data-root", root], offline)
+
+    assert {:error, "lane empty has no version"} =
+             CLI.evaluate(
+               ["lanes", "export", "empty", "--data-root", root],
+               deps(%{start_repo: fn -> :ok end, export_lane: fn _slug -> {:error, :no_version} end})
+             )
   end
 
   test "evaluate/2 with --linear-mcp loads the workflow and enters mcp mode" do
-    test_pid = self()
+    output =
+      capture_io(fn ->
+        assert :ok =
+                 CLI.evaluate(
+                   ["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"],
+                   deps(%{
+                     ensure_linear_mcp_started: fn -> {:ok, [:req]} end,
+                     serve_linear_mcp: fn ->
+                       assert Workflow.workflow_file_path() == "/abs/WORKFLOW.md"
+                       IO.write("MCP response")
+                     end
+                   })
+                 )
+      end)
 
-    deps = %{
-      file_regular?: fn _path -> true end,
-      set_workflow_file_path: fn path ->
-        send(test_pid, {:workflow, path})
-        :ok
-      end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, []} end,
-      ensure_linear_mcp_started: fn ->
-        send(test_pid, :mcp_started)
-        {:ok, [:req]}
-      end,
-      serve_linear_mcp: fn ->
-        send(test_pid, :served)
-        :ok
-      end,
-      preflight: fn -> :ok end
-    }
-
-    assert :ok = CLI.evaluate(["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"], deps)
-    assert_received {:workflow, "/abs/WORKFLOW.md"}
-    assert_received :mcp_started
-    assert_received :served
+    assert output == "MCP response"
   end
 
-  test "evaluate/2 with --linear-mcp keeps logger output off protocol stdout" do
-    test_pid = self()
+  test "evaluate/2 with --linear-mcp keeps startup and request logs off protocol stdout" do
     response = Jason.encode!(%{"jsonrpc" => "2.0", "id" => 1, "result" => %{"isError" => true}})
     protocol_output = IO.iodata_to_binary(["Content-Length: ", Integer.to_string(byte_size(response)), "\r\n\r\n", response])
 
-    deps = %{
-      file_regular?: fn _path -> true end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, []} end,
-      ensure_linear_mcp_started: fn -> {:ok, [:req]} end,
-      serve_linear_mcp: fn ->
-        send(test_pid, {:default_logger_handler, :logger.get_handler_config(:default)})
-        Logger.error("Linear GraphQL request failed: :timeout")
-        IO.write(protocol_output)
-        :ok
-      end,
-      preflight: fn -> :ok end
-    }
-
     stdout =
-      ExUnit.CaptureIO.capture_io(fn ->
-        assert :ok = CLI.evaluate(["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"], deps)
+      capture_io(fn ->
+        assert :ok =
+                 CLI.evaluate(
+                   ["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"],
+                   deps(%{
+                     ensure_linear_mcp_started: fn ->
+                       Logger.warning("startup warning")
+                       {:ok, [:req]}
+                     end,
+                     serve_linear_mcp: fn ->
+                       Logger.error("Linear GraphQL request failed: :timeout")
+                       IO.write(protocol_output)
+                     end
+                   })
+                 )
+
         Logger.flush()
       end)
 
     assert stdout == protocol_output
-    assert_received {:default_logger_handler, {:error, {:not_found, :default}}}
   end
 
   test "evaluate/2 with --linear-mcp returns startup errors before serving" do
-    test_pid = self()
+    assert {:error, message} =
+             CLI.evaluate(
+               ["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"],
+               deps(%{
+                 ensure_linear_mcp_started: fn -> {:error, :req_failed} end,
+                 serve_linear_mcp: fn -> flunk("must not serve after startup failure") end
+               })
+             )
 
-    deps = %{
-      file_regular?: fn _path -> true end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, []} end,
-      ensure_linear_mcp_started: fn -> {:error, :req_failed} end,
-      serve_linear_mcp: fn ->
-        send(test_pid, :served)
-        :ok
-      end,
-      preflight: fn -> :ok end
-    }
-
-    assert {:error, message} = CLI.evaluate(["--linear-mcp", "--workflow", "/abs/WORKFLOW.md"], deps)
     assert message =~ "Failed to start Symphony linear MCP runtime"
     assert message =~ ":req_failed"
-    refute_received :served
   end
 
-  test "serve_linear_mcp_loop/2 handles Content-Length framed requests and responses" do
+  test "serve_linear_mcp_loop/2 handles Content-Length framed requests and responses", %{root: root} do
+    File.mkdir_p!(root)
+    :ok = TestSupport.write_workflow_file!(Path.join(root, "WORKFLOW.md"))
+    on_exit(fn -> TestSupport.reset_lanes!() end)
+
     request =
       Jason.encode!(%{
         "jsonrpc" => "2.0",

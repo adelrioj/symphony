@@ -18,6 +18,86 @@
   --shadow-lg: 0 20px 50px rgba(15, 23, 42, 0.08);
 }
 
+.app-nav {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 0.75rem 1.5rem;
+}
+
+.lane-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 1rem;
+}
+
+.lane-form {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.lane-form label {
+  display: grid;
+  gap: 0.4rem;
+  font-weight: 600;
+}
+
+.lane-form input:not([type="checkbox"]):not([type="hidden"]),
+.lane-form select,
+.lane-form textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0.7rem 0.85rem;
+  background: white;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 400;
+}
+
+.lane-form textarea.mono {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  resize: vertical;
+  tab-size: 2;
+}
+
+.lane-form input[readonly] {
+  background: var(--card-muted);
+}
+
+.lane-form input[type="checkbox"] {
+  width: 1.2rem;
+  height: 1.2rem;
+  accent-color: var(--accent);
+}
+
+.lane-form button {
+  justify-self: start;
+}
+
+:is(a, button, input, select, textarea):focus-visible {
+  outline: 3px solid var(--accent-ink);
+  outline-offset: 3px;
+}
+
+.run-events {
+  padding-left: 1.5rem;
+}
+
+.run-events li {
+  padding: 0.7rem 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.run-events time,
+.run-events strong {
+  margin-right: 0.75rem;
+}
+
 * {
   box-sizing: border-box;
 }

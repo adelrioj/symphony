@@ -5,6 +5,43 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Repo
+
+  test "hook observer exceptions cannot prevent commands or replace their outcomes" do
+    root = Path.join(System.tmp_dir!(), "hook-observer-#{System.unique_integer([:positive, :monotonic])}")
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_after_create: "printf created > created",
+      hook_before_run: "exit 7",
+      hook_after_run: "printf cleaned > cleaned; exit 9"
+    )
+
+    issue = %Issue{id: "observer", identifier: "OBS-1"}
+    context = ExecutionContext.local(root)
+
+    capture_log(fn ->
+      assert {:ok, workspace} = Workspace.create_for_issue(issue, context, fn _event -> raise "observer failure" end)
+      assert File.read!(Path.join(workspace, "created")) == "created"
+
+      assert {:error, {:workspace_hook_failed, "before_run", 7, _}} =
+               Workspace.run_before_run_hook(workspace, issue, context, fn _event -> throw(:observer_failure) end)
+
+      assert :ok = Workspace.run_after_run_hook(workspace, issue, context, fn _event -> exit(:observer_failure) end)
+      assert File.read!(Path.join(workspace, "cleaned")) == "cleaned"
+    end)
+  end
+
+  test "a persisted lane without an active version cannot supply agent or MCP prompts" do
+    lane = Repo.insert!(%SymphonyElixir.Lanes.Lane{slug: "never-configured", name: "Never configured"})
+    LaneContext.put(lane.id)
+    assert :ok = LaneStore.refresh(lane.id)
+
+    assert {:error, {:lane_invalid, _reason}} = Workflow.current()
+    assert {:error, {:lane_invalid, _reason}} = Workflow.current_content()
+    assert_raise RuntimeError, fn -> PromptBuilder.build_prompt(%Issue{id: "no-version", identifier: "NV-1"}) end
+  end
 
   defmodule FailingManagedBackend do
     @behaviour SymphonyElixir.Agent
@@ -306,8 +343,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert String.starts_with?(Path.basename(first_workspace), "MT_Det--")
   end
 
-  test "relative local workspace roots resolve from the workflow directory" do
-    workflow_dir = Path.dirname(Workflow.workflow_file_path())
+  test "relative local workspace roots resolve from data root rather than workflow or launcher directories" do
+    data_root = Path.join(Config.data_root(), "installation")
+    Application.put_env(:symphony_elixir, :data_root, data_root)
     launcher_dir = Path.join(System.tmp_dir!(), "symphony-elixir-launcher-#{System.unique_integer([:positive])}")
     original_cwd = File.cwd!()
 
@@ -317,7 +355,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.cd!(launcher_dir)
 
       assert {:ok, expected_workspace} =
-               SymphonyElixir.PathSafety.canonicalize(Path.join([workflow_dir, "relative-workspaces", "MT-REL"]))
+               SymphonyElixir.PathSafety.canonicalize(Path.join([data_root, "relative-workspaces", "MT-REL"]))
 
       assert {:ok, workspace} = Workspace.create_for_issue("MT-REL", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
 
@@ -1049,25 +1087,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "linear graphql honors a bound tracker-settings snapshot without loading live config" do
     parent = self()
-    original_workflow_path = Workflow.workflow_file_path()
-    workflow_store_pid = Process.whereis(WorkflowStore)
-
-    missing_workflow_path =
-      Path.join(System.tmp_dir!(), "missing-bound-workflow-#{System.unique_integer([:positive])}.md")
-
-    on_exit(fn ->
-      Workflow.set_workflow_file_path(original_workflow_path)
-
-      if is_pid(workflow_store_pid) and is_nil(Process.whereis(WorkflowStore)) do
-        Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
-      end
-    end)
-
-    if is_pid(Process.whereis(WorkflowStore)) do
-      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
-    end
-
-    Workflow.set_workflow_file_path(missing_workflow_path)
+    LaneContext.put(:unavailable)
 
     assert {:ok, %{"data" => %{"viewer" => %{"id" => "viewer-bound"}}}} =
              Client.graphql(
@@ -1496,46 +1516,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "writableRoots" => [explicit_workspace, explicit_cache]
            }
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ",")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "tracker.active_states"
+    for {overrides, path} <- [
+          {[tracker_active_states: ","], "tracker.active_states"},
+          {[max_concurrent_agents: "bad"], "agent.max_concurrent_agents"},
+          {[worker_max_concurrent_agents_per_host: 0], "worker.max_concurrent_agents_per_host"},
+          {[codex_turn_timeout_ms: "bad"], "codex.turn_timeout_ms"},
+          {[codex_read_timeout_ms: "bad"], "codex.read_timeout_ms"},
+          {[codex_stall_timeout_ms: "bad"], "codex.stall_timeout_ms"}
+        ] do
+      assert {:error, errors} = write_workflow_file!(Workflow.workflow_file_path(), overrides)
+      assert Enum.any?(errors, &(&1.path == path))
+      assert :ok = Config.validate!()
+    end
 
-    write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: "bad")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "agent.max_concurrent_agents"
+    assert {:error, errors} =
+             write_workflow_file!(Workflow.workflow_file_path(),
+               tracker_active_states: %{todo: true},
+               tracker_terminal_states: %{done: true},
+               poll_interval_ms: %{bad: true},
+               workspace_root: 123,
+               max_retry_backoff_ms: 0,
+               max_concurrent_agents_by_state: %{"Todo" => "1", "Review" => 0, "Done" => "bad"},
+               hook_timeout_ms: 0,
+               observability_enabled: "maybe",
+               observability_refresh_ms: %{bad: true},
+               observability_render_interval_ms: %{bad: true}
+             )
 
-    write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 0)
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "worker.max_concurrent_agents_per_host"
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_turn_timeout_ms: "bad")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.turn_timeout_ms"
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_read_timeout_ms: "bad")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.read_timeout_ms"
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.stall_timeout_ms"
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_active_states: %{todo: true},
-      tracker_terminal_states: %{done: true},
-      poll_interval_ms: %{bad: true},
-      workspace_root: 123,
-      max_retry_backoff_ms: 0,
-      max_concurrent_agents_by_state: %{"Todo" => "1", "Review" => 0, "Done" => "bad"},
-      hook_timeout_ms: 0,
-      observability_enabled: "maybe",
-      observability_refresh_ms: %{bad: true},
-      observability_render_interval_ms: %{bad: true},
-      server_port: -1,
-      server_host: 123
-    )
-
-    assert {:error, {:invalid_workflow_config, _message}} = Config.validate!()
+    assert Enum.any?(errors, &(&1.path == "tracker.active_states"))
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "")
     assert :ok = Config.validate!()
@@ -1545,9 +1553,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert :ok = Config.validate!()
     assert Config.settings!().codex.thread_sandbox == ""
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_turn_sandbox_policy: "bad")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.turn_sandbox_policy"
+    assert {:error, errors} = write_workflow_file!(Workflow.workflow_file_path(), codex_turn_sandbox_policy: "bad")
+    assert Enum.any?(errors, &(&1.path == "codex.turn_sandbox_policy"))
 
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_approval_policy: "future-policy",
@@ -1720,6 +1727,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     """
 
     File.write!(Workflow.workflow_file_path(), workflow)
+    assert :ok = reload_workflow!()
 
     assert Config.settings!().agent.max_concurrent_agents == 10
     assert Config.max_concurrent_agents_for_state("Todo") == 1

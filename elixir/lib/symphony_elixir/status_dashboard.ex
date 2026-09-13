@@ -6,7 +6,12 @@ defmodule SymphonyElixir.StatusDashboard do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Config, HttpServer}
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.HttpServer
+  alias SymphonyElixir.LaneContext
+  alias SymphonyElixir.LaneRegistry
+  alias SymphonyElixir.LaneStore
   alias SymphonyElixir.Orchestrator
   alias SymphonyElixir.Tracker
   alias SymphonyElixirWeb.ObservabilityPubSub
@@ -100,7 +105,7 @@ defmodule SymphonyElixir.StatusDashboard do
     refresh_ms_override = keyword_override(opts, :refresh_ms)
     enabled_override = keyword_override(opts, :enabled)
     render_interval_ms_override = keyword_override(opts, :render_interval_ms)
-    observability = Config.settings!().observability
+    observability = dashboard_observability()
     refresh_ms = refresh_ms_override || observability.refresh_ms
     render_interval_ms = render_interval_ms_override || observability.render_interval_ms
     render_fun = Keyword.get(opts, :render_fun, &render_to_terminal/1)
@@ -178,7 +183,7 @@ defmodule SymphonyElixir.StatusDashboard do
   def handle_info(:tick, state), do: {:noreply, state}
 
   defp refresh_runtime_config(%__MODULE__{} = state) do
-    observability = Config.settings!().observability
+    observability = dashboard_observability()
 
     %{
       state
@@ -213,11 +218,7 @@ defmodule SymphonyElixir.StatusDashboard do
       |> Map.put(:last_tps_value, tps)
 
     if snapshot_data != state.last_snapshot_fingerprint or periodic_rerender_due?(state, now_ms) do
-      content =
-        format_snapshot_content(
-          snapshot_data,
-          tps
-        )
+      content = format_content(snapshot_data, tps)
 
       state
       |> maybe_update_snapshot_fingerprint(snapshot_data)
@@ -306,31 +307,32 @@ defmodule SymphonyElixir.StatusDashboard do
       %{state | pending_content: nil, flush_timer_ref: nil}
   end
 
-  defp snapshot_with_samples(token_samples, now_ms) do
-    case snapshot_payload() do
-      {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
-        total_tokens = Map.get(codex_totals, :total_tokens, 0)
-
-        {
-          {:ok,
-           %{
-             running: running,
-             retrying: retrying,
-             codex_totals: codex_totals,
-             rate_limits: Map.get(snapshot, :rate_limits),
-             environment_discovery: Map.get(snapshot, :environment_discovery),
-             polling: Map.get(snapshot, :polling)
-           }},
-          update_token_samples(token_samples, now_ms, total_tokens)
-        }
-
-      :error ->
-        {
-          :error,
-          prune_samples(token_samples, now_ms)
-        }
+  defp dashboard_observability do
+    case Enum.find(LaneStore.list(), &match?(%{settings: %Schema{}}, &1)) do
+      %{settings: settings} -> settings.observability
+      nil -> %Schema.Observability{}
     end
   end
+
+  defp snapshot_with_samples(token_samples, now_ms) do
+    case snapshot_payload() do
+      {:ok, lanes} ->
+        total_tokens = Enum.sum(Enum.map(lanes, &Map.get(&1.snapshot.codex_totals, :total_tokens, 0)))
+        {{:ok, lanes}, update_token_samples(token_samples, now_ms, total_tokens)}
+
+      :error ->
+        {:error, prune_samples(token_samples, now_ms)}
+    end
+  end
+
+  defp format_content({:ok, lanes}, tps) do
+    Enum.map_join(lanes, "\n", fn %{entry: entry, snapshot: snapshot} ->
+      LaneContext.put(entry.lane_id)
+      colorize("╭─ LANE #{entry.slug}", @ansi_bold) <> "\n" <> format_snapshot_content({:ok, snapshot}, tps)
+    end)
+  end
+
+  defp format_content(:error, tps), do: format_snapshot_content(:error, tps)
 
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
@@ -405,9 +407,15 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_scope_and_dashboard_lines do
     scope_part =
-      case Tracker.scope_summary(Config.settings!().tracker) do
-        "n/a" -> colorize("n/a", @ansi_gray)
-        summary -> colorize(summary, @ansi_cyan)
+      case Config.settings() do
+        {:ok, settings} ->
+          case Tracker.scope_summary(settings.tracker) do
+            "n/a" -> colorize("n/a", @ansi_gray)
+            summary -> colorize(summary, @ansi_cyan)
+          end
+
+        {:error, _} ->
+          colorize("n/a", @ansi_gray)
       end
 
     scope_line = colorize("│ Scope: ", @ansi_bold) <> scope_part
@@ -436,7 +444,7 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp dashboard_url do
-    dashboard_url(Config.settings!().server.host, Config.server_port(), HttpServer.bound_port())
+    dashboard_url(Config.server_host(), Config.server_port(), HttpServer.bound_port())
   end
 
   defp dashboard_url(_host, nil, _bound_port), do: nil
@@ -554,30 +562,18 @@ defmodule SymphonyElixir.StatusDashboard do
     do: dashboard_url(host, configured_port, bound_port)
 
   defp snapshot_payload do
-    if Process.whereis(Orchestrator) do
-      case Orchestrator.snapshot() do
-        %{
-          running: running,
-          retrying: retrying,
-          codex_totals: codex_totals
-        } = snapshot
-        when is_list(running) and is_list(retrying) ->
-          {:ok,
-           %{
-             running: running,
-             retrying: retrying,
-             codex_totals: codex_totals,
-             rate_limits: Map.get(snapshot, :rate_limits),
-             environment_discovery: Map.get(snapshot, :environment_discovery),
-             polling: Map.get(snapshot, :polling)
-           }}
+    lanes =
+      Enum.flat_map(LaneStore.list(), fn entry ->
+        with pid when is_pid(pid) <- LaneRegistry.whereis(entry.lane_id, :orchestrator),
+             %{running: running, retrying: retrying, codex_totals: _} = data <- Orchestrator.snapshot(pid, 15_000),
+             true <- is_list(running) and is_list(retrying) do
+          [%{entry: entry, snapshot: data}]
+        else
+          _ -> []
+        end
+      end)
 
-        _ ->
-          :error
-      end
-    else
-      :error
-    end
+    if lanes == [], do: :error, else: {:ok, lanes}
   end
 
   defp format_running_rows(running, running_event_width) do
@@ -1052,9 +1048,8 @@ defmodule SymphonyElixir.StatusDashboard do
     colorize("●", color_code)
   end
 
-  defp snapshot_total_tokens({:ok, %{codex_totals: codex_totals}}) when is_map(codex_totals) do
-    Map.get(codex_totals, :total_tokens, 0)
-  end
+  defp snapshot_total_tokens({:ok, lanes}) when is_list(lanes),
+    do: Enum.sum(Enum.map(lanes, &Map.get(&1.snapshot.codex_totals, :total_tokens, 0)))
 
   defp snapshot_total_tokens(_snapshot_data), do: 0
 

@@ -161,123 +161,6 @@ defmodule SymphonyElixir.ExtensionsTest do
     :ok
   end
 
-  test "workflow store reloads changes, keeps last good workflow, and falls back when stopped" do
-    ensure_workflow_store_running()
-    assert {:ok, %{prompt: "You are an agent for this repository."}} = Workflow.current()
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      prompt: "Second prompt",
-      poll_interval_ms: 45_000
-    )
-
-    send(WorkflowStore, :poll)
-
-    assert_eventually(fn ->
-      match?({:ok, %{prompt: "Second prompt"}}, Workflow.current())
-    end)
-
-    good_settings = Config.settings!()
-    assert good_settings.polling.interval_ms == 45_000
-
-    File.write!(Workflow.workflow_file_path(), "---\ntracker: [\n---\nBroken prompt\n")
-    assert {:error, _reason} = WorkflowStore.force_reload()
-    assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
-
-    File.write!(
-      Workflow.workflow_file_path(),
-      "---\npolling:\n  interval_ms: nope\n---\nTyped-invalid prompt\n"
-    )
-
-    assert {:error, {:invalid_workflow_config, message}} = WorkflowStore.force_reload()
-    assert message =~ "polling.interval_ms"
-    assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
-    assert Config.settings!().polling.interval_ms == good_settings.polling.interval_ms
-    assert {:error, {:invalid_workflow_config, _message}} = Config.validate!()
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "linear",
-      tracker_api_token: "token",
-      tracker_project_slug: nil,
-      prompt: "Semantic-invalid prompt"
-    )
-
-    assert {:error, :missing_linear_scope} = WorkflowStore.force_reload()
-    assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
-    assert Config.settings!().polling.interval_ms == good_settings.polling.interval_ms
-    assert {:error, :missing_linear_scope} = Config.validate!()
-
-    third_workflow = Path.join(Path.dirname(Workflow.workflow_file_path()), "THIRD_WORKFLOW.md")
-    write_workflow_file!(third_workflow, prompt: "Third prompt")
-    Workflow.set_workflow_file_path(third_workflow)
-    assert {:ok, %{prompt: "Third prompt"}} = Workflow.current()
-
-    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
-    assert {:ok, %{prompt: "Third prompt"}} = WorkflowStore.current()
-    assert {:ok, settings} = WorkflowStore.settings()
-    assert settings.polling.interval_ms == 30_000
-    assert :ok = WorkflowStore.force_reload()
-    assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
-  end
-
-  test "workflow store init stops on missing workflow file" do
-    missing_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "MISSING_WORKFLOW.md")
-    Workflow.set_workflow_file_path(missing_path)
-
-    assert {:stop, {:missing_workflow_file, ^missing_path, :enoent}} = WorkflowStore.init([])
-  end
-
-  test "workflow store start_link and poll callback cover missing-file error paths" do
-    ensure_workflow_store_running()
-    existing_path = Workflow.workflow_file_path()
-    manual_path = Path.join(Path.dirname(existing_path), "MANUAL_WORKFLOW.md")
-    missing_path = Path.join(Path.dirname(existing_path), "MANUAL_MISSING_WORKFLOW.md")
-
-    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
-
-    Workflow.set_workflow_file_path(missing_path)
-
-    assert {:error, {:missing_workflow_file, ^missing_path, :enoent}} =
-             WorkflowStore.settings()
-
-    assert {:error, {:missing_workflow_file, ^missing_path, :enoent}} =
-             WorkflowStore.force_reload()
-
-    write_workflow_file!(manual_path, prompt: "Manual workflow prompt")
-    Workflow.set_workflow_file_path(manual_path)
-
-    assert {:ok, manual_pid} = WorkflowStore.start_link()
-    assert Process.alive?(manual_pid)
-
-    state = :sys.get_state(manual_pid)
-    File.write!(manual_path, "---\ntracker: [\n---\nBroken prompt\n")
-    assert {:noreply, returned_state} = WorkflowStore.handle_info(:poll, state)
-    assert returned_state.workflow.prompt == "Manual workflow prompt"
-    refute returned_state.stamp == nil
-    assert_receive :poll, 1_100
-
-    Workflow.set_workflow_file_path(missing_path)
-    assert {:noreply, path_error_state} = WorkflowStore.handle_info(:poll, returned_state)
-    assert path_error_state.workflow.prompt == "Manual workflow prompt"
-    assert_receive :poll, 1_100
-
-    Workflow.set_workflow_file_path(manual_path)
-    File.rm!(manual_path)
-    assert {:noreply, removed_state} = WorkflowStore.handle_info(:poll, path_error_state)
-    assert removed_state.workflow.prompt == "Manual workflow prompt"
-    assert_receive :poll, 1_100
-
-    assert :ok = GenServer.stop(manual_pid)
-
-    Workflow.set_workflow_file_path(existing_path)
-
-    restart_result = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
-
-    assert match?({:ok, _pid}, restart_result) or
-             match?({:error, {:already_started, _pid}}, restart_result)
-
-    assert :ok = WorkflowStore.force_reload()
-  end
-
   test "tracker delegates to memory and linear adapters" do
     issue = %Issue{id: "issue-1", identifier: "MT-1", state: "In Progress"}
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue, %{id: "ignored"}])
@@ -607,7 +490,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     body
     """)
 
-    assert :ok = WorkflowStore.force_reload()
+    assert :ok = reload_workflow!()
 
     assert {:error, {:unsupported_tracker_operation, :create_comment}} =
              SymphonyElixir.Tracker.create_comment("1", "blocked")
@@ -660,8 +543,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
-    conn = get(build_conn(), "/api/v1/state")
-    state_payload = json_response(conn, 200)
+    conn = get(api_conn(), "/api/v1/state")
+    assert %{"generated_at" => _, "lanes" => [state_payload]} = json_response(conn, 200)
+    assert state_payload["lane"] == "default"
 
     assert state_payload["counts"] == %{
              "running" => length(state_payload["running"]),
@@ -669,33 +553,37 @@ defmodule SymphonyElixir.ExtensionsTest do
              "blocked" => length(state_payload["blocked"])
            }
 
-    conn = get(build_conn(), "/api/v1/MT-HTTP")
+    conn = get(api_conn(), "/api/v1/MT-HTTP")
     issue_payload = json_response(conn, 200)
 
     assert %{
              "issue_id" => "issue-http",
+             "lane" => "default",
              "status" => "running",
              "workspace" => %{"path" => local_workspace_path}
            } = issue_payload
 
+    assert %{"lane" => "default", "issue_id" => "issue-http"} =
+             json_response(get(api_conn(), "/api/v1/lanes/default/MT-HTTP"), 200)
+
     assert local_workspace_path == Path.join(Config.settings!().workspace.root, "MT-HTTP")
 
-    conn = get(build_conn(), "/api/v1/MT-RETRY")
+    conn = get(api_conn(), "/api/v1/MT-RETRY")
 
     assert %{"status" => "retrying", "retry" => %{"attempt" => 2, "error" => "boom"}} =
              json_response(conn, 200)
 
-    conn = get(build_conn(), "/api/v1/MT-BLOCKED")
+    conn = get(api_conn(), "/api/v1/MT-BLOCKED")
 
     assert %{"status" => "blocked"} = json_response(conn, 200)
 
-    conn = get(build_conn(), "/api/v1/MT-MISSING")
+    conn = get(api_conn(), "/api/v1/MT-MISSING")
 
     assert %{"error" => %{"code" => "issue_not_found"}} = json_response(conn, 404)
 
-    conn = post(build_conn(), "/api/v1/refresh", %{})
+    conn = post(api_conn(), "/api/v1/refresh", %{})
 
-    assert %{"queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]} =
+    assert %{"lanes" => [%{"lane" => "default", "queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]}]} =
              json_response(conn, 202)
   end
 
@@ -703,30 +591,25 @@ defmodule SymphonyElixir.ExtensionsTest do
     unavailable_orchestrator = Module.concat(__MODULE__, :UnavailableOrchestrator)
     start_test_endpoint(orchestrator: unavailable_orchestrator, snapshot_timeout_ms: 5)
 
-    assert json_response(post(build_conn(), "/api/v1/state", %{}), 405) ==
+    assert json_response(post(api_conn(), "/api/v1/state", %{}), 405) ==
              %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
 
-    assert json_response(get(build_conn(), "/api/v1/refresh"), 405) ==
+    assert json_response(get(api_conn(), "/api/v1/refresh"), 405) ==
              %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
 
-    assert json_response(post(build_conn(), "/", %{}), 405) ==
+    assert json_response(post(browser_conn(), "/", %{}), 405) ==
              %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
 
-    assert json_response(post(build_conn(), "/api/v1/MT-1", %{}), 405) ==
+    assert json_response(post(api_conn(), "/api/v1/MT-1", %{}), 405) ==
              %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
 
-    assert json_response(get(build_conn(), "/unknown"), 404) ==
+    assert json_response(get(browser_conn(), "/unknown"), 404) ==
              %{"error" => %{"code" => "not_found", "message" => "Route not found"}}
 
-    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert %{"lanes" => [%{"lane" => "default", "error" => %{"code" => "snapshot_unavailable"}}]} =
+             json_response(get(api_conn(), "/api/v1/state"), 200)
 
-    assert state_payload ==
-             %{
-               "generated_at" => state_payload["generated_at"],
-               "error" => %{"code" => "snapshot_unavailable", "message" => "Snapshot unavailable"}
-             }
-
-    assert json_response(post(build_conn(), "/api/v1/refresh", %{}), 503) ==
+    assert json_response(post(api_conn(), "/api/v1/refresh", %{}), 503) ==
              %{
                "error" => %{
                  "code" => "orchestrator_unavailable",
@@ -740,13 +623,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _pid} = SlowOrchestrator.start_link(name: timeout_orchestrator)
     start_test_endpoint(orchestrator: timeout_orchestrator, snapshot_timeout_ms: 1)
 
-    timeout_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
-
-    assert timeout_payload ==
-             %{
-               "generated_at" => timeout_payload["generated_at"],
-               "error" => %{"code" => "snapshot_timeout", "message" => "Snapshot timed out"}
-             }
+    assert %{"lanes" => [%{"lane" => "default", "error" => %{"code" => "snapshot_timeout"}}]} =
+             json_response(get(api_conn(), "/api/v1/state"), 200)
   end
 
   test "dashboard bootstraps liveview from embedded static assets" do
@@ -766,7 +644,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
-    html = html_response(get(build_conn(), "/"), 200)
+    html = html_response(get(browser_conn(), "/lanes/default"), 200)
     assert html =~ ~r|/dashboard\.css\?v=[0-9a-f]{12}|
 
     assert html =~
@@ -819,8 +697,13 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
-    {:ok, view, html} = live(build_conn(), "/")
-    assert html =~ "Operations Dashboard"
+    lane_id = SymphonyElixir.LaneContext.current!()
+    issue = %Issue{id: "issue-ui", identifier: "UI-1", title: "UI history", state: "Todo"}
+    :ok = SymphonyElixir.Runs.started(%{lane_id: lane_id, issue: issue, attempt_id: "att-ui", attempt: nil, worker_ref: nil})
+    :ok = SymphonyElixir.Runs.finished("att-ui", "done")
+
+    {:ok, view, html} = live(browser_conn(), "/lanes/default")
+    assert has_element?(view, "#run-att-ui a[href='/runs/att-ui']")
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"
     assert html =~ "MT-BLOCKED"
@@ -892,7 +775,7 @@ defmodule SymphonyElixir.ExtensionsTest do
       snapshot_timeout_ms: 5
     )
 
-    {:ok, _view, html} = live(build_conn(), "/")
+    {:ok, _view, html} = live(browser_conn(), "/lanes/default")
     assert html =~ "Snapshot unavailable"
     assert html =~ "snapshot_unavailable"
   end
@@ -929,9 +812,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     port = wait_for_bound_port()
     assert port == HttpServer.bound_port()
 
-    response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
+    response = Req.get!("http://127.0.0.1:#{port}/api/v1/state", headers: [{"authorization", "Bearer test-token"}])
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
+    assert hd(response.body["lanes"])["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
@@ -943,16 +826,16 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     refresh_response =
       Req.post!("http://127.0.0.1:#{port}/api/v1/refresh",
-        headers: [{"content-type", "application/x-www-form-urlencoded"}],
+        headers: [{"content-type", "application/x-www-form-urlencoded"}, {"authorization", "Bearer test-token"}],
         body: ""
       )
 
     assert refresh_response.status == 202
-    assert refresh_response.body["queued"] == true
+    assert hd(refresh_response.body["lanes"])["queued"] == true
 
     method_not_allowed_response =
       Req.post!("http://127.0.0.1:#{port}/api/v1/state",
-        headers: [{"content-type", "application/x-www-form-urlencoded"}],
+        headers: [{"content-type", "application/x-www-form-urlencoded"}, {"authorization", "Bearer test-token"}],
         body: ""
       )
 
@@ -961,6 +844,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:error, _reason} = HttpServer.start_link(host: "bad host", port: 0)
   end
+
+  defp api_conn, do: build_conn() |> Plug.Conn.put_req_header("authorization", "Bearer test-token")
+  defp browser_conn, do: build_conn() |> Plug.Test.init_test_session(%{"operator" => true})
 
   defp start_test_endpoint(overrides) do
     endpoint_config =
@@ -1048,15 +934,4 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
-
-  defp ensure_workflow_store_running do
-    if Process.whereis(WorkflowStore) do
-      :ok
-    else
-      case Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore) do
-        {:ok, _pid} -> :ok
-        {:error, {:already_started, _pid}} -> :ok
-      end
-    end
-  end
 end

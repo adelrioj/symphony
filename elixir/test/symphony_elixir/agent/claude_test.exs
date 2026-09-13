@@ -68,9 +68,11 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     workspace = Path.join(System.tmp_dir!(), "claude-owner-workspace-#{System.unique_integer([:positive])}")
     File.mkdir_p!(workspace)
     parent = self()
+    {:ok, snapshot} = LaneContext.capture()
 
     owner =
       spawn(fn ->
+        LaneContext.install(snapshot)
         {:ok, session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
         send(parent, {:owned_session, session})
         Process.sleep(:infinity)
@@ -593,7 +595,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
 
     write_fake_claude_lines!(script, [
       %{"type" => "system", "subtype" => "init", "session_id" => "event-run"},
-      %{"type" => "assistant", "message" => %{"usage" => %{"input_tokens" => 7, "output_tokens" => 8}}},
+      %{"type" => "assistant", "message" => %{"usage" => %{"input_tokens" => 7, "output_tokens" => 8, "cache_read_input_tokens" => 3}}},
       %{"type" => "assistant", "message" => %{"content" => "not-list"}},
       %{
         "type" => "assistant",
@@ -630,8 +632,8 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     assert action == "approve shell"
     assert :ok = Claude.stop_session(session)
 
-    usage = %{input_tokens: 7, output_tokens: 8, total_tokens: 15}
-    blocked_usage = %{input_tokens: 8, output_tokens: 9, total_tokens: 17}
+    usage = %{input_tokens: 10, output_tokens: 8, total_tokens: 18, cached_tokens: 3}
+    blocked_usage = %{input_tokens: 11, output_tokens: 9, total_tokens: 20, cached_tokens: 3}
 
     assert_received {:claude_update, %{event: :session_started, session_id: "event-run"}}
     assert_received {:claude_update, %{event: :usage_updated, usage: ^usage}}
@@ -726,7 +728,7 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     body
     """)
 
-    if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+    assert :ok = reload_workflow!()
     :ok
   end
 

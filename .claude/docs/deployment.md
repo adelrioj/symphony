@@ -9,11 +9,117 @@ Each tracker adapter declares its own credential env vars via the `secret_enviro
 
 ## The MCP mode
 
-The escript has a second mode: `./bin/symphony --linear-mcp --workflow <path>` serves the MCP stdio server in `mcp/linear_server.ex` instead of starting the daemon. The `claude` agent backend spawns this on itself to give Claude Code tracker access (`claude.linear_mcp_command`) — don't repurpose it as a general entrypoint.
+The built escript `./bin/symphony --linear-mcp --workflow <path>` serves the MCP stdio server in
+`mcp/linear_server.ex` without opening the installation database. The `claude` backend spawns it
+to give Claude Code tracker access (`claude.linear_mcp_command`) using the attempt's private
+workflow snapshot. Keep the escript for MCP; run the database-backed daemon through `mix symphony`
+or a Burrito release, not an escript, because SQLite's NIF needs an on-disk application layout.
 
 ## Docker and client deployments
 
-One instance drives one repo plus one Linear scope, selected by `tracker.provider.team_keys`, `tracker.provider.current_cycle`, or `tracker.provider.project_slug` (at least one is required; see the Linear adapter profile in `elixir/README.md`). Client deployments are self-hosted from their own private repos, seeded by copying `deploy/client-template/`, which pulls the published image `ghcr.io/adelrioj/symphony` (built and pushed by `.github/workflows/docker-publish.yml`). This repo keeps only local dev: `docker/Dockerfile`, `docker-compose.yml` (one `symphony-example` service), `.env.example`, and the single sanitized `workflows/example.md`. Both compose files mount the workflow file's directory read-only at `/config` — never the single file, or an editor's rename-replace on the host kills hot reload — pass `--i-understand-that-this-will-be-running-without-the-usual-guardrails` (the CLI refuses to start without it), and publish on `127.0.0.1:4000` only, since the dashboard and JSON API have no authentication; the workflow files set `server.host: 0.0.0.0` so the container binds the interface Docker forwards to. Steps are in `elixir/README.md` ("Run in Docker") and `deploy/client-template/README.md`. The image pins its toolchain from `elixir/mise.toml`; keep those two in sync.
+One installation serves one client and runs multiple lanes in one `mix symphony serve` process.
+Each lane has its own tracker scope, workspace root, hooks, agent settings, prompt, and scheduler.
+For Linear, each lane needs at least one of `tracker.provider.team_keys`,
+`tracker.provider.current_cycle`, or `tracker.provider.project_slug`; see the adapter profile in
+`elixir/README.md`. Lanes share one SQLite database and installation credentials, not tenant isolation.
+
+Clients self-host from private repos seeded by `deploy/client-template/`, pulling the published
+`ghcr.io/adelrioj/symphony` image (built by `.github/workflows/docker-publish.yml`). This repo's root
+Compose file is only a source-built development installation: its service is `symphony-example`;
+the client template's service is `symphony`.
+
+The image pins Erlang/Elixir from `elixir/mise.toml` and starts with `ENTRYPOINT ["mix", "symphony"]`.
+`mix escript.build` already compiles the application and dependencies on disk; the image retains
+that build tree for the SQLite NIF, so a redundant `mix compile` adds no packaging effect.
+`/app/elixir/bin` is on `PATH` so the default `symphony` MCP command resolves to the built escript.
+
+Both Compose services run:
+
+```bash
+mix symphony serve --host 0.0.0.0 --port 4000 --data-root /data \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
+
+They require `SYMPHONY_OPERATOR_TOKEN` and `LINEAR_API_KEY` in the environment (the client template
+also loads `.env` for clone and other deployment credentials). The operator token is a separate,
+high-entropy installation credential; generate one with `openssl rand -hex 32`. `serve` refuses
+to start without it. Tracker and agent credentials are still required for the corresponding lanes.
+
+The `/data` named volume holds `symphony.sqlite3` and `log/`; it replaces the old log-only mount
+and `--logs-root` flag. `/workspaces` remains a separate persistent volume. Preserve both during
+upgrades: `docker compose down -v` deletes them. Relative lane workspace roots resolve against
+`--data-root`; use distinct roots under `/workspaces` for container lanes.
+
+Both Compose files mount the import directory read-only at `/config`, not a single file, so
+explicit imports see files replaced by host editors. Mounted files are never watched. YAML
+`server:` values are accepted but ignored with a warning; the listener is installation-level.
+The container binds `0.0.0.0` via `serve --host`, while the host publishes only `127.0.0.1:4000`.
+The UI/API are authenticated, but remote use still needs a TLS reverse proxy or SSH tunnel:
+do not expose bearer credentials over public HTTP.
+
+For a new root development installation, export both required credentials, then:
+
+```bash
+docker compose build
+docker compose run --rm symphony-example lanes import /config/example.md --slug example --data-root /data
+docker compose up -d
+```
+
+Log in at <http://localhost:4000> with the operator token and enable `example`. A newly imported
+lane is disabled. The client template's equivalent imports `/config/workflow.md` as `main` with
+the service name `symphony`; its README has the full setup and API enable command.
+
+## Client migration
+
+Replace separate `features`, `bugs`, and `qa` daemons for the **same client** with three lanes in
+one installation. Do not combine separate clients: use distinct services, databases/volumes,
+operator tokens, tracker/clone secrets, and agent credentials for each trust boundary. The template
+shares the host `~/.codex` directory; use separate credential directories when isolating clients.
+Agents can read the installation environment and mounted `.env`; do not put unrelated secrets there.
+
+1. Render the client's existing workflows into `features.md`, `bugs.md`, and `qa.md` in its import
+   directory. Preserve the intended scopes/prompts and give lanes separate workspace roots under
+   `/workspaces`. Remove `server:` settings; host/port are now service flags.
+2. Drain active work before stopping the old daemons so the new installation will not dispatch
+   the same issues concurrently. With the new service stopped, import all three into its database:
+
+   ```bash
+   docker compose run --rm symphony lanes import /config/features.md --slug features --data-root /data
+   docker compose run --rm symphony lanes import /config/bugs.md --slug bugs --data-root /data
+   docker compose run --rm symphony lanes import /config/qa.md --slug qa --data-root /data
+   docker compose up -d
+   ```
+
+   All imports and `serve` must use the same `--data-root /data`. Native deployments use
+   `mix symphony lanes import <file> --slug <slug> --data-root <dir>` and the same directory for
+   `mix symphony serve`. Keep one service unit, with `SYMPHONY_OPERATOR_TOKEN` and tracker/clone
+   secrets in its protected `EnvironmentFile`, an Elixir working directory, a provisioned Mix/OTP
+   toolchain, and the acknowledgement flag on `ExecStart`. Do not retain one unit per lane.
+3. Log in and enable the three lanes individually, checking each lane's tracker preflight status.
+   A preflight error disables that lane, not the installation. The same enable action is
+   `PUT /api/v1/lanes/:slug` with `{"enabled":true}` and bearer authentication.
+4. Converge subsequent configuration through the authenticated API, not file replacement or
+   service restart. With `TOKEN` set to the installation operator token:
+
+   ```bash
+   curl --fail-with-body -X PUT http://localhost:4000/api/v1/lanes/features \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     --data @payload.json
+   ```
+
+   `payload.json` is a JSON object: `front_matter` contains raw YAML without `---` delimiters;
+   `prompt` contains the Markdown body; optional `note` describes the revision. Omitted fields
+   retain their values. Supplying YAML or prompt creates an immutable version; metadata-only
+   updates do not. Invalid saves return HTTP 422 with field-path errors and leave configuration
+   unchanged. Valid saves do not restart active attempts, which retain dispatch-time snapshots.
+   Guarded identity changes are rejected while the lane owns work; explicitly disabling a lane
+   does stop its runtime and active work.
+
+`lanes import` is an offline operation. Imports made while `serve` runs are not picked up by that
+process until restart; use the UI/API for live changes. Changes to installation flags or environment
+credentials still require a planned service restart. Back up the database and workspaces before
+deployment migrations; old log-only volumes are not lane databases and are not migrated automatically.
 
 ## Release builds
 

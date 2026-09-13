@@ -1,26 +1,29 @@
-defmodule SymphonyElixirWeb.DashboardLive do
+defmodule SymphonyElixirWeb.LaneLive do
   @moduledoc """
   Live observability dashboard for Symphony.
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.{LaneStore, Runs}
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
   @impl true
-  def mount(_params, _session, socket) do
-    socket =
-      socket
-      |> assign(:payload, load_payload())
-      |> assign(:now, DateTime.utc_now())
-
+  def mount(%{"slug" => slug}, _session, socket) do
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
+      :ok = ObservabilityPubSub.subscribe_lane(slug)
       schedule_runtime_tick()
     end
 
-    {:ok, socket}
+    case LaneStore.by_slug(slug) do
+      {:ok, entry} ->
+        {:ok, socket |> assign(:entry, entry) |> refresh()}
+
+      :error ->
+        {:ok, socket |> put_flash(:error, "No lane with slug #{slug}") |> push_navigate(to: "/")}
+    end
   end
 
   @impl true
@@ -30,12 +33,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   @impl true
-  def handle_info(:observability_updated, socket) do
-    {:noreply,
-     socket
-     |> assign(:payload, load_payload())
-     |> assign(:now, DateTime.utc_now())}
-  end
+  def handle_info(:observability_updated, socket), do: {:noreply, refresh(socket)}
+
+  def handle_info({:lane_updated, _slug}, socket), do: {:noreply, refresh(socket)}
 
   @impl true
   def render(assigns) do
@@ -44,15 +44,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <header class="hero-card">
         <div class="hero-grid">
           <div>
-            <p class="eyebrow">
-              Symphony Observability
-            </p>
-            <h1 class="hero-title">
-              Operations Dashboard
-            </h1>
+            <p class="eyebrow">Lane</p>
+            <h1 class="hero-title">{@entry.name} <span class="muted mono">{@entry.slug}</span></h1>
             <p class="hero-copy">
-              Current state, retry pressure, token usage, and orchestration health for the active Symphony runtime.
+              <a class="issue-link" href={"/lanes/#{@entry.slug}/edit"}>Edit</a>
+              · <a class="issue-link" href={"/lanes/#{@entry.slug}/versions"}>Versions</a>
+              · executor {@entry.executor}
+              · {if @entry.enabled, do: "enabled", else: "disabled"}
             </p>
+            <p :if={@entry.error} class="error-copy">{@entry.error}</p>
           </div>
 
           <div class="status-stack">
@@ -177,7 +177,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td>
                       <div class="issue-stack">
                         <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                        <a class="issue-link" href={"/api/v1/lanes/#{@entry.slug}/#{URI.encode_www_form(entry.issue_identifier)}"}>JSON details</a>
                       </div>
                     </td>
                     <td>
@@ -258,7 +258,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td>
                       <div class="issue-stack">
                         <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                        <a class="issue-link" href={"/api/v1/lanes/#{@entry.slug}/#{URI.encode_www_form(entry.issue_identifier)}"}>JSON details</a>
                       </div>
                     </td>
                     <td>
@@ -330,7 +330,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td>
                       <div class="issue-stack">
                         <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                        <a class="issue-link" href={"/api/v1/lanes/#{@entry.slug}/#{URI.encode_www_form(entry.issue_identifier)}"}>JSON details</a>
                       </div>
                     </td>
                     <td><%= entry.attempt %></td>
@@ -343,16 +343,49 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <% end %>
         </section>
       <% end %>
+      <section class="section-card" id="recent-runs">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">Recent runs</h2>
+            <p class="section-copy">Latest attempts recorded for this lane.</p>
+          </div>
+        </div>
+        <%= if @runs == [] do %>
+          <p class="empty-state">No runs recorded yet.</p>
+        <% else %>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead><tr><th>Issue</th><th>Status</th><th>Started</th><th>Turns</th><th>Tokens</th><th></th></tr></thead>
+              <tbody>
+                <tr :for={run <- @runs} id={"run-#{run.attempt_id}"}>
+                  <td>{run.issue_identifier}</td>
+                  <td><span class={state_badge_class(run.status)}>{run.status}</span></td>
+                  <td class="mono">{DateTime.to_iso8601(run.started_at)}</td>
+                  <td class="numeric">{run.turns}</td>
+                  <td class="numeric">{format_int(run.input_tokens + run.output_tokens)}</td>
+                  <td><a class="issue-link" href={"/runs/#{URI.encode_www_form(run.attempt_id)}"}>Events</a></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        <% end %>
+      </section>
     </section>
     """
   end
 
-  defp load_payload do
-    Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
-  end
+  defp refresh(socket) do
+    case LaneStore.lookup(socket.assigns.entry.lane_id) do
+      {:ok, entry} ->
+        socket
+        |> assign(:entry, entry)
+        |> assign(:payload, Presenter.state_payload(Presenter.orchestrator_for(entry), snapshot_timeout_ms()))
+        |> assign(:runs, Runs.list_for_lane(entry.lane_id, 20))
+        |> assign(:now, DateTime.utc_now())
 
-  defp orchestrator do
-    Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
+      :error ->
+        socket |> put_flash(:error, "Lane no longer exists") |> push_navigate(to: "/")
+    end
   end
 
   defp snapshot_timeout_ms do

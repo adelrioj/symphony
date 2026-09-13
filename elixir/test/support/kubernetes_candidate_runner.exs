@@ -5,7 +5,7 @@ Code.require_file("kubernetes_candidate_evidence.exs", __DIR__)
 
 defmodule SymphonyElixir.KubernetesCandidateRunner do
   @moduledoc false
-  alias SymphonyElixir.{AgentRuntimeSupervisor, Config, ExecutionContext, Orchestrator, SSH, Workflow, WorkflowStore}
+  alias SymphonyElixir.{AgentRuntimeSupervisor, ExecutionContext, Lanes, LaneStore, Orchestrator, SSH, Workflow}
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixir.ExecutionEnvironment.{Command, Kubernetes, Operations}
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Candidate, Client}
@@ -69,7 +69,6 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
   defp execute(input) do
     original = %{
-      workflow: Workflow.workflow_file_path(),
       issues: Application.get_env(:symphony_elixir, :memory_tracker_issues),
       recipient: Application.get_env(:symphony_elixir, :memory_tracker_recipient)
     }
@@ -78,13 +77,15 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     {:ok, observations} = Agent.start_link(fn -> %{status: "initializing", protocol_observations: [], cleanup: "not_started", runner: "not_run"} end)
 
     try do
+      # Memory tracker state is application-global; never share this harness with another lane.
+      true = LaneStore.list() == []
       {:ok, document} = Workflow.load(input["workflow_path"])
       raw = candidate_workflow(document.config, input["pins"]["deployment_id"])
       :ok = File.write(workflow, "---\n" <> Jason.encode!(raw) <> "\n---\nNon-model candidate lifecycle probe.\n", [:exclusive])
       File.chmod!(workflow, 0o600)
-      Workflow.set_workflow_file_path(workflow)
-      :ok = WorkflowStore.force_reload()
-      config = EnvironmentConfig.runtime(Config.settings!())
+      {:ok, lane, _warnings} = Lanes.import_file(workflow, slug: "candidate")
+      false = lane.enabled
+      config = EnvironmentConfig.runtime(LaneStore.settings!(lane.id))
       true = config.kind == "kubernetes"
       {:ok, _} = Candidate.validate(config, input["pins"])
       {source, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: Path.expand("../..", __DIR__))
@@ -93,7 +94,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       {:ok, tasks} = Task.Supervisor.start_link()
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, control)
       GenServer.call(control, {:issues, []})
-      ctx = %{input: input, config: config, control: control, observations: observations, tasks: tasks, authority: self()}
+      ctx = %{input: input, config: config, lane_id: lane.id, lane_version_id: lane.current_version_id, control: control, observations: observations, tasks: tasks, authority: self()}
       persist(ctx)
 
       try do
@@ -149,8 +150,6 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
         {:error, :candidate_setup_interrupted}
     after
       stop_runtime()
-      Workflow.set_workflow_file_path(original.workflow)
-      WorkflowStore.force_reload()
       restore(:memory_tracker_issues, original.issues)
       restore(:memory_tracker_recipient, original.recipient)
       File.rm(workflow)
@@ -221,7 +220,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       end
     end
 
-    {:ok, runtime} = AgentRuntimeSupervisor.start_link(name: @runtime, task_supervisor_name: @tasks, orchestrator_name: @scheduler, environment_operation_fun: operation, runner_fun: runner)
+    {:ok, runtime} = AgentRuntimeSupervisor.start_link(lane_id: ctx.lane_id, name: @runtime, task_supervisor_name: @tasks, orchestrator_name: @scheduler, environment_operation_fun: operation, runner_fun: runner)
     owner = self()
 
     spawn(fn ->
@@ -323,6 +322,8 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
              runner_sha256: ctx.input["runner_sha256"],
              pins: ctx.input["pins"],
              mode: ctx.input["mode"],
+             lane_id: ctx.lane_id,
+             lane_version_id: ctx.lane_version_id,
              support_sha256: @support_sha256,
              production_allocation: "stopped",
              physical_fault_and_storage_fault_qualification: "not_performed",

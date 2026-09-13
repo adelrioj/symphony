@@ -1,14 +1,14 @@
 defmodule SymphonyElixir.Config do
   @moduledoc """
-  Runtime configuration loaded from `WORKFLOW.md`.
+  Workflow settings and installation-level runtime configuration.
   """
 
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ExecutionEnvironment
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
+  alias SymphonyElixir.{LaneContext, LaneStore}
   alias SymphonyElixir.Tracker
   alias SymphonyElixir.Workflow
-  alias SymphonyElixir.WorkflowStore
 
   @default_prompt_template """
   You are working on an issue from the configured tracker.
@@ -38,13 +38,45 @@ defmodule SymphonyElixir.Config do
           turn_sandbox_policy: map()
         }
 
+  @doc "Directory holding `symphony.sqlite3` and `log/`; defaults to the current working directory."
+  @spec data_root() :: Path.t()
+  def data_root, do: Application.get_env(:symphony_elixir, :data_root) || File.cwd!()
+
+  @spec server_host() :: String.t()
+  def server_host, do: Application.get_env(:symphony_elixir, :server_host) || "127.0.0.1"
+
+  @spec operator_token() :: String.t() | nil
+  def operator_token, do: Application.get_env(:symphony_elixir, :operator_token)
+
+  @doc "Installation-specific cookie signing key; rotating the operator token invalidates sessions."
+  @spec operator_session_secret() :: String.t() | nil
+  def operator_session_secret do
+    case operator_token() do
+      token when is_binary(token) and byte_size(token) > 0 ->
+        :crypto.mac(:hmac, :sha512, token, "symphony/operator-session/v1") |> Base.encode64()
+
+      _ ->
+        nil
+    end
+  end
+
+  @spec events_retention_days() :: pos_integer()
+  def events_retention_days, do: Application.get_env(:symphony_elixir, :events_retention_days) || 30
+
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
-    WorkflowStore.settings()
+    with {:ok, entry} <- LaneContext.capture() do
+      case entry.settings do
+        %Schema{} = settings -> {:ok, settings}
+        _ -> {:error, {:lane_invalid, entry.error}}
+      end
+    end
   end
 
   @spec settings!() :: Schema.t()
   def settings! do
+    LaneContext.current!()
+
     case settings() do
       {:ok, settings} ->
         settings
@@ -106,24 +138,25 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @doc "Installation HTTP port; nil disables HTTP."
   @spec server_port() :: non_neg_integer() | nil
-  def server_port do
-    case Application.get_env(:symphony_elixir, :server_port_override) do
-      port when is_integer(port) and port >= 0 -> port
-      _ -> settings!().server.port
-    end
-  end
+  def server_port, do: Application.get_env(:symphony_elixir, :server_port)
 
   @doc false
   @spec local_workspace_root() :: Path.t()
   def local_workspace_root do
-    workflow_dir = Workflow.workflow_file_path() |> Path.expand() |> Path.dirname()
-    Path.expand(settings!().workspace.root, workflow_dir)
+    Path.expand(settings!().workspace.root, data_root())
   end
 
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
-    WorkflowStore.force_reload()
+    case LaneContext.snapshot() do
+      {:ok, _entry} ->
+        with {:ok, settings} <- settings(), do: validate_settings(settings)
+
+      :error ->
+        LaneStore.validate(LaneContext.current!())
+    end
   end
 
   @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
@@ -201,20 +234,14 @@ defmodule SymphonyElixir.Config do
 
   defp format_config_error(reason) do
     case reason do
-      {:invalid_workflow_config, message} ->
-        "Invalid WORKFLOW.md config: #{message}"
+      {:lane_unavailable, lane_id} ->
+        "Lane #{inspect(lane_id)} is not loaded"
 
-      {:missing_workflow_file, path, raw_reason} ->
-        "Missing WORKFLOW.md at #{path}: #{inspect(raw_reason)}"
+      {:lane_invalid, message} ->
+        "Invalid lane config: #{message}"
 
-      {:workflow_parse_error, raw_reason} ->
-        "Failed to parse WORKFLOW.md: #{inspect(raw_reason)}"
-
-      :workflow_front_matter_not_a_map ->
-        "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
-
-      other ->
-        "Invalid WORKFLOW.md config: #{inspect(other)}"
+      :no_lane_context ->
+        "No lane context for this process"
     end
   end
 end

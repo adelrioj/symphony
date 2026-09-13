@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
-# Symphony runtime image: one container runs `bin/symphony <WORKFLOW.md>` for one repo plus one
-# tracker scope.
+# Symphony runtime image: one container runs `mix symphony serve` for one installation with
+# multiple lanes. The built bin/symphony escript remains the agent-side --linear-mcp server.
 # node base gives us the Codex CLI prerequisite; mise pins Erlang/Elixir from the repo's mise.toml.
 FROM node:20-bookworm-slim
 
@@ -39,10 +39,14 @@ RUN mix deps.get
 
 # App layer.
 COPY elixir/ ./
+# escript.build also compiles the project and dependencies on disk. Keep _build here so the
+# Mix daemon can load SQLite's NIF; a second mix compile adds no packaging effect.
 RUN mix escript.build
 
-# Workspaces (per-issue clones) and logs are runtime volumes, not baked into the image.
-VOLUME ["/workspaces", "/app/elixir/log"]
+ENV PATH="/app/elixir/bin:${PATH}"
 
-# WORKFLOW.md is mounted per deployment; compose `command` passes its path + flags.
-ENTRYPOINT ["./bin/symphony"]
+# Per-issue clones and durable database/log data are runtime volumes, not image contents.
+VOLUME ["/workspaces", "/data"]
+
+# Compose passes serve + installation flags; /config is only an import/export source.
+ENTRYPOINT ["mix", "symphony"]

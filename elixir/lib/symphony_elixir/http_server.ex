@@ -3,7 +3,7 @@ defmodule SymphonyElixir.HttpServer do
   Compatibility facade that starts the Phoenix observability endpoint when enabled.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator}
+  alias SymphonyElixir.Config
   alias SymphonyElixirWeb.Endpoint
 
   @secret_key_bytes 48
@@ -20,8 +20,7 @@ defmodule SymphonyElixir.HttpServer do
   def start_link(opts \\ []) do
     case Keyword.get(opts, :port, Config.server_port()) do
       port when is_integer(port) and port >= 0 ->
-        host = Keyword.get(opts, :host, Config.settings!().server.host)
-        orchestrator = Keyword.get(opts, :orchestrator, Orchestrator)
+        host = Keyword.get(opts, :host, Config.server_host())
         snapshot_timeout_ms = Keyword.get(opts, :snapshot_timeout_ms, 15_000)
 
         with {:ok, ip} <- parse_host(host) do
@@ -29,7 +28,6 @@ defmodule SymphonyElixir.HttpServer do
             server: true,
             http: [ip: ip, port: port],
             url: [host: normalize_host(host)],
-            orchestrator: orchestrator,
             snapshot_timeout_ms: snapshot_timeout_ms,
             secret_key_base: secret_key_base()
           ]
@@ -37,7 +35,9 @@ defmodule SymphonyElixir.HttpServer do
           endpoint_config =
             :symphony_elixir
             |> Application.get_env(Endpoint, [])
+            |> Keyword.delete(:orchestrator)
             |> Keyword.merge(endpoint_opts)
+            |> put_orchestrator_option(opts)
 
           Application.put_env(:symphony_elixir, Endpoint, endpoint_config)
           Endpoint.start_link()
@@ -58,6 +58,14 @@ defmodule SymphonyElixir.HttpServer do
     _error -> nil
   catch
     :exit, _reason -> nil
+  end
+
+  defp put_orchestrator_option(endpoint_config, opts) do
+    if Keyword.has_key?(opts, :orchestrator) do
+      Keyword.put(endpoint_config, :orchestrator, opts[:orchestrator])
+    else
+      endpoint_config
+    end
   end
 
   defp parse_host({_, _, _, _} = ip), do: {:ok, ip}
@@ -83,6 +91,6 @@ defmodule SymphonyElixir.HttpServer do
   defp normalize_host(host), do: to_string(host)
 
   defp secret_key_base do
-    Base.encode64(:crypto.strong_rand_bytes(@secret_key_bytes), padding: false)
+    Config.operator_session_secret() || Base.encode64(:crypto.strong_rand_bytes(@secret_key_bytes), padding: false)
   end
 end

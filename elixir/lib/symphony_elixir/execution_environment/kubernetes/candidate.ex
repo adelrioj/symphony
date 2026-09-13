@@ -36,6 +36,7 @@ if Mix.env() == :test do
            true <- q["qualified"] == false and q["stage"] == "candidate-unqualified",
            true <- q["termination_contract"] == "candidate-unqualified-kubelet-all-containers-v1",
            true <- pins["namespace"] == get_in(config, [:provider, "namespace"]) and pins["deployment_id"] == config[:deployment_id],
+           true <- q["controller_namespace"] != pins["namespace"],
            true <- hex?(pins["consumer_source_commit"], 40) and hex?(q["controller_source_commit"], 40),
            true <- image?(q["controller_image"]) and image?(q["worker_image"]),
            true <- exact_keys?(pins["schema_digests"], @schemas) and Enum.all?(pins["schema_digests"], fn {_, hash} -> hex?(hash, 40) end),
