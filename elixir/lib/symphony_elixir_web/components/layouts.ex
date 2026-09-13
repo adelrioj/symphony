@@ -9,6 +9,7 @@ defmodule SymphonyElixirWeb.Layouts do
   def root(assigns) do
     assigns =
       assigns
+      |> Map.put_new(:__changed__, nil)
       |> assign(:csrf_token, Plug.CSRFProtection.get_csrf_token())
       |> assign(:dashboard_css_url, SymphonyElixirWeb.StaticAssets.dashboard_css_url())
       |> assign(:favicon_url, SymphonyElixirWeb.StaticAssets.favicon_url())
@@ -20,7 +21,7 @@ defmodule SymphonyElixirWeb.Layouts do
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="csrf-token" content={@csrf_token} />
-        <title>Symphony Observability</title>
+        <title>Symphony</title>
         <link rel="icon" type="image/png" sizes="128x128" href={@favicon_url} />
         <script defer src="/vendor/phoenix_html/phoenix_html.js"></script>
         <script defer src="/vendor/phoenix/phoenix.js"></script>
@@ -54,6 +55,11 @@ defmodule SymphonyElixirWeb.Layouts do
   def app(assigns) do
     ~H"""
     <main class="app-shell">
+      <nav class="app-nav" aria-label="Main navigation">
+        <a class="issue-link" href="/">Lanes</a>
+      </nav>
+      <p :if={Phoenix.Flash.get(@flash, :error)} id="flash-error" class="error-card" role="alert">{Phoenix.Flash.get(@flash, :error)}</p>
+      <p :if={Phoenix.Flash.get(@flash, :info)} id="flash-info" class="section-card" role="status">{Phoenix.Flash.get(@flash, :info)}</p>
       {@inner_content}
     </main>
     """
