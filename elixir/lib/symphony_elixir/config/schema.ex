@@ -343,21 +343,17 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
 
-  @spec parse(map(), keyword()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t() | [{String.t(), String.t()}]}}
+  @typep validation_errors :: String.t() | [{String.t(), String.t()}]
+
+  @spec parse(map(), keyword()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, validation_errors()}}
   def parse(config, opts \\ []) when is_map(config) do
     attrs = normalize_keys(config)
     error_format = Keyword.get(opts, :errors, :string)
 
-    with :ok <- validate_worker_source(attrs) do
-      attrs
-      |> drop_nil_values()
-      |> changeset()
-      |> apply_action(:validate)
-      |> case do
-        {:ok, settings} -> {:ok, finalize_settings(settings)}
-        {:error, changeset} -> {:error, {:invalid_workflow_config, format_errors(changeset, error_format)}}
-      end
-    else
+    case validate_worker_source(attrs) do
+      :ok ->
+        parse_attributes(attrs, error_format)
+
       {:error, {path, message}} ->
         errors =
           case error_format do
@@ -366,6 +362,17 @@ defmodule SymphonyElixir.Config.Schema do
           end
 
         {:error, {:invalid_workflow_config, errors}}
+    end
+  end
+
+  defp parse_attributes(attrs, error_format) do
+    attrs
+    |> drop_nil_values()
+    |> changeset()
+    |> apply_action(:validate)
+    |> case do
+      {:ok, settings} -> {:ok, finalize_settings(settings)}
+      {:error, changeset} -> {:error, {:invalid_workflow_config, format_errors(changeset, error_format)}}
     end
   end
 

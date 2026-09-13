@@ -4,7 +4,7 @@ defmodule SymphonyElixir.RepoTest do
   alias SymphonyElixir.{Config, Repo}
 
   setup do
-    keys = [:data_root, :server_port, :server_port_override]
+    keys = [:data_root, :server_port]
     previous = Map.new(keys, &{&1, Application.fetch_env(:symphony_elixir, &1)})
     root = Path.join(System.tmp_dir!(), "symphony-repo-#{System.unique_integer([:positive, :monotonic])}")
 
@@ -145,14 +145,13 @@ defmodule SymphonyElixir.RepoTest do
     assert File.regular?(Path.join(root, "symphony.sqlite3"))
   end
 
-  test "installation port takes precedence, including disabling a legacy override" do
-    Application.put_env(:symphony_elixir, :server_port_override, 4000)
+  test "installation port supports ephemeral binding and explicit disabling" do
     Application.put_env(:symphony_elixir, :server_port, 0)
     assert Config.server_port() == 0
     Application.put_env(:symphony_elixir, :server_port, nil)
     assert Config.server_port() == nil
     Application.delete_env(:symphony_elixir, :server_port)
-    assert Config.server_port() == 4000
+    assert Config.server_port() == nil
   end
 
   defp isolated_repo do
