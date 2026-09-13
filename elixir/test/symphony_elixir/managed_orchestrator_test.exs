@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.ManagedOrchestratorTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.AgentRuntimeSupervisor
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.ExecutionEnvironment
@@ -7,6 +8,8 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   alias SymphonyElixir.ExecutionEnvironment.Lifecycle
   alias SymphonyElixir.ExecutionEnvironment.Operations
   alias SymphonyElixir.ExecutionEnvironment.Record
+  alias SymphonyElixir.LaneRegistry
+  alias SymphonyElixir.LaneSupervisor
   alias SymphonyElixir.SSH
   alias SymphonyElixir.StatusDashboard
   alias SymphonyElixirWeb.Presenter
@@ -48,7 +51,6 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
       poll_interval_ms: 60_000
     )
 
-    release_guard_on_exit(:sys.get_state(WorkflowStore).environment_guard.token)
     inventory = start_supervised!({MemoryInventory, self()})
     Process.put({__MODULE__, :inventory}, inventory)
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, inventory)
@@ -136,8 +138,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     poll(owner)
     original = Config.settings!().worker.environment.deployment_id
     replacement = Map.put(environment(), "deployment_id", "other")
-    write_managed_workflow(worker_environment: replacement)
-    assert {:error, :environment_identity_in_use} = WorkflowStore.force_reload()
+    assert {:error, [%{path: "worker.environment"}]} = write_managed_workflow(worker_environment: replacement)
     assert Config.settings!().worker.environment.deployment_id == original
   end
 
@@ -284,6 +285,40 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
           refute MapSet.member?(:sys.get_state(owner).claimed, "first")
       end
     end
+  end
+
+  test "managed stop completion keeps attempt exhaustion policy and parking state after save" do
+    issues([issue("first", 1)])
+    {owner, tasks} = scheduler()
+    discover([])
+    {config, entry, prepare} = operation(:prepare)
+    ready(config, entry, prepare, owner, tasks)
+    assert_receive {:agent_started, "first", runner, opts}, 1_000
+    original_blocked_state = Config.settings!().agent.blocked_state
+    exhaustion = %{state: "in progress", count: 2, head: nil}
+    :sys.replace_state(owner, &%{&1 | turn_exhaustions: %{"first" => exhaustion}})
+    send(owner, {:agent_turns_exhausted, "first", opts[:attempt_id], "In Progress"})
+    Orchestrator.snapshot(owner, 1_000)
+    send(runner, :finish_agent)
+    {_, stopping, stop} = operation(:stop)
+
+    assert :ok =
+             write_managed_workflow(
+               tracker_active_states: ["In Progress"],
+               max_turn_exhaustions: 0,
+               agent_blocked_state: "Replacement Blocked",
+               poll_interval_ms: 60_000
+             )
+
+    assert Config.settings!().agent.max_turn_exhaustions == 0
+    stopped(stop, stopping)
+
+    assert_receive {:inventory_state_applied, "first", ^original_blocked_state}, 1_000
+    assert %{running: []} = Orchestrator.snapshot(owner, 1_000)
+    assert {:ok, [parked]} = Tracker.fetch_issues_by_ids(["first"])
+    assert parked.state == original_blocked_state
+    refute Map.has_key?(:sys.get_state(owner).retry_attempts, "first")
+    assert Config.settings!().agent.blocked_state == "Replacement Blocked"
   end
 
   test "backend reload during prepare stops instead of launching the old backend" do
@@ -436,8 +471,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     {owner, _} = scheduler()
     discover([%{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}])
     wait_state(owner, &Map.has_key?(&1.environment_entries, "first"))
-    write_managed_workflow(tracker_kind: "linear")
-    assert {:error, :environment_identity_in_use} = WorkflowStore.force_reload()
+    assert {:error, [%{path: "worker.environment"}]} = write_managed_workflow(tracker_kind: "linear")
     assert Config.settings!().tracker.kind == "memory"
   end
 
@@ -471,61 +505,66 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     {owner, _} = scheduler()
     discover([%{record("retained") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}])
     wait_state(owner, &Map.has_key?(&1.environment_entries, "retained"))
-    {:ok, replacement} = WorkflowStore.protect_environment(EnvironmentConfig.identity(Config.settings!()))
+    identity = EnvironmentConfig.identity(Config.settings!())
+    {:ok, replacement} = LaneStore.protect_environment(LaneContext.current!(), identity)
     release_guard_on_exit(replacement)
     issues([issue("first", 1)])
     poll(owner)
     refute_receive {:environment_operation, :prepare, _, _, _, _}, 0
     assert {:error, :authority_replaced} = :sys.get_state(owner).environment_discovery
-    assert :sys.get_state(WorkflowStore).environment_guard.token == replacement
+    assert :sys.get_state(LaneStore).guards[LaneContext.current!()].token == replacement
   end
 
-  test "surviving scheduler reacquires the same identity after the workflow store process restarts" do
+  test "store authority restart fences the old scheduler and replacement rediscovers retained inventory" do
     issues([])
-    {owner, tasks} = scheduler()
+    {owner, _tasks} = scheduler(:registered)
     retained = %{record("retained") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}
     discover([retained])
-    wait_state(owner, &Map.has_key?(&1.environment_entries, "retained"))
-    previous_store = Process.whereis(WorkflowStore)
-    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
-    assert %{queued: true} = Orchestrator.request_refresh(owner)
-    assert Orchestrator.snapshot(owner, 1_000).environment_discovery.status == :blocked
-    assert {:ok, replacement} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
-    refute replacement == previous_store
-    release_guard_on_exit(:sys.get_state(replacement).environment_guard.token)
-    Orchestrator.request_refresh(owner)
+    previous = wait_state(owner, &Map.has_key?(&1.environment_entries, "retained"))
+    monitor = Process.monitor(owner)
+    restart_store()
+    assert_receive {:DOWN, ^monitor, :process, ^owner, _}, 1_000
+    assert Orchestrator.request_refresh(owner) == :unavailable
+
+    lane_id = LaneContext.current!()
+
+    assert {:error, :invalid_environment_guard} =
+             LaneStore.protect_environment(lane_id, previous.environment_identity, previous.environment_guard)
+
+    {replacement, tasks} = scheduler(:registered)
     discover([retained])
-    wait_state(owner, &(&1.environment_discovery == :ready))
+    recovered = wait_state(replacement, &(&1.environment_discovery == :ready))
+    assert recovered.environment_identity == previous.environment_identity
+    refute recovered.environment_guard == previous.environment_guard
     issues([issue("first", 1)])
-    poll(owner)
+    poll(replacement)
     {config, entry, prepare} = operation(:prepare)
-    ready(config, entry, prepare, owner, tasks)
+    ready(config, entry, prepare, replacement, tasks)
     assert_receive {:agent_started, "first", _, _}, 1_000
-    assert [%{issue_id: "first"}] = Orchestrator.snapshot(owner, 1_000).running
+    assert [%{issue_id: "first"}] = Orchestrator.snapshot(replacement, 1_000).running
   end
 
-  test "store restart cannot adopt a rejected on-disk identity while retained resources survive" do
+  test "store restart recovers the accepted database identity after rejecting an identity save" do
     issues([])
-    {owner, _tasks} = scheduler()
+    {owner, _tasks} = scheduler(:registered)
     discover([%{record("retained") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}])
     accepted = wait_state(owner, &Map.has_key?(&1.environment_entries, "retained")).environment_identity
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "memory",
-      workspace_root: "/home/user/workspaces",
-      worker_environment: Map.put(environment(), "deployment_id", "rejected-deployment")
-    )
+    assert {:error, [%{path: "worker.environment"}]} =
+             write_workflow_file!(Workflow.workflow_file_path(),
+               tracker_kind: "memory",
+               workspace_root: "/home/user/workspaces",
+               worker_environment: Map.put(environment(), "deployment_id", "rejected-deployment")
+             )
 
-    assert {:error, :environment_identity_in_use} = WorkflowStore.force_reload()
-    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
-    assert {:ok, replacement} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
-    release_guard_on_exit(:sys.get_state(replacement).environment_guard.token)
-    issues([issue("first", 1)])
-    Orchestrator.request_refresh(owner)
-    poll(owner)
-    assert :sys.get_state(owner).environment_identity == accepted
-    assert {:error, :authority_replaced} = :sys.get_state(owner).environment_discovery
-    refute_receive {:environment_operation, :discover, _, _, _, _}, 0
+    monitor = Process.monitor(owner)
+    restart_store()
+    assert_receive {:DOWN, ^monitor, :process, ^owner, _}, 1_000
+    {replacement, _tasks} = scheduler(:registered)
+    discover([%{record("retained") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}])
+    wait_state(replacement, &(&1.environment_discovery == :ready))
+    assert :sys.get_state(replacement).environment_identity == accepted
+    assert EnvironmentConfig.identity(Config.settings!()) == accepted
     refute_receive {:environment_operation, :prepare, _, _, _, _}, 0
   end
 
@@ -821,9 +860,22 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     end
   end
 
-  defp scheduler do
+  defp restart_store do
+    previous_store = Process.whereis(LaneStore)
+
+    try do
+      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, LaneStore)
+      assert :ok = ensure_lane_store_started!()
+      refute Process.whereis(LaneStore) == previous_store
+    after
+      ensure_lane_store_started!()
+    end
+  end
+
+  defp scheduler(mode \\ :isolated) do
     parent = self()
-    tasks = start_supervised!({Task.Supervisor, []}, id: make_ref())
+    lane_id = LaneContext.current!()
+    tasks = if mode == :registered, do: LaneRegistry.via(lane_id, :tasks), else: start_supervised!({Task.Supervisor, []}, id: make_ref())
 
     operation_fun = fn _adapter, config, entry, operation, opts ->
       send(parent, {:environment_operation, operation, config, entry, self(), opts})
@@ -849,8 +901,31 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
       runner_fun: runner_fun
     ]
 
-    child = Supervisor.child_spec({Orchestrator, options}, restart: :temporary)
-    owner = start_supervised!(child, id: make_ref())
+    owner =
+      if mode == :registered do
+        runtime_options = [
+          lane_id: lane_id,
+          name: LaneRegistry.via(lane_id, :runtime),
+          task_supervisor_name: tasks,
+          orchestrator_name: LaneRegistry.via(lane_id, :orchestrator),
+          environment_operation_fun: operation_fun,
+          runner_fun: runner_fun
+        ]
+
+        child = Supervisor.child_spec({AgentRuntimeSupervisor, runtime_options}, restart: :temporary)
+        {:ok, _runtime} = DynamicSupervisor.start_child(LaneSupervisor, child)
+
+        on_exit({__MODULE__, :registered_runtime, lane_id}, fn ->
+          ensure_lane_store_started!()
+          LaneSupervisor.stop_lane(lane_id)
+        end)
+
+        LaneRegistry.whereis(lane_id, :orchestrator)
+      else
+        child = Supervisor.child_spec({Orchestrator, options}, restart: :temporary)
+        start_supervised!(child, id: make_ref())
+      end
+
     state = wait_state(owner, &poll_idle?/1)
     release_guard_on_exit(state.environment_guard)
     {owner, tasks}
@@ -887,10 +962,14 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   end
 
   defp release_guard_on_exit(token) when is_reference(token) do
+    lane_id = LaneContext.current!()
+
     on_exit({:environment_guard, token}, fn ->
-      # The simulated inventory lives only in these private tasks/messages. ExUnit
-      # has stopped their supervisors before this callback releases its exact token.
-      WorkflowStore.release_environment(token, :empty_inventory)
+      # Simulated inventory dies with its tasks. ExUnit already stops isolated
+      # supervisors; registered fixtures must stop before releasing their token.
+      ensure_lane_store_started!()
+      if LaneSupervisor.running?(lane_id), do: LaneSupervisor.stop_lane(lane_id)
+      LaneStore.release_environment(lane_id, token, :empty_inventory)
     end)
   end
 

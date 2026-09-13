@@ -3,7 +3,24 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard, Workspace}
+  alias SymphonyElixir.{Config, LaneContext, LaneRegistry, LaneStore, Orchestrator, StatusDashboard, Workspace}
+  alias SymphonyElixir.LaneStore.Entry
+  alias SymphonyElixirWeb.Endpoint
+
+  @doc "Selects a lane's orchestrator and installs its configuration context for projections."
+  @spec orchestrator_for(Entry.t()) :: GenServer.server()
+  def orchestrator_for(%Entry{lane_id: lane_id}) do
+    LaneContext.put(lane_id)
+    Endpoint.config(:orchestrator) || LaneRegistry.via(lane_id, :orchestrator)
+  end
+
+  @spec lane_payload(Entry.t(), timeout()) :: map()
+  def lane_payload(%Entry{} = entry, snapshot_timeout_ms) do
+    entry |> orchestrator_for() |> state_payload(snapshot_timeout_ms) |> Map.put(:lane, entry.slug)
+  end
+
+  @spec lanes() :: [Entry.t()]
+  def lanes, do: LaneStore.list()
 
   @spec state_payload(GenServer.server(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do

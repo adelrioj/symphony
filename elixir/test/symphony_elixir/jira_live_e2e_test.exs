@@ -180,7 +180,7 @@ defmodule SymphonyElixir.Jira.LiveE2ETest do
       """
     )
 
-    assert :ok = SymphonyElixir.WorkflowStore.force_reload()
+    assert :ok = reload_workflow!()
   end
 
   defp live_prompt(issue_id, project_key, terminal_state, expected_comment) do

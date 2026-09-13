@@ -35,6 +35,9 @@ defmodule SymphonyElixir.AgentRunnerStubBackend do
       {:error, _reason} = error ->
         error
 
+      {:raise, message} ->
+        raise ArgumentError, message
+
       _ ->
         result =
           Keyword.get_lazy(opts, :test_result, fn ->
@@ -67,14 +70,30 @@ defmodule SymphonyElixir.AgentRunnerTest do
     root = Path.join(System.tmp_dir!(), "symphony-managed-guard-#{System.unique_integer([:positive])}")
     sentinel = Path.join(root, "hook-ran")
     on_exit(fn -> File.rm_rf(root) end)
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_create: "touch #{sentinel}")
-    settings = Config.settings!()
-    original = :sys.get_state(SymphonyElixir.WorkflowStore)
-    on_exit(fn -> :sys.replace_state(SymphonyElixir.WorkflowStore, fn _ -> original end) end)
 
-    :sys.replace_state(SymphonyElixir.WorkflowStore, fn state ->
-      %{state | settings: %{settings | worker: Map.put(settings.worker, :environment, %{})}}
-    end)
+    environment = %{
+      "kind" => "google_workstations",
+      "deployment_id" => "runner-guard",
+      "startup_timeout_ms" => 10_000,
+      "shutdown_timeout_ms" => 10_000,
+      "provider" => %{
+        "project" => "p",
+        "location" => "l",
+        "cluster" => "c",
+        "config" => "cfg",
+        "credential_configuration" => "deploy",
+        "impersonate_service_account" => "sa@example.com",
+        "ssh_user" => "user"
+      }
+    }
+
+    options = [
+      workspace_root: root,
+      hook_after_create: "touch #{sentinel}",
+      worker_environment: environment
+    ]
+
+    assert :ok = write_workflow_file!(Workflow.workflow_file_path(), options)
 
     assert {:error, :managed_context_required} = AgentRunner.run(build_issue([]), nil, [])
 
@@ -155,6 +174,169 @@ defmodule SymphonyElixir.AgentRunnerTest do
              )
 
     assert_received {:codex_worker_update, "issue-blocked", _attempt_id, ^native_update}
+  end
+
+  test "configured attempt hooks report execution outcomes and skip after-create on workspace reuse" do
+    issue = build_issue(state: "Done")
+    root = hook_workspace_root!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      tracker_kind: "memory",
+      hook_after_create: "printf created > created",
+      hook_before_run: "test -f created; printf before >> before",
+      hook_after_run: "printf after >> after; exit 9"
+    )
+
+    opts = [
+      backend_module: SymphonyElixir.AgentRunnerStubBackend,
+      execution_context: SymphonyElixir.ExecutionContext.local(root),
+      issue_state_fetcher: fn _ids -> {:ok, [issue]} end,
+      attempt_id: "hooks"
+    ]
+
+    assert :ok = AgentRunner.run(issue, self(), opts)
+    assert_hook_update("hooks", "after_create", "started")
+    assert_hook_update("hooks", "after_create", "finished")
+    assert_hook_update("hooks", "before_run", "started")
+    assert_hook_update("hooks", "before_run", "finished")
+    assert_hook_update("hooks", "after_run", "started")
+    assert_hook_update("hooks", "after_run", "failed")
+    workspace = Path.join(root, issue.identifier)
+    assert File.read!(Path.join(workspace, "after")) == "after"
+
+    assert :ok = AgentRunner.run(issue, self(), Keyword.put(opts, :attempt_id, "reused"))
+    assert_hook_update("reused", "before_run", "started")
+    assert_hook_update("reused", "before_run", "finished")
+    assert_hook_update("reused", "after_run", "started")
+    assert_hook_update("reused", "after_run", "failed")
+    refute_received {:codex_worker_update, _, "reused", %{event: :hook}}
+    assert File.read!(Path.join(workspace, "after")) == "afterafter"
+  end
+
+  test "failed after-create reports failure before removing the partial workspace" do
+    root = hook_workspace_root!()
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_create: "touch partial; exit 7")
+    issue = build_issue([])
+
+    assert_raise RuntimeError, ~r/workspace_hook_failed/, fn ->
+      AgentRunner.run(issue, self(), attempt_id: "create-failed", execution_context: SymphonyElixir.ExecutionContext.local(root))
+    end
+
+    assert_hook_update("create-failed", "after_create", "started")
+    assert_hook_update("create-failed", "after_create", "failed")
+    refute File.exists?(Path.join(root, issue.identifier))
+  end
+
+  test "before-run timeout reports failure and still observes best-effort after-run" do
+    assert_raise RuntimeError, ~r/workspace_hook_timeout/, fn ->
+      run_stub!(build_issue([]),
+        attempt_id: "timed-out",
+        test_pid: self(),
+        workflow: [hook_before_run: "sleep 1", hook_after_run: "exit 8", hook_timeout_ms: 20]
+      )
+    end
+
+    assert_hook_update("timed-out", "before_run", "started")
+    assert_hook_update("timed-out", "before_run", "failed")
+    assert_hook_update("timed-out", "after_run", "started")
+    assert_hook_update("timed-out", "after_run", "failed")
+    refute_received :stub_turn_ran
+  end
+
+  test "blocked result emits its authoritative update before tracker parking and after-run failure" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    MemoryTracker.fail(:update_issue_state)
+    result = Result.new(status: :blocked, session_id: "blocked-result", blocked_action: "Approve deployment")
+
+    assert :ok =
+             run_stub!(build_issue([]),
+               attempt_id: "blocked-hooks",
+               test_result: result,
+               test_message: %{event: :completed, timestamp: DateTime.utc_now(), session_id: "blocked-result"},
+               workflow: [hook_after_run: "exit 9"]
+             )
+
+    assert_received {:codex_worker_update, "issue-blocked", "blocked-hooks", %{event: :completed}}
+    assert_receive {:worker_runtime_info, "issue-blocked", "blocked-hooks", _}
+    assert_receive next
+    assert {:codex_worker_update, "issue-blocked", "blocked-hooks", update} = next
+    assert %{event: :attempt_blocked, session_id: "blocked-result", timestamp: %DateTime{}, payload: detail} = update
+    assert detail =~ "Approve deployment"
+    assert_receive {:memory_tracker_comment, "issue-blocked", _body}
+    assert_hook_update("blocked-hooks", "after_run", "started")
+    assert_hook_update("blocked-hooks", "after_run", "failed")
+    refute_received {:agent_turns_exhausted, _, _, _}
+  end
+
+  test "managed exceptional cleanup reports after-run failure without replacing the backend exception" do
+    root = hook_workspace_root!()
+    context = managed_hook_context!(root)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_run: "printf attempted > after; exit 9")
+
+    assert_raise ArgumentError, "backend exploded", fn ->
+      AgentRunner.run(build_issue([]), self(),
+        attempt_id: "managed-failed",
+        execution_context: context,
+        backend_module: SymphonyElixir.AgentRunnerStubBackend,
+        run_result: {:raise, "backend exploded"}
+      )
+    end
+
+    assert_hook_update("managed-failed", "after_run", "started")
+    assert_hook_update("managed-failed", "after_run", "failed")
+    assert File.read!(Path.join(context.workspace_path, "after")) == "attempted"
+  end
+
+  test "managed timeout reports an unknown hook outcome without running cleanup" do
+    root = hook_workspace_root!()
+    context = managed_hook_context!(root)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_before_run: "sleep 2",
+      hook_after_run: "touch after",
+      hook_timeout_ms: 500
+    )
+
+    assert {:managed_execution_unknown, {:remote_command_timeout, "before_run", 500}} =
+             catch_exit(AgentRunner.run(build_issue([]), self(), execution_context: context, attempt_id: "managed-timeout"))
+
+    assert_hook_update("managed-timeout", "before_run", "started")
+    assert_hook_update("managed-timeout", "before_run", "failed")
+    refute_received {:codex_worker_update, _, "managed-timeout", %{event: :hook}}
+    assert File.dir?(context.workspace_path)
+    refute File.exists?(Path.join(context.workspace_path, "after"))
+  end
+
+  test "a hook command task exception is reported before its linked runner exits" do
+    root = hook_workspace_root!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_after_create: "rmdir \"$PWD\"",
+      hook_before_run: "true"
+    )
+
+    {:ok, snapshot} = SymphonyElixir.LaneContext.capture()
+    recipient = self()
+
+    {pid, ref} =
+      spawn_monitor(fn ->
+        SymphonyElixir.LaneContext.install(snapshot)
+
+        AgentRunner.run(build_issue([]), recipient,
+          execution_context: SymphonyElixir.ExecutionContext.local(root),
+          attempt_id: "hook-exception"
+        )
+      end)
+
+    assert_hook_update("hook-exception", "after_create", "started")
+    assert_hook_update("hook-exception", "after_create", "finished")
+    assert_hook_update("hook-exception", "before_run", "started")
+    assert_hook_update("hook-exception", "before_run", "failed")
+    assert_receive {:DOWN, ^ref, :process, ^pid, reason}
+    refute reason == :normal
   end
 
   test "run/3 reports start_session errors without calling stop_session" do
@@ -385,6 +567,30 @@ defmodule SymphonyElixir.AgentRunnerTest do
     struct!(Issue, attrs)
   end
 
+  defp hook_workspace_root! do
+    root = Path.join(System.tmp_dir!(), "symphony-runner-hooks-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(root) end)
+    root
+  end
+
+  defp managed_hook_context!(root) do
+    realpath = System.find_executable("grealpath") || System.find_executable("realpath") || flunk("realpath is required")
+    bin = Path.join(root, "bin")
+    File.mkdir_p!(bin)
+    File.ln_s!(realpath, Path.join(bin, "realpath"))
+    bash_env = Path.join(root, "bash-env")
+    File.write!(bash_env, "export PATH='#{bin}':\"$PATH\"\n")
+    target = %SymphonyElixir.SSH.Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture", env: [{"BASH_ENV", bash_env}]}
+    %SymphonyElixir.ExecutionContext{mode: :managed, workspace_root: root, workspace_path: Path.join(root, "ticket"), target: target}
+  end
+
+  defp assert_hook_update(attempt_id, hook_name, outcome) do
+    assert_receive {:codex_worker_update, "issue-blocked", ^attempt_id, %{event: :hook} = update}, 1_000
+    assert %{timestamp: %DateTime{}, payload: payload} = update
+    assert payload =~ hook_name
+    assert payload =~ outcome
+  end
+
   defp run_stub!(issue, opts) do
     workspace_root =
       Path.join(
@@ -394,9 +600,11 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
     ExUnit.Callbacks.on_exit(fn -> File.rm_rf(workspace_root) end)
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "memory",
-      workspace_root: workspace_root
+    {workflow, opts} = Keyword.pop(opts, :workflow, [])
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      Keyword.merge([tracker_kind: "memory", workspace_root: workspace_root], workflow)
     )
 
     AgentRunner.run(

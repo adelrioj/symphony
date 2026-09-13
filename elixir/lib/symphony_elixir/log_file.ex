@@ -12,7 +12,7 @@ defmodule SymphonyElixir.LogFile do
 
   @spec default_log_file() :: Path.t()
   def default_log_file do
-    default_log_file(File.cwd!())
+    default_log_file(SymphonyElixir.Config.data_root())
   end
 
   @spec default_log_file(Path.t()) :: Path.t()

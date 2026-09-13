@@ -226,7 +226,7 @@ defmodule SymphonyElixir.LiveE2ETest do
     end)
 
     # The Orchestrator under AgentRuntimeSupervisor re-reads the active workflow file on every tick,
-    # and write_workflow_file!/2 forces a WorkflowStore reload, so the live scope written below would
+    # and write_workflow_file!/2 imports a new lane version, so the live scope written below would
     # make it poll the real workspace with the real token and dispatch Codex agents against every
     # dispatchable issue in the active cycle, not just the ones seeded here. Both neighbouring live
     # tests stop the runtime for exactly this reason.

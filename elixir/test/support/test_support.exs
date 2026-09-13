@@ -11,6 +11,7 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Codex.AppServer
       alias SymphonyElixir.Config
       alias SymphonyElixir.HttpServer
+      alias SymphonyElixir.{LaneContext, Lanes, LaneStore}
       alias SymphonyElixir.Linear.Client
       alias SymphonyElixir.Orchestrator
       alias SymphonyElixir.PromptBuilder
@@ -18,19 +19,23 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Tracker
       alias SymphonyElixir.Tracker.Issue
       alias SymphonyElixir.Workflow
-      alias SymphonyElixir.WorkflowStore
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
         only: [
           write_workflow_file!: 1,
           write_workflow_file!: 2,
+          reload_workflow!: 0,
+          reset_lanes!: 0,
+          ensure_lane_store_started!: 0,
           restore_env: 2,
           stop_default_http_server: 0,
           start_test_orchestrator: 1
         ]
 
       setup context do
+        saved_env = Application.get_all_env(:symphony_elixir)
+
         unless context[:owns_default_runtime] do
           start_supervised!({Task.Supervisor, name: SymphonyElixir.TaskSupervisor})
         end
@@ -43,17 +48,18 @@ defmodule SymphonyElixir.TestSupport do
 
         File.mkdir_p!(workflow_root)
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
-        write_workflow_file!(workflow_file)
+        Application.put_env(:symphony_elixir, :data_root, workflow_root)
+        Application.put_env(:symphony_elixir, :operator_token, "test-token")
         Workflow.set_workflow_file_path(workflow_file)
-        if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+        reset_lanes!()
+        :ok = write_workflow_file!(workflow_file)
         stop_default_http_server()
 
         on_exit(fn ->
-          Application.delete_env(:symphony_elixir, :workflow_file_path)
-          Application.delete_env(:symphony_elixir, :server_port_override)
-          Application.delete_env(:symphony_elixir, :memory_tracker_issues)
-          Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+          reset_lanes!()
           Tracker.Memory.reset()
+          for {key, _} <- Application.get_all_env(:symphony_elixir), do: Application.delete_env(:symphony_elixir, key)
+          for {key, value} <- saved_env, do: Application.put_env(:symphony_elixir, key, value)
           File.rm_rf(workflow_root)
         end)
 
@@ -76,18 +82,60 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   def write_workflow_file!(path, overrides \\ []) do
-    workflow = workflow_content(overrides)
-    File.write!(path, workflow)
+    File.write!(path, workflow_content(overrides))
+    import_workflow(path)
+  end
 
-    if Process.whereis(SymphonyElixir.WorkflowStore) do
-      try do
-        SymphonyElixir.WorkflowStore.force_reload()
-      catch
-        :exit, _reason -> :ok
+  def default_lane_slug, do: "default"
+
+  def reload_workflow!, do: import_workflow(SymphonyElixir.Workflow.workflow_file_path())
+
+  defp import_workflow(path) do
+    case SymphonyElixir.Lanes.import_file(path, slug: default_lane_slug()) do
+      {:ok, lane, _warnings} ->
+        SymphonyElixir.LaneContext.put(lane.id)
+        :ok
+
+      {:error, _errors} = error ->
+        error
+    end
+  end
+
+  def reset_lanes! do
+    ensure_lane_store_started!()
+    alias SymphonyElixir.{LaneStore, Repo, Runs}
+    ids = Enum.uniq(Enum.map(Repo.all(SymphonyElixir.Lanes.Lane), & &1.id) ++ Enum.map(LaneStore.list(), & &1.lane_id))
+    Enum.each(ids, &LaneStore.remove/1)
+    Runs.flush()
+    Repo.delete_all(SymphonyElixir.Runs.Event)
+    Repo.delete_all(SymphonyElixir.Runs.Run)
+    Repo.delete_all(SymphonyElixir.Lanes.LaneVersion)
+    Repo.delete_all(SymphonyElixir.Lanes.Lane)
+    Enum.each(ids, &LaneStore.refresh/1)
+    :ok
+  end
+
+  def ensure_lane_store_started! do
+    if is_nil(Process.whereis(SymphonyElixir.LaneStore)) do
+      case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.LaneStore) do
+        {:ok, _pid} -> :ok
+        {:error, :running} -> :ok
+        result -> raise "cannot restart the test lane store: #{inspect(result)}"
       end
     end
 
     :ok
+  end
+
+  def import_coverage(module, path) do
+    if Code.ensure_loaded?(:cover), do: import_cover_data(:cover, module, path)
+    :ok
+  end
+
+  defp import_cover_data(cover, module, path) do
+    if match?({:file, _}, cover.is_compiled(module)) do
+      :ok = cover.import(String.to_charlist(path))
+    end
   end
 
   def restore_env(key, nil), do: System.delete_env(key)
@@ -159,8 +207,6 @@ defmodule SymphonyElixir.TestSupport do
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
-          server_port: nil,
-          server_host: nil,
           prompt: @workflow_prompt
         ],
         overrides
@@ -209,8 +255,6 @@ defmodule SymphonyElixir.TestSupport do
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
-    server_port = Keyword.get(config, :server_port)
-    server_host = Keyword.get(config, :server_host)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -261,7 +305,6 @@ defmodule SymphonyElixir.TestSupport do
         "  extra_mcp_servers: #{yaml_value(claude_extra_mcp_servers)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
-        server_yaml(server_port, server_host),
         "---",
         prompt
       ]
@@ -339,18 +382,6 @@ defmodule SymphonyElixir.TestSupport do
       "  refresh_ms: #{yaml_value(refresh_ms)}",
       "  render_interval_ms: #{yaml_value(render_interval_ms)}"
     ]
-    |> Enum.join("\n")
-  end
-
-  defp server_yaml(nil, nil), do: nil
-
-  defp server_yaml(port, host) do
-    [
-      "server:",
-      port && "  port: #{yaml_value(port)}",
-      host && "  host: #{yaml_value(host)}"
-    ]
-    |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
 

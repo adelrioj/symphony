@@ -1079,6 +1079,25 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     eventually(fn -> not File.exists?(path) end)
   end
 
+  test "a staged owner lost before its acknowledgement call still rejects access and cleans files" do
+    supervisor = start_supervised!(Task.Supervisor)
+    authority = spawn(fn -> receive do: (:finish -> :ok) end)
+    path = temporary_path("stage-owner-lost")
+    File.write!(path, "private")
+
+    {caller, owner} =
+      paused_holder_start(supervisor, fn ->
+        Operations.stage_private_paths(supervisor, authority, self(), [path])
+      end)
+
+    monitor = Process.monitor(owner)
+    send(authority, :finish)
+    assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}
+    assert true = :erlang.resume_process(caller.pid)
+    assert {:error, _} = Task.await(caller)
+    refute File.exists?(path)
+  end
+
   test "adoption acknowledgement cannot revive a connection after its authority exits" do
     supervisor = start_supervised!(Task.Supervisor)
 

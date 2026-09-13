@@ -9,7 +9,7 @@ This repo is two things:
 - **`SPEC.md`** (repo root) — the language-agnostic specification of Symphony. It is the source of truth.
 - **`elixir/`** — the reference implementation (Elixir/OTP). It may be a *superset* of the spec but must never *conflict* with it. When an implementation change meaningfully alters intended behavior, update `SPEC.md` in the same change.
 
-Symphony orchestrates autonomous coding work: it polls an issue tracker, creates an isolated workspace per issue, and runs a coding-agent backend inside that workspace until the issue reaches a terminal state. Both boundaries are pluggable behaviours — `Tracker` (6 adapters) and `Agent` (`codex`, `claude`).
+Symphony orchestrates autonomous coding work in DB-backed lanes: each lane polls its configured tracker scope, creates isolated per-issue workspaces, and runs a coding-agent backend. One installation serves one client with multiple independently supervised lanes. Both boundaries are pluggable behaviours — `Tracker` (6 adapters) and `Agent` (`codex`, `claude`).
 
 **Nearly all development happens in `elixir/`.** Read `elixir/AGENTS.md` first — it carries the authoritative implementation rules (the most important ones are summarized below).
 
@@ -29,7 +29,7 @@ Run all `mix` commands from the `elixir/` directory. Toolchain (Elixir 1.19.x / 
 
 ```bash
 mix setup                 # install deps (alias for deps.get)
-mix build                 # escript.build -> bin/symphony
+mix build                 # escript.build -> bin/symphony (agent-side MCP only)
 mix test                  # full suite
 mix test path/to/file_test.exs            # single file
 mix test path/to/file_test.exs:42         # single test by line number
@@ -50,17 +50,19 @@ CI runs `make all` (`.github/workflows/make-all.yml`). PR descriptions are linte
 ## Running the service
 
 ```bash
-./bin/symphony ./WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails          # defaults to ./WORKFLOW.md if no path given
-./bin/symphony ./WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails --port 4000   # also start the Phoenix dashboard + JSON API
+export SYMPHONY_OPERATOR_TOKEN='replace-with-a-long-random-secret'
+mix symphony lanes import ./WORKFLOW.md --slug main --data-root /data   # offline; new lane disabled
+mix symphony serve --data-root /data --port 4000 --i-understand-that-this-will-be-running-without-the-usual-guardrails
+./bin/symphony --linear-mcp --workflow <path>                           # agent-side MCP escript
 ```
 
-`--logs-root <dir>` sets where Symphony creates `log/`; it writes `<dir>/log/symphony.log*` (default: cwd). Logs never go to stdout — the status board owns it, so the console handler is removed at startup. Tracker credentials, the `--linear-mcp` mode, and Docker deployment are in `.claude/docs/deployment.md`.
+Use the same writable `--data-root <dir>` for import/export and serve (default: cwd). It holds `symphony.sqlite3` and `log/symphony.log*`. Enable the imported lane after signing in at `/login`; use the UI/API for live edits, not another process's offline import or filesystem changes. The daemon runs through `mix symphony` or a Burrito release because SQLite's NIF cannot load from an escript. Serve defaults to `127.0.0.1:4000` and 30-day event retention; `--host`, `--port`, and `--events-retention-days` are installation flags. Logs never go to stdout — the status board owns it. Tracker credentials, MCP mode, and Docker deployment are in `.claude/docs/deployment.md`.
 
 ## Non-negotiables
 
 - Workspaces must stay under the configured workspace root, and a turn's cwd must never be the source repo. Path checks live in `path_safety.ex`.
 - Add tracker capabilities through the `Tracker` behaviour and agent backends through the `Agent` behaviour — never by branching in `AgentRunner` or calling an adapter directly.
-- Always add config access through `SymphonyElixir.Config`, never ad-hoc env reads.
+- Add config access through `SymphonyElixir.Config` (installation settings and lane-context getters) and `LaneStore` (published lane values), never ad-hoc env reads. Long-lived lane processes call `LaneContext.put/1`; attempt tasks and helpers inherit the immutable dispatch snapshot, not a later ETS value.
 - Orchestrator state is concurrency-sensitive — preserve retry, reconciliation, and cleanup semantics when editing.
 
 ## Key implementation rules (from `elixir/AGENTS.md`)

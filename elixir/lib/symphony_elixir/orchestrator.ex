@@ -17,11 +17,14 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ExecutionEnvironment.Lifecycle.Entry
   alias SymphonyElixir.ExecutionEnvironment.Operations
   alias SymphonyElixir.ExecutionEnvironment.Record
+  alias SymphonyElixir.LaneContext
+  alias SymphonyElixir.LaneStore
+  alias SymphonyElixir.Runs
   alias SymphonyElixir.StatusDashboard
   alias SymphonyElixir.Tracker
   alias SymphonyElixir.Tracker.Issue
-  alias SymphonyElixir.WorkflowStore
   alias SymphonyElixir.Workspace
+  alias SymphonyElixirWeb.ObservabilityPubSub
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -47,6 +50,7 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :lane_id,
       task_supervisor: SymphonyElixir.TaskSupervisor,
       environment_entries: %{},
       environment_jobs: %{},
@@ -70,6 +74,12 @@ defmodule SymphonyElixir.Orchestrator do
     ]
   end
 
+  @spec child_spec(keyword()) :: Supervisor.child_spec()
+  def child_spec(opts) do
+    opts = Keyword.put_new_lazy(opts, :lane_id, &LaneContext.current!/0)
+    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}}
+  end
+
   @doc false
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -79,11 +89,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
+    lane_id = Keyword.fetch!(opts, :lane_id)
+    LaneContext.put(lane_id)
+
     case Config.settings() do
       {:ok, config} ->
         now_ms = System.monotonic_time(:millisecond)
 
         state = %State{
+          lane_id: lane_id,
           poll_interval_ms: config.polling.interval_ms,
           max_concurrent_agents: config.agent.max_concurrent_agents,
           next_poll_due_at_ms: now_ms,
@@ -97,8 +112,9 @@ defmodule SymphonyElixir.Orchestrator do
           codex_rate_limits: nil
         }
 
-        state = capture_environment(state, config)
-        if is_nil(state.environment_config), do: run_terminal_workspace_cleanup()
+        # LaneStore owns runtime startup; guard acquisition must happen after init
+        # returns so the store is free to answer the first tick's request.
+        if is_nil(EnvironmentConfig.runtime(config)), do: run_terminal_workspace_cleanup()
         state = schedule_tick(state, 0)
 
         {:ok, state}
@@ -192,15 +208,14 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
+        Runs.finished(running_entry.attempt_id, run_status(reason, running_entry))
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
         state =
-          if managed_entry?(state, issue_id) do
-            managed_stop(state, issue_id, {:agent_down, safe_agent_reason(reason), running_entry})
-          else
-            handle_agent_down(reason, state, issue_id, running_entry, session_id)
-          end
+          with_lane_snapshot(Map.get(running_entry, :lane_snapshot), fn ->
+            complete_running_entry(state, issue_id, running_entry, reason, session_id)
+          end)
 
         Logger.info("Agent task finished for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}")
 
@@ -233,6 +248,13 @@ defmodule SymphonyElixir.Orchestrator do
     case Map.get(running, issue_id) do
       %{attempt_id: ^attempt_id} = running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+
+        Runs.event(
+          attempt_id,
+          %{event: update.event, message: updated_running_entry.last_codex_message, session_id: updated_running_entry.session_id},
+          token_delta,
+          Map.get(updated_running_entry, :turn_count, 0)
+        )
 
         state =
           state
@@ -274,9 +296,28 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
+  def handle_info({:lane_updated, lane_id}, %{lane_id: lane_id} = state) do
+    state = refresh_runtime_config(state)
+    notify_dashboard()
+    {:noreply, state}
+  end
+
   def handle_info(_msg, state) do
     Logger.debug("Orchestrator ignored an unrecognized message")
     {:noreply, state}
+  end
+
+  defp run_status(_reason, %{attempt_outcome: :blocked}), do: "blocked"
+  defp run_status(:normal, %{turns_exhausted_state: name}) when is_binary(name), do: "turns_exhausted"
+  defp run_status(:normal, entry), do: if(input_required_blocker?(entry), do: "blocked", else: "done")
+  defp run_status(_reason, entry), do: if(input_required_blocker?(entry), do: "blocked", else: "failed")
+
+  defp complete_running_entry(state, issue_id, running_entry, reason, session_id) do
+    if managed_entry?(state, issue_id) do
+      managed_stop(state, issue_id, {:agent_down, safe_agent_reason(reason), running_entry})
+    else
+      handle_agent_down(reason, state, issue_id, running_entry, session_id)
+    end
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
@@ -507,25 +548,45 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
-    running_ids = Map.keys(state.running)
 
-    if running_ids == [] do
-      state
-    else
-      case Tracker.fetch_issues_by_ids(running_ids) do
-        {:ok, issues} ->
-          issues
-          |> reconcile_running_issue_states(
-            state,
-            active_state_set(),
-            terminal_state_set()
-          )
-          |> reconcile_missing_running_issue_ids(running_ids, issues)
+    state.running
+    |> Enum.group_by(fn {_id, entry} -> get_in(entry, [:lane_snapshot, Access.key(:version_id)]) end)
+    |> Enum.reduce(state, fn {_version, entries}, acc ->
+      {_id, first} = hd(entries)
+      ids = Enum.map(entries, &elem(&1, 0))
 
-        {:error, reason} ->
-          Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
+      with_lane_snapshot(Map.get(first, :lane_snapshot), fn ->
+        refresh_running_issue_group(acc, ids)
+      end)
+    end)
+  end
 
-          state
+  defp refresh_running_issue_group(state, ids) do
+    case Tracker.fetch_issues_by_ids(ids) do
+      {:ok, issues} ->
+        issues
+        |> reconcile_running_issue_states(state, active_state_set(), terminal_state_set())
+        |> reconcile_missing_running_issue_ids(ids, issues)
+
+      {:error, reason} ->
+        Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
+        state
+    end
+  end
+
+  defp with_lane_snapshot(nil, fun), do: fun.()
+
+  defp with_lane_snapshot(snapshot, fun) do
+    lane_id = LaneContext.current!()
+    previous = LaneContext.snapshot()
+    LaneContext.install(snapshot)
+
+    try do
+      fun.()
+    after
+      case previous do
+        {:ok, entry} -> LaneContext.install(entry)
+        :error -> LaneContext.put(lane_id)
       end
     end
   end
@@ -760,6 +821,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
+        Runs.finished(running_entry.attempt_id, "stopped")
 
         stop_running_task(pid, ref, state.task_supervisor)
 
@@ -782,22 +844,18 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
+    now = DateTime.utc_now()
+
+    Enum.reduce(state.running, state, fn {issue_id, entry}, acc ->
+      with_lane_snapshot(Map.get(entry, :lane_snapshot), fn ->
+        reconcile_stalled_running_issue(acc, issue_id, entry, now)
+      end)
+    end)
+  end
+
+  defp reconcile_stalled_running_issue(state, issue_id, entry, now) do
     timeout_ms = Config.settings!().codex.stall_timeout_ms
-
-    cond do
-      timeout_ms <= 0 ->
-        state
-
-      map_size(state.running) == 0 ->
-        state
-
-      true ->
-        now = DateTime.utc_now()
-
-        Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
-          maybe_restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
-        end)
-    end
+    if timeout_ms > 0, do: maybe_restart_stalled_issue(state, issue_id, entry, now, timeout_ms), else: state
   end
 
   defp maybe_restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
@@ -861,10 +919,9 @@ defmodule SymphonyElixir.Orchestrator do
     Map.get(running_entry, :last_codex_timestamp) || Map.get(running_entry, :started_at)
   end
 
-  defp last_activity_timestamp(_running_entry), do: nil
-
   defp input_required_blocker?(running_entry) when is_map(running_entry) do
-    Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
+    Map.get(running_entry, :attempt_outcome) == :blocked or
+      Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
       not is_nil(input_required_completion_outcome(Map.get(running_entry, :completion))) or
       codex_message_method(Map.get(running_entry, :last_codex_message)) ==
         "mcpServer/elicitation/request"
@@ -900,8 +957,6 @@ defmodule SymphonyElixir.Orchestrator do
       codex_message_blocker_error(Map.get(running_entry, :last_codex_message)) ||
       fallback
   end
-
-  defp blocker_error(_running_entry, fallback), do: fallback
 
   defp codex_event_blocker_error(:turn_input_required), do: "codex turn requires operator input"
   defp codex_event_blocker_error(:approval_required), do: "codex turn requires approval"
@@ -952,6 +1007,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp stop_and_block_issue(%State{environment_entries: entries} = state, issue_id, running_entry, error) when is_map_key(entries, issue_id) do
+    Runs.finished(running_entry.attempt_id, "blocked")
     managed_stop(state, issue_id, {:block, running_entry, error})
   end
 
@@ -979,6 +1035,8 @@ defmodule SymphonyElixir.Orchestrator do
       last_codex_event: Map.get(running_entry, :last_codex_event),
       last_codex_timestamp: Map.get(running_entry, :last_codex_timestamp)
     }
+
+    Runs.finished(running_entry.attempt_id, "blocked")
 
     %{
       state
@@ -1122,6 +1180,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
+    {:ok, snapshot} = LaneContext.capture()
+    with_lane_snapshot(snapshot, fn -> dispatch_issue_from_snapshot(state, issue, attempt, preferred_worker_host) end)
+  end
+
+  defp dispatch_issue_from_snapshot(state, issue, attempt, preferred_worker_host) do
     case refresh_issue_for_dispatch(issue) do
       {:ok, %Issue{} = refreshed_issue} ->
         case backend_module_for_dispatch(refreshed_issue) do
@@ -1231,8 +1294,12 @@ defmodule SymphonyElixir.Orchestrator do
   defp spawn_issue_with_context(state, issue, attempt, recipient, backend_module, context, attempt_id, claim?) do
     worker_host = context.worker_host
     runner = state.runner_fun
+    {:ok, snapshot} = LaneContext.capture()
+    lane_id = state.lane_id
 
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
+           LaneContext.install(snapshot)
+
            runner.(issue, recipient,
              attempt: attempt,
              execution_context: context,
@@ -1242,6 +1309,17 @@ defmodule SymphonyElixir.Orchestrator do
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
+
+        Runs.started(%{
+          lane_id: lane_id,
+          lane_version_id: snapshot.version_id,
+          executor: snapshot.executor,
+          owner_pid: self(),
+          issue: issue,
+          attempt_id: attempt_id,
+          attempt: attempt,
+          worker_ref: worker_host
+        })
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
 
@@ -1255,6 +1333,7 @@ defmodule SymphonyElixir.Orchestrator do
             execution_context: context,
             identifier: issue.identifier,
             issue: issue,
+            lane_snapshot: snapshot,
             worker_host: worker_host,
             workspace_path: context.workspace_path,
             session_id: nil,
@@ -1483,6 +1562,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp notify_dashboard do
     StatusDashboard.notify_update()
+
+    with {:ok, lane_id} <- LaneContext.current(),
+         {:ok, %{slug: slug}} <- LaneStore.lookup(lane_id) do
+      ObservabilityPubSub.broadcast_lane(slug)
+    else
+      _ -> :ok
+    end
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
@@ -1501,6 +1587,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_refreshed_retry(state, issue, attempt, metadata) do
+    {:ok, snapshot} = LaneContext.capture()
+    with_lane_snapshot(snapshot, fn -> dispatch_refreshed_retry_from_snapshot(state, issue, attempt, metadata) end)
+  end
+
+  defp dispatch_refreshed_retry_from_snapshot(state, issue, attempt, metadata) do
     case refresh_issue_for_dispatch(issue) do
       {:ok, %Issue{} = refreshed_issue} ->
         dispatch_retry_backend(state, refreshed_issue, attempt, metadata[:worker_host])
@@ -1772,18 +1863,18 @@ defmodule SymphonyElixir.Orchestrator do
   # Same-store token loss is competing authority, not permission to reacquire.
   # A replaced process may only grant our captured identity, never a new disk scope.
   defp protect_environment(state) do
-    store = Process.whereis(WorkflowStore)
+    store = Process.whereis(LaneStore)
 
     result =
       if is_reference(state.environment_guard) and store == state.environment_store do
-        WorkflowStore.protect_environment(state.environment_identity, state.environment_guard)
+        LaneStore.protect_environment(state.lane_id, state.environment_identity, state.environment_guard)
       else
-        WorkflowStore.protect_environment(state.environment_identity)
+        LaneStore.protect_environment(state.lane_id, state.environment_identity)
       end
 
     case result do
       {:ok, token} when is_pid(store) ->
-        if Process.whereis(WorkflowStore) == store do
+        if Process.whereis(LaneStore) == store do
           {:ok, %{state | environment_guard: token, environment_store: store}}
         else
           environment_authority_lost(state)
@@ -2264,6 +2355,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         {running, remaining} ->
           stop_running_task(running.pid, running.ref, state.task_supervisor)
+          Runs.finished(running.attempt_id, "stopped")
           record_session_completion_totals(%{state | running: remaining}, running)
       end
 
@@ -2292,10 +2384,19 @@ defmodule SymphonyElixir.Orchestrator do
     state = put_environment(state, %{entry | completion: nil, last_error: error})
 
     case completion do
-      {:agent_down, reason, running} -> handle_agent_down(reason, state, entry.record.issue_id, running, running_entry_session_id(running))
-      {:retry, attempt, metadata} -> schedule_issue_retry(state, entry.record.issue_id, attempt, metadata)
-      {:block, running, error} -> block_issue_from_entry(state, entry.record.issue_id, running, error)
-      _ -> do_release_issue_claim(state, entry.record.issue_id)
+      {:agent_down, reason, running} ->
+        with_lane_snapshot(Map.get(running, :lane_snapshot), fn ->
+          handle_agent_down(reason, state, entry.record.issue_id, running, running_entry_session_id(running))
+        end)
+
+      {:retry, attempt, metadata} ->
+        schedule_issue_retry(state, entry.record.issue_id, attempt, metadata)
+
+      {:block, running, error} ->
+        block_issue_from_entry(state, entry.record.issue_id, running, error)
+
+      _ ->
+        do_release_issue_claim(state, entry.record.issue_id)
     end
   end
 
@@ -2321,7 +2422,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_release_environment_guard(state, empty?) do
     if empty? and not environment_work?(state) and is_reference(state.environment_guard) do
-      case WorkflowStore.release_environment(state.environment_guard, :empty_inventory) do
+      case LaneStore.release_environment(state.lane_id, state.environment_guard, :empty_inventory) do
         :ok -> %{state | environment_guard: nil}
         _ -> state
       end
@@ -2340,12 +2441,23 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_environment_entries(state) do
-    ids = Map.keys(state.environment_entries)
+    state.environment_entries
+    |> Map.keys()
+    |> Enum.group_by(fn id -> get_in(state.running, [id, :lane_snapshot, Access.key(:version_id)]) end)
+    |> Enum.reduce(state, fn {_version, ids}, acc ->
+      snapshot = get_in(state.running, [hd(ids), :lane_snapshot])
 
-    case if(ids == [], do: {:ok, []}, else: Tracker.fetch_issues_by_ids(ids)) do
+      with_lane_snapshot(snapshot, fn ->
+        refresh_environment_issue_group(acc, ids)
+      end)
+    end)
+  end
+
+  defp refresh_environment_issue_group(state, ids) do
+    case Tracker.fetch_issues_by_ids(ids) do
       {:ok, issues} ->
         by_id = Map.new(issues, &{&1.id, &1})
-        Enum.reduce(ids, state, fn id, acc -> reconcile_environment(acc, id, by_id[id]) end)
+        Enum.reduce(ids, state, fn id, current -> reconcile_environment(current, id, by_id[id]) end)
 
       _ ->
         Enum.reduce(ids, state, &inspect_unresolved_environment/2)
@@ -2651,6 +2763,7 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        blocked: blocked,
+       claimed: MapSet.size(state.claimed),
        environments: Enum.map(state.environment_entries, fn {_id, entry} -> environment_snapshot(entry) end),
        environment_discovery: environment_discovery_snapshot(state),
        codex_totals: state.codex_totals,
@@ -2679,6 +2792,13 @@ defmodule SymphonyElixir.Orchestrator do
      }, state}
   end
 
+  @impl true
+  def terminate(reason, state) do
+    status = if reason in [:normal, :shutdown] or match?({:shutdown, _}, reason), do: "stopped", else: "failed"
+    Enum.each(state.running, fn {_issue_id, entry} -> Runs.finished(entry.attempt_id, status) end)
+    :ok
+  end
+
   defp blocked_issue_state(%{issue: %Issue{state: state}}), do: state
   defp blocked_issue_state(_metadata), do: nil
 
@@ -2703,10 +2823,12 @@ defmodule SymphonyElixir.Orchestrator do
         last_codex_message: summarize_codex_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
         last_codex_event: event,
+        attempt_outcome: if(event == :attempt_blocked, do: :blocked, else: Map.get(running_entry, :attempt_outcome)),
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
         codex_total_tokens: codex_total_tokens + token_delta.total_tokens,
+        codex_last_reported_cached_tokens: max(Map.get(running_entry, :codex_last_reported_cached_tokens, 0), token_delta.cached_reported),
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
@@ -2720,6 +2842,7 @@ defmodule SymphonyElixir.Orchestrator do
     # Claude starts a fresh invocation each turn. Keep the worker's accumulated
     # totals, but measure this invocation from zero rather than the previous one.
     Map.merge(entry, %{
+      codex_last_reported_cached_tokens: 0,
       codex_last_reported_input_tokens: 0,
       codex_last_reported_output_tokens: 0,
       codex_last_reported_total_tokens: 0
@@ -2881,6 +3004,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do
     usage = extract_token_usage(update)
+    cached = compute_token_delta(running_entry, :cached, usage, :codex_last_reported_cached_tokens)
 
     {
       compute_token_delta(
@@ -2908,6 +3032,8 @@ defmodule SymphonyElixir.Orchestrator do
         input_tokens: input.delta,
         output_tokens: output.delta,
         total_tokens: total.delta,
+        cached_tokens: cached.delta,
+        cached_reported: cached.reported,
         input_reported: input.reported,
         output_reported: output.reported,
         total_reported: total.reported
@@ -3084,6 +3210,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp integer_token_map?(payload) do
     token_fields = [
+      :cached_tokens,
+      "cached_tokens",
+      "cachedInputTokens",
+      :cachedInputTokens,
       :input_tokens,
       :output_tokens,
       :total_tokens,
@@ -3112,6 +3242,9 @@ defmodule SymphonyElixir.Orchestrator do
       !is_nil(integer_like(value))
     end)
   end
+
+  defp get_token_usage(usage, :cached),
+    do: payload_get(usage, [:cached_tokens, "cached_tokens", :cachedInputTokens, "cachedInputTokens", :cached_input_tokens, "cached_input_tokens", "cache_read_input_tokens"])
 
   defp get_token_usage(usage, :input),
     do:

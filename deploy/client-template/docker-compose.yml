@@ -1,13 +1,14 @@
-# One Symphony container for one scope (one repo + one Linear scope: team, cycle, or project).
+# One Symphony installation for one client, with one or more independently configured lanes.
 #
-#   cp .env.example .env     # then edit LINEAR_API_KEY
-#   docker compose up -d
+#   cp .env.example .env     # then set LINEAR_API_KEY and SYMPHONY_OPERATOR_TOKEN
+#   docker compose run --rm symphony lanes import /config/workflow.md --slug main --data-root /data
+#   docker compose up -d    # then log in at http://localhost:4000 and enable main
 #
 # Upgrade:  docker compose pull && docker compose up -d
 #
 # This directory is mounted read-only at /config as a *directory*, not a single file:
-# a single-file bind mount pins the inode, so an editor's rename-replace on the host stops
-# propagating into the container and live reload of workflow.md dies.
+# a single-file bind mount pins the inode, hiding files replaced by a host editor from later
+# explicit imports. Files are not watched; edit running lanes through the UI or API.
 # Note: every value in .env is passed into the container (env_file below) and .env itself is
 # readable inside it at /config/.env. Symphony's agents run with approval_policy: never, so
 # treat anything you put in .env as readable by those agents — keep it to keys this
@@ -18,10 +19,10 @@ services:
     image: ghcr.io/adelrioj/symphony:latest   # pin a version tag (e.g. :0.0.2) for production
     environment:
       LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY in .env}
+      SYMPHONY_OPERATOR_TOKEN: ${SYMPHONY_OPERATOR_TOKEN:?set SYMPHONY_OPERATOR_TOKEN in .env}
     env_file:
       - path: .env          # every variable in .env reaches the container (e.g. a clone token)
-        required: false     # .env is optional to Compose only — the ${LINEAR_API_KEY:?} guard
-                            # above is what enforces the key, and it aborts first if .env is absent
+        required: false     # optional only if the required keys above are exported in the shell
     restart: unless-stopped
     volumes:
       # Host Codex login, mounted as a DIRECTORY, not as auth.json directly. The CLI rewrites
@@ -31,23 +32,22 @@ services:
       - ${HOME:?run docker compose from a shell where HOME is set}/.codex:/root/.codex
       - .:/config:ro
       - workspaces:/workspaces
-      - logs:/app/elixir/log
+      - data:/data
     # Symphony requires the acknowledgement flag below to run unattended.
     command:
-      - /config/workflow.md
+      - serve
       - --i-understand-that-this-will-be-running-without-the-usual-guardrails
       - --port
       - "4000"
-      # --logs-root is the directory Symphony creates `log/` *under*, not the log directory
-      # itself: it writes <root>/log/symphony.log*. Passing the volume path here would nest them
-      # at /app/elixir/log/log/, outside the `logs` volume mounted above.
-      - --logs-root
-      - /app/elixir
+      - --host
+      - 0.0.0.0
+      - --data-root
+      - /data
     ports:
-      # loopback only: the dashboard and JSON API have no authentication. For remote access put
-      # an authenticated reverse proxy in front of it, or use an SSH tunnel.
+      # Authenticated UI/API; keep host publishing on loopback. For remote access use an SSH
+      # tunnel or a TLS reverse proxy rather than sending operator credentials over public HTTP.
       - "127.0.0.1:4000:4000"   # dashboard + JSON API -> http://localhost:4000
 
 volumes:
   workspaces:
-  logs:
+  data:

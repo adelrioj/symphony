@@ -1,12 +1,15 @@
-# Local development only: one Symphony container built from source, running the sanitized
-# example workflow. Client deployments do NOT belong here — each client owns a private repo
+# Local development only: one Symphony installation built from source, with the sanitized
+# example imported as a lane. Client deployments do NOT belong here — each client owns a private repo
 # seeded from deploy/client-template/, which pulls the published GHCR image.
 #
 #   export LINEAR_API_KEY=...
-#   docker compose up --build          # or: orb start, then the same command
+#   export SYMPHONY_OPERATOR_TOKEN="$(openssl rand -hex 32)"
+#   docker compose build
+#   docker compose run --rm symphony-example lanes import /config/example.md --slug example --data-root /data
+#   docker compose up -d               # then log in at http://localhost:4000 and enable example
 #
-# The workflow is mounted as a directory, not a single file: a single-file bind mount pins
-# the inode, so an editor's rename-replace on the host stops propagating and hot reload dies.
+# Mount the import directory, not one file, so explicit future imports see files replaced by
+# host editors. Files are not watched: save running lane changes through the UI or API.
 
 services:
   symphony-example:
@@ -16,6 +19,7 @@ services:
     image: symphony:latest
     environment:
       LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY in your shell}
+      SYMPHONY_OPERATOR_TOKEN: ${SYMPHONY_OPERATOR_TOKEN:?set SYMPHONY_OPERATOR_TOKEN in your shell}
     restart: unless-stopped
     volumes:
       # Host Codex login, mounted as a DIRECTORY, not as auth.json directly. The CLI rewrites
@@ -26,23 +30,22 @@ services:
       - ${HOME:?run docker compose from a shell where HOME is set}/.codex:/root/.codex
       - ./workflows:/config:ro
       - example-workspaces:/workspaces
-      - example-logs:/app/elixir/log
+      - example-data:/data
     # Symphony requires the acknowledgement flag below to run unattended.
     command:
-      - /config/example.md
+      - serve
       - --i-understand-that-this-will-be-running-without-the-usual-guardrails
       - --port
       - "4000"
-      # --logs-root is the directory Symphony creates `log/` *under*, not the log directory
-      # itself: it writes <root>/log/symphony.log*. Passing the volume path here would nest them
-      # at /app/elixir/log/log/, outside the mount below.
-      - --logs-root
-      - /app/elixir
+      - --host
+      - 0.0.0.0
+      - --data-root
+      - /data
     ports:
-      # loopback only: the dashboard and JSON API have no authentication, and the container binds
-      # all of its own interfaces (server.host in the workflow file). Keep exposure on the host.
+      # Authenticated UI/API; keep host publishing on loopback. For remote access use an SSH
+      # tunnel or a TLS reverse proxy. --host binds the container interface Docker forwards to.
       - "127.0.0.1:4000:4000"   # dashboard + JSON API -> http://localhost:4000
 
 volumes:
   example-workspaces:
-  example-logs:
+  example-data:

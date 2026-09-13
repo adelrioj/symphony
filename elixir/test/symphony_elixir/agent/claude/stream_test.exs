@@ -99,6 +99,20 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
     refute message =~ "Reading code"
   end
 
+  test "cached usage deduplicates repeated message blocks and reconciles final invocation totals" do
+    event = %{"type" => "assistant", "message" => %{"id" => "message-1", "usage" => %{"input_tokens" => 2, "cache_read_input_tokens" => 8}, "content" => []}}
+    {first, update} = Stream.step(event)
+    assert update.usage.cached_tokens == 8
+    {repeated, update} = Stream.step(event, first)
+    assert update.usage.cached_tokens == 8
+    second = put_in(event, ["message", "id"], "message-2")
+    {summed, update} = Stream.step(second, repeated)
+    assert update.usage.cached_tokens == 16
+    {_final, update} = Stream.step(%{"type" => "result", "subtype" => "success", "is_error" => false, "usage" => %{"input_tokens" => 4, "cache_read_input_tokens" => 16}}, summed)
+    assert update.usage.cached_tokens == 16
+    assert update.usage.input_tokens == 20
+  end
+
   test "empty successful stream still reports a stream error" do
     assert {:error, {:claude_stream, "stream ended without a result event"}} = Stream.fold([], 0)
     assert {:error, {:claude_stream, "stream ended without a result event"}} = Stream.fold([], nil)

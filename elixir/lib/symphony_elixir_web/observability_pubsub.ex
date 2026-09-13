@@ -13,13 +13,21 @@ defmodule SymphonyElixirWeb.ObservabilityPubSub do
   end
 
   @spec broadcast_update() :: :ok
-  def broadcast_update do
-    case Process.whereis(@pubsub) do
-      pid when is_pid(pid) ->
-        Phoenix.PubSub.broadcast(@pubsub, @topic, @update_message)
+  def broadcast_update, do: safe_broadcast(@topic, @update_message)
 
-      _ ->
-        :ok
-    end
+  @spec subscribe_lane(String.t()) :: :ok | {:error, term()}
+  def subscribe_lane(slug) when is_binary(slug), do: Phoenix.PubSub.subscribe(@pubsub, "lane:" <> slug)
+
+  @spec broadcast_lane(String.t()) :: :ok
+  def broadcast_lane(slug) when is_binary(slug), do: safe_broadcast("lane:" <> slug, {:lane_updated, slug})
+
+  @spec subscribe_run(String.t()) :: :ok | {:error, term()}
+  def subscribe_run(attempt_id) when is_binary(attempt_id), do: Phoenix.PubSub.subscribe(@pubsub, "run:" <> attempt_id)
+
+  @spec broadcast_run(String.t(), term()) :: :ok
+  def broadcast_run(attempt_id, message) when is_binary(attempt_id), do: safe_broadcast("run:" <> attempt_id, message)
+
+  defp safe_broadcast(topic, message) do
+    if Process.whereis(@pubsub), do: Phoenix.PubSub.broadcast(@pubsub, topic, message), else: :ok
   end
 end

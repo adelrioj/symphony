@@ -13,6 +13,8 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 ## How it works
 
+One installation serves one client with multiple DB-backed lanes. Each enabled lane independently:
+
 1. Polls the configured tracker for candidate work (included adapters: Linear, GitHub Issues, Jira
    Cloud, Asana, and GitLab)
 2. Creates a workspace per issue
@@ -77,17 +79,24 @@ mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails
+export SYMPHONY_OPERATOR_TOKEN='replace-with-a-long-random-secret'
+mise exec -- mix symphony lanes import ./WORKFLOW.md --slug main --data-root /data
+mise exec -- mix symphony serve --data-root /data --port 4000 --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
+
+Create a writable persistent `/data` directory, or replace it consistently in all commands.
+Sign in at <http://localhost:4000/login> with the operator token, review the imported lane, then
+enable it. New lanes are disabled by default. Repeat import with a different slug for each lane.
+The daemon runs through Mix or a Burrito release because the SQLite NIF cannot load from an
+escript; `mix build` builds `bin/symphony` for agent-side `--linear-mcp` use only.
 
 ## Run in Docker (OrbStack-compatible)
 
-One Symphony instance drives one repo. Its Linear read scope is selected by
-`tracker.provider.team_keys`, `tracker.provider.current_cycle`, `tracker.provider.project_slug`, or
-a combination, optionally narrowed by `tracker.required_labels` / `tracker.any_labels`; at least one
-of the three container selectors is required. You may still run one container per project if you
-want the isolation. Everything below works as-is with [OrbStack](https://orbstack.dev/) (native
-arm64, no platform pins) or Docker Desktop.
+One container runs one installation with multiple independently scheduled lanes. Each lane selects
+its own tracker scope and workspace root; use distinct workspace roots and managed deployment
+identities where lanes must not share resources. For Linear, at least one of
+`tracker.provider.team_keys`, `current_cycle`, or `project_slug` is required; label policies can
+narrow that scope further. This works with [OrbStack](https://orbstack.dev/) or Docker Desktop.
 
 ### Deploying a project
 
@@ -95,7 +104,7 @@ Deployments live in their own private repos, not in this one. Copy
 [`deploy/client-template/`](../deploy/client-template) into a new repo and follow the README in
 it: it pulls the published image `ghcr.io/adelrioj/symphony` (built and pushed by
 [`.github/workflows/docker-publish.yml`](../.github/workflows/docker-publish.yml)), mounts that
-repo's own `workflow.md`, and needs no clone of this repo. Prerequisites, hot reload,
+repo's workflow import files, and needs no clone of this repo. Prerequisites, live UI/API edits,
 private-repo cloning, GHCR authentication and the security model are documented there; this
 section does not repeat them.
 
@@ -112,38 +121,35 @@ above, which leaves you in `symphony/elixir`.
    ```bash
    codex login
    ```
-2. **Set your Linear key** (git-ignored; `docker compose` auto-loads `.env`):
+2. **Set tracker and operator credentials** (git-ignored; compose auto-loads `.env`):
    ```bash
-   cp .env.example .env      # then edit LINEAR_API_KEY
+   cp .env.example .env      # edit LINEAR_API_KEY and SYMPHONY_OPERATOR_TOKEN
    ```
-3. **Edit `workflows/example.md`** — at minimum a scope selector (`tracker.provider.project_slug`,
-   `tracker.provider.team_keys`, or `tracker.provider.current_cycle` with `team_keys`) and the
-   `hooks.after_create` clone URL. Keep `workspace.root: /workspaces` (it must match the volume
-   mount in compose) and `server.host: 0.0.0.0` (see the port note below).
-4. **Launch:**
+3. **Edit `workflows/example.md`** before import: set the tracker scope and `hooks.after_create`
+   clone URL. Keep `workspace.root: /workspaces` to match the volume. Any `server` section is ignored.
+4. **Import offline, then launch:**
    ```bash
-   docker compose up --build          # first build compiles OTP once, then caches it
+   docker compose build
+   docker compose run --rm symphony-example lanes import /config/example.md --slug example --data-root /data
+   docker compose up -d
    ```
-   Dashboard: <http://localhost:4000>.
+   Sign in at <http://localhost:4000/login>, review the lane, then enable it.
 
-The `workflows/` directory is mounted read-only at `/config` as a *directory*, never as a single
-file: a single-file bind mount pins the inode, so an editor's rename-replace on the host stops
-propagating and hot reload dies. Editing `workflows/example.md` on the host reloads it in the
-running container within about a second.
+The `/config` mount supplies import files; it is not watched. SQLite and logs persist in the
+`/data` volume. Use the UI or authenticated API for live edits; offline imports made while
+`serve` is running are not published to its lane store until restart.
 
-Compose runs the daemon with the acknowledgement flag Symphony requires in order to start:
+Compose runs:
 
-```
-/config/example.md --i-understand-that-this-will-be-running-without-the-usual-guardrails --port 4000 --logs-root /app/elixir
+```text
+serve --i-understand-that-this-will-be-running-without-the-usual-guardrails --port 4000 --host 0.0.0.0 --data-root /data
 ```
 
 Notes:
 
-- **Ports:** the dashboard and JSON API have no authentication, so compose publishes
-  `127.0.0.1:4000:4000` — host-side loopback only. Inside the container `server.host` stays
-  `0.0.0.0`, which is not a contradiction: Docker forwards the published port to the container's
-  network interface, not to its loopback, so a container-side loopback bind would be
-  unreachable. Do not widen the host side.
+- **Ports:** all lane UI/API routes require the operator credential. Compose still publishes
+  `127.0.0.1:4000:4000` (host loopback only); the daemon binds `--host 0.0.0.0` inside the container
+  so Docker can forward traffic. Use TLS and a deliberate network policy for remote access.
 - **Private repos:** `after_create` clones over HTTPS. For a private repo, forward a token into
   the container (add `env_file: .env` to the service) and use it in the clone URL. Symphony runs
   the hook itself through the container's own shell (`sh -lc`), which inherits the container
@@ -172,34 +178,53 @@ After downloading the executable for your platform from a release:
 
 ```bash
 chmod +x ./symphony-v0.0.1-macos_arm64
-./symphony-v0.0.1-macos_arm64 ./WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails
+export SYMPHONY_OPERATOR_TOKEN='replace-with-a-long-random-secret'
+./symphony-v0.0.1-macos_arm64 lanes import ./WORKFLOW.md --slug main --data-root /data
+./symphony-v0.0.1-macos_arm64 serve --data-root /data --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
 ## Configuration
 
-Pass a custom workflow file path to `./bin/symphony` when starting the service:
+The daemon reads lane configuration from `<data-root>/symphony.sqlite3`, not a positional workflow
+file. Lane workflow saves insert immutable versions; metadata-only edits do not. Activate an older
+version to roll back the pointer without rewriting history. Active attempts keep a dispatch-time
+snapshot of settings, prompt, hooks, backend/tools, version and completion policy, including retries'
+new dispatches and deferred completion helpers. Later attempts use the saved version.
+
+Required for `serve`:
+
+- `--i-understand-that-this-will-be-running-without-the-usual-guardrails`: acknowledges unattended
+  execution. Offline import/export and MCP do not require it.
+- `SYMPHONY_OPERATOR_TOKEN`: a nonblank installation-wide secret; serve refuses to start without it.
+
+Installation flags:
+
+| Flag | Meaning/default |
+| --- | --- |
+| `--data-root <dir>` | Persistent database and `log/symphony.log*`; default current directory |
+| `--port <port>` | HTTP listener; default `4000`, `0` requests an ephemeral port, valid range `0..65535` |
+| `--host <ip>` | Literal bind IP; default `127.0.0.1` |
+| `--events-retention-days <n>` | Positive event-retention days; default `30` |
+
+Use the same data root for every command targeting an installation:
 
 ```bash
-./bin/symphony /path/to/custom/WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails
+mix symphony lanes import /path/to/WORKFLOW.md --slug main --name "Main lane" --note "initial import" --data-root /data
+mix symphony lanes export main --data-root /data
 ```
 
-If no path is passed, Symphony defaults to `./WORKFLOW.md`.
+Import creates a disabled lane, or appends a version to an existing slug while preserving enabled
+state. These commands open only the database, not schedulers. They are offline tools: importing in
+another process while serve runs is not applied live until restart; use the UI/API instead.
+For import, UI creation, and API create/update, lane slugs must match `^[a-z][a-z0-9-]{1,40}$`.
+The exact slug `new` is reserved for the creation page at `/lanes/new`; use an ordinary slug such as
+`main` or `new-work`. A rejected slug produces a field error without saving a lane or version.
+Export writes the current workflow to stdout. Canonical nonempty LF-delimited front matter with a
+newline after its closing delimiter round-trips exactly; arbitrary delimiter/newline envelopes
+normalize. Raw YAML and prompt text, including leading blank lines, remain editable content.
 
-Required flag:
-
-- `--i-understand-that-this-will-be-running-without-the-usual-guardrails` — daemon mode refuses to
-  start without it; it acknowledges that Codex runs with no guardrails. Not required for
-  `--linear-mcp`, which serves the Linear MCP tools instead of starting the daemon.
-
-Optional flags:
-
-- `--logs-root` sets the directory Symphony creates `log/` under; it writes
-  `<root>/log/symphony.log*` (default root: the working directory, so `./log/symphony.log`).
-  Pass the parent, not the log directory itself, or the logs land one level deeper than intended
-- `--port` also starts the Phoenix observability service (default: disabled)
-
-The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-agent session prompt.
+`WORKFLOW.md` uses YAML front matter plus a Markdown prompt. `server.port` and `server.host`
+are retained but ignored with a warning on import/save; listener settings belong to `serve`.
 
 Minimal example:
 
@@ -295,11 +320,12 @@ codex:
   command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
 ```
 
-- If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
-- If a later reload fails, Symphony keeps running with the last known good workflow and logs the
-  reload error until the file is fixed.
-- `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
-  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+- Invalid imports/saves return field-path errors without inserting a version. An invalid stored lane
+  at boot is disabled with an operator-visible error rather than preventing other lanes from running.
+- Tracker preflight runs before runtime start and after tracker edits. Pending checks are tied to the
+  current publication generation; newer edits replace pending checks and stale results cannot start
+  or disable the lane. A current failure disables only that lane.
+- Local relative `workspace.root` values resolve against `--data-root`, not the import directory.
 
 ### Managed ticket environments
 
@@ -382,19 +408,20 @@ worker:
   ticket paths must stay strictly beneath it, never equal it, traverse a symlink outside it, or use
   the source checkout. Display-identifier changes never rename a retained managed checkout.
 
-The reload identity includes provider kind, deployment ID, tracker kind, workspace root, and every provider
+The guarded identity includes provider kind, deployment ID, tracker kind, workspace root, and every provider
 reference in the selected example (including auth-selection references). Workstations
 project/location/cluster and Kubernetes kubeconfig/context/namespace are deployment boundaries,
-not agent-controlled scheduling choices. While inventory or jobs remain, identity-changing reloads
-are rejected atomically and the last good workflow remains active. Owner death does not unlock this
+not agent-controlled scheduling choices. While inventory or jobs remain, identity-changing lane saves
+and version activations are rejected atomically and the last good workflow remains active. Owner death does not unlock this
 guard. Only authoritative empty compute-and-storage inventory with no unresolved operations permits
 release, and protection is reacquired before subsequent allocation. Mutable polling, concurrency,
 deadlines and retention are not identity changes; in-flight work retains its captured configuration.
 Existing environments retain and validate their captured template identity rather than silently
 adopting edited infrastructure.
-A surviving orchestrator can reacquire its same accepted identity after a real WorkflowStore process
-replacement. A competing owner in the same live store remains fenced, and a previously rejected
-on-disk identity migration does not become accepted merely because the store restarted.
+A LaneStore replacement stops surviving lane runtimes, releases stale guard owners, and
+rebuilds accepted identities from SQLite before restarting enabled lanes. A competing owner
+remains fenced; rejected identity edits never reach the database and cannot become accepted
+merely because the store restarted.
 
 #### Recovery, capacity, retention, and hooks
 
@@ -622,9 +649,9 @@ The helper accepts a bare API path; the shared transport always adds `fieldValid
 
 #### Managed observability API
 
-Enable the existing service with `--port` or `server.port`.
+Use the authenticated HTTP service started by `serve` (`--port`, default 4000).
 
-`GET /api/v1/state` also exposes `environment_discovery`: null for local/static execution, otherwise:
+Each lane entry in `GET /api/v1/state` exposes `environment_discovery`: null for local/static execution, otherwise:
 
 ```json
 {"provider_kind":"google_workstations","status":"blocked","error_code":"denied"}
@@ -635,7 +662,7 @@ Enable the existing service with `--port` or `server.port`.
 dashboard and terminal status show this global discovery condition even with zero environment
 entries, so paused admission is distinguishable from an idle deployment. Agent counts are unchanged.
 
-`GET /api/v1/state` adds `environments` (an array, empty with no managed entries). Each entry is an
+Each lane entry in `GET /api/v1/state` adds `environments` (an array, empty with no managed entries). Each entry is an
 explicit safe projection, never a serialized provider Record, config, SSH target, or CLI response:
 
 | Field | Meaning |
@@ -659,7 +686,7 @@ failure is not a successful cancellation, and deletion uncertainty is not proof 
 No access token, private key path, SSH argv/environment, authentication reference, private metadata,
 or provider diagnostic body is exposed.
 
-`GET /api/v1/<issue_identifier>` also finds stopped retained environments with no active agent.
+`GET /api/v1/lanes/:slug/:issue_identifier` also finds stopped retained environments with no active agent.
 It adds `environment` (the same projection, null for unmanaged issues); managed `workspace.path`
 comes from persisted environment state and `workspace.host` is the safe provider label. When no
 running/retrying/blocked agent entry exists, `status` is the environment phase string and those
@@ -717,7 +744,7 @@ passed as `--allowedTools`. `WORKFLOW.md` is the prompt itself, so pass a creden
 server through a wrapper script rather than writing it here.
 
 `linear_mcp_command` is an executable path only. Symphony appends the required
-`--linear-mcp --workflow <absolute WORKFLOW.md>` flags itself. Claude permission prompts are routed
+`--linear-mcp --workflow <private-workflow-snapshot>` flags itself. Claude permission prompts are routed
 through `--permission-prompt-tool mcp__symphony__approval_prompt`, not through the normal
 `allowed_tools` list.
 
@@ -730,7 +757,7 @@ measure usage, not billing cost. Message IDs prevent repeated content blocks fro
 twice, and the final invocation total reconciles live estimates. Each fresh Claude turn starts
 its usage baseline at zero while the worker and process totals continue accumulating.
 Activity shows bounded assistant text, tool names without arguments, and completion/failure
-outcomes. These counters are in memory: a service restart clears them.
+outcomes. Live counters reset on runtime restart; durable attempt totals remain in run history.
 
 For SSH workers, each worker must be able to resolve `claude.command` and either
 `claude.linear_mcp_command` or `symphony` on `PATH`; worker-side tracker environment variables are
@@ -748,6 +775,10 @@ The helper mode can also be run directly when debugging MCP wiring:
 ```bash
 ./bin/symphony --linear-mcp --workflow /absolute/path/to/WORKFLOW.md
 ```
+
+This escript starts a file-backed lane context only, without SQLite or a scheduler. During normal
+execution the daemon writes a private snapshot of the attempt's workflow for MCP; changing the
+current lane version cannot switch the adapter or prompt under that running attempt.
 
 ### Linear adapter profile
 
@@ -816,18 +847,18 @@ The helper mode can also be run directly when debugging MCP wiring:
   `tracker_transport`, non-200 responses to `tracker_response` (`429` is `tracker_rate_limited`),
   GraphQL/unknown payload failures to `tracker_payload`, and missing cursors to
   `tracker_pagination`; logs and tool responses carry the human-readable provider detail.
-- Startup preflight: when `team_keys` is configured, the adapter resolves the scope against Linear
-  once before the scheduling loop starts, in at most two requests regardless of how many values are
-  configured — one `teams` query carrying each team's `activeCycle` and workflow states, and, only
+- Lane preflight: when `team_keys` is configured, the adapter resolves the scope against Linear
+  before the lane starts and after tracker edits, in at most two requests per check regardless of
+  how many values are configured — one `teams` query carrying active cycles and workflow states, and, only
   when a label list is non-empty, one `issueLabels` query filtered by the configured label names.
   `activeCycle` is a single object rather than a connection, so selecting it is free against
   Linear's complexity budget; only its `id` is read, purely as a presence marker.
   Every unresolved value is reported together in one `{:linear_preflight_failed, reasons}` error
-  rather than one per boot. The one exception: when *no* configured team key resolves at all, the
+  rather than one per edit/start. The one exception: when *no* configured team key resolves at all, the
   error lists only the team keys, because every state and label would then be reported absent too
   and would bury the single actionable reason.
-  An unresolvable team key fails the boot, because that is a typo rather
-  than a state. A configured state name or label absent from *all* listed teams also fails the boot,
+  An unresolvable team key disables the lane, because that is a typo rather
+  than a state. A configured state name or label absent from *all* listed teams also disables the lane,
   because it can never match; absent from only *some* listed teams is a warning naming those teams,
   because those conjuncts are ANDed with the team conjunct and the remaining teams still match. A
   `required_labels` warning says explicitly that the named teams will contribute no issues at all,
@@ -835,13 +866,13 @@ The helper mode can also be run directly when debugging MCP wiring:
   teams match nothing for it. A team whose workflow-states page comes back full — the page size is
   pinned by a named module attribute, currently 50, because Linear's query complexity is
   multiplicative across nested connections — makes absence unprovable, so that warns instead of
-  failing. A listed team with no active cycle warns and boots: an absent active cycle is a normal
+  failing. A listed team with no active cycle warns and permits lane startup: an absent active cycle is a normal
   Linear state during sprint cooldown, and refusing to start would turn a routine condition into an
   outage. With `project_slug` as the only selector there is nothing to resolve and preflight makes
   no request — an unknown slug still fails silently, because Linear returns zero issues for it.
-- No active cycle at runtime: the poll simply returns zero issues and the instance idles. No
+- No active cycle at runtime: the poll simply returns zero issues and that lane idles. No
   per-tick probe is spent and no repeated warning is emitted, because cycles legitimately end.
-  Operator visibility is the boot warning plus the status board's `Scope:` line.
+  Operator visibility is the preflight warning plus the status board's `Scope:` line.
 - Scope on the status board: the adapter implements the optional `Tracker.scope_summary/1`
   callback, so the board renders an unconditional `Scope:` line — for example
   `teams ENG, OPS · current cycle · required labels agent`. Label names render lowercase because
@@ -909,19 +940,76 @@ The helper mode can also be run directly when debugging MCP wiring:
 
 ## Web dashboard
 
-The observability UI now runs on a minimal Phoenix stack:
+Phoenix LiveView and Bandit provide the installation's authenticated control and observability UI.
+Tracker links use only tracker-provided `http`/`https` URLs.
 
-- LiveView for the dashboard at `/`
-- JSON API for operational debugging under `/api/v1/*`
-- Bandit as the HTTP server
-- Phoenix dependency static assets for the LiveView client bootstrap
-- Tracker issue identifiers link to the tracker-provided URL when it uses `http` or `https`
+| Route | Surface |
+| --- | --- |
+| `/login` | Operator-token login |
+| `/` | Lane list, health, enable/disable controls |
+| `/lanes/new` | Create a disabled lane |
+| `/lanes/:slug` | Lane runtime, issue activity and durable run history |
+| `/lanes/:slug/edit` | Metadata, raw YAML and prompt editor with field-path errors |
+| `/lanes/:slug/versions` | Immutable version history and activation |
+| `/runs/:attempt_id` | Durable attempt details, token totals and event timeline |
+
+Browser requests without authentication redirect to `/login`; API requests return `401`.
+Login establishes an HTTP-only signed session; bearer authentication can also seed a browser session.
+Login and cookie-authenticated mutations require CSRF protection. Explicit bearer-authenticated API
+requests do not require a CSRF token. Rotating the operator token invalidates existing sessions.
+Only login and static assets are public. The token permits configuration writes, so treat it as an
+administrative credential; keep loopback binding or deploy appropriate TLS/network restrictions.
+
+```bash
+curl -H "Authorization: Bearer $SYMPHONY_OPERATOR_TOKEN" http://localhost:4000/api/v1/lanes
+curl -X PUT -H "Authorization: Bearer $SYMPHONY_OPERATOR_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"enabled":true}' \
+  http://localhost:4000/api/v1/lanes/main
+```
+
+All API routes below require authentication:
+
+| Method | Route | Result |
+| --- | --- | --- |
+| GET | `/api/v1/lanes` | `{"lanes":[...]}` metadata/runtime health list |
+| POST | `/api/v1/lanes` | Create lane, `201` with lane object |
+| PUT | `/api/v1/lanes/:slug` | Partial metadata/workflow update, `200` with lane object |
+| POST | `/api/v1/lanes/:slug/versions/:id/activate` | Activate a version of that lane, `200` |
+| GET | `/api/v1/lanes/:slug/export` | Current workflow as `text/markdown` |
+| DELETE | `/api/v1/lanes/:slug` | Soft delete, `204`; enabled/running lane returns `409` |
+| GET | `/api/v1/state` | `{"generated_at":"...","lanes":[...]}` with per-lane runtime payloads |
+| GET | `/api/v1/lanes/:slug/:issue_identifier` | Lane-scoped issue details including `"lane"` |
+| GET | `/api/v1/:issue_identifier` | First matching lane's issue details; prefer the scoped route |
+| POST | `/api/v1/refresh` | Best-effort refresh of available lanes, `202` with `{"lanes":[...]}`; `503` if none available |
+
+Create/update accepts `slug`, `name`, `enabled`, `executor`, `front_matter`, `prompt`, and `note`.
+`front_matter` is a YAML string without delimiters, `prompt` a string, `enabled` a boolean, and
+`note` a string or null. Slugs match `^[a-z][a-z0-9-]{1,40}$`; only executor `"local"` is currently
+accepted (SSH/managed worker selection still belongs inside the workflow). New lanes default disabled.
+Supplying either workflow string creates a version, even when unchanged; omitted strings retain
+their current values. Metadata-only updates create no version. Invalid input returns
+`422 {"errors":[{"path":"polling.interval_ms","message":"..."}]}`. Missing lanes return `404`.
+Soft deletion retains history and reserves the slug; disable and wait for runtime shutdown first.
+
+### Durable history and retention
+
+SQLite stores lanes, immutable lane versions, run attempts, and run events. Attempt records retain
+the dispatch-time lane version/executor, status, timing, turn count, and token totals including cached
+usage. The ordered history writer is asynchronous: scheduling never waits for database writes.
+Database errors are logged, not retried; uncommitted queued events may be lost on process failure.
+History is observability data, never the source for claims, retries, or restart scheduling.
+
+Disabling a lane stops its runtime/agents and finishes active attempts as stopped; abnormal runtime
+death finishes them as failed. Runtime crashes are isolated by lane; five abnormal deaths within
+60 seconds disable the lane with a visible error. Event retention starts one minute after boot and
+runs daily, deleting events older than `--events-retention-days` while preserving run summaries and
+workflow versions. Live views subscribe to lane/run updates.
 
 ## Project Layout
 
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
-- `WORKFLOW.md`: in-repo workflow contract used by local runs
+- `WORKFLOW.md`: example import/export contract for one lane
 - `../.codex/`: repository-local Codex skills and setup helpers
 
 ## Testing
@@ -929,6 +1017,10 @@ The observability UI now runs on a minimal Phoenix stack:
 ```bash
 make all
 ```
+
+The suite uses a shared in-memory SQLite database and runs serially. The test harness resets lane
+state between tests; `TestSupport.write_workflow_file!/2` updates the current test lane immediately,
+not a file watcher. Do not point tests at an installation's persistent data root.
 
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
 resources and launch a real `codex app-server` session:

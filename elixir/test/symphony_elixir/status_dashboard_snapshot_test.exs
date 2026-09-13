@@ -19,17 +19,17 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
   end
 
   test "snapshot fixture: idle dashboard with observability url" do
-    previous_port_override = Application.get_env(:symphony_elixir, :server_port_override)
+    previous_port_override = Application.get_env(:symphony_elixir, :server_port)
 
     on_exit(fn ->
       if is_nil(previous_port_override) do
-        Application.delete_env(:symphony_elixir, :server_port_override)
+        Application.delete_env(:symphony_elixir, :server_port)
       else
-        Application.put_env(:symphony_elixir, :server_port_override, previous_port_override)
+        Application.put_env(:symphony_elixir, :server_port, previous_port_override)
       end
     end)
 
-    Application.put_env(:symphony_elixir, :server_port_override, 4000)
+    Application.put_env(:symphony_elixir, :server_port, 4000)
 
     snapshot_data =
       {:ok,

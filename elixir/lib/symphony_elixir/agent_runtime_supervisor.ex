@@ -5,6 +5,14 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
 
   use Supervisor
 
+  alias SymphonyElixir.LaneContext
+
+  @spec child_spec(keyword()) :: Supervisor.child_spec()
+  def child_spec(opts) do
+    opts = Keyword.put_new_lazy(opts, :lane_id, &LaneContext.current!/0)
+    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :supervisor}
+  end
+
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -17,6 +25,7 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
       Keyword.get(opts, :task_supervisor_name, SymphonyElixir.TaskSupervisor)
 
     orchestrator_name = Keyword.get(opts, :orchestrator_name, SymphonyElixir.Orchestrator)
+    lane_id = Keyword.fetch!(opts, :lane_id)
 
     children = [
       Supervisor.child_spec(
@@ -24,7 +33,7 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
         id: task_supervisor_name
       ),
       Supervisor.child_spec(
-        {SymphonyElixir.Orchestrator, Keyword.merge(Keyword.take(opts, [:environment_operation_fun, :runner_fun]), name: orchestrator_name, task_supervisor: task_supervisor_name)},
+        {SymphonyElixir.Orchestrator, Keyword.merge(Keyword.take(opts, [:environment_operation_fun, :runner_fun]), lane_id: lane_id, name: orchestrator_name, task_supervisor: task_supervisor_name)},
         id: orchestrator_name
       )
     ]

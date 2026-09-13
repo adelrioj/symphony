@@ -39,7 +39,6 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       File.mkdir_p!(workspace)
       write_fake_ssh!(tmp, ssh_trace)
       write_fake_claude!(fake_claude)
-      write_claude_workflow!(fake_claude)
 
       on_exit(fn ->
         restore_env("PATH", previous_path)
@@ -56,6 +55,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       System.put_env("CLAUDE_MCP_CONFIG_CAPTURE", mcp_config_capture)
       System.put_env("CLAUDE_SECRET_CAPTURE", secret_capture)
       System.put_env(secret_name, secret_value)
+      write_claude_workflow!(fake_claude)
 
       target =
         case unquote(transport) do
@@ -116,7 +116,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       remote_workflow_path = Enum.at(remote_args, workflow_index + 1)
 
       assert remote_workflow_path =~ "/tmp/symphony-claude-workflow."
-      refute remote_workflow_path == Workflow.current_path()
+      refute remote_workflow_path == Workflow.workflow_file_path()
 
       assert_received {:claude_update, %{event: :session_started, session_id: "ssh-run"}}
 
@@ -189,7 +189,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     body
     """)
 
-    if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+    assert :ok = reload_workflow!()
     :ok
   end
 end
