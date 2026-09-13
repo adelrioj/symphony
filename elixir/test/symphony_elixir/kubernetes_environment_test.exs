@@ -1617,6 +1617,34 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert api_state()["pods"] == %{}
   end
 
+  # A failed JSON-Patch precondition is a 422 whose prose goes to stderr, leaving no JSON body to
+  # classify. Treating that as unknown poisons the record and makes the scheduler recreate and
+  # re-suspend the guest forever; a read-back proves the atomic patch never applied.
+  test "a stale parent precondition reported as prose is a retryable conflict, not unknown" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+
+    command = fn executable, args, options ->
+      if Path.basename(executable) == "kubectl" and "patch" in args and Enum.any?(args, &String.starts_with?(&1, "sandboxes.")) and
+           Process.get(:stale_parent_patch) == nil do
+        Process.put(:stale_parent_patch, true)
+        parent = api_state()["sandboxes"][record.key]
+        put_object("sandboxes", update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1)))
+        {:ok, %{status: 1, output: "The request is invalid: the server rejected our request due to an error in our request"}}
+      else
+        api_command(executable, args, options)
+      end
+    end
+
+    assert {:error, {:retryable, :kubernetes_cas_conflict}, _} =
+             Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, command))
+
+    assert api_state()["sandboxes"][record.key]["spec"]["operatingMode"] == "Suspended"
+    assert {:ok, observed} = Kubernetes.inspect(config, created, opts)
+    assert {:ok, intended} = Kubernetes.put_intent(config, observed, %{desired: :running}, opts)
+    assert intended.desired == :running
+  end
+
   test "credential rotation after local key loss retains pinned host identity" do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)

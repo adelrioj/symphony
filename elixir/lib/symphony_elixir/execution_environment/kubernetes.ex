@@ -2167,9 +2167,38 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       annotations = Map.put(get_in(sandbox, ["metadata", "annotations"]) || %{}, @state, encode_record(durable))
       patch = cas(sandbox) ++ [%{"op" => "add", "path" => "/metadata/annotations", "value" => annotations}] ++ extra
 
-      with {:ok, updated} <- api(config, :patch, object_path(config, "sandboxes", sandbox), patch, opts),
-           do: {:ok, bind_parent(durable, updated)}
+      case api(config, :patch, object_path(config, "sandboxes", sandbox), patch, opts) do
+        {:ok, updated} -> {:ok, bind_parent(durable, updated)}
+        error -> confirm_persist(config, durable, sandbox, annotations, extra, error, opts)
+      end
     end
+  end
+
+  # kubectl reports a failed JSON-Patch precondition as 422 prose with an empty body, so the
+  # transport cannot classify it and conservatively returns unknown. Read back before believing
+  # that: our own exact state annotation proves a lost response, and a parent that moved without
+  # it proves the atomic patch never applied. Anything less certain stays unknown.
+  defp confirm_persist(config, durable, sandbox, annotations, extra, error, opts) do
+    case Client.lookup(config, collection(config, "sandboxes"), name(sandbox), opts) do
+      {:ok, observed} when is_map(observed) ->
+        cond do
+          uid(observed) != uid(sandbox) -> error
+          persisted_intent?(observed, annotations, extra) -> {:ok, bind_parent(durable, observed)}
+          rv(observed) != rv(sandbox) -> {:error, {:retryable, :kubernetes_cas_conflict}}
+          true -> error
+        end
+
+      _ ->
+        error
+    end
+  end
+
+  defp persisted_intent?(observed, annotations, extra) do
+    get_in(observed, ["metadata", "annotations", @state]) == annotations[@state] and
+      Enum.all?(extra, fn
+        %{"op" => "add", "path" => path, "value" => value} -> get_in(observed, String.split(path, "/", trim: true)) == value
+        _ -> false
+      end)
   end
 
   defp durable_metadata(metadata), do: Map.drop(metadata, ["client_key_directory", "client_key_lease"])
