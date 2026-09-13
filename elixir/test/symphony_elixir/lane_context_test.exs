@@ -3,6 +3,7 @@ defmodule SymphonyElixir.LaneContextTest do
 
   alias SymphonyElixir.LaneContext
   alias SymphonyElixir.LaneContext.NoLaneContext
+  alias SymphonyElixir.LaneStore.Entry
 
   test "a direct tag resolves and can be replaced in the tagging process" do
     assert :ok = LaneContext.put(7)
@@ -30,19 +31,20 @@ defmodule SymphonyElixir.LaneContextTest do
 
   test "supervised children and nested tasks resolve past untagged callers" do
     supervisor = start_supervised!(Task.Supervisor)
-    LaneContext.put(11)
+    snapshot = %Entry{lane_id: 11, version_id: 1, prompt: "dispatch version"}
+    LaneContext.install(snapshot)
 
     task =
       Task.Supervisor.async_nolink(supervisor, fn ->
-        inner = Task.async(fn -> LaneContext.current!() end) |> Task.await()
+        inner = Task.async(fn -> {LaneContext.current!(), LaneContext.capture()} end) |> Task.await()
         {LaneContext.current!(), inner}
       end)
 
-    assert {11, 11} = Task.await(task)
+    assert {11, {11, {:ok, ^snapshot}}} = Task.await(task)
   end
 
   test "the nearest tag wins and nested task overrides do not retag their ancestors" do
-    LaneContext.put(11)
+    LaneContext.install(%Entry{lane_id: 11, version_id: 1, prompt: "ancestor dispatch"})
 
     task =
       Task.async(fn ->
@@ -50,7 +52,7 @@ defmodule SymphonyElixir.LaneContextTest do
 
         nested =
           Task.async(fn ->
-            inherited = LaneContext.current!()
+            inherited = {LaneContext.current!(), LaneContext.snapshot()}
             LaneContext.put(33)
             descendant = Task.async(fn -> LaneContext.current!() end) |> Task.await()
             {inherited, LaneContext.current!(), descendant}
@@ -60,8 +62,9 @@ defmodule SymphonyElixir.LaneContextTest do
         {nested, LaneContext.current!()}
       end)
 
-    assert {{22, 33, 33}, 22} = Task.await(task)
+    assert {{{22, :error}, 33, 33}, 22} = Task.await(task)
     assert 11 = LaneContext.current!()
+    assert {:ok, %{lane_id: 11, prompt: "ancestor dispatch"}} = LaneContext.snapshot()
   end
 
   test "two active lanes and their nested tasks remain isolated under one supervisor" do
@@ -94,16 +97,17 @@ defmodule SymphonyElixir.LaneContextTest do
   test "a surviving task skips a dead tagged caller and resolves the next live tag" do
     supervisor = start_supervised!(Task.Supervisor)
     parent = self()
-    LaneContext.put(11)
+    snapshot = %Entry{lane_id: 11, version_id: 1, prompt: "surviving dispatch"}
+    LaneContext.install(snapshot)
 
     caller =
       Task.Supervisor.async_nolink(supervisor, fn ->
-        LaneContext.put(22)
+        LaneContext.install(%Entry{lane_id: 22, version_id: 2, prompt: "expired dispatch"})
 
         {:ok, reader} =
           Task.Supervisor.start_child(supervisor, fn ->
             receive do
-              :resolve -> send(parent, {:resolved, LaneContext.current()})
+              :resolve -> send(parent, {:resolved, LaneContext.current(), LaneContext.capture()})
             end
           end)
 
@@ -118,7 +122,7 @@ defmodule SymphonyElixir.LaneContextTest do
     assert_receive {:DOWN, ^monitor, :process, _, :normal}, 1_000
     send(reader, :resolve)
 
-    assert_receive {:resolved, {:ok, 11}}, 1_000
+    assert_receive {:resolved, {:ok, 11}, {:ok, ^snapshot}}, 1_000
   end
 
   test "a surviving task reports missing context when its only tagged caller has died" do
@@ -127,12 +131,13 @@ defmodule SymphonyElixir.LaneContextTest do
 
     caller =
       Task.Supervisor.async_nolink(supervisor, fn ->
-        LaneContext.put(22)
+        LaneContext.install(%Entry{lane_id: 22, version_id: 2, prompt: "expired dispatch"})
 
         {:ok, reader} =
           Task.Supervisor.start_child(supervisor, fn ->
             receive do
-              :resolve -> send(parent, {:resolved, LaneContext.current()})
+              :resolve ->
+                send(parent, {:resolved, LaneContext.current(), LaneContext.snapshot(), LaneContext.capture()})
             end
           end)
 
@@ -147,7 +152,7 @@ defmodule SymphonyElixir.LaneContextTest do
     assert_receive {:DOWN, ^monitor, :process, _, :normal}, 1_000
     send(reader, :resolve)
 
-    assert_receive {:resolved, :error}, 1_000
+    assert_receive {:resolved, :error, :error, {:error, :no_lane_context}}, 1_000
   end
 
   test "missing context raises an actionable error identifying the calling module and function" do
@@ -173,9 +178,9 @@ defmodule SymphonyElixir.LaneContextTest do
     parent = self()
     LaneContext.put(11)
 
-    spawn_link(fn -> send(parent, {:resolved, LaneContext.current()}) end)
+    spawn_link(fn -> send(parent, {:resolved, LaneContext.current(), LaneContext.snapshot()}) end)
 
-    assert_receive {:resolved, :error}, 1_000
+    assert_receive {:resolved, :error, :error}, 1_000
   end
 
   defp require_lane_context do
