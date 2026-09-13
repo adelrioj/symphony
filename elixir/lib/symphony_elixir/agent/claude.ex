@@ -50,7 +50,7 @@ defmodule SymphonyElixir.Agent.Claude do
     with :ok <- require_context(context),
          {:ok, expanded_workspace} <- workspace_cwd(workspace, context),
          {:ok, tracker_env} <- capture_tracker_env(secret_environment_names, env_reader),
-         {:ok, workflow_snapshot} <- File.read(Workflow.current_path()),
+         {:ok, workflow_snapshot} <- Workflow.current_content(),
          {:ok, parent_dir} <- mcp_config_dir(expanded_workspace),
          :ok <- ensure_private_directory(parent_dir),
          {:ok, session_dir} <- create_private_session_directory(parent_dir) do

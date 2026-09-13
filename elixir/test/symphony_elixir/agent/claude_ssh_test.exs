@@ -116,7 +116,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       remote_workflow_path = Enum.at(remote_args, workflow_index + 1)
 
       assert remote_workflow_path =~ "/tmp/symphony-claude-workflow."
-      refute remote_workflow_path == Workflow.current_path()
+      refute remote_workflow_path == Workflow.workflow_file_path()
 
       assert_received {:claude_update, %{event: :session_started, session_id: "ssh-run"}}
 
@@ -189,7 +189,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     body
     """)
 
-    if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+    assert :ok = reload_workflow!()
     :ok
   end
 end

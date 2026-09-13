@@ -164,7 +164,7 @@ defmodule SymphonyElixir.Asana.LiveE2ETest do
       """
     )
 
-    assert :ok = SymphonyElixir.WorkflowStore.force_reload()
+    assert :ok = reload_workflow!()
   end
 
   defp live_prompt(project_gid, done_section_gid, expected_comment) do

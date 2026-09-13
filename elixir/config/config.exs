@@ -2,6 +2,8 @@ import Config
 
 config :phoenix, :json_library, Jason
 
+config :logger, :default_formatter, metadata: [:issue_id, :issue_identifier, :session_id, :attempt_id]
+
 config :symphony_elixir, ecto_repos: [SymphonyElixir.Repo]
 
 config :symphony_elixir, SymphonyElixirWeb.Endpoint,

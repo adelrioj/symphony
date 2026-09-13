@@ -17,7 +17,6 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   alias SymphonyElixir.SSH
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Workflow
-  alias SymphonyElixir.WorkflowStore
 
   @moduletag :live_e2e
   @moduletag timeout: 1_800_000
@@ -395,7 +394,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
 
     raw = put_in(ctx.raw, ["hooks", "after_create"], get_in(ctx.raw, ["hooks", "after_create"]) <> "\n" <> install)
     replace_private!(ctx.workflow_path, workflow_document(raw))
-    require!(WorkflowStore.force_reload() == :ok, "qualification_workflow_reload_rejected")
+    require!(SymphonyElixir.TestSupport.reload_workflow!() == :ok, "qualification_workflow_reload_rejected")
   end
 
   defp workload_script(run_id) do
@@ -456,6 +455,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     end
 
     runtime_opts = [
+      lane_id: SymphonyElixir.LaneContext.current!(),
       name: @runtime,
       task_supervisor_name: @worker_tasks,
       orchestrator_name: @orchestrator,
@@ -1015,7 +1015,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
 
     raw = put_in(document.config, ["worker", "environment", "terminal_retention_ms"], milliseconds)
     replace_private!(ctx.workflow_path, workflow_document(raw))
-    require!(WorkflowStore.force_reload() == :ok, "retention_reload_rejected")
+    require!(SymphonyElixir.TestSupport.reload_workflow!() == :ok, "retention_reload_rejected")
     if Process.whereis(@orchestrator), do: refresh()
   end
 

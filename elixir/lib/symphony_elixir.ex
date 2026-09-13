@@ -8,7 +8,7 @@ defmodule SymphonyElixir do
   """
   @spec start_link() :: Supervisor.on_start()
   def start_link do
-    SymphonyElixir.AgentRuntimeSupervisor.start_link([])
+    SymphonyElixir.AgentRuntimeSupervisor.start_link(lane_id: SymphonyElixir.LaneContext.current!())
   end
 end
 
@@ -38,15 +38,17 @@ defmodule SymphonyElixir.Application do
     children = [
       {Phoenix.PubSub, name: SymphonyElixir.PubSub},
       SymphonyElixir.Repo,
-      SymphonyElixir.WorkflowStore,
-      SymphonyElixir.AgentRuntimeSupervisor,
+      SymphonyElixir.Runs,
+      SymphonyElixir.LaneRegistry,
+      SymphonyElixir.LaneSupervisor,
+      SymphonyElixir.LaneStore,
       SymphonyElixir.HttpServer,
       SymphonyElixir.StatusDashboard
     ]
 
     Supervisor.start_link(
       children,
-      strategy: :one_for_one,
+      strategy: :rest_for_one,
       name: SymphonyElixir.Supervisor
     )
   end

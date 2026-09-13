@@ -602,8 +602,6 @@ defmodule SymphonyElixir.Jira.AdapterTest do
       """
     )
 
-    if Process.whereis(SymphonyElixir.WorkflowStore) do
-      assert :ok = SymphonyElixir.WorkflowStore.force_reload()
-    end
+    assert :ok = reload_workflow!()
   end
 end

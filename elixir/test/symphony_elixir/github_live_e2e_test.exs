@@ -128,7 +128,7 @@ defmodule SymphonyElixir.GitHub.LiveE2ETest do
       """
     )
 
-    assert :ok = SymphonyElixir.WorkflowStore.force_reload()
+    assert :ok = reload_workflow!()
   end
 
   defp live_prompt(repo, expected_comment) do

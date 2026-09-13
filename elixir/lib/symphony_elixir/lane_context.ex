@@ -9,6 +9,7 @@ defmodule SymphonyElixir.LaneContext do
   """
 
   @key :symphony_lane_id
+  @snapshot_key :symphony_lane_snapshot
 
   defmodule NoLaneContext do
     @moduledoc "Raised when neither a process nor its live task callers have a lane tag."
@@ -18,6 +19,7 @@ defmodule SymphonyElixir.LaneContext do
   @doc "Tags the current process with its lane, replacing any previous tag."
   @spec put(term()) :: :ok
   def put(lane_id) do
+    Process.delete(@snapshot_key)
     Process.put(@key, lane_id)
     :ok
   end
@@ -52,6 +54,75 @@ defmodule SymphonyElixir.LaneContext do
           message:
             "no lane context in #{inspect(self())} for #{inspect(module)}.#{function}/#{arity}: " <>
               "call SymphonyElixir.LaneContext.put/1 in this process or start it from a lane's Task.Supervisor"
+    end
+  end
+
+  @doc "Captures the complete immutable lane entry before an attempt is spawned."
+  @spec capture() :: {:ok, SymphonyElixir.LaneStore.Entry.t()} | {:error, term()}
+  def capture do
+    case current() do
+      {:ok, lane_id} -> capture_lane(lane_id)
+      :error -> {:error, :no_lane_context}
+    end
+  end
+
+  @doc "Installs a dispatch snapshot in an attempt process."
+  @spec install(SymphonyElixir.LaneStore.Entry.t()) :: :ok
+  def install(%{lane_id: lane_id} = entry) do
+    put(lane_id)
+    Process.put(@snapshot_key, entry)
+    :ok
+  end
+
+  @doc "Returns this process's snapshot or its nearest tagged task caller's snapshot."
+  @spec snapshot() :: {:ok, SymphonyElixir.LaneStore.Entry.t()} | :error
+  def snapshot do
+    case Process.get(@snapshot_key) do
+      nil ->
+        if not is_nil(Process.get(@key)) or @key in Process.get_keys(nil) do
+          :error
+        else
+          snapshot_from_callers(Process.get(:"$callers", []))
+        end
+
+      entry ->
+        {:ok, entry}
+    end
+  end
+
+  defp capture_lane(lane_id) do
+    case snapshot() do
+      {:ok, entry} -> {:ok, entry}
+      :error -> lookup_lane(lane_id)
+    end
+  end
+
+  defp lookup_lane(lane_id) do
+    case SymphonyElixir.LaneStore.lookup(lane_id) do
+      {:ok, entry} -> {:ok, entry}
+      :error -> {:error, {:lane_unavailable, lane_id}}
+    end
+  end
+
+  defp snapshot_from_callers([]), do: :error
+
+  defp snapshot_from_callers([pid | rest]) do
+    case Process.info(pid, :dictionary) do
+      {:dictionary, dictionary} ->
+        snapshot_from_dictionary(dictionary, rest)
+
+      nil ->
+        snapshot_from_callers(rest)
+    end
+  end
+
+  defp snapshot_from_dictionary(dictionary, rest) do
+    case List.keyfind(dictionary, @snapshot_key, 0) do
+      {@snapshot_key, entry} ->
+        {:ok, entry}
+
+      nil ->
+        if List.keymember?(dictionary, @key, 0), do: :error, else: snapshot_from_callers(rest)
     end
   end
 

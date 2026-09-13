@@ -5,6 +5,11 @@ defmodule SymphonyElixir.WorkflowTest do
 
   @fixtures Path.expand("../fixtures/lanes", __DIR__)
 
+  test "loading a missing workflow returns its path and filesystem reason" do
+    path = Path.join(System.tmp_dir!(), "missing-workflow-#{System.unique_integer([:positive, :monotonic])}.md")
+    assert {:error, {:missing_workflow_file, ^path, :enoent}} = Workflow.load(path)
+  end
+
   test "split and render preserve the checked-in workflow bytes" do
     for file <- ~w(client-template.md example.md) do
       content = File.read!(Path.join(@fixtures, file))

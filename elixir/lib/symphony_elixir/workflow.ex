@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Workflow do
   Loads workflow configuration and prompt from WORKFLOW.md.
   """
 
-  alias SymphonyElixir.WorkflowStore
+  alias SymphonyElixir.LaneContext
 
   @workflow_file_name "WORKFLOW.md"
 
@@ -13,23 +13,15 @@ defmodule SymphonyElixir.Workflow do
       Path.join(File.cwd!(), @workflow_file_name)
   end
 
-  @spec current_path() :: Path.t()
-  def current_path do
-    workflow_file_path()
-    |> Path.expand()
-  end
-
   @spec set_workflow_file_path(Path.t()) :: :ok
   def set_workflow_file_path(path) when is_binary(path) do
     Application.put_env(:symphony_elixir, :workflow_file_path, path)
-    maybe_reload_store()
     :ok
   end
 
   @spec clear_workflow_file_path() :: :ok
   def clear_workflow_file_path do
     Application.delete_env(:symphony_elixir, :workflow_file_path)
-    maybe_reload_store()
     :ok
   end
 
@@ -41,12 +33,23 @@ defmodule SymphonyElixir.Workflow do
 
   @spec current() :: {:ok, loaded_workflow()} | {:error, term()}
   def current do
-    case Process.whereis(WorkflowStore) do
-      pid when is_pid(pid) ->
-        WorkflowStore.current()
+    with {:ok, entry} <- LaneContext.capture() do
+      case entry.workflow do
+        nil -> {:error, {:lane_invalid, entry.error}}
+        workflow -> {:ok, workflow}
+      end
+    end
+  end
 
-      _ ->
-        load()
+  @doc "Renders the pinned attempt workflow, or the current lane version outside an attempt."
+  @spec current_content() :: {:ok, String.t()} | {:error, term()}
+  def current_content do
+    with {:ok, entry} <- LaneContext.capture() do
+      if is_binary(entry.front_matter) do
+        {:ok, render(entry.front_matter, entry.prompt)}
+      else
+        {:error, {:lane_invalid, entry.error}}
+      end
     end
   end
 
@@ -139,7 +142,6 @@ defmodule SymphonyElixir.Workflow do
   end
 
   defp front_matter_yaml_to_map(yaml) when is_binary(yaml) do
-
     if String.trim(yaml) == "" do
       {:ok, %{}}
     else
@@ -149,13 +151,5 @@ defmodule SymphonyElixir.Workflow do
         {:error, reason} -> {:error, reason}
       end
     end
-  end
-
-  defp maybe_reload_store do
-    if Process.whereis(WorkflowStore) do
-      _ = WorkflowStore.force_reload()
-    end
-
-    :ok
   end
 end
