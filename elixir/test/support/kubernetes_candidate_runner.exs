@@ -162,7 +162,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     |> Map.put("tracker", %{"kind" => "memory", "active_states" => ["Candidate"], "terminal_states" => ["Done"]})
     |> Map.put("hooks", %{})
     |> Map.put("polling", %{"interval_ms" => 1_000})
-    |> Map.put("agent", %{"max_concurrent_agents" => 1, "backend" => "codex"})
+    |> Map.put("agent", %{"max_concurrent_agents" => 1, "backend" => "codex", "in_progress_state" => ""})
     |> update_in(["worker", "environment"], &Map.merge(&1, %{"deployment_id" => deployment, "terminal_retention_ms" => 0}))
   end
 
