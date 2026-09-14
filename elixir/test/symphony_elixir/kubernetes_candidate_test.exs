@@ -48,7 +48,8 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
       "timeout_ms" => 1_000,
       "cleanup_timeout_ms" => 1_000,
       "runner_sha256" => Candidate.sha256(File.read!(Path.expand("../support/kubernetes_candidate_runner.exs", __DIR__))),
-      "negative_control_paths" => ["/api/v1/namespaces/unrelated"]
+      "negative_control_paths" => ["/api/v1/namespaces/unrelated"],
+      "worker_count" => 1
     }
     input_path = Path.join(ctx.root, "input.json")
     File.write!(input_path, Jason.encode!(input))

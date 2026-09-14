@@ -16,7 +16,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
   @runtime __MODULE__.Runtime
   @scheduler __MODULE__.Scheduler
   @tasks __MODULE__.Tasks
-  @input_fields ~w(authorization mode workflow_path output_path pins timeout_ms cleanup_timeout_ms runner_sha256 negative_control_paths)
+  @input_fields ~w(authorization mode workflow_path output_path pins timeout_ms cleanup_timeout_ms runner_sha256 negative_control_paths worker_count)
   @source __ENV__.file
   @support_sha256 Map.new(["managed_environment_fixture/provider.exs", "managed_environment_fixture/control.exs", "kubernetes_candidate_evidence.exs"], fn file ->
                     bytes = File.read!(Path.join(__DIR__, file))
@@ -40,6 +40,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
          true <- is_map(input["pins"]),
          true <- Enum.all?(~w(workflow_path output_path), &(is_binary(input[&1]) and Path.type(input[&1]) == :absolute)),
          true <- Enum.all?(~w(timeout_ms cleanup_timeout_ms), &(is_integer(input[&1]) and input[&1] in 1_000..900_000)),
+         true <- is_integer(input["worker_count"]) and input["worker_count"] in 1..4,
          true <- is_list(input["negative_control_paths"]) and input["negative_control_paths"] != [],
          true <- Enum.all?(input["negative_control_paths"], &is_binary/1),
          true <- Candidate.sha256(File.read!(@source)) == input["runner_sha256"] do
@@ -80,7 +81,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       # Memory tracker state is application-global; never share this harness with another lane.
       true = LaneStore.list() == []
       {:ok, document} = Workflow.load(input["workflow_path"])
-      raw = candidate_workflow(document.config, input["pins"]["deployment_id"])
+      raw = candidate_workflow(document.config, input["pins"]["deployment_id"], input["worker_count"])
       :ok = File.write(workflow, "---\n" <> Jason.encode!(raw) <> "\n---\nNon-model candidate lifecycle probe.\n", [:exclusive])
       File.chmod!(workflow, 0o600)
       {:ok, lane, _warnings} = Lanes.import_file(workflow, slug: "candidate")
@@ -157,17 +158,26 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     end
   end
 
-  defp candidate_workflow(raw, deployment) do
+  defp candidate_workflow(raw, deployment, workers) do
     raw
     |> Map.put("tracker", %{"kind" => "memory", "active_states" => ["Candidate"], "terminal_states" => ["Done"]})
     |> Map.put("hooks", %{})
     |> Map.put("polling", %{"interval_ms" => 1_000})
-    |> Map.put("agent", %{"max_concurrent_agents" => 1, "backend" => "codex", "in_progress_state" => ""})
+    |> Map.put("agent", %{"max_concurrent_agents" => workers, "backend" => "codex", "in_progress_state" => ""})
     |> update_in(["worker", "environment"], &Map.merge(&1, %{"deployment_id" => deployment, "terminal_retention_ms" => 0}))
   end
 
-  defp issues(%{"mode" => "run", "pins" => pins}, _) do
-    [%Issue{id: pins["deployment_id"] <> "-probe", identifier: "CANDIDATE-1", title: "Non-model candidate probe", state: "Candidate", priority: 1, dispatchable: true}]
+  defp issues(%{"mode" => "run", "pins" => pins, "worker_count" => workers}, _) do
+    for index <- 1..workers do
+      %Issue{
+        id: pins["deployment_id"] <> "-probe-" <> Integer.to_string(index),
+        identifier: "CANDIDATE-" <> Integer.to_string(index),
+        title: "Non-model candidate probe",
+        state: "Candidate",
+        priority: index,
+        dispatchable: true
+      }
+    end
   end
 
   defp issues(_, records) do
