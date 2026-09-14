@@ -1239,6 +1239,25 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert get_in(api_state(), ["pods", "se-ticket", "status", "phase"]) == "Running"
   end
 
+  # Each adapter binds its own template identity onto the scheduler's bare record. Without it
+  # ExecutionContext.managed/3 raises and preparation dies as {:invalid, :managed_execution_context},
+  # so the environment is allocated and then never usable — no agent can ever be dispatched to it.
+  test "a started environment carries the template identity a managed context requires" do
+    {config, record, opts} = api_fixture()
+    # Orchestrator.managed_record/2 builds records with template_identity: nil and leaves each
+    # adapter to bind its own.
+    bare = %{record | template_identity: nil}
+
+    {:ok, created} = Kubernetes.ensure(config, bare, opts)
+    assert created.template_identity == "template-uid"
+
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, started} = Kubernetes.start(config, intended, opts)
+    assert started.template_identity == "template-uid"
+    assert {:ok, [discovered]} = Kubernetes.discover(config, opts)
+    assert discovered.template_identity == "template-uid"
+  end
+
   # The Pod and its journal entry become visible independently. Aborting on the gap deletes the
   # Pod, the controller recreates it, and the environment churns through its bounded journal
   # without ever starting — observed live as 59 Pod operations for one environment.

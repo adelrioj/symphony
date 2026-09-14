@@ -249,6 +249,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     result =
       with {:ok, q} <- qualification(config, opts),
+           record = bind_template_identity(record, q),
            {:ok, existing} <- Client.lookup(config, collection(config, "sandboxes"), record.key, opts),
            {:ok, objects} <- inventory(config, opts) do
         ensure_observed(config, record, existing, objects, q, opts)
@@ -256,6 +257,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     result(record, result)
   end
+
+  # The scheduler creates records with no template identity and each adapter binds its own; the
+  # Kubernetes adapter only ever validated it. Without a binding, ExecutionContext.managed/3
+  # raises and preparation dies as {:invalid, :managed_execution_context}, so an environment is
+  # allocated and then never usable. Bind on entry so the durable copy written to the guard and
+  # every later identity comparison see the same value.
+  defp bind_template_identity(%Record{template_identity: nil} = record, q), do: %{record | template_identity: q["template_uid"]}
+  defp bind_template_identity(record, _q), do: record
 
   defp ensure_observed(config, record, existing, objects, q, opts) do
     cond do
