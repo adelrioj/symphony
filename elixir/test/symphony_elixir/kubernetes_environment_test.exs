@@ -1239,6 +1239,36 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert get_in(api_state(), ["pods", "se-ticket", "status", "phase"]) == "Running"
   end
 
+  # The Pod and its journal entry become visible independently. Aborting on the gap deletes the
+  # Pod, the controller recreates it, and the environment churns through its bounded journal
+  # without ever starting — observed live as 59 Pod operations for one environment.
+  test "a Pod observed before its journal entry is awaited rather than destroyed" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+
+    hide = fn exe, args, options ->
+      result = api_command(exe, args, options)
+      raw = if "get" in args, do: arg(args, "--raw"), else: nil
+      hidden = Process.get(:hidden_journal, 0)
+
+      pod? = is_map(api_state()["pods"]["se-ticket"])
+
+      if Path.basename(exe) == "kubectl" and is_binary(raw) and String.contains?(raw, "/sandboxes") and pod? and hidden < 1 do
+        Process.put(:hidden_journal, hidden + 1)
+        {:ok, %{status: 0, output: body}} = result
+        {:ok, %{status: 0, output: Jason.encode!(update_in(Jason.decode!(body), ["items"], fn items -> Enum.map(items, &strip_pod_operations/1) end))}}
+      else
+        result
+      end
+    end
+
+    assert {:ok, started} = Kubernetes.start(config, intended, Keyword.put(opts, :command_fun, hide))
+    assert started.metadata["authorized_pod_uids"] == ["pod-uid"]
+    assert Process.get(:pod_incarnation) == 1
+    assert get_in(api_state(), ["pods", "se-ticket", "status", "phase"]) == "Running"
+  end
+
   # A WaitForFirstConsumer claim that never binds has no PV whose deletion could be proven, so
   # the evidence path can never discharge it and the identity would be retained forever. Absence
   # of both the claim and any PV referencing it is the proof that no storage was provisioned.
@@ -2714,6 +2744,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     Map.update(object, "status", %{"conditions" => [condition]}, &Map.put(&1, "conditions", [condition]))
   end
 
+  defp strip_pod_operations(sandbox) do
+    if get_in(sandbox, ["status", "creationJournal", "operations"]) do
+      update_in(sandbox, ["status", "creationJournal", "operations"], &Enum.reject(&1, fn op -> op["resource"] == "pods" end))
+    else
+      sandbox
+    end
+  end
+
   defp late_missing_pod_after_close(record, storage_failure) do
     fn exe, args, options ->
       response = api_command(exe, args, options)
@@ -2721,6 +2759,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       if "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes") and
            guard_data(record)["phase"] == "Closing" and Process.get(:late_missing_pod) != true do
         Process.put(:late_missing_pod, true)
+
         parent = api_state()["sandboxes"][record.key]
         inject_missing_storage(storage_failure, parent)
         create_pod(api_state()["sandboxes"][record.key])

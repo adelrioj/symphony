@@ -1492,7 +1492,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
         {:error, {:unknown, :kubernetes_child_ownership_changed}}
 
       not journaled_pod?(sandbox, pod) ->
-        {:error, {:unknown, :kubernetes_unjournaled_child}}
+        reread_journaled_pod(config, record, sandbox, pod, q, opts)
 
       uid(pod) in authorized and not gated?(pod) ->
         {:ok, normalize(record, sandbox, [pod], evidence)}
@@ -1505,6 +1505,23 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
       true ->
         release(config, record, sandbox, pod, q, opts)
+    end
+  end
+
+  # Authorization runs against a parent snapshot taken before the Pod was observed, so a Pod
+  # issued between the two reads looks unjournaled. Aborting on that deletes the Pod, the
+  # controller recreates it, and the environment churns through its bounded journal without ever
+  # starting — observed live as 59 Pod operations for one environment. Re-read the parent
+  # authoritatively once: the protocol commits the entry before the POST, so a genuinely issued
+  # Pod appears. A Pod still missing from the fresh journal is denied exactly as before, which
+  # keeps forged and uncommitted attribution decisively rejected rather than merely delayed.
+  defp reread_journaled_pod(config, record, _sandbox, pod, q, opts) do
+    with {:ok, current} <- fetch_parent(config, record, opts),
+         true <- journaled_pod?(current, pod) do
+      authorize_pod(config, record, current, pod, q, opts)
+    else
+      false -> {:error, {:unknown, :kubernetes_unjournaled_child}}
+      error -> error
     end
   end
 
