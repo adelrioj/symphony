@@ -15,6 +15,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @pv_finalizer "external-provisioner.volume.kubernetes.io/finalizer"
   @children ["pods", "persistentvolumeclaims", "services", "secrets"]
   @protocol "symphony-create-drain-v1"
+  @persist_attempts 3
 
   @stock_baseline %{
     release: "v1.0.1",
@@ -1570,7 +1571,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
          {:ok, saved} <- persist(config, record, sandbox, [], opts),
          {:ok, current} <- fetch_parent(config, saved, opts),
          {:ok, observed} <- observe_guard(config, saved, current, opts),
-         true <- rv(current) == saved.version and running_intent?(observed, current),
+         # Our own pending start, read back from the guard, is what proves nobody rewrote
+         # the record between persisting it and releasing the gate. Requiring the parent's
+         # resourceVersion to be untouched proved nothing extra and could never hold while
+         # the controller reconciles: it writes status and journal revisions continuously.
+         true <- observed.pending == saved.pending and running_intent?(observed, current),
          :ok <- Guard.open(config, saved, opts),
          :ok <- safe_live_pod(pod, q),
          index when is_integer(index) <- Enum.find_index(get_in(pod, ["spec", "schedulingGates"]) || [], &(&1["name"] == @gate)),
@@ -2219,13 +2224,41 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     with {:ok, guard} <- Guard.save(config, record, encode_record(record), opts),
          {:ok, durable} <- decode_guard_record(guard.data, config) do
       durable = %{durable | metadata: Map.merge(durable.metadata, Map.take(record.metadata, ["client_key_directory", "client_key_lease"]))}
-      annotations = Map.put(get_in(sandbox, ["metadata", "annotations"]) || %{}, @state, encode_record(durable))
-      patch = cas(sandbox) ++ [%{"op" => "add", "path" => "/metadata/annotations", "value" => annotations}] ++ extra
+      apply_state(config, durable, sandbox, extra, opts, @persist_attempts)
+    end
+  end
 
-      case api(config, :patch, object_path(config, "sandboxes", sandbox), patch, opts) do
-        {:ok, updated} -> {:ok, bind_parent(durable, updated)}
-        error -> confirm_persist(config, durable, sandbox, annotations, extra, error, opts)
-      end
+  defp apply_state(config, durable, sandbox, extra, opts, attempts) do
+    annotations = Map.put(get_in(sandbox, ["metadata", "annotations"]) || %{}, @state, encode_record(durable))
+    patch = cas(sandbox) ++ [%{"op" => "add", "path" => "/metadata/annotations", "value" => annotations}] ++ extra
+
+    case api(config, :patch, object_path(config, "sandboxes", sandbox), patch, opts) do
+      {:ok, updated} ->
+        {:ok, bind_parent(durable, updated)}
+
+      error ->
+        case confirm_persist(config, durable, sandbox, annotations, extra, error, opts) do
+          {:error, {:retryable, :kubernetes_cas_conflict}} when attempts > 1 ->
+            retry_state(config, durable, sandbox, extra, opts, attempts)
+
+          result ->
+            result
+        end
+    end
+  end
+
+  # The controller writes status and journal revisions continuously, so the parent's
+  # resourceVersion moves under every write of ours. That is not a competing record
+  # change: re-read, and when our own state annotation is still the one we based this
+  # write on, re-apply against the fresh parent. A moved annotation means another
+  # writer owns the record, and that conflict is still surfaced to the caller.
+  defp retry_state(config, durable, sandbox, extra, opts, attempts) do
+    with {:ok, observed} when is_map(observed) <- Client.lookup(config, collection(config, "sandboxes"), name(sandbox), opts),
+         true <- uid(observed) == uid(sandbox),
+         true <- get_in(observed, ["metadata", "annotations", @state]) == get_in(sandbox, ["metadata", "annotations", @state]) do
+      apply_state(config, durable, observed, extra, opts, attempts - 1)
+    else
+      _ -> {:error, {:retryable, :kubernetes_cas_conflict}}
     end
   end
 

@@ -1707,25 +1707,94 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)
 
-    command = fn executable, args, options ->
-      if Path.basename(executable) == "kubectl" and "patch" in args and Enum.any?(args, &String.starts_with?(&1, "sandboxes.")) and
-           Process.get(:stale_parent_patch) == nil do
-        Process.put(:stale_parent_patch, true)
-        parent = api_state()["sandboxes"][record.key]
-        put_object("sandboxes", update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1)))
-        {:ok, %{status: 1, output: "The request is invalid: the server rejected our request due to an error in our request"}}
-      else
-        api_command(executable, args, options)
-      end
-    end
-
     assert {:error, {:retryable, :kubernetes_cas_conflict}, _} =
-             Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, command))
+             Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, stale_parent_patch(record)))
 
     assert api_state()["sandboxes"][record.key]["spec"]["operatingMode"] == "Suspended"
     assert {:ok, observed} = Kubernetes.inspect(config, created, opts)
     assert {:ok, intended} = Kubernetes.put_intent(config, observed, %{desired: :running}, opts)
     assert intended.desired == :running
+  end
+
+  # The controller writes status and journal revisions continuously, so the parent's
+  # resourceVersion moves under nearly every write. Surfacing that as a conflict failed
+  # preparation outright and the environment was allocated but never usable.
+  test "a parent that only moved underneath us is re-read and the write re-applied" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    once = stale_parent_patch(record, once: true)
+
+    assert {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, once))
+    assert intended.desired == :running
+    assert {:ok, observed} = Kubernetes.inspect(config, intended, opts)
+    assert observed.desired == :running
+  end
+
+  test "a parent whose record moved is a real conflict and is never overwritten" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    competing = stale_parent_patch(record, once: true, record_annotation: "competing-writer")
+
+    assert {:error, {:retryable, :kubernetes_cas_conflict}, _} =
+             Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, competing))
+
+    assert api_state()["sandboxes"][record.key]["metadata"]["annotations"]["symphony.dev/record"] == "competing-writer"
+    assert api_state()["sandboxes"][record.key]["spec"]["operatingMode"] == "Suspended"
+  end
+
+  # The live controller writes status and journal revisions continuously, so the parent's
+  # resourceVersion has almost always moved by the time we write. Preparation must still
+  # complete: this is the shape that left an environment allocated but never usable.
+  test "a continuously reconciling controller does not block preparation" do
+    {config, record, opts} = api_fixture()
+    busy = busy_controller()
+    opts = Keyword.put(opts, :command_fun, busy)
+
+    assert {:ok, created} = Kubernetes.ensure(config, record, opts)
+    assert {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    assert {:ok, started} = Kubernetes.start(config, intended, opts)
+    assert started.pending == [%{verb: :start, id: "pod-uid", outcome: :succeeded}]
+    assert {:ok, observed} = Kubernetes.inspect(config, started, opts)
+    assert observed.phase == :running
+  end
+
+  # Every successful write is followed by an unrelated status bump, exactly as the
+  # sandbox controller behaves while it reconciles.
+  defp busy_controller do
+    fn executable, args, call_options ->
+      result = api_command(executable, args, call_options)
+      parent = api_state()["sandboxes"]["se-ticket"]
+
+      if is_map(parent) and Path.basename(executable) == "kubectl" and "patch" in args do
+        put_object("sandboxes", update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1)))
+      end
+
+      result
+    end
+  end
+
+  # Models the controller bumping the parent between our read and our patch: the patch is
+  # rejected as prose with no body, exactly as kubectl reports a failed precondition.
+  defp stale_parent_patch(record, options \\ []) do
+    fn executable, args, call_options ->
+      spent = options[:once] == true and Process.get(:stale_parent_patch) != nil
+
+      if Path.basename(executable) == "kubectl" and "patch" in args and Enum.any?(args, &String.starts_with?(&1, "sandboxes.")) and not spent do
+        Process.put(:stale_parent_patch, true)
+        parent = api_state()["sandboxes"][record.key]
+        moved = update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1))
+
+        moved =
+          if options[:record_annotation],
+            do: put_in(moved, ["metadata", "annotations", "symphony.dev/record"], options[:record_annotation]),
+            else: moved
+
+        put_object("sandboxes", moved)
+        {:ok, %{status: 1, output: "The request is invalid: the server rejected our request due to an error in our request"}}
+      else
+        api_command(executable, args, call_options)
+      end
+    end
   end
 
   test "credential rotation after local key loss retains pinned host identity" do
