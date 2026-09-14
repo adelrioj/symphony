@@ -1699,9 +1699,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     spec = pod["spec"] || %{}
     containers = all_containers(spec, ["containers", "initContainers", "ephemeralContainers"])
     states = all_containers(status, ["containerStatuses", "initContainerStatuses", "ephemeralContainerStatuses"])
-    kubelet = Enum.any?(get_in(pod, ["metadata", "managedFields"]) || [], &(&1["manager"] == "kubelet" and &1["subresource"] == "status"))
 
-    kubelet and status["phase"] in ["Succeeded", "Failed"] and containers != [] and
+    # Attribution is the status subresource itself, not the field manager's name: the
+    # manager string is chosen by the writer, while admission restricts pods/status to
+    # the assigned node. Distributions name it differently (k3s embeds the kubelet and
+    # writes "k3s"), so pinning the name only makes terminal status unprovable there.
+    reported = Enum.any?(get_in(pod, ["metadata", "managedFields"]) || [], &(&1["subresource"] == "status"))
+
+    reported and status["phase"] in ["Succeeded", "Failed"] and containers != [] and
       Enum.all?(containers, &container_terminated?(&1, states))
   end
 

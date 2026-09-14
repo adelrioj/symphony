@@ -1055,6 +1055,22 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert guard_data(record)["phase"] == "Closing"
   end
 
+  test "a distribution whose embedded kubelet writes status under its own name still proves stop" do
+    # k3s runs the kubelet inside the server binary and records "k3s" as the status
+    # field manager. The manager string is writer-chosen, so requiring "kubelet" made
+    # terminal status unprovable there and left every stopped worker observed forever.
+    {config, record, opts} = api_fixture(status_field_manager: "k3s")
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, running} = Kubernetes.start(config, intended, opts)
+    assert {:ok, stopped} = Kubernetes.stop(config, running, opts)
+    assert stopped.phase == :stopped
+    assert {:quiescent, _} = stopped.proof
+    assert {:ok, destroyed} = Kubernetes.destroy(config, stopped, opts)
+    assert destroyed.absent?
+    assert api_state()["pods"] == %{}
+  end
+
   test "inspect refuses a damaged closed acknowledgement without losing retained disk authority" do
     {config, record, opts} = api_fixture(delay_pv: true)
     {:ok, created} = Kubernetes.ensure(config, record, opts)
@@ -2735,7 +2751,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
       terminal =
         object
-        |> put_in(["metadata", "managedFields"], [%{"manager" => "kubelet", "subresource" => "status"}])
+        |> put_in(["metadata", "managedFields"], [%{"manager" => option(:status_field_manager) || "kubelet", "subresource" => "status"}])
         |> Map.put("status", %{"phase" => "Succeeded", "containerStatuses" => statuses})
 
       put_event("pods", name, %{"type" => "MODIFIED", "object" => terminal})
