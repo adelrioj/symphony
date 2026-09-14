@@ -1239,6 +1239,24 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert get_in(api_state(), ["pods", "se-ticket", "status", "phase"]) == "Running"
   end
 
+  # A WaitForFirstConsumer claim that never binds has no PV whose deletion could be proven, so
+  # the evidence path can never discharge it and the identity would be retained forever. Absence
+  # of both the claim and any PV referencing it is the proof that no storage was provisioned.
+  test "a claim that never bound is discharged by proven absence instead of retained forever" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    state = api_state() |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil) |> Map.put("persistentvolumes", %{})
+    Process.put(:kubernetes_api, state)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, started} = Kubernetes.start(config, intended, opts)
+    assert get_in(started.metadata, ["volumes", "workspace-se-ticket", "unbound"]) == true
+
+    assert {:ok, deleted} = Kubernetes.destroy(config, started, opts)
+    assert deleted.absent?
+    assert api_state()["persistentvolumeclaims"] == %{}
+    assert api_state()["persistentvolumes"] == %{}
+  end
+
   test "an incompatible installed CRD is rejected rather than silently selecting another API" do
     {config, record, opts} = api_fixture()
     state = update_in(api_state(), ["customresourcedefinitions", "sandboxes.agents.x-k8s.io", "spec", "versions"], fn [version] -> [Map.put(version, "name", "v1alpha1")] end)
@@ -2679,9 +2697,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp delete_effect("persistentvolumeclaims", name, _object) do
     remove_object("persistentvolumeclaims", name)
+    pv = api_state()["persistentvolumes"]["pv-ticket"]
 
-    if not option(:delay_pv) do
-      pv = api_state()["persistentvolumes"]["pv-ticket"]
+    # A claim that never bound has no volume to release, so only a provisioned one emits a
+    # deletion event. Without this the fixture raises instead of modelling the real API.
+    if is_map(pv) and not option(:delay_pv) do
       put_event("persistentvolumes", "pv-ticket", %{"type" => "DELETED", "object" => put_in(pv, ["metadata", "finalizers"], [])})
       remove_object("persistentvolumes", "pv-ticket")
     end

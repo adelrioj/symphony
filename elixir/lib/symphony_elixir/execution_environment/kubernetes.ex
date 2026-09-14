@@ -918,7 +918,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp complete_member?(%{"resource" => "services"}, _evidence, _record), do: true
-  defp deleted_volume?(volume), do: volume["deleted"] == true and is_binary(volume["pv_uid"])
+  # Either the provisioned volume's deletion was observed, or the claim provably never bound and
+  # no volume was ever provisioned for it. Only discharge_unbound/5 sets the latter, and only
+  # after an authoritative read shows the claim absent with no PersistentVolume claiming its UID.
+  defp deleted_volume?(volume), do: volume["deleted"] == true and (is_binary(volume["pv_uid"]) or volume["unbound"] == true)
 
   defp authorized_pods_terminated?(record, evidence) do
     Enum.all?(record.metadata["authorized_pod_uids"] || [], &termination_proof?(evidence[&1], &1, record))
@@ -1794,12 +1797,33 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
           {:cont, {:ok, current}}
 
         volume["pv_uid"] == nil ->
-          {:halt, {:error, {:unknown, :unbound_pvc_provisioning_unresolved}, current}}
+          case discharge_unbound(config, current, key, volume, opts) do
+            {:ok, updated} -> {:cont, {:ok, updated}}
+            :unresolved -> {:halt, {:error, {:unknown, :unbound_pvc_provisioning_unresolved}, current}}
+            error -> {:halt, error}
+          end
 
         true ->
           {:cont, {:ok, observe_volume_deletion(config, current, key, volume, q, opts)}}
       end
     end)
+  end
+
+  # A claim that never bound has no backing volume whose deletion could ever be proven, so the
+  # evidence path below can never discharge it and cleanup would retain the identity forever.
+  # Prove the negative instead: the claim is authoritatively absent and no PersistentVolume
+  # references its UID. A claim that bound after capture, or any read failure, stays unresolved.
+  defp discharge_unbound(config, record, key, volume, opts) do
+    with {:ok, claim} <- Client.lookup(config, collection(config, "persistentvolumeclaims"), volume["pvc_name"], opts),
+         {:ok, provisioned} <- Client.list(config, collection(config, "persistentvolumes"), opts) do
+      claimed? = Enum.any?(provisioned, &(get_in(&1, ["spec", "claimRef", "uid"]) == volume["pvc_uid"]))
+
+      if is_nil(claim) and not claimed? do
+        {:ok, %{record | metadata: put_in(record.metadata, ["volumes", key, "deleted"], true)}}
+      else
+        :unresolved
+      end
+    end
   end
 
   defp observe_volume_deletion(config, record, key, volume, q, opts) do
