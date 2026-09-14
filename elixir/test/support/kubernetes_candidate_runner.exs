@@ -211,7 +211,14 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
           quote_shell(nonce) <>
           "; rm .symphony-candidate-probe; printf %s " <> quote_shell(nonce)
 
-      {:ok, %{status: 0, output: ^nonce}} = Command.run(target.executable, target.prefix ++ [SSH.remote_shell_command(script)], env: target.env, timeout_ms: 30_000, max_output_bytes: 4096)
+      {:ok, %{status: 0, output: ^nonce}} =
+        Command.run(target.executable, target.prefix ++ [SSH.remote_shell_command(script)],
+          env: target.env,
+          timeout_ms: 30_000,
+          max_output_bytes: 4096,
+          task_supervisor: ctx.tasks
+        )
+
       update(ctx, %{runner: "passed"})
       # Remain a real occupied runner until the authority initiates terminal cleanup.
       receive do
