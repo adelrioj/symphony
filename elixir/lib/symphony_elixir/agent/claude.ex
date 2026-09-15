@@ -50,11 +50,13 @@ defmodule SymphonyElixir.Agent.Claude do
     with :ok <- require_context(context),
          {:ok, expanded_workspace} <- workspace_cwd(workspace, context),
          {:ok, tracker_env} <- capture_tracker_env(secret_environment_names, env_reader),
-         {:ok, workflow_snapshot} <- Workflow.current_content(),
+         {:ok, workflow} <- Workflow.current(),
          {:ok, parent_dir} <- mcp_config_dir(expanded_workspace),
          :ok <- ensure_private_directory(parent_dir),
          {:ok, session_dir} <- create_private_session_directory(parent_dir) do
       cleanup_monitor = start_cleanup_monitor(owner, session_dir)
+      # MCP needs tracker configuration, not controller-only provider files or agent runtime settings.
+      workflow_snapshot = Workflow.render(Jason.encode!(Map.take(workflow.config, ["tracker"])), workflow.prompt)
 
       case write_session_files(session_dir, workflow_snapshot, settings.claude, tracker_env) do
         {:ok, workflow_snapshot_path, mcp_config_path} ->

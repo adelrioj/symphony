@@ -31,7 +31,10 @@ Linear serves `linear_graphql` and `linear_fetch_attachment`, GitHub Issues serv
 Asana serves `asana_api`, and GitLab serves `gitlab_api`. Symphony executes those tools with
 configured host-side auth and removes declared tracker-token environment variables from the Codex
 child, so the agent does not need a second tracker login. The Claude backend exposes the selected
-adapter's tools through Symphony's standalone MCP mode.
+adapter's tools through Symphony's standalone MCP mode. Its private workflow snapshot contains
+the pinned tracker configuration and prompt, not controller-only worker/provider settings.
+The memory tracker advertises no tracker tools, but MCP still provides the deny-only
+`approval_prompt`; removing MCP is not a supported permission workaround.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
@@ -582,7 +585,11 @@ disappearance or generic Failed/ContainerStatusUnknown is not stop evidence.
 
 Qualify the CSI driver's DeleteVolume and deletion-protection behavior. Bound PV identity,
 claimRef/volumeHandle and `external-provisioner.volume.kubernetes.io/finalizer` must be observed
-before deletion; a complete exact-UID PV deletion watch must show finalizer removal. PVC disappearance,
+before deletion; a complete exact-UID PV `DELETED` watch event must match that bound identity.
+Kubernetes can delete atomically when an update removes the last finalizer, so the watch event
+may still contain the prior object's finalizer list
+([upstream implementation](https://github.com/kubernetes/kubernetes/blob/v1.33.0/staging/src/k8s.io/apiserver/pkg/registry/generic/registry/store.go#L565-L614)).
+PVC disappearance,
 missing PVs, unbound claims with unknown provisioning, denied inventory, or compacted watch history
 do not establish disk absence. Never strip protection finalizers to force progress.
 
@@ -647,7 +654,7 @@ supported; exec/auth-provider plugins, impersonation, custom transports and inse
 Controller token files are snapshotted at client construction, not refreshed after rejection.
 The helper accepts a bare API path; the shared transport always adds `fieldValidation=Strict`.
 
-##### Test-only non-model candidate runner
+##### Test-only candidate runner
 
 `Kubernetes.candidate_preflight/3` and its candidate validator exist only in
 `MIX_ENV=test` artifacts. Ordinary `Kubernetes.preflight/2` rejects candidate options
@@ -655,11 +662,20 @@ and retains its unconditional allocation stop. This is not a workflow switch or 
 production baseline replacement.
 
 The opt-in runner uses the real lifecycle operations, single-attempt helper, Memory
-tracker, and managed SSH transport. It replaces the agent callback with a nonce
-write/read/remove probe, clears workflow hooks, permits one worker, and starts a
-fresh runtime for terminal cleanup. It never invokes AgentRunner or a paid backend.
-Its evidence always says `candidate-unqualified`, `qualified: false`, and
-`backend_sessions: 0`, even after a successful probe.
+tracker, and managed SSH transport. It clears workflow hooks, permits one to four
+workers, and starts a fresh runtime for terminal cleanup. With `backend: null`, it
+replaces the agent callback with a nonce write/read/remove probe and invokes no model.
+With explicit model authorization and `backend: "claude"` or `"codex"`, it invokes
+AgentRunner with a nonce task rendered from the issue description. Provision the
+selected backend's authentication in the guest; the runner does not provision credentials
+or bypass the backend's approval policy.
+
+Evidence always says `candidate-unqualified` and `qualified: false`.
+`backend_sessions` counts model probes that reach artifact readback, not every started
+or interrupted attempt; it remains zero for non-model and cleanup runs. Model acceptance
+requires one completed probe per requested worker, `dispatch: "ok"`, and
+`artifact_matched: true` after reading the nonce file over the managed SSH connection.
+A transcript claiming success is not sufficient.
 
 Run from an operator-reviewed source checkout with accessible Git metadata, not a
 production release artifact. PR21 moved runtime configuration into SQLite lanes:
@@ -696,8 +712,10 @@ The input JSON requires exactly:
 
 | Field | Meaning |
 | --- | --- |
-| `authorization` | `disposable-namespace-non-model`; an explicit operator authorization, not permission to provision infrastructure |
+| `authorization` | `disposable-namespace-non-model` or `disposable-namespace-model`; explicit operator authorization, not permission to provision infrastructure |
 | `mode` | `run` for a fresh deployment identity; `cleanup` for recovery of that same identity |
+| `backend` | `null` for non-model; `"claude"` or `"codex"` requires model authorization |
+| `worker_count` | Integer from 1 to 4 |
 | `workflow_path` | Absolute path to the existing Kubernetes workflow |
 | `output_path` | New evidence file in an existing caller-owned `0700` directory |
 | `pins` | Exact candidate baseline described below |

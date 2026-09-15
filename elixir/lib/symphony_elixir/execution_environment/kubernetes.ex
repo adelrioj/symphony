@@ -146,7 +146,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     with {:ok, record} <- decode_guard_record(data, config),
          {:ok, guard} <- Guard.decode(object, record),
          {:ok, guard} <- Guard.settle(config, record, guard, opts),
-         {:ok, record} <- guard_observation(config, record, guard, objects) do
+         {:ok, record} <- guard_observation(config, record, guard, objects, opts) do
       {:ok, record}
     else
       _ -> {:error, {:unknown, :kubernetes_guard_discovery_conflict}}
@@ -168,14 +168,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
          do: {:ok, %{record | provider_ref: data["parentUID"]}}
   end
 
-  defp guard_observation(config, record, guard, objects) do
+  defp guard_observation(config, record, guard, objects, opts) do
     with {:ok, saved} <- decode_guard_record(guard.data, config) do
       sandbox = Enum.find(objects["sandboxes"], &(name(&1) == record.key))
-      observe_guard_parent(saved, guard, sandbox, objects)
+      observe_guard_parent(config, saved, guard, sandbox, objects, opts)
     end
   end
 
-  defp observe_guard_parent(saved, guard, nil, objects) do
+  defp observe_guard_parent(_config, saved, guard, nil, objects, _opts) do
     if guard.data["phase"] == "Complete" and complete_evidence?(guard, saved) and
          not remaining_backing?(objects, saved) and guard_children_absent?(objects, saved) do
       {:ok, completed_record(saved, guard)}
@@ -184,15 +184,26 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     end
   end
 
-  defp observe_guard_parent(saved, guard, sandbox, _objects) do
+  defp observe_guard_parent(config, saved, guard, sandbox, objects, opts) do
     with :ok <- ownership(sandbox, saved),
          :ok <- guarded_parent(guard, sandbox),
          true <- guard.data["phase"] != "Complete" do
-      {:ok, %{saved | version: rv(sandbox)}}
+      observe_active_guard(config, saved, guard, sandbox, objects, opts)
     else
       _ -> {:error, {:unknown, :kubernetes_ownership_changed}}
     end
   end
+
+  defp observe_active_guard(config, %{desired: :running} = saved, guard, sandbox, objects, opts) do
+    with {:ok, q} <- qualification(config, opts),
+         :ok <- template_identity(saved, q),
+         {:ok, current} <- accept_observed_drain(saved, sandbox, guard) do
+      inspect_parent(config, current, sandbox, objects, q, opts)
+    end
+  end
+
+  defp observe_active_guard(_config, saved, _guard, sandbox, _objects, _opts),
+    do: {:ok, %{saved | version: rv(sandbox)}}
 
   defp guard_children_absent?(objects, record) do
     Enum.all?(@children, fn resource ->
@@ -1879,9 +1890,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp volume_deleted?(event, volume, q) do
     pv = event["object"]
+    # Removing the last finalizer deletes atomically; DELETED can contain the prior stored object.
+    # CSI protection must have been observed before deletion, with the exact bound volume identity.
 
     event["type"] == "DELETED" and uid(pv) == volume["pv_uid"] and volume["csi_finalizer_observed"] == true and
-      @pv_finalizer not in (get_in(pv, ["metadata", "finalizers"]) || []) and
       get_in(pv, ["spec", "csi", "volumeHandle"]) == volume["volume_handle"] and
       get_in(pv, ["spec", "csi", "driver"]) == q["csi_driver"] and
       get_in(pv, ["spec", "claimRef", "uid"]) == volume["pvc_uid"]

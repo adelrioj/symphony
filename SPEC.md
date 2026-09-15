@@ -2674,6 +2674,10 @@ Extension config:
   process can read its `--mcp-config` file. For remote turns the workflow snapshot, MCP config, and
   prompt are length-prefixed over SSH stdin. The worker writes workflow/config to mode-0600 temporary
   files and trap-removes them on exit, so no worker-side tracker environment is required.
+- The MCP workflow snapshot SHOULD include only the session-bound tracker configuration and prompt,
+  excluding controller-only worker/provider settings. Starting the guest MCP server MUST NOT require
+  controller lifecycle credentials or kubeconfig files. A tracker with no tools does not remove the
+  non-interactive deny-only approval endpoint.
 
 ### A.2 Scheduling Notes
 
@@ -2938,6 +2942,12 @@ durable physical safety classification, including never-authorized or now-missin
 committed PVC retains an explicit backing-storage obligation. Newly discovered physical uncertainty
 invalidates prior compute quiescence; storage-only uncertainty remains a separate ownership obligation.
 After drain, cleanup MUST NOT depend on a new normal-reconciliation suspension acknowledgement.
+
+Bound-volume cleanup requires a complete exact-UID PV `DELETED` watch event matching the captured
+claim UID, CSI driver and volume handle, with CSI deletion protection observed before deletion.
+The final event may contain the prior stored finalizer list when removing the last finalizer
+deletes the object atomically. Mere PVC/PV absence, lost watch history, or removing finalizers
+to force progress MUST NOT substitute for that evidence.
 
 A complete `ReadyToFinalize` receipt MUST be durably persisted and exactly read back before removing
 the exact parent's cleanup finalizer. Parent, child and backing absence precede durable `Complete`

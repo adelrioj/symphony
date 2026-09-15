@@ -129,6 +129,65 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     end
   end
 
+  test "managed MCP snapshot works without controller kubeconfig and still denies approval" do
+    alias SymphonyElixir.{Config, ExecutionContext, LaneContext}
+    alias SymphonyElixir.Config.Schema
+    alias SymphonyElixir.MCP.LinearServer
+
+    root = Path.join(System.tmp_dir!(), "symphony-mcp-guest-#{System.unique_integer([:positive])}")
+    workspace = Path.join(root, "workspace")
+    kubeconfig = Path.join(root, "controller.kubeconfig")
+    previous_path = System.get_env("PATH")
+    File.mkdir_p!(workspace)
+    File.write!(kubeconfig, "controller-only")
+    write_fake_ssh!(root, Path.join(root, "ssh.trace"))
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf!(root)
+    end)
+
+    provider = %{
+      "kubeconfig" => kubeconfig,
+      "context" => "unit",
+      "namespace" => "candidate",
+      "template" => "worker",
+      "ssh_user" => "worker",
+      "ssh_auth_volume" => "auth",
+      "ssh_port" => 2222
+    }
+
+    :ok =
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: root,
+        worker_environment: %{
+          kind: "kubernetes",
+          deployment_id: "mcp-guest",
+          provider: provider,
+          startup_timeout_ms: 1_000,
+          shutdown_timeout_ms: 1_000
+        }
+      )
+
+    target = %SymphonyElixir.SSH.Target{executable: Path.join([root, "bin", "ssh"]), prefix: [], label: "fixture"}
+    context = %ExecutionContext{mode: :managed, workspace_root: root, workspace_path: workspace, target: target}
+    {:ok, session} = Claude.start_session(workspace, execution_context: context)
+    on_exit(fn -> Claude.stop_session(session) end)
+
+    File.rm!(kubeconfig)
+    {:ok, workflow} = Workflow.load(session.workflow_snapshot_path)
+    {:ok, settings} = Schema.parse(workflow.config)
+    assert :ok = Config.validate_settings(settings)
+
+    {:ok, entry} = LaneContext.capture()
+    LaneContext.install(%{entry | settings: settings, workflow: workflow})
+    response = LinearServer.handle_request(%{"method" => "tools/list", "id" => 1})
+    assert Enum.map(response["result"]["tools"], & &1["name"]) == ["approval_prompt"]
+    denied = LinearServer.handle_request(%{"method" => "tools/call", "id" => 2, "params" => %{"name" => "approval_prompt"}})
+    assert denied["result"]["isError"] == true
+  end
+
   defp write_fake_ssh!(test_root, trace_file) do
     fake_bin_dir = Path.join(test_root, "bin")
     fake_ssh = Path.join(fake_bin_dir, "ssh")
