@@ -21,7 +21,10 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
     :resource_uid,
     :resource_name,
     :resource,
-    :namespace
+    :namespace,
+    :backend,
+    :dispatch,
+    :artifact_matched
   ]
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)

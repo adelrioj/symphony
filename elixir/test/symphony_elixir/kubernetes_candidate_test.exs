@@ -69,6 +69,66 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     assert Jason.decode!(File.read!(output))["backend_sessions"] == 0
   end
 
+  test "model dispatch renders the issue's nonce task instead of the non-model probe label", ctx do
+    alias SymphonyElixir.{KubernetesCandidateRunner, LaneContext, Lanes, PromptBuilder, TestSupport, Workflow}
+    TestSupport.reset_lanes!()
+    enabled = System.get_env("SYMPHONY_RUN_KUBERNETES_CANDIDATE")
+    System.put_env("SYMPHONY_RUN_KUBERNETES_CANDIDATE", "1")
+
+    on_exit(fn ->
+      TestSupport.restore_env("SYMPHONY_RUN_KUBERNETES_CANDIDATE", enabled)
+      TestSupport.reset_lanes!()
+    end)
+
+    File.chmod!(ctx.root, 0o700)
+    workflow = Path.join(ctx.root, "WORKFLOW")
+    environment = %{kind: "kubernetes", deployment_id: "ignored", provider: ctx.config.provider, startup_timeout_ms: 1_000, shutdown_timeout_ms: 1_000}
+    File.write!(workflow, Workflow.render(Jason.encode!(%{worker: %{environment: environment}}), "Operator workflow must not replace the probe task."))
+
+    input = %{
+      "authorization" => "disposable-namespace-model",
+      "mode" => "run",
+      "workflow_path" => workflow,
+      "output_path" => Path.join(ctx.root, "evidence.json"),
+      "pins" => %{"deployment_id" => "candidate-model-probe"},
+      "timeout_ms" => 1_000,
+      "cleanup_timeout_ms" => 1_000,
+      "runner_sha256" => Candidate.sha256(File.read!(Path.expand("../support/kubernetes_candidate_runner.exs", __DIR__))),
+      "negative_control_paths" => ["/api/v1/namespaces/unrelated"],
+      "worker_count" => 1,
+      "backend" => "claude"
+    }
+
+    input_path = Path.join(ctx.root, "input.json")
+    File.write!(input_path, Jason.encode!(input))
+
+    assert {:error, :candidate_setup_failed} = KubernetesCandidateRunner.run_file(input_path)
+    [lane] = Lanes.list()
+    :ok = LaneContext.put(lane.id)
+    issue = %SymphonyElixir.Tracker.Issue{description: "Create candidate-probe.txt containing SYMPHONY-test-nonce. Then stop."}
+    assert String.trim(PromptBuilder.build_prompt(issue)) == issue.description
+  end
+
+  test "model evidence preserves external artifact verification without retaining raw credentials", ctx do
+    control = start_supervised!({SymphonyElixir.ManagedEnvironmentFixture.Control, config: ctx.config, checks: [], session_limit: 0})
+
+    event = %{
+      event: :model_session,
+      issue_id: "probe",
+      backend: "claude",
+      dispatch: :ok,
+      artifact_matched: true,
+      credentials: %{token: "MODEL_SECRET_CANARY"}
+    }
+
+    :ok = GenServer.call(control, {:event, event})
+    [stored] = GenServer.call(control, :snapshot).events
+    assert stored[:artifact_matched] == true
+    assert stored[:backend] == "claude"
+    assert stored[:dispatch] == :ok
+    refute Jason.encode!(stored) =~ "MODEL_SECRET_CANARY"
+  end
+
   test "incomplete candidate identity is rejected without contacting the provider", %{config: config} do
     command = fn _, _, _ -> flunk("candidate identity must fail before provider I/O") end
     preflight = Kubernetes.candidate_preflight(config, %{}, command_fun: command)

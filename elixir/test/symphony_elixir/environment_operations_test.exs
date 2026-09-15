@@ -1130,6 +1130,28 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     refute Process.alive?(owner)
   end
 
+  test "adoption timeout releases the holder after it resumes instead of retaining private files" do
+    supervisor = start_supervised!(Task.Supervisor)
+    authority = self()
+    path = temporary_path("adoption-timeout")
+    File.write!(path, "private")
+    target = %Target{executable: "/bin/sh", prefix: [], label: "worker"}
+
+    {caller, owner} =
+      paused_holder_start(supervisor, fn ->
+        Operations.open_connection(supervisor, authority, target, private_paths: [path])
+      end)
+
+    monitor = Process.monitor(owner)
+    assert true = :erlang.suspend_process(owner)
+    assert true = :erlang.resume_process(caller.pid)
+    assert {:error, {:unknown, :connection_adoption_failed}} = Task.await(caller, 5_000)
+    assert File.read!(path) == "private"
+    assert true = :erlang.resume_process(owner)
+    assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}
+    refute File.exists?(path)
+  end
+
   test "a port closed during supervised transfer cannot produce a connection" do
     supervisor = start_supervised!(Task.Supervisor)
     path = temporary_path("closed-transfer")

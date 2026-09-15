@@ -69,6 +69,10 @@ or review apps run on GKE. The alternative Kubernetes Agent Sandbox profile requ
 VM isolation, persistent guest-compatible Docker storage, admission, networking, and CSI evidence;
 managed gVisor and GKE Autopilot are not interchangeable with this profile.
 
+Claude's guest-side MCP snapshot carries the pinned tracker configuration, not controller-only
+provider files. Guests do not need the controller's kubeconfig; non-interactive approval remains
+deny-only, including for the memory tracker.
+
 Managed selection never falls back to local execution or another provider. Startup inventories owned
 resources before dispatch, and unresolved remote stop or deletion remains visible rather than being
 treated as successful cleanup. Terminal retention defaults to zero, but deletion still requires a

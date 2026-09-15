@@ -100,6 +100,8 @@ workspace:
 # Full operator/ConfigMap/API field contract: README.md#managed-ticket-environments.
 # Image requires real GNU realpath -m --, Bash/Git/findmnt, agent/Compose/browser tools and
 # private persistent Docker. macOS managed-path tests need GNU coreutils realpath on PATH.
+# Remote Claude also requires Symphony's MCP executable. Its tracker-only snapshot does not
+# require controller kubeconfig files in the guest; permission prompts remain deny-only.
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/openai/symphony .

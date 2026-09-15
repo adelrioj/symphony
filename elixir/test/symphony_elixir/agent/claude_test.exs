@@ -50,8 +50,8 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     assert session.secret_environment_names == [secret_name]
     assert get_in(config, ["mcpServers", "symphony", "env"]) == %{secret_name => secret_value}
 
-    # The snapshot is a copy of the workflow file, which holds an unresolved `$LINEAR_API_KEY`
-    # reference in production. A resolved value landing here would put the secret in a second file.
+    # The MCP snapshot preserves unresolved tracker credential references. A resolved value
+    # landing here would put the secret in a second file.
     refute File.read!(session.workflow_snapshot_path) =~ secret_value
 
     args = get_in(config, ["mcpServers", "symphony", "args"])
