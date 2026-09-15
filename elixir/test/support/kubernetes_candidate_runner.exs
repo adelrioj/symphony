@@ -78,7 +78,18 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     }
 
     workflow = input["output_path"] <> ".workflow"
-    {:ok, observations} = Agent.start_link(fn -> %{status: "initializing", protocol_observations: [], cleanup: "not_started", runner: "not_run", workers: %{}, dispatches: %{}} end)
+
+    {:ok, observations} =
+      Agent.start_link(fn ->
+        %{
+          status: "initializing",
+          protocol_observations: [],
+          cleanup: "not_started",
+          runner: "not_run",
+          workers: %{},
+          dispatches: %{}
+        }
+      end)
 
     try do
       # Memory tracker state is application-global; never share this harness with another lane.
@@ -359,7 +370,11 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
         _ -> nil
       end
 
-    %{outcome: if(result == :ok and observed == expected, do: "passed", else: "failed"), dispatch: elem_tag(result), artifact_matched: observed == expected}
+    %{
+      outcome: if(result == :ok and observed == expected, do: "passed", else: "failed"),
+      dispatch: elem_tag(result),
+      artifact_matched: observed == expected
+    }
   end
 
   defp elem_tag({tag, _}), do: tag
@@ -440,7 +455,16 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       {:codex_worker_update, ^issue_id, ^attempt_id, message} = update ->
         if is_pid(recipient), do: send(recipient, update)
 
-        if message[:event] in [:session_started, :completed, :turn_completed, :error, :turn_failed, :turn_cancelled, :blocked, :attempt_blocked] do
+        if message[:event] in [
+             :session_started,
+             :completed,
+             :turn_completed,
+             :error,
+             :turn_failed,
+             :turn_cancelled,
+             :blocked,
+             :attempt_blocked
+           ] do
           event = Map.take(message, [:event, :session_id]) |> Map.merge(observation_time("observed"))
           change(ctx, &update_in(&1, [:dispatches, attempt_id, :lifecycle], fn events -> events ++ [event] end))
         end
@@ -460,7 +484,14 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       {:DOWN, ^ref, :process, ^owner, reason} ->
         change(ctx, fn state ->
           dispatch = state.dispatches[attempt_id]
-          state = if Map.has_key?(dispatch, :outcome), do: state, else: worker_result(state, issue_id, environment_id, "failed")
+
+          state =
+            if Map.has_key?(dispatch, :outcome) do
+              state
+            else
+              worker_result(state, issue_id, environment_id, "failed")
+            end
+
           ending = observation_time("ended") |> Map.put(:termination, if(reason in [:normal, :shutdown, :killed], do: reason, else: :abnormal))
           update_in(state, [:dispatches, attempt_id], &(&1 |> Map.merge(ending) |> Map.put_new(:outcome, "failed")))
         end)
