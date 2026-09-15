@@ -301,13 +301,16 @@ defmodule SymphonyElixir.OrchestratorTest do
     workspace_root = Path.join(tmp, "workspaces")
     fake_claude = Path.join(tmp, "fake_claude")
     starts = Path.join(tmp, "starts")
-    release = Path.join(tmp, "release")
     File.mkdir_p!(workspace_root)
 
     File.write!(fake_claude, """
     #!/bin/sh
     basename "$PWD" >> "#{starts}"
-    while [ ! -f "#{release}" ]; do sleep 0.01; done
+    run=$(wc -l < "#{starts}" | tr -d ' ')
+    while [ ! -f "#{tmp}/release-$run" ]; do
+      [ -d "#{tmp}" ] || exit 1
+      sleep 0.01
+    done
     printf '%s\\n' '{"type":"system","subtype":"init","session_id":"fair-yield"}'
     printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":10,"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"result":"waiting"}'
     """)
@@ -332,17 +335,101 @@ defmodule SymphonyElixir.OrchestratorTest do
     on_exit(fn -> stop_orchestrator(pid) end)
 
     wait_for_state(pid, fn state ->
-      state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
+      state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms) and
+        state.next_poll_due_at_ms > System.monotonic_time(:millisecond)
     end)
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting])
     send(pid, :run_poll_cycle)
     wait_until(fn -> File.exists?(starts) end)
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting, ready])
-    File.write!(release, "")
+    File.write!(Path.join(tmp, "release-1"), "")
 
     wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 2 end, 5_000)
     assert starts |> File.read!() |> String.split("\n", trim: true) |> Enum.take(2) == ["MT-WAIT", "MT-READY"]
+
+    state =
+      wait_for_state(pid, fn state ->
+        Map.has_key?(state.running, ready.id) and Map.has_key?(state.retry_attempts, waiting.id)
+      end)
+
+    retry_token = state.retry_attempts[waiting.id].retry_token
+    send(pid, {:retry_issue, waiting.id, retry_token})
+
+    wait_for_state(pid, fn state ->
+      match?(%{retry_token: token} when token != retry_token, state.retry_attempts[waiting.id])
+    end)
+
+    assert String.split(File.read!(starts), "\n", trim: true) == ["MT-WAIT", "MT-READY"]
+
+    File.write!(Path.join(tmp, "release-2"), "")
+    wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 3 end, 5_000)
+
+    assert starts |> File.read!() |> String.split("\n", trim: true) |> Enum.take(3) ==
+             ["MT-WAIT", "MT-READY", "MT-WAIT"]
+
+    :sys.suspend(pid)
+    state = :sys.get_state(pid)
+    ready_retry = state.retry_attempts[ready.id]
+    Process.cancel_timer(ready_retry.timer_ref)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_api_token: nil,
+      tracker_active_states: ["Implemented"],
+      max_turn_exhaustions: 0
+    )
+
+    send(pid, {:retry_issue, ready.id, ready_retry.retry_token})
+    :sys.resume(pid)
+
+    failed =
+      wait_for_state(pid, fn state ->
+        match?(%{retry_token: token} when token != ready_retry.retry_token, state.retry_attempts[ready.id])
+      end)
+
+    failed_retry = failed.retry_attempts[ready.id]
+    write_claude_dispatch_workflow!(workspace_root, fake_claude, 0)
+
+    File.write!(Path.join(tmp, "release-3"), "")
+    wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 4 end, 5_000)
+
+    assert starts |> File.read!() |> String.split("\n", trim: true) |> Enum.take(4) ==
+             ["MT-WAIT", "MT-READY", "MT-WAIT", "MT-WAIT"]
+
+    send(pid, {:retry_issue, ready.id, failed_retry.retry_token})
+
+    wait_for_state(pid, fn state ->
+      match?(%{retry_token: token} when token != failed_retry.retry_token, state.retry_attempts[ready.id])
+    end)
+
+    File.write!(Path.join(tmp, "release-4"), "")
+    wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 5 end, 5_000)
+
+    assert starts |> File.read!() |> String.split("\n", trim: true) |> Enum.take(5) ==
+             ["MT-WAIT", "MT-READY", "MT-WAIT", "MT-WAIT", "MT-READY"]
+
+    third = %Issue{waiting | id: "third", identifier: "MT-THIRD", priority: 3}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting, ready, third])
+    File.write!(Path.join(tmp, "release-5"), "")
+    wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 6 end, 5_000)
+
+    for issue <- [ready, waiting] do
+      retry = :sys.get_state(pid).retry_attempts[issue.id]
+      send(pid, {:retry_issue, issue.id, retry.retry_token})
+
+      wait_for_state(pid, fn state ->
+        match?(%{retry_token: token} when token != retry.retry_token, state.retry_attempts[issue.id])
+      end)
+    end
+
+    for run <- 6..8 do
+      File.write!(Path.join(tmp, "release-#{run}"), "")
+      wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= run + 1 end, 5_000)
+    end
+
+    assert starts |> File.read!() |> String.split("\n", trim: true) |> Enum.take(9) ==
+             ["MT-WAIT", "MT-READY", "MT-WAIT", "MT-WAIT", "MT-READY", "MT-THIRD", "MT-WAIT", "MT-READY", "MT-THIRD"]
   end
 
   # Symphony moves a claimed work item itself. The prompt used to ask the agent to do it in
