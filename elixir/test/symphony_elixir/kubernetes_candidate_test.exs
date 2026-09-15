@@ -40,7 +40,6 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     assert SymphonyElixir.KubernetesCandidateRunner.worker_result(state, "two", "env-one", "passed").runner != "passed"
   end
 
-
   test "model readiness requires every expected live issue in a distinct environment" do
     alias SymphonyElixir.KubernetesCandidateRunner, as: Runner
     first = %{issue_id: "one", environment_id: "env-one"}
@@ -68,6 +67,7 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
       assert {:exit, {{:badmatch, {:error, :candidate_deadline}}, _}} = Task.yield(task, 1_000)
     end)
   end
+
   defp worker_observations do
     %{runner: "running", workers: Map.new(["one", "two"], &{&1, %{outcome: "pending", environment_id: nil}})}
   end

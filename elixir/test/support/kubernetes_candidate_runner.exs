@@ -373,10 +373,15 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
     runner =
       cond do
-        Enum.any?(results, &(&1.outcome == "failed")) -> "failed"
+        Enum.any?(results, &(&1.outcome == "failed")) ->
+          "failed"
+
         Enum.all?(results, &(&1.outcome == "passed")) and
-            length(Enum.uniq_by(results, & &1.environment_id)) == map_size(workers) -> "passed"
-        true -> "running"
+            length(Enum.uniq_by(results, & &1.environment_id)) == map_size(workers) ->
+          "passed"
+
+        true ->
+          "running"
       end
 
     %{state | workers: workers, runner: runner}
@@ -468,8 +473,8 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
   defp observation_time(prefix) do
     %{
-      prefix <> "_at" => DateTime.to_iso8601(DateTime.utc_now()),
-      prefix <> "_monotonic_ms" => System.monotonic_time(:millisecond)
+      (prefix <> "_at") => DateTime.to_iso8601(DateTime.utc_now()),
+      (prefix <> "_monotonic_ms") => System.monotonic_time(:millisecond)
     }
   end
 
