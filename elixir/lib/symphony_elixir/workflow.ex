@@ -101,6 +101,30 @@ defmodule SymphonyElixir.Workflow do
   def render("", prompt) when is_binary(prompt), do: prompt
   def render(front_matter, prompt) when is_binary(front_matter) and is_binary(prompt), do: "---\n" <> front_matter <> "\n---\n" <> prompt
 
+  @doc """
+  Strip controller-only configuration from a snapshot before it is shipped to a worker.
+
+  `worker.environment` describes how the controller provisions the worker and points at
+  controller-local paths — `provider.kubeconfig` above all. A guest cannot satisfy them,
+  and the tracker MCP server refuses to start on a workflow whose provider block it
+  cannot resolve, which leaves the agent without the approval channel it was told to
+  use. The worker has no business knowing how it was provisioned either.
+  """
+  @spec for_worker(String.t()) :: String.t()
+  def for_worker(content) when is_binary(content) do
+    %{front_matter: front_matter, prompt: prompt} = split(content)
+
+    case front_matter_yaml_to_map(String.replace(front_matter, ~r/\R/u, "\n")) do
+      {:ok, %{"worker" => %{"environment" => _} = worker} = config} ->
+        worker = Map.delete(worker, "environment")
+        config = if worker == %{}, do: Map.delete(config, "worker"), else: Map.put(config, "worker", worker)
+        render(Jason.encode!(config), prompt)
+
+      _ ->
+        content
+    end
+  end
+
   @spec parse(String.t()) :: {:ok, loaded_workflow()} | {:error, term()}
   def parse(content) when is_binary(content) do
     %{front_matter: front_matter, prompt: prompt} = split(content)
