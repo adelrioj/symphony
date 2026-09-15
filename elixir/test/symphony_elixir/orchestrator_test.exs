@@ -296,6 +296,55 @@ defmodule SymphonyElixir.OrchestratorTest do
     assert_receive {:memory_tracker_state_update, "issue-claude-exhausted", "Blocked / Needs Attention"}, 5_000
   end
 
+  test "a completed waiting session gives queued work the slot before its continuation" do
+    tmp = Path.join(System.tmp_dir!(), "symphony-fair-yield-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(tmp, "workspaces")
+    fake_claude = Path.join(tmp, "fake_claude")
+    starts = Path.join(tmp, "starts")
+    release = Path.join(tmp, "release")
+    File.mkdir_p!(workspace_root)
+
+    File.write!(fake_claude, """
+    #!/bin/sh
+    basename "$PWD" >> "#{starts}"
+    while [ ! -f "#{release}" ]; do sleep 0.01; done
+    printf '%s\\n' '{"type":"system","subtype":"init","session_id":"fair-yield"}'
+    printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":10,"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"result":"waiting"}'
+    """)
+
+    File.chmod!(fake_claude, 0o700)
+    on_exit(fn -> File.rm_rf(tmp) end)
+    write_claude_dispatch_workflow!(workspace_root, fake_claude, 0)
+
+    waiting = %Issue{
+      id: "waiting",
+      identifier: "MT-WAIT",
+      title: "Waiting for review",
+      state: "Implemented",
+      priority: 1,
+      labels: [],
+      dispatchable: true
+    }
+
+    ready = %Issue{waiting | id: "ready", identifier: "MT-READY", title: "Ready for tests", priority: 2}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    {:ok, pid} = Orchestrator.start_link(name: Module.concat(__MODULE__, :FairYieldOrchestrator))
+    on_exit(fn -> stop_orchestrator(pid) end)
+
+    wait_for_state(pid, fn state ->
+      state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting])
+    send(pid, :run_poll_cycle)
+    wait_until(fn -> File.exists?(starts) end)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting, ready])
+    File.write!(release, "")
+
+    wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 2 end, 5_000)
+    assert starts |> File.read!() |> String.split("\n", trim: true) |> Enum.take(2) == ["MT-WAIT", "MT-READY"]
+  end
+
   # Symphony moves a claimed work item itself. The prompt used to ask the agent to do it in
   # step 1, and on 2026-09-05 an agent ran for 25 minutes without ever making the move, so a
   # human reading the board saw an untouched work item. The orchestrator already knows it

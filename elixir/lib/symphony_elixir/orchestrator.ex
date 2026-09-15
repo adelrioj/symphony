@@ -267,15 +267,19 @@ defmodule SymphonyElixir.Orchestrator do
       {:continue, state} ->
         Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
-        state
-        |> complete_issue(issue_id)
-        |> schedule_issue_retry(issue_id, 1, %{
-          identifier: running_entry.identifier,
-          issue_url: running_entry.issue.url,
-          delay_type: :continuation,
-          worker_host: Map.get(running_entry, :worker_host),
-          workspace_path: Map.get(running_entry, :workspace_path)
-        })
+        state =
+          state
+          |> complete_issue(issue_id)
+          |> schedule_issue_retry(issue_id, 1, %{
+            identifier: running_entry.identifier,
+            issue_url: running_entry.issue.url,
+            delay_type: :continuation,
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path)
+          })
+
+        # Waiting lanes keep their claim, but queued work gets the freed slot first.
+        if Config.settings!().agent.max_turn_exhaustions == 0, do: maybe_dispatch(state), else: state
     end
   end
 
