@@ -131,7 +131,13 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
 
   test "incomplete candidate identity is rejected without contacting the provider", %{config: config} do
     command = fn _, _, _ -> flunk("candidate identity must fail before provider I/O") end
-    assert {:error, {:invalid, :kubernetes_candidate_identity}} = Kubernetes.candidate_preflight(config, %{}, command_fun: command)
+    preflight = Kubernetes.candidate_preflight(config, %{}, command_fun: command)
+    assert {:error, {:invalid, :kubernetes_candidate_identity}} = preflight
+    assert {:error, {:invalid, :kubernetes_candidate_identity}} = Kubernetes.candidate_preflight(config, %{})
+  end
+
+  test "a validator crash on a malformed config fails closed", ctx do
+    assert {:error, {:invalid, :kubernetes_candidate_identity}} = Candidate.validate(:corrupt, ctx.pins)
   end
 
   test "ordinary preflight cannot select even a matching candidate baseline", ctx do
@@ -260,7 +266,12 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
 
       objects = Map.update!(ctx.objects, "rolebindings", &(&1 ++ [binding]))
       result = Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(objects))
-      if namespace == "management", do: assert(result == {:error, {:invalid, :kubernetes_candidate_authorization}}), else: assert(result == :ok)
+
+      if namespace == "management" do
+        assert result == {:error, {:invalid, :kubernetes_candidate_authorization}}
+      else
+        assert result == :ok
+      end
     end
   end
 
@@ -269,7 +280,8 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
       "metadata" => meta("basic-user", "basic-uid"),
       "rules" => [
         %{"nonResourceURLs" => ["/api", "/apis", "/version"], "verbs" => ["get"]},
-        %{"apiGroups" => ["authorization.k8s.io"], "resources" => ["selfsubjectaccessreviews", "selfsubjectrulesreviews"], "verbs" => ["create"]}
+        %{"apiGroups" => ["authorization.k8s.io"], "resources" => ["selfsubjectaccessreviews", "selfsubjectrulesreviews"], "verbs" => ["create"]},
+        %{"apiGroups" => ["authentication.k8s.io"], "resources" => ["selfsubjectreviews"], "verbs" => ["create"]}
       ]
     }
 
@@ -314,6 +326,55 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     pins = put_in(ctx.pins, ["contract", "template_digest"], Candidate.digest(hd(objects["sandboxtemplates"])["spec"]))
     objects = put_in(objects, ["configmaps", Access.at(0), "data", "contract.json"], Jason.encode!(pins["contract"]))
     assert {:error, {:invalid, :unsafe_kubernetes_template}} = Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
+  end
+
+  test "space-separated watch namespace and bare boolean flags are canonical controller flags", ctx do
+    args = ["--watch-namespace", "candidate", "--leader-election-namespace=management", "--leader-elect", "--extensions=false"]
+    objects = put_in(ctx.objects, ["deployments", Access.at(0), "spec", "template", "spec", "containers", Access.at(0), "args"], args)
+    pins = Map.put(ctx.pins, "controller_spec_digest", Candidate.digest(hd(objects["deployments"])["spec"]))
+    assert :ok = Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
+  end
+
+  test "a non-string controller argument or an ambiguous controller container fails the contract", ctx do
+    containers = ["deployments", Access.at(0), "spec", "template", "spec", "containers"]
+    [container] = get_in(ctx.objects, containers)
+    args = ["--watch-namespace=candidate", "--leader-election-namespace=management", 1]
+
+    for objects <- [put_in(ctx.objects, containers ++ [Access.at(0), "args"], args), put_in(ctx.objects, containers, [container, container])] do
+      pins = Map.put(ctx.pins, "controller_spec_digest", Candidate.digest(hd(objects["deployments"])["spec"]))
+      assert {:error, {:invalid, :kubernetes_candidate_contract_mismatch}} = Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
+    end
+  end
+
+  test "the pinned workload role may manage sandboxes through the agents API group", ctx do
+    [workload, management] = ctx.objects["roles"]
+    sandboxes = %{"apiGroups" => ["agents.x-k8s.io"], "resources" => ["sandboxes", "sandboxes/status"], "verbs" => ["get", "list", "watch", "patch"]}
+    widened = Map.update!(workload, "rules", &(&1 ++ [sandboxes]))
+    objects = Map.put(ctx.objects, "roles", [widened, management])
+    pins = put_in(ctx.pins, ["controller_authorization", "workload_role"], authorization_pin(widened))
+    assert :ok = Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
+  end
+
+  test "a controller grant through a foreign API group or a cluster-scoped Role reference is unbounded", ctx do
+    subject = %{"kind" => "ServiceAccount", "name" => "controller", "namespace" => "management"}
+    admin = %{"apiGroup" => "rbac.authorization.k8s.io", "kind" => "ClusterRole", "name" => "cluster-admin"}
+
+    for ref <- [%{admin | "apiGroup" => "example.io"}, %{admin | "kind" => "Role", "name" => "workload"}] do
+      binding = %{"metadata" => meta("widened", "widened-uid"), "subjects" => [subject], "roleRef" => ref}
+      objects = Map.put(ctx.objects, "clusterrolebindings", [binding])
+      assert {:error, {:invalid, :kubernetes_candidate_authorization}} = Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(objects))
+    end
+  end
+
+  test "an unknown subject kind is never the controller principal", ctx do
+    binding = %{
+      "metadata" => meta("robot", "robot-uid"),
+      "subjects" => [%{"kind" => "Robot", "name" => "controller"}],
+      "roleRef" => %{"apiGroup" => "rbac.authorization.k8s.io", "kind" => "ClusterRole", "name" => "cluster-admin"}
+    }
+
+    objects = Map.put(ctx.objects, "clusterrolebindings", [binding])
+    assert :ok = Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(objects))
   end
 
   defp command(objects, denied \\ nil) do

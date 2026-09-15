@@ -112,31 +112,10 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   end
 
   defp guarded_inventory(%{kind: "kubernetes"} = config, records, opts) do
-    with {:ok, guarded} <-
-           collect(records, fn record ->
-             case Guard.fetch(config, record, opts) do
-               {:ok, guard} ->
-                 resource = guard_resource(guard.object, guard.data)
-                 {:ok, %{record | metadata: Map.put(record.metadata, "guard", resource)}}
-
-               error ->
-                 error
-             end
-           end),
+    with {:ok, guarded} <- collect(records, &guarded_record(config, &1, opts)),
          {:ok, result} <- inventory_records(config, guarded, opts),
          {:ok, guards} <- KubernetesClient.list(config, kube_collection(config, "configmaps"), opts) do
-      receipts =
-        Enum.flat_map(guards, fn object ->
-          with {:ok, data} when is_map(data) <- Jason.decode(get_in(object, ["data", "guard.json"]) || ""),
-               true <- get_in(data, ["identity", "deploymentID"]) == config.deployment_id,
-               true <- data["phase"] == "Complete",
-               false <- Enum.any?(records, &(&1.key == get_in(data, ["identity", "environmentKey"]))) do
-            [guard_resource(object, data)]
-          else
-            _ -> []
-          end
-        end)
-
+      receipts = Enum.flat_map(guards, &guard_receipts(&1, config, records))
       {:ok, Map.put(result, :retained_guards, receipts)}
     else
       error -> record_inventory_error(error, records)
@@ -144,6 +123,28 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   end
 
   defp guarded_inventory(config, records, opts), do: inventory_records(config, records, opts)
+
+  defp guarded_record(config, record, opts) do
+    case Guard.fetch(config, record, opts) do
+      {:ok, guard} ->
+        resource = guard_resource(guard.object, guard.data)
+        {:ok, %{record | metadata: Map.put(record.metadata, "guard", resource)}}
+
+      error ->
+        error
+    end
+  end
+
+  defp guard_receipts(object, config, records) do
+    with {:ok, data} when is_map(data) <- Jason.decode(get_in(object, ["data", "guard.json"]) || ""),
+         true <- get_in(data, ["identity", "deploymentID"]) == config.deployment_id,
+         true <- data["phase"] == "Complete",
+         false <- Enum.any?(records, &(&1.key == get_in(data, ["identity", "environmentKey"]))) do
+      [guard_resource(object, data)]
+    else
+      _ -> []
+    end
+  end
 
   defp guard_resource(object, data) do
     %{"kind" => "ConfigMap", "name" => name(object), "uid" => uid(object), "namespace" => namespace(object), "phase" => data["phase"]}
@@ -617,12 +618,15 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
       if operation == :stop and mutation != nil and armed?(callbacks, {:deny_stop, id}) do
         deny_kubernetes(config, mutation, callbacks, id, executable, args, opts)
       else
-        if match?(%{verb: "create", resource: "sandboxes"}, mutation), do: emit(callbacks, :create_invoked, id)
+        emit_create_invoked(callbacks, mutation, id)
         result = run_command(executable, args, opts)
         kubernetes_fault_result(result, config, entry, operation, mutation, callbacks)
       end
     end
   end
+
+  defp emit_create_invoked(callbacks, %{verb: "create", resource: "sandboxes"}, id), do: emit(callbacks, :create_invoked, id)
+  defp emit_create_invoked(_callbacks, _mutation, _id), do: :ok
 
   defp kubernetes_fault_result(result, config, entry, operation, mutation, callbacks) do
     case accepted_command(result) do
@@ -789,8 +793,11 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
         ]
 
         case run_command(System.find_executable("kubectl") || "kubectl", args, opts) |> accepted_command() do
-          {:ok, %{"status" => %{"allowed" => false} = status}} ->
-            if status["evaluationError"] in [nil, ""], do: :ok, else: {:error, :kubernetes_denial_unproven}
+          {:ok, %{"status" => %{"allowed" => false, "evaluationError" => error}}} when error not in [nil, ""] ->
+            {:error, :kubernetes_denial_unproven}
+
+          {:ok, %{"status" => %{"allowed" => false}}} ->
+            :ok
 
           _ ->
             {:error, :kubernetes_denial_unproven}
@@ -811,6 +818,7 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
 
   defp accepted_command(_), do: {:error, :not_accepted}
 
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp sandbox_create?(config, entry, %{verb: "create", resource: "sandboxes", namespace: ns, body: request}, body) do
     annotations = get_in(request, ["metadata", "annotations"]) || %{}
     attribution = Map.take(annotations, ~w(symphony.dev/create-protocol symphony.dev/create-guard-uid symphony.dev/create-attempt-id))
@@ -1459,7 +1467,7 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
 
     fields =
       if mutation do
-        uid = if is_list(mutation.body), do: Enum.find_value(mutation.body, fn item -> if item["op"] == "test" and item["path"] == "/metadata/uid", do: item["value"] end)
+        uid = if is_list(mutation.body), do: tested_uid(mutation.body)
         annotations = if is_map(mutation.body), do: get_in(mutation.body, ["metadata", "annotations"]) || %{}, else: %{}
 
         Map.merge(fields, %{
@@ -1474,6 +1482,10 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
       end
 
     %{callbacks | event: fn event -> callbacks.event.(Map.merge(fields, event)) end}
+  end
+
+  defp tested_uid(patch) do
+    Enum.find_value(patch, fn item -> if item["op"] == "test" and item["path"] == "/metadata/uid", do: item["value"] end)
   end
 
   defp accepted_callbacks(callbacks, body) do

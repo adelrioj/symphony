@@ -10,7 +10,7 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
   alias SymphonyElixir.ExecutionEnvironment.{Operations, Record}
   alias SymphonyElixir.ManagedEnvironmentFixture.Control
   alias SymphonyElixir.SSH.Target
-  alias SymphonyElixir.Tracker.Issue
+  alias SymphonyElixir.Tracker.{Issue, Memory}
 
   setup do
     previous = Application.get_env(:symphony_elixir, :memory_tracker_issues)
@@ -132,9 +132,9 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
     :ok = GenServer.call(recovered, {:interrupted, Jason.decode!(persisted)})
     restored = GenServer.call(recovered, :snapshot)
     :ok = GenServer.call(recovered, {:issues, Enum.map(restored.issues, &%{&1 | state: "Done"})})
-    assert {:ok, terminal} = SymphonyElixir.Tracker.Memory.fetch_issues_by_states(["Done"])
+    assert {:ok, terminal} = Memory.fetch_issues_by_states(["Done"])
     assert MapSet.new(Enum.map(terminal, & &1.id)) == MapSet.new([original.id, recovery.id])
-    assert {:ok, []} = SymphonyElixir.Tracker.Memory.fetch_issues_by_states(["Qualification Codex", "In Review"])
+    assert {:ok, []} = Memory.fetch_issues_by_states(["Qualification Codex", "In Review"])
     refute Control.qualified?(GenServer.call(recovered, :snapshot))
   end
 

@@ -4,8 +4,8 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
 
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
-  alias SymphonyElixir.Tracker.Memory
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard
+  alias SymphonyElixir.Tracker.Memory
 
   @resource_keys ~w(kind id name uid selfLink zone region namespace volume_handle)
   @event_keys [
