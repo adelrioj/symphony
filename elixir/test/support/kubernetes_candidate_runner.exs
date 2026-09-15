@@ -85,7 +85,8 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       true = LaneStore.list() == []
       {:ok, document} = Workflow.load(input["workflow_path"])
       raw = candidate_workflow(document.config, input["pins"]["deployment_id"], input["worker_count"], input["backend"])
-      :ok = File.write(workflow, "---\n" <> Jason.encode!(raw) <> "\n---\nNon-model candidate lifecycle probe.\n", [:exclusive])
+      prompt = if input["backend"], do: "{{ issue.description }}\n", else: "Non-model candidate lifecycle probe.\n"
+      :ok = File.write(workflow, "---\n" <> Jason.encode!(raw) <> "\n---\n" <> prompt, [:exclusive])
       File.chmod!(workflow, 0o600)
       {:ok, lane, _warnings} = Lanes.import_file(workflow, slug: "candidate")
       false = lane.enabled

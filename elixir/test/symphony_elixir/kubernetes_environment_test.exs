@@ -386,6 +386,22 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert api_state()["secrets"] == %{}
   end
 
+  test "discovery preserves a running attempt only while its authorized Pod is ready" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running, attempt_id: "active-agent"}, opts)
+    {:ok, started} = Kubernetes.start(config, intended, opts)
+    assert {:ok, %{phase: :running}} = Kubernetes.inspect(config, started, opts)
+
+    assert {:ok, [discovered]} = Kubernetes.discover(config, opts)
+    assert discovered.phase == :running
+    assert discovered.attempt_id == "active-agent"
+
+    put_object("pods", put_in(api_state()["pods"][record.key], ["status", "conditions"], []))
+    assert {:ok, [unready]} = Kubernetes.discover(config, opts)
+    assert unready.phase == :unknown
+  end
+
   test "forged controller attempt attribution cannot authorize a Pod or cleanup storage" do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)
@@ -2031,6 +2047,19 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
              Kubernetes.destroy(config, stopped, blocked_opts)
 
     refute get_in(deleting.metadata, ["volumes", "workspace-se-ticket", "deleted"]) == true
+  end
+
+  test "CSI deletion accepts the last stored PV metadata when finalizer removal deletes atomically" do
+    {config, record, opts} = api_fixture(delay_pv: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    assert {:error, {:unknown, :kubernetes_cleanup_pending}, deleting} = Kubernetes.destroy(config, created, opts)
+
+    pv = api_state()["persistentvolumes"]["pv-ticket"]
+    put_event("persistentvolumes", "pv-ticket", %{"type" => "DELETED", "object" => pv})
+    remove_object("persistentvolumes", "pv-ticket")
+
+    assert {:ok, deleted} = Kubernetes.destroy(config, deleting, opts)
+    assert deleted.absent?
   end
 
   test "private reachability accepts private IPv4 and ULA but rejects public malformed and missing addresses" do
