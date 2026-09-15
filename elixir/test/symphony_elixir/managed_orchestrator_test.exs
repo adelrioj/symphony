@@ -866,6 +866,8 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     try do
       assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, LaneStore)
       assert :ok = ensure_lane_store_started!()
+      # Registration precedes handle_continue; wait until restored lanes have been reconciled.
+      :sys.get_state(LaneStore)
       refute Process.whereis(LaneStore) == previous_store
     after
       ensure_lane_store_started!()

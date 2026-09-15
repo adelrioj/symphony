@@ -1055,6 +1055,22 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert guard_data(record)["phase"] == "Closing"
   end
 
+  test "a distribution whose embedded kubelet writes status under its own name still proves stop" do
+    # k3s runs the kubelet inside the server binary and records "k3s" as the status
+    # field manager. The manager string is writer-chosen, so requiring "kubelet" made
+    # terminal status unprovable there and left every stopped worker observed forever.
+    {config, record, opts} = api_fixture(status_field_manager: "k3s")
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, running} = Kubernetes.start(config, intended, opts)
+    assert {:ok, stopped} = Kubernetes.stop(config, running, opts)
+    assert stopped.phase == :stopped
+    assert {:quiescent, _} = stopped.proof
+    assert {:ok, destroyed} = Kubernetes.destroy(config, stopped, opts)
+    assert destroyed.absent?
+    assert api_state()["pods"] == %{}
+  end
+
   test "inspect refuses a damaged closed acknowledgement without losing retained disk authority" do
     {config, record, opts} = api_fixture(delay_pv: true)
     {:ok, created} = Kubernetes.ensure(config, record, opts)
@@ -1237,6 +1253,73 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert {:ok, started} = Kubernetes.start(config, intended, opts)
     assert started.metadata["authorized_pod_uids"] == ["pod-uid"]
     assert get_in(api_state(), ["pods", "se-ticket", "status", "phase"]) == "Running"
+  end
+
+  # Each adapter binds its own template identity onto the scheduler's bare record. Without it
+  # ExecutionContext.managed/3 raises and preparation dies as {:invalid, :managed_execution_context},
+  # so the environment is allocated and then never usable — no agent can ever be dispatched to it.
+  test "a started environment carries the template identity a managed context requires" do
+    {config, record, opts} = api_fixture()
+    # Orchestrator.managed_record/2 builds records with template_identity: nil and leaves each
+    # adapter to bind its own.
+    bare = %{record | template_identity: nil}
+
+    {:ok, created} = Kubernetes.ensure(config, bare, opts)
+    assert created.template_identity == "template-uid"
+
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, started} = Kubernetes.start(config, intended, opts)
+    assert started.template_identity == "template-uid"
+    assert {:ok, [discovered]} = Kubernetes.discover(config, opts)
+    assert discovered.template_identity == "template-uid"
+  end
+
+  # The Pod and its journal entry become visible independently. Aborting on the gap deletes the
+  # Pod, the controller recreates it, and the environment churns through its bounded journal
+  # without ever starting — observed live as 59 Pod operations for one environment.
+  test "a Pod observed before its journal entry is awaited rather than destroyed" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+
+    hide = fn exe, args, options ->
+      result = api_command(exe, args, options)
+      raw = if "get" in args, do: arg(args, "--raw"), else: nil
+      hidden = Process.get(:hidden_journal, 0)
+
+      pod? = is_map(api_state()["pods"]["se-ticket"])
+
+      if Path.basename(exe) == "kubectl" and is_binary(raw) and String.contains?(raw, "/sandboxes") and pod? and hidden < 1 do
+        Process.put(:hidden_journal, hidden + 1)
+        {:ok, %{status: 0, output: body}} = result
+        {:ok, %{status: 0, output: Jason.encode!(update_in(Jason.decode!(body), ["items"], fn items -> Enum.map(items, &strip_pod_operations/1) end))}}
+      else
+        result
+      end
+    end
+
+    assert {:ok, started} = Kubernetes.start(config, intended, Keyword.put(opts, :command_fun, hide))
+    assert started.metadata["authorized_pod_uids"] == ["pod-uid"]
+    assert Process.get(:pod_incarnation) == 1
+    assert get_in(api_state(), ["pods", "se-ticket", "status", "phase"]) == "Running"
+  end
+
+  # A WaitForFirstConsumer claim that never binds has no PV whose deletion could be proven, so
+  # the evidence path can never discharge it and the identity would be retained forever. Absence
+  # of both the claim and any PV referencing it is the proof that no storage was provisioned.
+  test "a claim that never bound is discharged by proven absence instead of retained forever" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    state = api_state() |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil) |> Map.put("persistentvolumes", %{})
+    Process.put(:kubernetes_api, state)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, started} = Kubernetes.start(config, intended, opts)
+    assert get_in(started.metadata, ["volumes", "workspace-se-ticket", "unbound"]) == true
+
+    assert {:ok, deleted} = Kubernetes.destroy(config, started, opts)
+    assert deleted.absent?
+    assert api_state()["persistentvolumeclaims"] == %{}
+    assert api_state()["persistentvolumes"] == %{}
   end
 
   test "an incompatible installed CRD is rejected rather than silently selecting another API" do
@@ -1616,6 +1699,184 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert {:error, {:unknown, :kubernetes_start_cancelled}, _} = Kubernetes.start(config, created, opts)
     assert api_state()["pods"] == %{}
   end
+
+  # A failed JSON-Patch precondition is a 422 whose prose goes to stderr, leaving no JSON body to
+  # classify. Treating that as unknown poisons the record and makes the scheduler recreate and
+  # re-suspend the guest forever; a read-back proves the atomic patch never applied.
+  test "a stale parent precondition reported as prose is a retryable conflict, not unknown" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+
+    assert {:error, {:retryable, :kubernetes_cas_conflict}, _} =
+             Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, stale_parent_patch(record)))
+
+    assert api_state()["sandboxes"][record.key]["spec"]["operatingMode"] == "Suspended"
+    assert {:ok, observed} = Kubernetes.inspect(config, created, opts)
+    assert {:ok, intended} = Kubernetes.put_intent(config, observed, %{desired: :running}, opts)
+    assert intended.desired == :running
+  end
+
+  # The controller writes status and journal revisions continuously, so the parent's
+  # resourceVersion moves under nearly every write. Surfacing that as a conflict failed
+  # preparation outright and the environment was allocated but never usable.
+  test "a parent that only moved underneath us is re-read and the write re-applied" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    once = stale_parent_patch(record, once: true)
+
+    assert {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, once))
+    assert intended.desired == :running
+    assert {:ok, observed} = Kubernetes.inspect(config, intended, opts)
+    assert observed.desired == :running
+  end
+
+  test "a parent whose record moved is a real conflict and is never overwritten" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    competing = stale_parent_patch(record, once: true, record_annotation: "competing-writer")
+
+    assert {:error, {:retryable, :kubernetes_cas_conflict}, _} =
+             Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, competing))
+
+    assert api_state()["sandboxes"][record.key]["metadata"]["annotations"]["symphony.dev/record"] == "competing-writer"
+    assert api_state()["sandboxes"][record.key]["spec"]["operatingMode"] == "Suspended"
+  end
+
+  # The live controller writes status and journal revisions continuously, so the parent's
+  # resourceVersion has almost always moved by the time we write. Preparation must still
+  # complete: this is the shape that left an environment allocated but never usable.
+  test "a continuously reconciling controller does not block preparation" do
+    {config, record, opts} = api_fixture()
+    busy = busy_controller()
+    opts = Keyword.put(opts, :command_fun, busy)
+
+    assert {:ok, created} = Kubernetes.ensure(config, record, opts)
+    assert {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    assert {:ok, started} = Kubernetes.start(config, intended, opts)
+    assert started.pending == [%{verb: :start, id: "pod-uid", outcome: :succeeded}]
+    assert {:ok, observed} = Kubernetes.inspect(config, started, opts)
+    assert observed.phase == :running
+  end
+
+  # Every successful write is followed by an unrelated status bump, exactly as the
+  # sandbox controller behaves while it reconciles.
+  defp busy_controller do
+    fn executable, args, call_options ->
+      result = api_command(executable, args, call_options)
+      parent = api_state()["sandboxes"]["se-ticket"]
+
+      if is_map(parent) and Path.basename(executable) == "kubectl" and "patch" in args do
+        put_object("sandboxes", update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1)))
+      end
+
+      result
+    end
+  end
+
+  # Only a parent that provably moved without our intent proves the patch never applied. A parent
+  # that vanished, was recreated, or did not move at all leaves the failed write unexplained.
+  test "an unexplained failed parent patch stays unknown instead of becoming a conflict" do
+    for rewrite <- [& &1, &put_in(&1, ["metadata", "uid"], "recreated-uid"), fn _parent -> nil end] do
+      {config, record, opts} = api_fixture()
+      {:ok, created} = Kubernetes.ensure(config, record, opts)
+      command = stale_parent_patch(record, rewrite: rewrite)
+      assert {:error, {:unknown, _}, _} = Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, command))
+    end
+  end
+
+  test "a claim that never bound stays unresolved while its volumes cannot be read or one still references it" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    claim = api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
+    state = api_state() |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil) |> Map.put("persistentvolumes", %{})
+    Process.put(:kubernetes_api, state)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, started} = Kubernetes.start(config, intended, opts)
+    assert get_in(started.metadata, ["volumes", "workspace-se-ticket", "unbound"]) == true
+
+    assert {:error, reason, unresolved} = Kubernetes.destroy(config, started, Keyword.put(opts, :command_fun, unreadable_volumes()))
+    refute reason == {:unknown, :unbound_pvc_provisioning_unresolved}
+    assert api_state()["persistentvolumeclaims"] == %{}
+
+    orphan = %{"metadata" => %{"name" => "orphan", "uid" => "orphan-uid"}, "spec" => %{"claimRef" => %{"uid" => claim["metadata"]["uid"]}}}
+    put_object("persistentvolumes", orphan)
+    assert {:error, {:unknown, :unbound_pvc_provisioning_unresolved}, _} = Kubernetes.destroy(config, unresolved, opts)
+    assert api_state()["persistentvolumes"]["orphan"]
+  end
+
+  test "a failed authoritative parent re-read denies an unjournaled Pod with the read failure" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    command = unreadable_parent_after_uncommit(record)
+
+    assert {:error, reason, _} = Kubernetes.start(config, intended, Keyword.put(opts, :command_fun, command))
+    refute reason == {:unknown, :kubernetes_unjournaled_child}
+    assert Process.get(:parent_unreadable) == true
+  end
+
+  # Once the claim itself is gone, the volume list that would prove nothing references it fails.
+  defp unreadable_volumes do
+    fn executable, args, call_options ->
+      if api_state()["persistentvolumeclaims"] == %{} and raw_path_ends_with?(args, "/persistentvolumes") do
+        {:ok, %{status: 1, output: Jason.encode!(%{"kind" => "Status", "code" => 500, "message" => "volumes unavailable"})}}
+      else
+        api_command(executable, args, call_options)
+      end
+    end
+  end
+
+  # The controller issues the Pod while reconciling the start patch, and the fixture uncommits it
+  # from the journal at once. The authoritative parent re-read is the first parent read after that
+  # Pod has been observed, and it is the read that fails.
+  defp unreadable_parent_after_uncommit(record) do
+    fn executable, args, call_options ->
+      if Process.get(:parent_unreadable) == true and "get" in args and raw_path_ends_with?(args, "/sandboxes") do
+        {:ok, %{status: 1, output: Jason.encode!(%{"kind" => "Status", "code" => 500, "message" => "parent unavailable"})}}
+      else
+        respond_then_uncommit(record, executable, args, call_options)
+      end
+    end
+  end
+
+  defp respond_then_uncommit(record, executable, args, call_options) do
+    response = api_command(executable, args, call_options)
+
+    if "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes"), do: uncommit_fixture_pod(record)
+    if "get" in args and raw_path_ends_with?(args, "/pods") and api_state()["pods"] != %{}, do: Process.put(:parent_unreadable, true)
+
+    response
+  end
+
+  defp raw_path_ends_with?(args, suffix), do: "--raw" in args and String.ends_with?(URI.parse(arg(args, "--raw")).path || "", suffix)
+
+  # Models the controller bumping the parent between our read and our patch: the patch is
+  # rejected as prose with no body, exactly as kubectl reports a failed precondition.
+  defp stale_parent_patch(record, options \\ []) do
+    fn executable, args, call_options ->
+      spent = options[:once] == true and Process.get(:stale_parent_patch) != nil
+
+      if Path.basename(executable) == "kubectl" and "patch" in args and Enum.any?(args, &String.starts_with?(&1, "sandboxes.")) and not spent do
+        Process.put(:stale_parent_patch, true)
+        rewrite_parent(record, options)
+        {:ok, %{status: 1, output: "The request is invalid: the server rejected our request due to an error in our request"}}
+      else
+        api_command(executable, args, call_options)
+      end
+    end
+  end
+
+  defp rewrite_parent(record, options) do
+    parent = api_state()["sandboxes"][record.key]
+    rewritten = Keyword.get(options, :rewrite, &bump_resource_version/1).(parent)
+    store_parent(record, annotate_record(rewritten, options[:record_annotation]))
+  end
+
+  defp store_parent(record, nil), do: Process.put(:kubernetes_api, update_in(api_state(), ["sandboxes"], &Map.delete(&1, record.key)))
+  defp store_parent(_record, parent), do: put_object("sandboxes", parent)
+  defp bump_resource_version(parent), do: update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1))
+  defp annotate_record(object, annotation) when annotation in [nil, false], do: object
+  defp annotate_record(object, annotation), do: put_in(object, ["metadata", "annotations", "symphony.dev/record"], annotation)
 
   test "credential rotation after local key loss retains pinned host identity" do
     {config, record, opts} = api_fixture()
@@ -2640,7 +2901,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
       terminal =
         object
-        |> put_in(["metadata", "managedFields"], [%{"manager" => "kubelet", "subresource" => "status"}])
+        |> put_in(["metadata", "managedFields"], [%{"manager" => option(:status_field_manager) || "kubelet", "subresource" => "status"}])
         |> Map.put("status", %{"phase" => "Succeeded", "containerStatuses" => statuses})
 
       put_event("pods", name, %{"type" => "MODIFIED", "object" => terminal})
@@ -2651,9 +2912,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp delete_effect("persistentvolumeclaims", name, _object) do
     remove_object("persistentvolumeclaims", name)
+    pv = api_state()["persistentvolumes"]["pv-ticket"]
 
-    if not option(:delay_pv) do
-      pv = api_state()["persistentvolumes"]["pv-ticket"]
+    # A claim that never bound has no volume to release, so only a provisioned one emits a
+    # deletion event. Without this the fixture raises instead of modelling the real API.
+    if is_map(pv) and not option(:delay_pv) do
       put_event("persistentvolumes", "pv-ticket", %{"type" => "DELETED", "object" => put_in(pv, ["metadata", "finalizers"], [])})
       remove_object("persistentvolumes", "pv-ticket")
     end
@@ -2666,6 +2929,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     Map.update(object, "status", %{"conditions" => [condition]}, &Map.put(&1, "conditions", [condition]))
   end
 
+  defp strip_pod_operations(sandbox) do
+    if get_in(sandbox, ["status", "creationJournal", "operations"]) do
+      update_in(sandbox, ["status", "creationJournal", "operations"], &Enum.reject(&1, fn op -> op["resource"] == "pods" end))
+    else
+      sandbox
+    end
+  end
+
   defp late_missing_pod_after_close(record, storage_failure) do
     fn exe, args, options ->
       response = api_command(exe, args, options)
@@ -2673,6 +2944,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       if "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes") and
            guard_data(record)["phase"] == "Closing" and Process.get(:late_missing_pod) != true do
         Process.put(:late_missing_pod, true)
+
         parent = api_state()["sandboxes"][record.key]
         inject_missing_storage(storage_failure, parent)
         create_pod(api_state()["sandboxes"][record.key])

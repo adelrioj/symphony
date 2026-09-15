@@ -10,7 +10,7 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
   alias SymphonyElixir.ExecutionEnvironment.{Operations, Record}
   alias SymphonyElixir.ManagedEnvironmentFixture.Control
   alias SymphonyElixir.SSH.Target
-  alias SymphonyElixir.Tracker.Issue
+  alias SymphonyElixir.Tracker.{Issue, Memory}
 
   setup do
     previous = Application.get_env(:symphony_elixir, :memory_tracker_issues)
@@ -77,6 +77,65 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
     for id <- ["disk-orphan", "other-disk", "claim-orphan", "orphan-uid"], do: assert(encoded =~ id)
     refute encoded =~ "SECRET"
     assert Map.get(state, :inventory_complete) == false
+  end
+
+  test "mixed invalid resource diagnostics retain exact storage identities" do
+    control = start_supervised!({Control, checks: [], session_limit: 0})
+    handle = "_tenant#disk%2F=雪"
+    resources = ["guard-name", %{"uid" => "pv-uid", "volume_handle" => handle, "token" => "SECRET"}]
+    :ok = inventory(control, {:error, {:unknown, {:kubernetes_invalid_owned_record, resources}}})
+    state = GenServer.call(control, :snapshot)
+    assert %{"id" => "guard-name"} in state.captured_resources
+    assert %{"uid" => "pv-uid", "volume_handle" => handle} in state.captured_resources
+    refute state.inventory_complete
+  end
+
+  test "completed guard receipts survive absence and interruption separately from resources" do
+    control = start_supervised!({Control, checks: ["absence"], session_limit: 0})
+
+    record = %{
+      key: "se-ticket",
+      kind: "kubernetes",
+      deployment_id: "deployment",
+      scope: %{"namespace" => "workers"},
+      provider_ref: "parent-uid",
+      metadata: %{},
+      absent?: true,
+      proof: {:quiescent, %{guard_uid: "guard-uid", parent_uid: "parent-uid", protocol: "symphony-create-drain-v1"}}
+    }
+
+    active = %{record | absent?: false, proof: :unknown, metadata: %{"guard" => %{"kind" => "ConfigMap", "uid" => "guard-uid", "namespace" => "workers"}}}
+    :ok = inventory(control, {:ok, %{records: [active], live_worker_counts: %{"se-ticket" => 0}}})
+    :ok = GenServer.call(control, {:check, "absence", %{status: :passed}})
+    refute Control.qualified?(GenServer.call(control, :snapshot))
+    :ok = GenServer.call(control, {:event, %{event: :record_observation, result: {:ok, record}}})
+    :ok = inventory(control, {:ok, %{records: [], live_worker_counts: %{}}})
+    state = GenServer.call(control, :snapshot)
+    assert [%{"uid" => "guard-uid", "kind" => "ConfigMap"} = receipt] = state.retained_guards
+    assert receipt["namespace"] == "workers"
+    assert state.observed_resources == []
+    refute Enum.any?(state.captured_resources, &(&1["uid"] == "guard-uid"))
+    :ok = GenServer.call(control, {:interrupted, Jason.decode!(Jason.encode!(%{retained_guards: state.retained_guards, events: []}))})
+    assert GenServer.call(control, :snapshot).retained_guards == state.retained_guards
+    refute Control.qualified?(GenServer.call(control, :snapshot))
+  end
+
+  test "fresh interrupted control restores original and recovery issues as terminal cleanup intents" do
+    original = %Issue{id: "qualification-1", identifier: "QUAL-1", state: "In Review"}
+    recovery = %Issue{id: "qualification-recovery", identifier: "QUAL-RECOVERY", state: "Qualification Codex"}
+    control = start_supervised!({Control, checks: [], session_limit: 0})
+    :ok = GenServer.call(control, {:issues, [original, recovery]})
+    persisted = Jason.encode!(%{cleanup_issue_ids: Enum.map(GenServer.call(control, :snapshot).issues, & &1.id)})
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    recovered = start_supervised!({Control, checks: [], session_limit: 0}, id: :recovered_cleanup)
+    :ok = GenServer.call(recovered, {:interrupted, Jason.decode!(persisted)})
+    restored = GenServer.call(recovered, :snapshot)
+    :ok = GenServer.call(recovered, {:issues, Enum.map(restored.issues, &%{&1 | state: "Done"})})
+    assert {:ok, terminal} = Memory.fetch_issues_by_states(["Done"])
+    assert MapSet.new(Enum.map(terminal, & &1.id)) == MapSet.new([original.id, recovery.id])
+    assert {:ok, []} = Memory.fetch_issues_by_states(["Qualification Codex", "In Review"])
+    refute Control.qualified?(GenServer.call(recovered, :snapshot))
   end
 
   test "runner rejection remains failed after good events cleanup and interrupted recovery" do

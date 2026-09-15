@@ -597,7 +597,7 @@ Production `Kubernetes.preflight/2` returns
 `{:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}}` even when every
 read-only profile and inventory check succeeds. The normal discovery path remains blocked and
 the scheduler admits no Kubernetes tickets; this is not merely a qualification-harness restriction.
-The harness preserves the same blocker. No workflow field or operator ConfigMap can override it.
+The full distributed qualification harness preserves the same blocker. No workflow field or operator ConfigMap can override it.
 Local/static SSH operation and the existing VM deployment do not depend on this managed-provider gate.
 
 ##### Candidate create-drain protocol
@@ -646,6 +646,107 @@ client-go retry path. Static bearer/token-file snapshots, basic auth and client 
 supported; exec/auth-provider plugins, impersonation, custom transports and insecure TLS are rejected.
 Controller token files are snapshotted at client construction, not refreshed after rejection.
 The helper accepts a bare API path; the shared transport always adds `fieldValidation=Strict`.
+
+##### Test-only non-model candidate runner
+
+`Kubernetes.candidate_preflight/3` and its candidate validator exist only in
+`MIX_ENV=test` artifacts. Ordinary `Kubernetes.preflight/2` rejects candidate options
+and retains its unconditional allocation stop. This is not a workflow switch or a
+production baseline replacement.
+
+The opt-in runner uses the real lifecycle operations, single-attempt helper, Memory
+tracker, and managed SSH transport. It replaces the agent callback with a nonce
+write/read/remove probe, clears workflow hooks, permits one worker, and starts a
+fresh runtime for terminal cleanup. It never invokes AgentRunner or a paid backend.
+Its evidence always says `candidate-unqualified`, `qualified: false`, and
+`backend_sessions: 0`, even after a successful probe.
+
+Run from an operator-reviewed source checkout with accessible Git metadata, not a
+production release artifact. PR21 moved runtime configuration into SQLite lanes:
+the runner imports its sanitized workflow as a **disabled** lane and passes its ID
+to the existing custom managed runtime. It does not enable `LaneSupervisor`, and
+`executor: local` describes the Symphony scheduler, not the managed worker.
+The database lane/version IDs are included in evidence.
+
+Use a fresh private database for **each invocation**, including cleanup mode.
+The runner rejects a nonempty LaneStore because Memory tracker state is global.
+Configure Repo **before application startup**. `MIX_ENV=test` normally uses a fresh
+in-memory SQLite database; the explicit file-backed setup below retains lane/version
+evidence after exit without touching an existing installation. The disabled candidate
+lane remains for inspection, including after failed cleanup.
+`SYMPHONY_CANDIDATE_DB` below is a launcher input, not a built-in application setting.
+Its parent must already be a private directory.
+
+```bash
+MIX_ENV=test \
+SYMPHONY_RUN_KUBERNETES_CANDIDATE=1 \
+SYMPHONY_KUBERNETES_CANDIDATE_INPUT=/absolute/private/candidate-input.json \
+SYMPHONY_CANDIDATE_DB=/absolute/private/fresh-symphony.sqlite3 \
+mise exec -- mix run --no-start -e '
+  database = System.fetch_env!("SYMPHONY_CANDIDATE_DB")
+  false = File.exists?(database)
+  Application.put_env(:symphony_elixir, :data_root, Path.dirname(database))
+  Application.put_env(:symphony_elixir, SymphonyElixir.Repo, database: database)
+  {:ok, _} = Application.ensure_all_started(:symphony_elixir)
+  Mix.Task.run("test", ["--no-start", "test/symphony_elixir/kubernetes_candidate_live_test.exs"])
+'
+```
+
+The input JSON requires exactly:
+
+| Field | Meaning |
+| --- | --- |
+| `authorization` | `disposable-namespace-non-model`; an explicit operator authorization, not permission to provision infrastructure |
+| `mode` | `run` for a fresh deployment identity; `cleanup` for recovery of that same identity |
+| `workflow_path` | Absolute path to the existing Kubernetes workflow |
+| `output_path` | New evidence file in an existing caller-owned `0700` directory |
+| `pins` | Exact candidate baseline described below |
+| `timeout_ms`, `cleanup_timeout_ms` | Each between 1,000 and 900,000 milliseconds |
+| `runner_sha256` | SHA-256 of `test/support/kubernetes_candidate_runner.exs` |
+| `negative_control_paths` | Nonempty list of independent existing resource API paths, compared before and after |
+
+`pins` contains `namespace`, `namespace_uid`, `deployment_id`,
+`consumer_source_commit`, `consumer_artifact_sha256`, `helper_sha256`, `contract`,
+`schema_digests`, `controller_spec_digest`, `controller_authorization`,
+`runtime_class_spec_digest`, `storage_class_digests`, and
+`network_policy_spec_digest`. Missing or extra keys fail closed. Artifact identity
+comes from `Kubernetes.Candidate.artifact_identity/0`: actual application BEAM hashes
+and their aggregate, not a source-version label. The helper pin hashes the executable
+actually found on `PATH`. Source commits remain provenance attestations; checking
+Git HEAD does not prove a clean checkout or a source-to-binary build.
+
+The immutable qualification ConfigMap's `contract.json` must equal `pins.contract`.
+It uses the existing contract fields above, but supplies the reviewed candidate
+release/source/image, plus `stage: "candidate-unqualified"`, `qualified: false`,
+`termination_contract: "candidate-unqualified-kubelet-all-containers-v1"`, and
+`worker_image`. Controller and worker images must use immutable SHA-256 references;
+every template container and init container must match the worker image.
+
+Use `Kubernetes.Candidate.digest/1` for object pins: canonical JSON SHA-256 truncated
+to 40 hexadecimal characters, not SHA-1. Schema pins map the two CRD names to their
+served/storage `v1beta1` `openAPIV3Schema` digests. Controller, Template and
+NetworkPolicy pins hash `spec`; RuntimeClass hashes `handler`, `overhead` and
+`scheduling`; StorageClass pins map UID to the object without metadata/apiVersion/kind.
+Authorization requires exactly `service_account`, `workload_role`, `workload_binding`,
+`management_role`, and `management_binding`, each with `name`, `namespace`, `uid`,
+and a digest of the object without metadata/apiVersion/kind.
+
+The controller must use its pinned entrypoint, one canonical namespace flag, and
+explicit management-namespace leader election, with extensions disabled. Candidate
+preflight additionally needs management-namespace ServiceAccount listing and
+cluster-wide read-only listing of Roles, RoleBindings, ClusterRoles and
+ClusterRoleBindings. It verifies workload and Lease grants and rejects extra
+controller-principal grants, except non-resource discovery reads and self-reviews.
+This inspection authority does not give the controller those inspection permissions.
+
+No resources or admission prerequisites are installed by the runner. Protected
+namespace identities, the enforcing create-drain policy, runtime isolation and
+network/storage prerequisites above still require operator preparation and
+qualification. Candidate preflight is not proof of admission enforcement or physical
+fault behavior. Full model-session and fault qualification remains a separate gated suite.
+Completed guard receipts remain after billable resources disappear; never reuse their
+deployment/ticket identities. After interruption, use `mode: "cleanup"` with the same
+pins and a fresh output path; unknown obligations are not absence proof.
 
 #### Managed observability API
 

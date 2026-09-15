@@ -15,6 +15,67 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @pv_finalizer "external-provisioner.volume.kubernetes.io/finalizer"
   @children ["pods", "persistentvolumeclaims", "services", "secrets"]
   @protocol "symphony-create-drain-v1"
+  @persist_attempts 3
+
+  @stock_baseline %{
+    release: "v1.0.1",
+    termination_contract: "qualified-kubelet-all-containers-v1",
+    controller_source_commit: "3e77ccbac4db8a12b0157eafcad0d1ad5872f32a",
+    controller_image_prefix: "registry.k8s.io/agent-sandbox/agent-sandbox-controller@sha256:",
+    schemas: [
+      {"sandboxes.agents.x-k8s.io", "37f0b89594ba20ca4d37b93714c362bcd694369f"},
+      {"sandboxtemplates.extensions.agents.x-k8s.io", "6c5c594b1a0cddda9b330bb094272e1c465d11c2"}
+    ]
+  }
+
+  # The release artifact has neither this entrypoint nor the candidate validator.
+  if Mix.env() == :test do
+    alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Candidate
+
+    @spec candidate_preflight(map(), map(), keyword()) :: :ok | {:error, term()}
+    def candidate_preflight(config, pins, opts \\ []) do
+      opts = opts |> Keyword.put(:candidate_baseline, pins) |> with_deadline()
+
+      with {:ok, _} <- qualification(config, opts),
+           :ok <- validate_config(config.provider),
+           {:ok, _} <- inventory(config, opts),
+           do: :ok
+    end
+
+    defp baseline(config, opts) do
+      case Keyword.fetch(opts, :candidate_baseline) do
+        {:ok, pins} -> Candidate.validate(config, pins)
+        :error -> {:ok, @stock_baseline}
+      end
+    end
+
+    defp candidate_contract(config, q, template, baseline, opts) do
+      case baseline do
+        %{candidate: pins} -> Candidate.contract(config, q, template, pins, opts)
+        _ -> :ok
+      end
+    end
+  else
+    defp baseline(_config, opts) do
+      with :ok <- ordinary_options(opts), do: {:ok, @stock_baseline}
+    end
+
+    defp candidate_contract(_config, _q, _template, _baseline, _opts), do: :ok
+  end
+
+  defp ordinary_options(opts) do
+    if Keyword.has_key?(opts, :candidate_baseline),
+      do: {:error, {:invalid, :kubernetes_candidate_options_forbidden}},
+      else: :ok
+  end
+
+  defp candidate_operation(config, opts) do
+    if Keyword.has_key?(opts, :candidate_baseline) do
+      with {:ok, _} <- qualification(config, opts), do: :ok
+    else
+      :ok
+    end
+  end
 
   @verbs [:create, :start, :stop, :delete, :update]
   @outcomes [:pending, :unknown, :succeeded, :failed]
@@ -37,7 +98,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   def preflight(config, opts) do
     opts = with_deadline(opts)
 
-    with :ok <- validate_config(config.provider),
+    with :ok <- ordinary_options(opts),
+         :ok <- validate_config(config.provider),
          {:ok, _} <- qualification(config, opts),
          {:ok, _} <- inventory(config, opts),
          do: {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}}
@@ -47,7 +109,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   def discover(config, opts) do
     opts = with_deadline(opts)
 
-    with {:ok, objects} <- inventory(config, opts),
+    with :ok <- candidate_operation(config, opts),
+         {:ok, objects} <- inventory(config, opts),
          {:ok, records} <- discover_guards(config, objects, opts),
          :ok <- inventory_guard_ownership(config, objects, records) do
       {:ok, records |> Map.values() |> Enum.reject(& &1.absent?)}
@@ -189,6 +252,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     result =
       with {:ok, q} <- qualification(config, opts),
+           record = bind_template_identity(record, q),
            {:ok, existing} <- Client.lookup(config, collection(config, "sandboxes"), record.key, opts),
            {:ok, objects} <- inventory(config, opts) do
         ensure_observed(config, record, existing, objects, q, opts)
@@ -196,6 +260,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     result(record, result)
   end
+
+  # The scheduler creates records with no template identity and each adapter binds its own; the
+  # Kubernetes adapter only ever validated it. Without a binding, ExecutionContext.managed/3
+  # raises and preparation dies as {:invalid, :managed_execution_context}, so an environment is
+  # allocated and then never usable. Bind on entry so the durable copy written to the guard and
+  # every later identity comparison see the same value.
+  defp bind_template_identity(%Record{template_identity: nil} = record, q), do: %{record | template_identity: q["template_uid"]}
+  defp bind_template_identity(record, _q), do: record
 
   defp ensure_observed(config, record, existing, objects, q, opts) do
     cond do
@@ -285,7 +357,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       end)
 
     result =
-      with {:ok, guard} <- Guard.fetch(config, record, opts) do
+      with :ok <- candidate_operation(config, opts),
+           {:ok, guard} <- Guard.fetch(config, record, opts) do
         write_intent(config, record, updated, guard, opts)
       end
 
@@ -323,8 +396,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     opts = with_deadline(opts)
 
     result =
-      with :ok <- Guard.open(config, record, opts),
-           {:ok, q} <- qualification(config, opts),
+      with {:ok, q} <- qualification(config, opts),
+           :ok <- Guard.open(config, record, opts),
            {:ok, sandbox} <- fetch_parent(config, record, opts),
            {:ok, record} <- observe_guard(config, record, sandbox, opts),
            true <- record.desired == :running and get_in(sandbox, ["metadata", "deletionTimestamp"]) == nil,
@@ -857,7 +930,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp complete_member?(%{"resource" => "services"}, _evidence, _record), do: true
-  defp deleted_volume?(volume), do: volume["deleted"] == true and is_binary(volume["pv_uid"])
+  # Either the provisioned volume's deletion was observed, or the claim provably never bound and
+  # no volume was ever provisioned for it. Only discharge_unbound/5 sets the latter, and only
+  # after an authoritative read shows the claim absent with no PersistentVolume claiming its UID.
+  defp deleted_volume?(volume), do: volume["deleted"] == true and (is_binary(volume["pv_uid"]) or volume["unbound"] == true)
 
   defp authorized_pods_terminated?(record, evidence) do
     Enum.all?(record.metadata["authorized_pod_uids"] || [], &termination_proof?(evidence[&1], &1, record))
@@ -1098,21 +1174,23 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp qualification(config, opts) do
-    with {:ok, %{status: 200, body: version}} <- Client.request(config, :get, "/version", nil, opts),
+    with {:ok, baseline} <- baseline(config, opts),
+         {:ok, %{status: 200, body: version}} <- Client.request(config, :get, "/version", nil, opts),
          true <- kubernetes_version?(version),
          {:ok, template} when is_map(template) <- Client.lookup(config, collection(config, "sandboxtemplates"), config.provider["template"], opts),
          qualification_name when is_binary(qualification_name) <- get_in(template, ["metadata", "annotations", @qualification]),
          {:ok, cm} when is_map(cm) <- Client.lookup(config, collection(config, "configmaps"), qualification_name, opts),
          true <- cm["immutable"] == true,
          {:ok, q} <- Jason.decode(get_in(cm, ["data", "contract.json"]) || ""),
-         true <- q["release"] == "v1.0.1" and q["template_uid"] == uid(template) and q["template_digest"] == digest(template["spec"]),
+         true <- q["release"] == baseline.release and q["template_uid"] == uid(template) and q["template_digest"] == digest(template["spec"]),
          true <- is_binary(q["qualification_report"]) and String.trim(q["qualification_report"]) != "",
-         true <- q["termination_contract"] == "qualified-kubelet-all-containers-v1",
+         true <- q["termination_contract"] == baseline.termination_contract,
+         :ok <- candidate_contract(config, q, template, baseline, opts),
          {:ok, crds} <- Client.list(config, "/apis/apiextensions.k8s.io/v1/customresourcedefinitions", opts),
-         :ok <- schemas(crds),
+         :ok <- schemas(crds, baseline),
          {:ok, deployments} <- Client.list(config, "/apis/apps/v1/namespaces/#{segment(q["controller_namespace"])}/deployments", opts),
          controller when is_map(controller) <- Enum.find(deployments, &(name(&1) == q["controller_name"])),
-         true <- uid(controller) == q["controller_uid"] and controller_image?(controller, q),
+         true <- uid(controller) == q["controller_uid"] and controller_image?(controller, q, baseline),
          {:ok, runtimes} <- Client.list(config, "/apis/node.k8s.io/v1/runtimeclasses", opts),
          runtime when is_map(runtime) <- Enum.find(runtimes, &(name(&1) == get_in(template, ["spec", "podTemplate", "spec", "runtimeClassName"]))),
          true <- uid(runtime) == q["runtime_class_uid"] and runtime["handler"] == q["runtime_handler"],
@@ -1130,13 +1208,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     _ -> {:error, {:invalid, :kubernetes_profile_not_qualified}}
   end
 
-  defp schemas(crds) do
-    expected = [
-      {"sandboxes.agents.x-k8s.io", "37f0b89594ba20ca4d37b93714c362bcd694369f"},
-      {"sandboxtemplates.extensions.agents.x-k8s.io", "6c5c594b1a0cddda9b330bb094272e1c465d11c2"}
-    ]
-
-    valid = Enum.all?(expected, fn {name, hash} -> qualified_schema?(crds, name, hash) end)
+  defp schemas(crds, baseline) do
+    valid = Enum.all?(baseline.schemas, fn {name, hash} -> qualified_schema?(crds, name, hash) end)
     if valid, do: :ok, else: {:error, {:invalid, :kubernetes_schema_mismatch}}
   end
 
@@ -1162,20 +1235,23 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp kubernetes_version?(_), do: false
 
-  defp controller_image?(controller, q) do
+  defp controller_image?(controller, q, baseline) do
     containers = get_in(controller, ["spec", "template", "spec", "containers"]) || []
     desired = get_in(controller, ["spec", "replicas"])
     available = get_in(controller, ["status", "availableReplicas"])
 
     is_integer(desired) and desired > 0 and is_integer(available) and available >= desired and
-      q["controller_source_commit"] == "3e77ccbac4db8a12b0157eafcad0d1ad5872f32a" and
-      Enum.any?(containers, &pinned_controller_image?(&1, q)) and
+      q["controller_source_commit"] == baseline.controller_source_commit and
+      Enum.any?(containers, &pinned_controller_image?(&1, q, baseline)) and
       get_in(controller, ["status", "observedGeneration"]) == get_in(controller, ["metadata", "generation"])
   end
 
-  defp pinned_controller_image?(container, q) do
-    prefix = "registry.k8s.io/agent-sandbox/agent-sandbox-controller@sha256:"
-    container["image"] == q["controller_image"] and String.starts_with?(container["image"] || "", prefix)
+  # A candidate baseline pins the exact image; the stock baseline pins its registry prefix.
+  defp pinned_controller_image?(container, q, baseline) do
+    image = container["image"]
+
+    image == q["controller_image"] and image == Map.get(baseline, :controller_image, image) and
+      String.starts_with?(image || "", Map.get(baseline, :controller_image_prefix, ""))
   end
 
   defp storage_classes(template, classes, q) do
@@ -1428,7 +1504,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
         {:error, {:unknown, :kubernetes_child_ownership_changed}}
 
       not journaled_pod?(sandbox, pod) ->
-        {:error, {:unknown, :kubernetes_unjournaled_child}}
+        reread_journaled_pod(config, record, sandbox, pod, q, opts)
 
       uid(pod) in authorized and not gated?(pod) ->
         {:ok, normalize(record, sandbox, [pod], evidence)}
@@ -1441,6 +1517,23 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
       true ->
         release(config, record, sandbox, pod, q, opts)
+    end
+  end
+
+  # Authorization runs against a parent snapshot taken before the Pod was observed, so a Pod
+  # issued between the two reads looks unjournaled. Aborting on that deletes the Pod, the
+  # controller recreates it, and the environment churns through its bounded journal without ever
+  # starting — observed live as 59 Pod operations for one environment. Re-read the parent
+  # authoritatively once: the protocol commits the entry before the POST, so a genuinely issued
+  # Pod appears. A Pod still missing from the fresh journal is denied exactly as before, which
+  # keeps forged and uncommitted attribution decisively rejected rather than merely delayed.
+  defp reread_journaled_pod(config, record, _sandbox, pod, q, opts) do
+    with {:ok, current} <- fetch_parent(config, record, opts),
+         true <- journaled_pod?(current, pod) do
+      authorize_pod(config, record, current, pod, q, opts)
+    else
+      false -> {:error, {:unknown, :kubernetes_unjournaled_child}}
+      error -> error
     end
   end
 
@@ -1480,7 +1573,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
          {:ok, saved} <- persist(config, record, sandbox, [], opts),
          {:ok, current} <- fetch_parent(config, saved, opts),
          {:ok, observed} <- observe_guard(config, saved, current, opts),
-         true <- rv(current) == saved.version and running_intent?(observed, current),
+         # Our own pending start, read back from the guard, is what proves nobody rewrote
+         # the record between persisting it and releasing the gate. Requiring the parent's
+         # resourceVersion to be untouched proved nothing extra and could never hold while
+         # the controller reconciles: it writes status and journal revisions continuously.
+         true <- observed.pending == saved.pending and running_intent?(observed, current),
          :ok <- Guard.open(config, saved, opts),
          :ok <- safe_live_pod(pod, q),
          index when is_integer(index) <- Enum.find_index(get_in(pod, ["spec", "schedulingGates"]) || [], &(&1["name"] == @gate)),
@@ -1609,9 +1706,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     spec = pod["spec"] || %{}
     containers = all_containers(spec, ["containers", "initContainers", "ephemeralContainers"])
     states = all_containers(status, ["containerStatuses", "initContainerStatuses", "ephemeralContainerStatuses"])
-    kubelet = Enum.any?(get_in(pod, ["metadata", "managedFields"]) || [], &(&1["manager"] == "kubelet" and &1["subresource"] == "status"))
 
-    kubelet and status["phase"] in ["Succeeded", "Failed"] and containers != [] and
+    # Attribution is the status subresource itself, not the field manager's name: the
+    # manager string is chosen by the writer, while admission restricts pods/status to
+    # the assigned node. Distributions name it differently (k3s embeds the kubelet and
+    # writes "k3s"), so pinning the name only makes terminal status unprovable there.
+    reported = Enum.any?(get_in(pod, ["metadata", "managedFields"]) || [], &(&1["subresource"] == "status"))
+
+    reported and status["phase"] in ["Succeeded", "Failed"] and containers != [] and
       Enum.all?(containers, &container_terminated?(&1, states))
   end
 
@@ -1733,12 +1835,37 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
           {:cont, {:ok, current}}
 
         volume["pv_uid"] == nil ->
-          {:halt, {:error, {:unknown, :unbound_pvc_provisioning_unresolved}, current}}
+          discharge_step(config, current, key, volume, opts)
 
         true ->
           {:cont, {:ok, observe_volume_deletion(config, current, key, volume, q, opts)}}
       end
     end)
+  end
+
+  defp discharge_step(config, current, key, volume, opts) do
+    case discharge_unbound(config, current, key, volume, opts) do
+      {:ok, updated} -> {:cont, {:ok, updated}}
+      :unresolved -> {:halt, {:error, {:unknown, :unbound_pvc_provisioning_unresolved}, current}}
+      error -> {:halt, error}
+    end
+  end
+
+  # A claim that never bound has no backing volume whose deletion could ever be proven, so the
+  # evidence path below can never discharge it and cleanup would retain the identity forever.
+  # Prove the negative instead: the claim is authoritatively absent and no PersistentVolume
+  # references its UID. A claim that bound after capture, or any read failure, stays unresolved.
+  defp discharge_unbound(config, record, key, volume, opts) do
+    with {:ok, claim} <- Client.lookup(config, collection(config, "persistentvolumeclaims"), volume["pvc_name"], opts),
+         {:ok, provisioned} <- Client.list(config, collection(config, "persistentvolumes"), opts) do
+      claimed? = Enum.any?(provisioned, &(get_in(&1, ["spec", "claimRef", "uid"]) == volume["pvc_uid"]))
+
+      if is_nil(claim) and not claimed? do
+        {:ok, %{record | metadata: put_in(record.metadata, ["volumes", key, "deleted"], true)}}
+      else
+        :unresolved
+      end
+    end
   end
 
   defp observe_volume_deletion(config, record, key, volume, q, opts) do
@@ -2103,12 +2230,66 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     with {:ok, guard} <- Guard.save(config, record, encode_record(record), opts),
          {:ok, durable} <- decode_guard_record(guard.data, config) do
       durable = %{durable | metadata: Map.merge(durable.metadata, Map.take(record.metadata, ["client_key_directory", "client_key_lease"]))}
-      annotations = Map.put(get_in(sandbox, ["metadata", "annotations"]) || %{}, @state, encode_record(durable))
-      patch = cas(sandbox) ++ [%{"op" => "add", "path" => "/metadata/annotations", "value" => annotations}] ++ extra
-
-      with {:ok, updated} <- api(config, :patch, object_path(config, "sandboxes", sandbox), patch, opts),
-           do: {:ok, bind_parent(durable, updated)}
+      apply_state(config, durable, sandbox, extra, opts, @persist_attempts)
     end
+  end
+
+  defp apply_state(config, durable, sandbox, extra, opts, attempts) do
+    annotations = Map.put(get_in(sandbox, ["metadata", "annotations"]) || %{}, @state, encode_record(durable))
+    patch = cas(sandbox) ++ [%{"op" => "add", "path" => "/metadata/annotations", "value" => annotations}] ++ extra
+
+    case api(config, :patch, object_path(config, "sandboxes", sandbox), patch, opts) do
+      {:ok, updated} ->
+        {:ok, bind_parent(durable, updated)}
+
+      error ->
+        case confirm_persist(config, durable, sandbox, annotations, extra, error, opts) do
+          {:error, {:retryable, :kubernetes_cas_conflict}} when attempts > 1 ->
+            retry_state(config, durable, sandbox, extra, opts, attempts)
+
+          result ->
+            result
+        end
+    end
+  end
+
+  # The controller writes status and journal revisions continuously, so the parent's
+  # resourceVersion moves under every write of ours. That is not a competing record
+  # change: re-read, and when our own state annotation is still the one we based this
+  # write on, re-apply against the fresh parent. A moved annotation means another
+  # writer owns the record, and that conflict is still surfaced to the caller.
+  defp retry_state(config, durable, sandbox, extra, opts, attempts) do
+    with {:ok, observed} when is_map(observed) <- Client.lookup(config, collection(config, "sandboxes"), name(sandbox), opts),
+         true <- uid(observed) == uid(sandbox),
+         true <- get_in(observed, ["metadata", "annotations", @state]) == get_in(sandbox, ["metadata", "annotations", @state]) do
+      apply_state(config, durable, observed, extra, opts, attempts - 1)
+    else
+      _ -> {:error, {:retryable, :kubernetes_cas_conflict}}
+    end
+  end
+
+  # kubectl reports a failed JSON-Patch precondition as 422 prose with an empty body, so the
+  # transport cannot classify it and conservatively returns unknown. Read back before believing
+  # that: our own exact state annotation proves a lost response, and a parent that moved without
+  # it proves the atomic patch never applied. Anything less certain stays unknown.
+  defp confirm_persist(config, durable, sandbox, annotations, extra, error, opts) do
+    case Client.lookup(config, collection(config, "sandboxes"), name(sandbox), opts) do
+      {:ok, observed} when is_map(observed) ->
+        cond do
+          uid(observed) != uid(sandbox) -> error
+          persisted_intent?(observed, annotations, extra) -> {:ok, bind_parent(durable, observed)}
+          rv(observed) != rv(sandbox) -> {:error, {:retryable, :kubernetes_cas_conflict}}
+          true -> error
+        end
+
+      _ ->
+        error
+    end
+  end
+
+  defp persisted_intent?(observed, annotations, extra) do
+    get_in(observed, ["metadata", "annotations", @state]) == annotations[@state] and
+      Enum.all?(extra, fn %{"op" => "add", "path" => path, "value" => value} -> get_in(observed, String.split(path, "/", trim: true)) == value end)
   end
 
   defp durable_metadata(metadata), do: Map.drop(metadata, ["client_key_directory", "client_key_lease"])
