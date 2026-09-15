@@ -5,7 +5,7 @@ Code.require_file("kubernetes_candidate_evidence.exs", __DIR__)
 
 defmodule SymphonyElixir.KubernetesCandidateRunner do
   @moduledoc false
-  alias SymphonyElixir.{AgentRuntimeSupervisor, ExecutionContext, Lanes, LaneStore, Orchestrator, SSH, Workflow}
+  alias SymphonyElixir.{AgentRunner, AgentRuntimeSupervisor, ExecutionContext, Lanes, LaneStore, Orchestrator, SSH, Workflow}
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixir.ExecutionEnvironment.{Command, Kubernetes, Operations}
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Candidate, Client}
@@ -16,7 +16,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
   @runtime __MODULE__.Runtime
   @scheduler __MODULE__.Scheduler
   @tasks __MODULE__.Tasks
-  @input_fields ~w(authorization mode workflow_path output_path pins timeout_ms cleanup_timeout_ms runner_sha256 negative_control_paths worker_count)
+  @input_fields ~w(authorization mode workflow_path output_path pins timeout_ms cleanup_timeout_ms runner_sha256 negative_control_paths worker_count backend)
   @source __ENV__.file
   @support_sha256 Map.new(["managed_environment_fixture/provider.exs", "managed_environment_fixture/control.exs", "kubernetes_candidate_evidence.exs"], fn file ->
                     bytes = File.read!(Path.join(__DIR__, file))
@@ -36,7 +36,9 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
   def validate_input(input) do
     with true <- is_map(input) and Enum.sort(Map.keys(input)) == Enum.sort(@input_fields),
-         true <- input["authorization"] == "disposable-namespace-non-model" and input["mode"] in ["run", "cleanup"],
+         true <- input["authorization"] in ["disposable-namespace-non-model", "disposable-namespace-model"] and input["mode"] in ["run", "cleanup"],
+         true <- input["backend"] in [nil, "claude", "codex"],
+         true <- input["backend"] == nil or input["authorization"] == "disposable-namespace-model",
          true <- is_map(input["pins"]),
          true <- Enum.all?(~w(workflow_path output_path), &(is_binary(input[&1]) and Path.type(input[&1]) == :absolute)),
          true <- Enum.all?(~w(timeout_ms cleanup_timeout_ms), &(is_integer(input[&1]) and input[&1] in 1_000..900_000)),
@@ -81,7 +83,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       # Memory tracker state is application-global; never share this harness with another lane.
       true = LaneStore.list() == []
       {:ok, document} = Workflow.load(input["workflow_path"])
-      raw = candidate_workflow(document.config, input["pins"]["deployment_id"], input["worker_count"])
+      raw = candidate_workflow(document.config, input["pins"]["deployment_id"], input["worker_count"], input["backend"])
       :ok = File.write(workflow, "---\n" <> Jason.encode!(raw) <> "\n---\nNon-model candidate lifecycle probe.\n", [:exclusive])
       File.chmod!(workflow, 0o600)
       {:ok, lane, _warnings} = Lanes.import_file(workflow, slug: "candidate")
@@ -158,21 +160,30 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     end
   end
 
-  defp candidate_workflow(raw, deployment, workers) do
+  defp candidate_workflow(raw, deployment, workers, backend) do
+    agent = %{"max_concurrent_agents" => workers, "backend" => backend || "codex", "in_progress_state" => "", "max_turns" => 1}
+
     raw
     |> Map.put("tracker", %{"kind" => "memory", "active_states" => ["Candidate"], "terminal_states" => ["Done"]})
     |> Map.put("hooks", %{})
     |> Map.put("polling", %{"interval_ms" => 1_000})
-    |> Map.put("agent", %{"max_concurrent_agents" => workers, "backend" => "codex", "in_progress_state" => ""})
+    |> Map.put("agent", agent)
+    |> Map.put("claude", %{"command" => "/opt/symphony-worker/bin/claude"})
     |> update_in(["worker", "environment"], &Map.merge(&1, %{"deployment_id" => deployment, "terminal_retention_ms" => 0}))
   end
 
-  defp issues(%{"mode" => "run", "pins" => pins, "worker_count" => workers}, _) do
+  # The model task is deliberately trivial and self-evidencing: the agent writes a
+  # nonce we chose into a file we name, so the probe can prove a real session did
+  # real work in the guest rather than trusting the backend's own transcript.
+  defp issues(%{"mode" => "run", "pins" => pins, "worker_count" => workers} = input, _) do
     for index <- 1..workers do
+      suffix = Integer.to_string(index)
+
       %Issue{
-        id: pins["deployment_id"] <> "-probe-" <> Integer.to_string(index),
-        identifier: "CANDIDATE-" <> Integer.to_string(index),
-        title: "Non-model candidate probe",
+        id: pins["deployment_id"] <> "-probe-" <> suffix,
+        identifier: "CANDIDATE-" <> suffix,
+        title: if(input["backend"], do: "Model candidate probe", else: "Non-model candidate probe"),
+        description: model_task(input, index),
         state: "Candidate",
         priority: index,
         dispatchable: true
@@ -183,6 +194,17 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
   defp issues(_, records) do
     Enum.map(records, &%Issue{id: &1.issue_id, identifier: &1.issue_identifier, title: "Candidate cleanup", state: "Done", dispatchable: false})
   end
+
+  defp model_task(%{"backend" => backend, "pins" => pins}, index) when is_binary(backend) do
+    "Create a file named candidate-probe.txt in the current directory. " <>
+      "Its only contents must be exactly this token, with no other text: " <>
+      model_nonce(pins["deployment_id"], index) <> "\nThen stop."
+  end
+
+  defp model_task(_input, _index), do: nil
+
+  def model_nonce(deployment_id, index),
+    do: "SYMPHONY-" <> (:crypto.hash(:sha256, deployment_id <> "/" <> Integer.to_string(index)) |> Base.encode16(case: :lower) |> binary_part(0, 24))
 
   defp start_runtime(ctx) do
     operation = fn adapter, config, entry, op, opts ->
@@ -204,37 +226,15 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       result
     end
 
-    runner = fn issue, _recipient, opts ->
+    runner = fn issue, recipient, opts ->
       :ok = GenServer.call(ctx.control, {:event, %{event: :runner_invocation, issue_id: issue.id, options: opts}})
       %ExecutionContext{mode: :managed, connection: %{target: target}, environment: %{config: config, record: record}} = context = opts[:execution_context]
       true = ExecutionContext.managed(config, record, context.connection) == context
-      nonce = Base.encode16(:crypto.strong_rand_bytes(24), case: :lower)
 
-      script =
-        "set -eu; umask 077; mkdir -p " <>
-          quote_shell(record.workspace_path) <>
-          "; cd " <>
-          quote_shell(record.workspace_path) <>
-          "; printf %s " <>
-          quote_shell(nonce) <>
-          " > .symphony-candidate-probe; test \"$(cat .symphony-candidate-probe)\" = " <>
-          quote_shell(nonce) <>
-          "; rm .symphony-candidate-probe; printf %s " <> quote_shell(nonce)
-
-      {:ok, %{status: 0, output: ^nonce}} =
-        Command.run(target.executable, target.prefix ++ [SSH.remote_shell_command(script)],
-          env: target.env,
-          timeout_ms: 30_000,
-          max_output_bytes: 4096,
-          task_supervisor: ctx.tasks
-        )
-
-      update(ctx, %{runner: "passed"})
-      # Remain a real occupied runner until the authority initiates terminal cleanup.
-      receive do
-        :candidate_release -> :ok
-      after
-        ctx.input["timeout_ms"] -> :ok
+      if ctx.input["backend"] do
+        model_probe(ctx, issue, recipient, opts, target, record)
+      else
+        non_model_probe(ctx, target, record)
       end
     end
 
@@ -291,6 +291,79 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     result
   end
 
+  defp non_model_probe(ctx, target, record) do
+    nonce = Base.encode16(:crypto.strong_rand_bytes(24), case: :lower)
+
+    script =
+      "set -eu; umask 077; mkdir -p " <>
+        quote_shell(record.workspace_path) <>
+        "; cd " <>
+        quote_shell(record.workspace_path) <>
+        "; printf %s " <>
+        quote_shell(nonce) <>
+        " > .symphony-candidate-probe; test \"$(cat .symphony-candidate-probe)\" = " <>
+        quote_shell(nonce) <>
+        "; rm .symphony-candidate-probe; printf %s " <> quote_shell(nonce)
+
+    {:ok, %{status: 0, output: ^nonce}} =
+      Command.run(target.executable, target.prefix ++ [SSH.remote_shell_command(script)],
+        env: target.env,
+        timeout_ms: 30_000,
+        max_output_bytes: 4096,
+        task_supervisor: ctx.tasks
+      )
+
+    update(ctx, %{runner: "passed"})
+    hold(ctx)
+  end
+
+  # A real backend session in the guest. The transcript is the backend's own claim,
+  # so it is not the evidence: the file the agent was asked to write is read back
+  # over the managed connection and must carry the nonce we chose.
+  defp model_probe(ctx, issue, recipient, opts, target, record) do
+    started = System.monotonic_time(:millisecond)
+    result = AgentRunner.run(issue, recipient, opts)
+    elapsed = System.monotonic_time(:millisecond) - started
+    index = issue.identifier |> String.split("-") |> List.last() |> String.to_integer()
+    expected = model_nonce(ctx.input["pins"]["deployment_id"], index)
+
+    read =
+      Command.run(
+        target.executable,
+        target.prefix ++ [SSH.remote_shell_command("cd " <> quote_shell(record.workspace_path) <> " && cat candidate-probe.txt")],
+        env: target.env,
+        timeout_ms: 30_000,
+        max_output_bytes: 4096,
+        task_supervisor: ctx.tasks
+      )
+
+    observed =
+      case read do
+        {:ok, %{status: 0, output: output}} -> String.trim(output)
+        _ -> nil
+      end
+
+    GenServer.call(
+      ctx.control,
+      {:event, %{event: :model_session, issue_id: issue.id, backend: ctx.input["backend"], elapsed_ms: elapsed, dispatch: elem_tag(result), artifact_matched: observed == expected}}
+    )
+
+    if observed == expected, do: update(ctx, %{runner: "passed"}), else: update(ctx, %{runner: "failed"})
+    hold(ctx)
+  end
+
+  defp elem_tag({tag, _}), do: tag
+  defp elem_tag(tag), do: tag
+
+  # Remain a real occupied runner until the authority initiates terminal cleanup.
+  defp hold(ctx) do
+    receive do
+      :candidate_release -> :ok
+    after
+      ctx.input["timeout_ms"] -> :ok
+    end
+  end
+
   defp capture(ctx, result) do
     GenServer.call(ctx.control, {:event, %{event: :record_observation, result: result}})
 
@@ -337,7 +410,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
            |> Map.merge(%{
              stage: "candidate-unqualified",
              qualified: false,
-             backend_sessions: 0,
+             backend_sessions: Enum.count(state.events, &(&1[:event] == :model_session or &1["event"] == "model_session")),
              artifact: Candidate.artifact_identity(),
              runner_sha256: ctx.input["runner_sha256"],
              pins: ctx.input["pins"],
