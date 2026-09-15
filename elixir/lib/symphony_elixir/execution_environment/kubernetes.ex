@@ -30,6 +30,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   # The release artifact has neither this entrypoint nor the candidate validator.
   if Mix.env() == :test do
+    alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Candidate
+
     @spec candidate_preflight(map(), map(), keyword()) :: :ok | {:error, term()}
     def candidate_preflight(config, pins, opts \\ []) do
       opts = opts |> Keyword.put(:candidate_baseline, pins) |> with_deadline()
@@ -42,14 +44,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     defp baseline(config, opts) do
       case Keyword.fetch(opts, :candidate_baseline) do
-        {:ok, pins} -> SymphonyElixir.ExecutionEnvironment.Kubernetes.Candidate.validate(config, pins)
+        {:ok, pins} -> Candidate.validate(config, pins)
         :error -> {:ok, @stock_baseline}
       end
     end
 
     defp candidate_contract(config, q, template, baseline, opts) do
       case baseline do
-        %{candidate: pins} -> SymphonyElixir.ExecutionEnvironment.Kubernetes.Candidate.contract(config, q, template, pins, opts)
+        %{candidate: pins} -> Candidate.contract(config, q, template, pins, opts)
         _ -> :ok
       end
     end
@@ -1244,12 +1246,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       get_in(controller, ["status", "observedGeneration"]) == get_in(controller, ["metadata", "generation"])
   end
 
+  # A candidate baseline pins the exact image; the stock baseline pins its registry prefix.
   defp pinned_controller_image?(container, q, baseline) do
-    container["image"] == q["controller_image"] and
-      case baseline do
-        %{controller_image: image} -> container["image"] == image
-        %{controller_image_prefix: prefix} -> String.starts_with?(container["image"] || "", prefix)
-      end
+    image = container["image"]
+
+    image == q["controller_image"] and image == Map.get(baseline, :controller_image, image) and
+      String.starts_with?(image || "", Map.get(baseline, :controller_image_prefix, ""))
   end
 
   defp storage_classes(template, classes, q) do
@@ -1833,16 +1835,20 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
           {:cont, {:ok, current}}
 
         volume["pv_uid"] == nil ->
-          case discharge_unbound(config, current, key, volume, opts) do
-            {:ok, updated} -> {:cont, {:ok, updated}}
-            :unresolved -> {:halt, {:error, {:unknown, :unbound_pvc_provisioning_unresolved}, current}}
-            error -> {:halt, error}
-          end
+          discharge_step(config, current, key, volume, opts)
 
         true ->
           {:cont, {:ok, observe_volume_deletion(config, current, key, volume, q, opts)}}
       end
     end)
+  end
+
+  defp discharge_step(config, current, key, volume, opts) do
+    case discharge_unbound(config, current, key, volume, opts) do
+      {:ok, updated} -> {:cont, {:ok, updated}}
+      :unresolved -> {:halt, {:error, {:unknown, :unbound_pvc_provisioning_unresolved}, current}}
+      error -> {:halt, error}
+    end
   end
 
   # A claim that never bound has no backing volume whose deletion could ever be proven, so the
@@ -2283,10 +2289,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp persisted_intent?(observed, annotations, extra) do
     get_in(observed, ["metadata", "annotations", @state]) == annotations[@state] and
-      Enum.all?(extra, fn
-        %{"op" => "add", "path" => path, "value" => value} -> get_in(observed, String.split(path, "/", trim: true)) == value
-        _ -> false
-      end)
+      Enum.all?(extra, fn %{"op" => "add", "path" => path, "value" => value} -> get_in(observed, String.split(path, "/", trim: true)) == value end)
   end
 
   defp durable_metadata(metadata), do: Map.drop(metadata, ["client_key_directory", "client_key_lease"])

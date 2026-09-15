@@ -3,8 +3,8 @@ Code.require_file("../support/managed_environment_fixture/provider.exs", __DIR__
 defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
   use ExUnit.Case, async: true
 
+  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Guard}
   alias SymphonyElixir.ManagedEnvironmentFixture.Provider
-  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Client
 
   test "single-attempt helper response loss retains exact accepted create attribution", context do
     config = kubernetes_config(context)
@@ -54,7 +54,16 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
 
     assert_receive :create_sent
     refute_receive :create_sent
-    assert_receive {:event, %{event: :create_accepted, attempt_id: "worker-attempt", create_attempt_id: "create-attempt", guard_uid: "guard-uid", resource_uid: "sandbox-uid"}}
+
+    assert_receive {:event,
+                    %{
+                      event: :create_accepted,
+                      attempt_id: "worker-attempt",
+                      create_attempt_id: "create-attempt",
+                      guard_uid: "guard-uid",
+                      resource_uid: "sandbox-uid"
+                    }}
+
     assert_receive {:event, %{event: :create_response_lost, create_attempt_id: "create-attempt", guard_uid: "guard-uid"}}
     refute Process.get(:fault_armed)
     Process.put(:fault_armed, true)
@@ -127,7 +136,7 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
       desired: :stopped
     }
 
-    guard_name = SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard.name(record)
+    guard_name = Guard.name(record)
 
     for phase <- ["Open", "ReadyToFinalize"] do
       parent_uid = if phase == "Open", do: nil, else: "parent-uid"

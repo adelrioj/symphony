@@ -4,11 +4,25 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
 
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
-  alias SymphonyElixir.Tracker.Memory
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard
+  alias SymphonyElixir.Tracker.Memory
 
   @resource_keys ~w(kind id name uid selfLink zone region namespace volume_handle)
-  @event_keys [:event, :issue_id, :operation, :attempt_id, :outcome, :mode, :environment_id, :create_attempt_id, :guard_uid, :resource_uid, :resource_name, :resource, :namespace]
+  @event_keys [
+    :event,
+    :issue_id,
+    :operation,
+    :attempt_id,
+    :outcome,
+    :mode,
+    :environment_id,
+    :create_attempt_id,
+    :guard_uid,
+    :resource_uid,
+    :resource_name,
+    :resource,
+    :namespace
+  ]
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 

@@ -26,6 +26,7 @@ if Mix.env() == :test do
     end
 
     @spec validate(map(), term()) :: {:ok, map()} | {:error, term()}
+    # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
     def validate(config, pins) do
       q = pins["contract"]
 
@@ -127,7 +128,13 @@ if Mix.env() == :test do
           put_controller_flag(name, value, rest, flags)
 
         _ ->
-          if String.replace_prefix(arg, "--", "") in @boolean_flags and String.starts_with?(arg, "--"), do: put_controller_flag(String.replace_prefix(arg, "--", ""), "true", rest, flags), else: :error
+          name = String.replace_prefix(arg, "--", "")
+
+          if name in @boolean_flags and String.starts_with?(arg, "--") do
+            put_controller_flag(name, "true", rest, flags)
+          else
+            :error
+          end
       end
     end
 
@@ -186,6 +193,7 @@ if Mix.env() == :test do
         is_list(role["rules"]) and role["rules"] != [] and Enum.all?(role["rules"], &scoped_rule?(&1, kind))
     end
 
+    # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
     defp scoped_rule?(rule, kind) do
       groups = rule["apiGroups"]
       resources = rule["resources"]
@@ -193,21 +201,18 @@ if Mix.env() == :test do
 
       is_list(groups) and groups != [] and is_list(resources) and resources != [] and is_list(verbs) and verbs != [] and
         rule["nonResourceURLs"] in [nil, []] and Enum.all?(verbs, &(&1 in ~w(get list watch create update patch delete))) and
-        Enum.all?(groups, fn group ->
-          Enum.all?(resources, fn resource ->
-            case kind do
-              :lease ->
-                group == "coordination.k8s.io" and resource == "leases"
-
-              :workload ->
-                (group == "" and resource in ~w(pods persistentvolumeclaims services events)) or
-                  (group == "events.k8s.io" and resource == "events") or
-                  (group == "agents.x-k8s.io" and resource in ~w(sandboxes sandboxes/status sandboxes/finalizers))
-            end
-          end)
-        end)
+        Enum.all?(groups, fn group -> Enum.all?(resources, &scoped_resource?(kind, group, &1)) end)
     end
 
+    defp scoped_resource?(:lease, group, resource), do: group == "coordination.k8s.io" and resource == "leases"
+
+    defp scoped_resource?(:workload, group, resource) do
+      (group == "" and resource in ~w(pods persistentvolumeclaims services events)) or
+        (group == "events.k8s.io" and resource == "events") or
+        (group == "agents.x-k8s.io" and resource in ~w(sandboxes sandboxes/status sandboxes/finalizers))
+    end
+
+    # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
     defp bounded_binding?(binding, cluster?, sa, auth, roles, cluster_roles) do
       subjects = binding["subjects"] || []
 
@@ -253,6 +258,7 @@ if Mix.env() == :test do
       end
     end
 
+    # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
     defp read_or_self_review?(rule) do
       verbs = rule["verbs"] || []
       resources = rule["resources"] || []

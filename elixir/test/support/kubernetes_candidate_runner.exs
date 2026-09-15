@@ -5,13 +5,14 @@ Code.require_file("kubernetes_candidate_evidence.exs", __DIR__)
 
 defmodule SymphonyElixir.KubernetesCandidateRunner do
   @moduledoc false
-  alias SymphonyElixir.{AgentRunner, AgentRuntimeSupervisor, ExecutionContext, Lanes, LaneStore, Orchestrator, SSH, Workflow}
-  alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
+  alias SymphonyElixir.{AgentRunner, AgentRuntimeSupervisor, ExecutionContext, Lanes, LaneStore, Orchestrator, SSH}
   alias SymphonyElixir.ExecutionEnvironment.{Command, Kubernetes, Operations}
+  alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Candidate, Client}
+  alias SymphonyElixir.KubernetesCandidateEvidence, as: Evidence
   alias SymphonyElixir.ManagedEnvironmentFixture.{Control, Provider}
   alias SymphonyElixir.Tracker.Issue
-  alias SymphonyElixir.KubernetesCandidateEvidence, as: Evidence
+  alias SymphonyElixir.Workflow
 
   @runtime __MODULE__.Runtime
   @scheduler __MODULE__.Scheduler
@@ -217,7 +218,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
       result =
         if op == :discover do
-          with :ok <- Kubernetes.candidate_preflight(config, ctx.input["pins"], opts), do: Kubernetes.discover(config, opts)
+          candidate_discover(ctx, config, opts)
         else
           Operations.run(Kubernetes, config, entry, op, opts)
         end
@@ -228,7 +229,14 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
     runner = fn issue, recipient, opts ->
       :ok = GenServer.call(ctx.control, {:event, %{event: :runner_invocation, issue_id: issue.id, options: opts}})
-      %ExecutionContext{mode: :managed, connection: %{target: target}, environment: %{config: config, record: record}} = context = opts[:execution_context]
+      context = opts[:execution_context]
+
+      %ExecutionContext{
+        mode: :managed,
+        connection: %{target: target},
+        environment: %{config: config, record: record}
+      } = context
+
       true = ExecutionContext.managed(config, record, context.connection) == context
 
       if ctx.input["backend"] do
@@ -239,7 +247,14 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     end
 
     {:ok, runtime} =
-      AgentRuntimeSupervisor.start_link(lane_id: ctx.lane_id, name: @runtime, task_supervisor_name: @tasks, orchestrator_name: @scheduler, environment_operation_fun: operation, runner_fun: runner)
+      AgentRuntimeSupervisor.start_link(
+        lane_id: ctx.lane_id,
+        name: @runtime,
+        task_supervisor_name: @tasks,
+        orchestrator_name: @scheduler,
+        environment_operation_fun: operation,
+        runner_fun: runner
+      )
 
     owner = self()
 
@@ -256,6 +271,10 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     Orchestrator.request_refresh(@scheduler)
   end
 
+  defp candidate_discover(ctx, config, opts) do
+    with :ok <- Kubernetes.candidate_preflight(config, ctx.input["pins"], opts), do: Kubernetes.discover(config, opts)
+  end
+
   defp cleanup(ctx, issues) do
     stop_runtime()
     update(ctx, %{cleanup: "unknown"})
@@ -268,7 +287,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
         case inventory(ctx) do
           {:ok, %{records: [], live_worker_counts: counts}} ->
-            state.environment_guard == nil and map_size(state.environment_jobs) == 0 and map_size(state.environment_entries) == 0 and Enum.all?(counts, fn {_, count} -> count == 0 end)
+            state.environment_guard == nil and map_size(state.environment_jobs) == 0 and map_size(state.environment_entries) == 0 and Enum.all?(counts, &(elem(&1, 1) == 0))
 
           _ ->
             false
