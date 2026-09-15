@@ -169,7 +169,11 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     |> Map.put("hooks", %{})
     |> Map.put("polling", %{"interval_ms" => 1_000})
     |> Map.put("agent", agent)
-    |> Map.put("claude", %{"command" => "/opt/symphony-worker/bin/claude"})
+    # The guest's login PATH is /usr/local/bin:/usr/bin:/bin — neither the agent nor the
+    # tracker MCP server is on it, and claude spawns the server by name. Unresolved, the
+    # server never starts, the permission-prompt tool it advertises never exists, and the
+    # session hangs after session_started.
+    |> Map.put("claude", %{"command" => "/opt/symphony-worker/bin/claude", "linear_mcp_command" => "/opt/symphony-worker/bin/symphony"})
     |> update_in(["worker", "environment"], &Map.merge(&1, %{"deployment_id" => deployment, "terminal_retention_ms" => 0}))
   end
 
