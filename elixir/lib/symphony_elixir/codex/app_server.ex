@@ -108,7 +108,9 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+        on_turn_message = fn message -> on_message.(Map.put(message, :session_id, session_id)) end
+
+        case await_turn_completion(port, on_turn_message, tool_executor, auto_approve_requests) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 

@@ -78,6 +78,85 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server correlates sequential turn lifecycle events without converting failures to completions" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-turn-correlation-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-CORRELATION")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          2) ;;
+          3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-correlation"}}}' ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-success"}}}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-correlation","turn":{"id":"turn-success","status":"completed","items":[]}}}'
+            ;;
+          5)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-failure"}}}'
+            printf '%s\\n' '{"method":"turn/failed","params":{"threadId":"thread-correlation","turnId":"turn-failure","error":{"message":"turn rejected"}}}'
+            ;;
+          *) exit 1 ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{id: "issue-correlation", identifier: "MT-CORRELATION", title: "Correlate turns", state: "In Progress"}
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+      context = SymphonyElixir.ExecutionContext.local(Config.local_workspace_root())
+      assert {:ok, session} = Codex.start_session(workspace, execution_context: context)
+
+      try do
+        assert {:ok, %Result{status: :done, session_id: "thread-correlation-turn-success"}} =
+                 Codex.run_turn(session, "Complete the first turn", issue, on_message: on_message)
+
+        assert_received {:app_server_message, %{event: :session_started, session_id: "thread-correlation-turn-success"}}
+
+        assert_received {:app_server_message,
+                         %{
+                           event: :turn_completed,
+                           session_id: "thread-correlation-turn-success",
+                           payload: %{"method" => "turn/completed", "params" => %{"turn" => %{"id" => "turn-success", "status" => "completed"}}}
+                         }}
+
+        assert {:error, {:turn_failed, %{"error" => %{"message" => "turn rejected"}}}} =
+                 Codex.run_turn(session, "Fail the second turn", issue, on_message: on_message)
+
+        assert_received {:app_server_message, %{event: :session_started, session_id: "thread-correlation-turn-failure"}}
+
+        assert_received {:app_server_message,
+                         %{
+                           event: :turn_failed,
+                           session_id: "thread-correlation-turn-failure",
+                           payload: %{"method" => "turn/failed", "params" => %{"turnId" => "turn-failure", "error" => %{"message" => "turn rejected"}}}
+                         }}
+
+        assert_received {:app_server_message, %{event: :turn_ended_with_error, session_id: "thread-correlation-turn-failure"}}
+        refute_received {:app_server_message, %{event: :turn_completed}}
+      after
+        Codex.stop_session(session)
+      end
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "turn timeout resets on stream updates and fires after silence" do
     test_root =
       Path.join(
