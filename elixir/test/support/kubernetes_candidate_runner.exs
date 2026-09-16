@@ -9,6 +9,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
   alias SymphonyElixir.ExecutionEnvironment.{Command, Kubernetes, Operations}
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Candidate, Client}
+  alias SymphonyElixir.ExecutionEnvironment.Lifecycle
   alias SymphonyElixir.KubernetesCandidateEvidence, as: Evidence
   alias SymphonyElixir.ManagedEnvironmentFixture.{Control, Provider}
   alias SymphonyElixir.Tracker.Issue
@@ -17,6 +18,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
   @runtime __MODULE__.Runtime
   @scheduler __MODULE__.Scheduler
   @tasks __MODULE__.Tasks
+  @scheduler_observation_limit 32
   @input_fields ~w(authorization mode workflow_path output_path pins timeout_ms cleanup_timeout_ms runner_sha256 negative_control_paths worker_count backend)
   @source __ENV__.file
   @support_sha256 Map.new(["managed_environment_fixture/provider.exs", "managed_environment_fixture/control.exs", "kubernetes_candidate_evidence.exs"], fn file ->
@@ -37,9 +39,11 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
   def validate_input(input) do
     with true <- is_map(input) and Enum.sort(Map.keys(input)) == Enum.sort(@input_fields),
-         true <- input["authorization"] in ["disposable-namespace-non-model", "disposable-namespace-model"] and input["mode"] in ["run", "cleanup"],
+         true <- input["authorization"] in ["disposable-namespace-non-model", "disposable-namespace-model"] and input["mode"] in ["run", "cleanup", "hold"],
          true <- input["backend"] in [nil, "claude", "codex"],
          true <- input["backend"] == nil or input["authorization"] == "disposable-namespace-model",
+         # A held probe exists only to keep one real non-model environment occupied across a restart.
+         true <- input["mode"] != "hold" or (input["authorization"] == "disposable-namespace-non-model" and input["backend"] == nil and input["worker_count"] == 1),
          true <- is_map(input["pins"]),
          true <- Enum.all?(~w(workflow_path output_path), &(is_binary(input[&1]) and Path.type(input[&1]) == :absolute)),
          true <- Enum.all?(~w(timeout_ms cleanup_timeout_ms), &(is_integer(input[&1]) and input[&1] in 1_000..900_000)),
@@ -118,18 +122,19 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
         {:ok, before} = Provider.unrelated_snapshot(config, input["negative_control_paths"], options(ctx))
         GenServer.call(control, {:baseline, before})
         {:ok, inventory} = inventory(ctx)
-        if input["mode"] == "run", do: true = inventory.records == [] and Map.get(inventory, :retained_guards, []) == []
+        if probe_mode?(input), do: true = inventory.records == [] and Map.get(inventory, :retained_guards, []) == []
         issues = issues(input, inventory.records)
         GenServer.call(control, {:issues, issues})
         GenServer.call(control, :allocation_started)
         update(ctx, %{status: "running", workers: Map.new(issues, &{&1.id, %{outcome: "pending", environment_id: nil}})})
 
         try do
-          if input["mode"] == "run" do
+          if probe_mode?(input) do
             start_runtime(ctx)
             :ok = await(input["timeout_ms"], fn -> Agent.get(observations, &(&1.runner in ["passed", "failed"])) end)
             true = Agent.get(observations, &(&1.runner == "passed"))
-            update(ctx, %{status: "probe_passed"})
+            update(ctx, %{status: probe_status(input)})
+            hold_until_timeout(ctx)
           end
         after
           cleanup(ctx, issues)
@@ -140,7 +145,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
         final = Agent.get(observations, & &1)
         true = final.cleanup == "complete"
         true = Map.get(final, :guard_observation_incomplete, false) == false
-        if input["mode"] == "run", do: true = Map.get(final, :retained_guards, []) != []
+        if probe_mode?(input), do: true = Map.get(final, :retained_guards, []) != []
         update(ctx, %{status: "candidate_stage_complete", unrelated_unchanged: true})
         {:ok, input["output_path"]}
       rescue
@@ -190,7 +195,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
   # The model task is deliberately trivial and self-evidencing: the agent writes a
   # nonce we chose into a file we name, so the probe can prove a real session did
   # real work in the guest rather than trusting the backend's own transcript.
-  defp issues(%{"mode" => "run", "pins" => pins, "worker_count" => workers} = input, _) do
+  defp issues(%{"mode" => mode, "pins" => pins, "worker_count" => workers} = input, _) when mode in ["run", "hold"] do
     for index <- 1..workers do
       suffix = Integer.to_string(index)
 
@@ -294,8 +299,13 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     result =
       await(ctx.input["cleanup_timeout_ms"], fn ->
         state = :sys.get_state(@scheduler, 2_000)
+        # Persist the held barrier before inventory can block on pending deletion.
+        capture_scheduler(ctx, state, nil)
+        observed = inventory(ctx)
+        state = :sys.get_state(@scheduler, 2_000)
+        capture_scheduler(ctx, state, live_worker_counts(observed))
 
-        case inventory(ctx) do
+        case observed do
           {:ok, %{records: [], live_worker_counts: counts}} ->
             state.environment_guard == nil and map_size(state.environment_jobs) == 0 and map_size(state.environment_entries) == 0 and Enum.all?(counts, &(elem(&1, 1) == 0))
 
@@ -536,6 +546,57 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       ctx.input["timeout_ms"] -> :ok
     end
   end
+
+  defp probe_mode?(input), do: input["mode"] in ["run", "hold"]
+  defp probe_status(%{"mode" => "hold"}), do: "probe_held"
+  defp probe_status(_input), do: "probe_passed"
+
+  # A held probe stays a real occupied runner so the authority can kill this whole process
+  # mid-hold; reaching the timeout instead falls through to the same conservative cleanup.
+  defp hold_until_timeout(%{input: %{"mode" => "hold"} = input}), do: await(input["timeout_ms"], fn -> false end)
+  defp hold_until_timeout(_ctx), do: :ok
+  defp live_worker_counts({:ok, %{live_worker_counts: counts}}), do: counts
+  defp live_worker_counts(_), do: nil
+
+  # Scheduler-side capacity facts only: booleans, counts and identity strings that the
+  # actual State and Lifecycle.Entry types already carry. Never refs, pids, credentials
+  # or config, so a receipt can be read by the authority without leaking runtime handles.
+  defp scheduler_observation(%Orchestrator.State{} = state, counts) do
+    entries =
+      state.environment_entries
+      |> Map.values()
+      |> Enum.map(&entry_observation/1)
+      |> Enum.sort_by(& &1.issue_id)
+
+    sample = %{
+      guard_held: is_reference(state.environment_guard),
+      discovery: discovery_state(state.environment_discovery),
+      jobs: map_size(state.environment_jobs),
+      entries: entries,
+      live_worker_counts: counts
+    }
+
+    Map.merge(sample, observation_time("observed"))
+  end
+
+  defp record_scheduler_observation(history, observation) do
+    signature = scheduler_signature(observation)
+    duplicate? = Enum.any?(history, &(scheduler_signature(&1) == signature))
+    if duplicate? or length(history) >= @scheduler_observation_limit, do: history, else: history ++ [observation]
+  end
+
+  defp capture_scheduler(ctx, state, counts) do
+    observation = scheduler_observation(state, counts)
+    change(ctx, &Map.put(&1, :scheduler_observations, record_scheduler_observation(Map.get(&1, :scheduler_observations, []), observation)))
+  end
+
+  defp entry_observation(%Lifecycle.Entry{record: record} = entry),
+    do: %{issue_id: record.issue_id, environment_id: record.key, status: Atom.to_string(entry.phase), occupied: Lifecycle.occupied?(entry)}
+
+  defp discovery_state(state) when state in [:ready, :pending], do: Atom.to_string(state)
+  defp discovery_state({:error, _}), do: "error"
+  defp discovery_state(_), do: "unknown"
+  defp scheduler_signature(observation), do: Map.take(observation, [:guard_held, :discovery, :jobs, :entries, :live_worker_counts])
 
   defp capture(ctx, result) do
     GenServer.call(ctx.control, {:event, %{event: :record_observation, result: result}})

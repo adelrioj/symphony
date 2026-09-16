@@ -68,6 +68,35 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     end)
   end
 
+  test "hold mode accepts exactly one non-model worker and nothing else" do
+    alias SymphonyElixir.KubernetesCandidateRunner, as: Runner
+    hold = %{candidate_input() | "mode" => "hold"}
+
+    assert Runner.validate_input(hold) == :ok
+    assert Runner.validate_input(%{hold | "worker_count" => 2}) == {:error, :candidate_input_rejected}
+    assert Runner.validate_input(%{hold | "authorization" => "disposable-namespace-model", "backend" => "claude"}) == {:error, :candidate_input_rejected}
+    assert Runner.validate_input(%{hold | "authorization" => "disposable-namespace-model"}) == {:error, :candidate_input_rejected}
+    assert Runner.validate_input(%{hold | "mode" => "fault"}) == {:error, :candidate_input_rejected}
+    assert Runner.validate_input(%{hold | "mode" => "run", "worker_count" => 2}) == :ok
+    assert Runner.validate_input(%{hold | "mode" => "cleanup"}) == :ok
+  end
+
+  defp candidate_input do
+    %{
+      "authorization" => "disposable-namespace-non-model",
+      "mode" => "run",
+      "workflow_path" => "/candidate/WORKFLOW.md",
+      "output_path" => "/candidate/evidence.json",
+      "pins" => %{},
+      "timeout_ms" => 1_000,
+      "cleanup_timeout_ms" => 1_000,
+      "runner_sha256" => Candidate.sha256(File.read!(Path.expand("../support/kubernetes_candidate_runner.exs", __DIR__))),
+      "negative_control_paths" => ["/api/v1/namespaces/unrelated"],
+      "worker_count" => 1,
+      "backend" => nil
+    }
+  end
+
   defp worker_observations do
     %{runner: "running", workers: Map.new(["one", "two"], &{&1, %{outcome: "pending", environment_id: nil}})}
   end
