@@ -93,6 +93,16 @@ Production Kubernetes allocation remains unconditionally blocked. This implement
 a replacement controller image/schema baseline, qualify infrastructure, or authorize deployment.
 Examples reference operator-created infrastructure; the existing VM remains independent of this gate.
 
+The test-artifact-only Kubernetes candidate runner accepts `mode: "hold"` for exactly one
+non-model worker. It holds a successful managed-SSH probe until timeout, then uses normal
+conservative cleanup; an operator can instead interrupt that consumer and recover with
+`mode: "cleanup"` in a fresh process. Cleanup receipts include bounded scheduler-barrier observations.
+The scratch LV driver under `elixir/test/support/` requires an operator-owned private identity pin,
+opens only the pinned block device read-only, and releases it on timeout or SIGTERM.
+It is restricted to scratch namespaces, an 8 GiB ceiling, a 1,200-second ceiling, and explicit retained-volume
+exclusions. Use independent process supervision and verify physical LV absence after restoration.
+These scratch checks do not qualify node-disconnection, host-loss recovery, or production allocation.
+
 ---
 
 ## License
