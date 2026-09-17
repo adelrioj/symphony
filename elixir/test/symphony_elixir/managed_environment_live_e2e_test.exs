@@ -63,8 +63,13 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
           end
 
         workflow_path = Path.join(run_root, "WORKFLOW")
+        # Kubernetes runs are only reachable through operator-pinned candidate artifacts, and the
+        # candidate validator binds those pins to the deployment id, so the pins choose it here.
+        pins = get_in(document.config, ["worker", "environment", "provider", "qualification", "candidate_pins"])
+        deployment_id = if is_map(pins), do: pins["deployment_id"], else: run_id
+        require!(nonblank?(deployment_id), "candidate_pins_deployment_id_required")
         # Install probes only after prerequisite validation, so absent profile values cannot crash setup.
-        raw = qualification_workflow(document.config, run_id)
+        raw = qualification_workflow(document.config, deployment_id)
         write_private!(workflow_path, workflow_document(raw))
         Workflow.set_workflow_file_path(workflow_path)
         require!(SymphonyElixir.TestSupport.reload_workflow!() == :ok, "qualification_workflow_import_rejected")
@@ -74,6 +79,8 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
         {:ok, adapter} = ExecutionEnvironment.adapter(config.kind)
         profile = Map.get(config.provider, "qualification", %{})
         require!(is_map(profile), "qualification_profile_required")
+        # Pins are the only Kubernetes route, and never a Workstations one.
+        require!(is_map(pins) == (config.kind == "kubernetes"), "kubernetes_candidate_pins_required")
         check_names = if config.kind == "kubernetes", do: @checks ++ ["delayed_gate_release", "node_disconnection"], else: @checks
         control_opts = [checks: check_names, session_limit: profile["max_backend_sessions"], config: config]
         {:ok, control} = Control.start_link(control_opts)
@@ -108,6 +115,8 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
           run_root: run_root,
           output: output,
           run_id: run_id,
+          deployment_id: deployment_id,
+          candidate_pins: pins,
           check_names: check_names,
           fixture_images: fixture_images(),
           deadline: now() + 1_500_000
@@ -910,7 +919,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
 
     evidence = %{
       provider: ctx.config.kind,
-      deployment_id: ctx.run_id,
+      deployment_id: ctx.deployment_id,
       scope: safe_scope(ctx),
       image_digest: Map.get(prerequisite, :image_digest, Map.get(prerequisite, "image_digest")),
       runtime_version: Map.get(prerequisite, :runtime_version, Map.get(prerequisite, "runtime_version")),
@@ -1140,7 +1149,9 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
 
   defp provider_opts(ctx) do
     require!(remaining(ctx) > 0, "qualification_deadline")
-    [task_supervisor: ctx.tasks, authority: self(), timeout_ms: min(60_000, remaining(ctx)), deadline: ctx.deadline]
+    opts = [task_supervisor: ctx.tasks, authority: self(), timeout_ms: min(60_000, remaining(ctx)), deadline: ctx.deadline]
+    # Every operation in the suite runs on the same pinned path the preflight validated.
+    if is_map(ctx.candidate_pins), do: Keyword.put(opts, :candidate_baseline, ctx.candidate_pins), else: opts
   end
 
   defp provider_value!({:ok, value}), do: value

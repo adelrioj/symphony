@@ -1311,6 +1311,7 @@ production provider mode or an authorization bypass:
 | `node_fault_authorized` | Kubernetes only: literal `true` for the dedicated-node disconnection scenario. |
 | `authorized_node_uids` | Kubernetes only: explicit nonempty allowlist of dedicated node UIDs; unrelated workload sharing is rejected. |
 | `denied_identity` | Kubernetes only: deliberately denied, non-`system:` Kubernetes username that the authorized caller can impersonate for the real stop-rejection probe, without impersonated groups. |
+| `candidate_pins` | Kubernetes only, and **required** there: the operator's pinned candidate identity, exactly the map the candidate runner consumes. Its `deployment_id` selects the run's deployment id, and its `contract.worker_image` must equal `worker_image`. Absent it the Kubernetes path stays blocked on the unproven v1.0.1 cleanup ordering; Workstations runs must omit it. |
 
 The rest of the workflow must satisfy the normal provider configuration and credential
 requirements documented above. Its `hooks.after_create` must clone an authorized

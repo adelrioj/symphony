@@ -39,15 +39,12 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
   def validate_input(input) do
     with true <- is_map(input) and Enum.sort(Map.keys(input)) == Enum.sort(@input_fields),
-         true <- input["authorization"] in ["disposable-namespace-non-model", "disposable-namespace-model"] and input["mode"] in ["run", "cleanup", "hold"],
-         true <- input["backend"] in [nil, "claude", "codex"],
-         true <- input["backend"] == nil or input["authorization"] == "disposable-namespace-model",
-         # A held probe exists only to keep one real non-model environment occupied across a restart.
-         true <- input["mode"] != "hold" or (input["authorization"] == "disposable-namespace-non-model" and input["backend"] == nil and input["worker_count"] == 1),
+         true <- authorized_backend?(input),
+         true <- authorized_mode?(input),
          true <- is_map(input["pins"]),
          true <- Enum.all?(~w(workflow_path output_path), &(is_binary(input[&1]) and Path.type(input[&1]) == :absolute)),
          true <- Enum.all?(~w(timeout_ms cleanup_timeout_ms), &(is_integer(input[&1]) and input[&1] in 1_000..900_000)),
-         true <- is_integer(input["worker_count"]) and input["worker_count"] in 1..4,
+         true <- is_integer(input["worker_count"]) and input["worker_count"] in 1..5,
          true <- is_list(input["negative_control_paths"]) and input["negative_control_paths"] != [],
          true <- Enum.all?(input["negative_control_paths"], &is_binary/1),
          true <- Candidate.sha256(File.read!(@source)) == input["runner_sha256"] do
@@ -57,6 +54,19 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     end
   rescue
     _ -> {:error, :candidate_input_rejected}
+  end
+
+  defp authorized_backend?(input) do
+    input["authorization"] in ["disposable-namespace-non-model", "disposable-namespace-model"] and
+      input["backend"] in [nil, "claude", "codex"] and
+      (input["backend"] == nil or input["authorization"] == "disposable-namespace-model")
+  end
+
+  # A held probe exists only to keep one real non-model environment occupied across a restart.
+  defp authorized_mode?(input) do
+    input["mode"] in ["run", "cleanup", "hold"] and
+      (input["mode"] != "hold" or
+         (input["authorization"] == "disposable-namespace-non-model" and input["backend"] == nil and input["worker_count"] == 1))
   end
 
   defp run(input) do

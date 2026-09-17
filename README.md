@@ -103,6 +103,21 @@ It is restricted to scratch namespaces, an 8 GiB ceiling, a 1,200-second ceiling
 exclusions. Use independent process supervision and verify physical LV absence after restoration.
 These scratch checks do not qualify node-disconnection, host-loss recovery, or production allocation.
 
+The separate operator-only `elixir/test/support/kubernetes_scratch_node_fault_driver.py` partitions
+only an explicitly pinned disposable host for at most 120 seconds. Before issuing its private,
+root-owned pin, freshly verify the Kubernetes node/namespace UIDs, scratch-only placement, and the
+actual management SSH peer. The driver checks local server, machine, boot, and hostname identities;
+it does not query Kubernetes or establish node eligibility. It refuses the retained original host.
+Use `--pin /root/<private-directory>/pin.json --duration-seconds 120 --check` before applying the
+same command without `--check`. Before applying, arm independent `--pin ... --restore` supervision
+to restore connectivity within 180 seconds of activation: process-local deadline/SIGTERM cleanup
+cannot survive SIGKILL. Restore accepts an expired pin but still checks host and nft table ownership.
+Only that pin's nft table is changed; the exact management peer's TCP22 traffic is exempt, not
+arbitrary established connections. Supply every actual cluster transport CIDR. Native nft comments
+and handle-bound deletion support nftables 1.0.6 without changing shared firewall configuration.
+Focused checks and isolated real-network smoke cover packet blocking and independent restoration;
+they are not live-node qualification. This CLI is not the full-suite `--request` fault adapter.
+
 ---
 
 ## License

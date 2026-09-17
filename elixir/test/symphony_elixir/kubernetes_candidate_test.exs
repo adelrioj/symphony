@@ -332,6 +332,41 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     assert {:error, {:invalid, :kubernetes_candidate_identity}} = Kubernetes.discover(ctx.config, opts)
   end
 
+  test "the comprehensive suite reaches Kubernetes only through operator pins", ctx do
+    alias SymphonyElixir.ManagedEnvironmentFixture.Provider
+
+    driver = Path.join(ctx.root, "qualification-fault-driver")
+    File.write!(driver, "#!/bin/sh\nexit 0\n")
+    File.chmod!(driver, 0o700)
+
+    profile = %{
+      "fault_driver" => driver,
+      "fault_driver_sha256" => Candidate.sha256(File.read!(driver)),
+      "storage_fault_authorized" => true,
+      "worker_image" => ctx.pins["contract"]["worker_image"],
+      "runtime_version" => "candidate-runtime",
+      "qualification_report" => "operator-authorization",
+      "quota_evidence" => %{"concurrent_workers" => 5, "retained_environments" => 6}
+    }
+
+    config = Map.put(ctx.config, :kind, "kubernetes")
+    opts = [timeout_ms: 60_000, command_fun: command(ctx.objects)]
+
+    # A live cluster that answers every candidate read still cannot pass the stock path.
+    assert {:error, blocked} = Provider.preflight(config, profile, opts)
+    assert blocked in [:kubernetes_controller_cleanup_ordering_unproven, :kubernetes_prerequisites_unavailable]
+
+    # Pins that are not the operator's are rejected outright, never degraded into the stock path.
+    forged = Map.put(profile, "candidate_pins", %{"deployment_id" => config.deployment_id})
+    assert {:error, :kubernetes_candidate_identity} = Provider.preflight(config, forged, opts)
+
+    pinned = Map.put(profile, "candidate_pins", ctx.pins)
+    assert {:ok, evidence} = Provider.preflight(config, pinned, opts)
+    assert evidence.image_digest == profile["worker_image"]
+    assert evidence.controller_source_commit == ctx.pins["contract"]["controller_source_commit"]
+    refute evidence.candidate_qualified
+  end
+
   test "candidate preflight requires the live inventory after exact safety validation", ctx do
     assert :ok = Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(ctx.objects))
     denied = command(ctx.objects, "pods")
