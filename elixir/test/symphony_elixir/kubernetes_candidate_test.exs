@@ -5,6 +5,102 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Candidate
 
+  test "first successful worker cannot finish a two-worker probe" do
+    state = SymphonyElixir.KubernetesCandidateRunner.worker_result(worker_observations(), "one", "env-one", "passed")
+    assert state.runner == "running"
+  end
+
+  test "both distinct successful workers finish the probe" do
+    state =
+      worker_observations()
+      |> SymphonyElixir.KubernetesCandidateRunner.worker_result("one", "env-one", "passed")
+      |> SymphonyElixir.KubernetesCandidateRunner.worker_result("two", "env-two", "passed")
+
+    assert state.runner == "passed"
+  end
+
+  test "worker failure survives later successes including its own retry" do
+    state =
+      worker_observations()
+      |> SymphonyElixir.KubernetesCandidateRunner.worker_result("one", "env-one", "failed")
+      |> SymphonyElixir.KubernetesCandidateRunner.worker_result("two", "env-two", "passed")
+      |> SymphonyElixir.KubernetesCandidateRunner.worker_result("one", "env-one", "passed")
+
+    assert state.runner == "failed"
+    assert state.workers["one"].outcome == "failed"
+  end
+
+  test "duplicate successes and shared environments do not satisfy the worker count" do
+    state =
+      worker_observations()
+      |> SymphonyElixir.KubernetesCandidateRunner.worker_result("one", "env-one", "passed")
+      |> SymphonyElixir.KubernetesCandidateRunner.worker_result("one", "env-one", "passed")
+
+    assert state.runner == "running"
+    assert SymphonyElixir.KubernetesCandidateRunner.worker_result(state, "two", "env-one", "passed").runner != "passed"
+  end
+
+  test "model readiness requires every expected live issue in a distinct environment" do
+    alias SymphonyElixir.KubernetesCandidateRunner, as: Runner
+    first = %{issue_id: "one", environment_id: "env-one"}
+    second = %{issue_id: "two", environment_id: "env-two"}
+    state = Map.put(worker_observations(), :dispatches, %{"first" => first})
+    refute Runner.model_dispatch_ready?(state)
+    refute Runner.model_dispatch_ready?(%{state | dispatches: %{"first" => first, "duplicate" => first}})
+    refute Runner.model_dispatch_ready?(%{state | dispatches: %{"first" => first, "second" => %{second | environment_id: "env-one"}}})
+    state = %{state | dispatches: %{"first" => first, "second" => second}}
+    assert Runner.model_dispatch_ready?(state)
+    refute Runner.model_dispatch_ready?(put_in(state, [:dispatches, "second", "ended_at"], "finished"))
+    refute Runner.model_dispatch_ready?(%{state | runner: "failed"})
+  end
+
+  test "missing model worker reaches the existing deadline instead of launching", ctx do
+    ctx = probe_context(ctx, "claude")
+    ctx = put_in(ctx.input["timeout_ms"], 1)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      task =
+        Task.Supervisor.async_nolink(ctx.tasks, fn ->
+          SymphonyElixir.KubernetesCandidateRunner.run_probe(ctx, %{id: "one"}, nil, [attempt_id: "missing"], nil, %{key: "env-one"})
+        end)
+
+      assert {:exit, {{:badmatch, {:error, :candidate_deadline}}, _}} = Task.yield(task, 1_000)
+    end)
+  end
+
+  test "hold mode accepts exactly one non-model worker and nothing else" do
+    alias SymphonyElixir.KubernetesCandidateRunner, as: Runner
+    hold = %{candidate_input() | "mode" => "hold"}
+
+    assert Runner.validate_input(hold) == :ok
+    assert Runner.validate_input(%{hold | "worker_count" => 2}) == {:error, :candidate_input_rejected}
+    assert Runner.validate_input(%{hold | "authorization" => "disposable-namespace-model", "backend" => "claude"}) == {:error, :candidate_input_rejected}
+    assert Runner.validate_input(%{hold | "authorization" => "disposable-namespace-model"}) == {:error, :candidate_input_rejected}
+    assert Runner.validate_input(%{hold | "mode" => "fault"}) == {:error, :candidate_input_rejected}
+    assert Runner.validate_input(%{hold | "mode" => "run", "worker_count" => 2}) == :ok
+    assert Runner.validate_input(%{hold | "mode" => "cleanup"}) == :ok
+  end
+
+  defp candidate_input do
+    %{
+      "authorization" => "disposable-namespace-non-model",
+      "mode" => "run",
+      "workflow_path" => "/candidate/WORKFLOW.md",
+      "output_path" => "/candidate/evidence.json",
+      "pins" => %{},
+      "timeout_ms" => 1_000,
+      "cleanup_timeout_ms" => 1_000,
+      "runner_sha256" => Candidate.sha256(File.read!(Path.expand("../support/kubernetes_candidate_runner.exs", __DIR__))),
+      "negative_control_paths" => ["/api/v1/namespaces/unrelated"],
+      "worker_count" => 1,
+      "backend" => nil
+    }
+  end
+
+  defp worker_observations do
+    %{runner: "running", workers: Map.new(["one", "two"], &{&1, %{outcome: "pending", environment_id: nil}})}
+  end
+
   setup do
     root = Path.join(System.tmp_dir!(), "candidate-boundary-#{System.unique_integer([:positive])}")
     File.mkdir!(root)
@@ -66,7 +162,7 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     assert settings.agent.max_concurrent_agents == 1
     assert settings.hooks.before_run == nil
     assert settings.worker.environment.deployment_id == "candidate-db-probe"
-    assert Jason.decode!(File.read!(output))["backend_sessions"] == 0
+    assert Jason.decode!(File.read!(output))["model_sessions_started"] == 0
   end
 
   test "model dispatch renders the issue's nonce task instead of the non-model probe label", ctx do
@@ -109,24 +205,91 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     assert String.trim(PromptBuilder.build_prompt(issue)) == issue.description
   end
 
-  test "model evidence preserves external artifact verification without retaining raw credentials", ctx do
+  test "non-model probes finish only after both actual workspace checks", ctx do
+    alias SymphonyElixir.KubernetesCandidateRunner, as: Runner
+    ctx = probe_context(ctx, nil)
+    target = %SymphonyElixir.SSH.Target{executable: "/bin/sh", prefix: ["-c"], env: [], label: "local-probe"}
+
+    for {id, expected} <- [{"one", "running"}, {"two", "passed"}] do
+      task =
+        Task.async(fn ->
+          Runner.run_probe(ctx, %{id: id}, nil, [attempt_id: id], target, %{key: "env-" <> id, workspace_path: Path.join(ctx.root, id)})
+        end)
+
+      assert Task.await(task) == :ok
+      assert Agent.get(ctx.observations, & &1.runner) == expected
+    end
+
+    evidence = Jason.decode!(File.read!(ctx.input["output_path"]))
+    assert evidence["model_probes_completed"] == 0
+    assert evidence["model_sessions_started"] == 0
+  end
+
+  test "lifecycle evidence distinguishes observed sessions, completed probes and held dispatches", ctx do
+    alias SymphonyElixir.KubernetesCandidateRunner, as: Runner
+    ctx = probe_context(ctx, "claude")
+    parent = self()
+    update = {:codex_worker_update, "one", "attempt", %{event: :session_started, session_id: "session", payload: "MODEL_SECRET_CANARY"}}
+
+    owner =
+      spawn(fn ->
+        receive do
+          {:observe, observer} ->
+            send(observer, update)
+            send(observer, update)
+            send(observer, {:codex_worker_update, "one", "attempt", %{event: :completed, session_id: "session"}})
+            ref = make_ref()
+            send(observer, {:probe_finished, self(), ref, %{outcome: "passed", dispatch: :ok, artifact_matched: true}})
+            receive do: ({^ref, :recorded} -> send(parent, :held))
+            receive do: (:release -> :ok)
+        end
+      end)
+
+    observer = Runner.observe_dispatch(ctx, owner, self(), "one", "attempt", "env-one")
+    monitor = Process.monitor(observer)
+    send(owner, {:observe, observer})
+    assert_receive :held
+    assert_receive ^update
+    evidence = Jason.decode!(File.read!(ctx.input["output_path"]))
+    assert evidence["model_sessions_started"] == 1
+    assert evidence["model_sessions_completed"] == 1
+    assert evidence["model_probes_completed"] == 1
+    dispatch = evidence["dispatches"]["attempt"]
+    assert dispatch["started_monotonic_ms"] <= hd(dispatch["lifecycle"])["observed_monotonic_ms"]
+    assert List.last(dispatch["lifecycle"])["observed_monotonic_ms"] <= dispatch["probe_finished_monotonic_ms"]
+    refute Map.has_key?(dispatch, "ended_at")
+    refute Jason.encode!(evidence) =~ "MODEL_SECRET_CANARY"
+    send(owner, :release)
+    assert_receive {:DOWN, ^monitor, :process, ^observer, :normal}
+    ended = Jason.decode!(File.read!(ctx.input["output_path"]))["dispatches"]["attempt"]
+    assert ended["probe_finished_monotonic_ms"] <= ended["ended_monotonic_ms"]
+  end
+
+  test "killed dispatch preserves its started session and records failure without a completed probe", ctx do
+    alias SymphonyElixir.KubernetesCandidateRunner, as: Runner
+    ctx = probe_context(ctx, "claude")
+    owner = spawn(fn -> receive do: (:release -> :ok) end)
+    observer = Runner.observe_dispatch(ctx, owner, self(), "one", "attempt", "env-one")
+    monitor = Process.monitor(observer)
+    update = {:codex_worker_update, "one", "attempt", %{event: :session_started, session_id: "interrupted"}}
+    send(observer, update)
+    assert_receive ^update
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^observer, :normal}
+    evidence = Jason.decode!(File.read!(ctx.input["output_path"]))
+    assert evidence["runner"] == "failed"
+    assert evidence["dispatches"]["attempt"]["outcome"] == "failed"
+    assert evidence["model_sessions_started"] == 1
+    assert evidence["model_sessions_completed"] == 0
+    assert evidence["model_probes_completed"] == 0
+  end
+
+  defp probe_context(ctx, backend) do
+    observations = start_supervised!({Agent, fn -> Map.merge(worker_observations(), %{dispatches: %{}}) end})
     control = start_supervised!({SymphonyElixir.ManagedEnvironmentFixture.Control, config: ctx.config, checks: [], session_limit: 0})
-
-    event = %{
-      event: :model_session,
-      issue_id: "probe",
-      backend: "claude",
-      dispatch: :ok,
-      artifact_matched: true,
-      credentials: %{token: "MODEL_SECRET_CANARY"}
-    }
-
-    :ok = GenServer.call(control, {:event, event})
-    [stored] = GenServer.call(control, :snapshot).events
-    assert stored[:artifact_matched] == true
-    assert stored[:backend] == "claude"
-    assert stored[:dispatch] == :ok
-    refute Jason.encode!(stored) =~ "MODEL_SECRET_CANARY"
+    tasks = start_supervised!(Task.Supervisor)
+    input = %{"backend" => backend, "timeout_ms" => 0, "output_path" => Path.join(ctx.root, "probe.json"), "pins" => %{}, "runner_sha256" => "test", "mode" => "run"}
+    Map.merge(ctx, %{observations: observations, control: control, tasks: tasks, input: input, lane_id: "test", lane_version_id: "test"})
   end
 
   test "incomplete candidate identity is rejected without contacting the provider", %{config: config} do
@@ -167,6 +330,41 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
 
     assert {:error, {:invalid, :kubernetes_candidate_identity}, _} = Kubernetes.put_intent(ctx.config, record, %{desired: :absent}, opts)
     assert {:error, {:invalid, :kubernetes_candidate_identity}} = Kubernetes.discover(ctx.config, opts)
+  end
+
+  test "the comprehensive suite reaches Kubernetes only through operator pins", ctx do
+    alias SymphonyElixir.ManagedEnvironmentFixture.Provider
+
+    driver = Path.join(ctx.root, "qualification-fault-driver")
+    File.write!(driver, "#!/bin/sh\nexit 0\n")
+    File.chmod!(driver, 0o700)
+
+    profile = %{
+      "fault_driver" => driver,
+      "fault_driver_sha256" => Candidate.sha256(File.read!(driver)),
+      "storage_fault_authorized" => true,
+      "worker_image" => ctx.pins["contract"]["worker_image"],
+      "runtime_version" => "candidate-runtime",
+      "qualification_report" => "operator-authorization",
+      "quota_evidence" => %{"concurrent_workers" => 5, "retained_environments" => 6}
+    }
+
+    config = Map.put(ctx.config, :kind, "kubernetes")
+    opts = [timeout_ms: 60_000, command_fun: command(ctx.objects)]
+
+    # A live cluster that answers every candidate read still cannot pass the stock path.
+    assert {:error, blocked} = Provider.preflight(config, profile, opts)
+    assert blocked in [:kubernetes_controller_cleanup_ordering_unproven, :kubernetes_prerequisites_unavailable]
+
+    # Pins that are not the operator's are rejected outright, never degraded into the stock path.
+    forged = Map.put(profile, "candidate_pins", %{"deployment_id" => config.deployment_id})
+    assert {:error, :kubernetes_candidate_identity} = Provider.preflight(config, forged, opts)
+
+    pinned = Map.put(profile, "candidate_pins", ctx.pins)
+    assert {:ok, evidence} = Provider.preflight(config, pinned, opts)
+    assert evidence.image_digest == profile["worker_image"]
+    assert evidence.controller_source_commit == ctx.pins["contract"]["controller_source_commit"]
+    refute evidence.candidate_qualified
   end
 
   test "candidate preflight requires the live inventory after exact safety validation", ctx do

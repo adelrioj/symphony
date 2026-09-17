@@ -271,12 +271,12 @@ Notes:
   matching ignores case and surrounding whitespace. A blank configured label matches no issue, and
   an empty list imposes no constraint.
 - Safer Codex defaults are used when policy fields are omitted:
-  - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
+  - `codex.approval_policy` defaults to `{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":false}}`, rejecting approval prompts rather than auto-approving them.
   - `codex.thread_sandbox` defaults to `workspace-write`
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - `codex.turn_timeout_ms` is the maximum silence interval while a turn is streaming. Each
   app-server update resets it; it is not a total turn runtime cap.
-- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
+- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. Codex 0.153.4 supports `untrusted`, `on-request`, `never`, and object-form `granular`. Older workflows using `reject` must migrate to `granular` and invert each rejection flag into an allowance flag.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
@@ -671,11 +671,29 @@ selected backend's authentication in the guest; the runner does not provision cr
 or bypass the backend's approval policy.
 
 Evidence always says `candidate-unqualified` and `qualified: false`.
-`backend_sessions` counts model probes that reach artifact readback, not every started
-or interrupted attempt; it remains zero for non-model and cleanup runs. Model acceptance
-requires one completed probe per requested worker, `dispatch: "ok"`, and
-`artifact_matched: true` after reading the nonce file over the managed SSH connection.
-A transcript claiming success is not sufficient.
+`workers` records a sticky outcome for each expected issue. Cleanup starts only after
+all requested workers succeed in distinct environments, or after failure/timeout;
+duplicate success cannot satisfy another worker and later success cannot erase failure.
+`dispatches`, keyed by attempt ID, records issue/environment identity, backend,
+dispatch start/end, probe completion, and observed backend lifecycle events.
+`model_probes_completed` counts model wrappers that reach artifact readback;
+`model_sessions_started` and `model_sessions_completed` count distinct attempt/session
+identities observed in backend lifecycle messages, including interrupted attempts.
+These counters are zero for non-model and cleanup runs. Model acceptance requires
+one successful probe per requested worker, `dispatch: "ok"`, and `artifact_matched: true`
+after reading the nonce file over managed SSH. A transcript claiming success is insufficient.
+Model dispatch waits, within the existing run timeout, for every expected managed
+worker to register in a distinct live environment. This readiness barrier does not
+itself prove model overlap; multi-worker model acceptance additionally requires
+overlapping observed session-start/completion intervals for the same session identities.
+
+Dispatch and lifecycle observations include controller UTC and monotonic millisecond
+timestamps. A dispatch remains occupied after its probe finishes, until cleanup releases
+it: overlapping dispatch intervals do **not** prove overlapping model calls. Inspect
+observed session-start/completion intervals separately; missing terminal events are
+incomplete evidence, not a model completion or proof of overlap. Timing is observed at
+the controller, not provider-side inference timing. No raw model payloads or credentials
+are retained in these lifecycle records.
 
 Run from an operator-reviewed source checkout with accessible Git metadata, not a
 production release artifact. PR21 moved runtime configuration into SQLite lanes:
@@ -1293,6 +1311,7 @@ production provider mode or an authorization bypass:
 | `node_fault_authorized` | Kubernetes only: literal `true` for the dedicated-node disconnection scenario. |
 | `authorized_node_uids` | Kubernetes only: explicit nonempty allowlist of dedicated node UIDs; unrelated workload sharing is rejected. |
 | `denied_identity` | Kubernetes only: deliberately denied, non-`system:` Kubernetes username that the authorized caller can impersonate for the real stop-rejection probe, without impersonated groups. |
+| `candidate_pins` | Kubernetes only, and **required** there: the operator's pinned candidate identity, exactly the map the candidate runner consumes. Its `deployment_id` selects the run's deployment id, and its `contract.worker_image` must equal `worker_image`. Absent it the Kubernetes path stays blocked on the unproven v1.0.1 cleanup ordering; Workstations runs must omit it. |
 
 The rest of the workflow must satisfy the normal provider configuration and credential
 requirements documented above. Its `hooks.after_create` must clone an authorized

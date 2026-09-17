@@ -187,7 +187,7 @@ defmodule SymphonyElixir.TestSupport do
           agent_backend_by_state: %{},
           agent_blocked_state: "Blocked / Needs Attention",
           codex_command: "codex app-server",
-          codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
+          codex_approval_policy: nil,
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,
           codex_turn_timeout_ms: 3_600_000,

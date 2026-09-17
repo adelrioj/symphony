@@ -477,14 +477,53 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
     end
   end
 
-  defp provider_preflight(%{kind: "kubernetes"} = config, _profile, _quota, opts) do
-    # Production preflight owns the allocation stop; qualification cannot bypass it.
+  # Production preflight owns the allocation stop; qualification cannot bypass it.
+  # Only the test-only validator, against artifacts the operator pinned by digest,
+  # reaches a passing Kubernetes preflight. Absent pins, ordinary allocation stays blocked.
+  defp provider_preflight(%{kind: "kubernetes"} = config, profile, quota, opts) do
+    case profile["candidate_pins"] do
+      pins when is_map(pins) -> candidate_preflight(config, profile, pins, quota, opts)
+      _ -> blocked_preflight(config, opts)
+    end
+  end
+
+  defp blocked_preflight(config, opts) do
     case Kubernetes.preflight(config, opts) do
       {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}} ->
         {:error, :kubernetes_controller_cleanup_ordering_unproven}
 
       _ ->
         {:error, :kubernetes_prerequisites_unavailable}
+    end
+  end
+
+  defp candidate_preflight(config, profile, pins, quota, opts) do
+    contract = pins["contract"]
+
+    with :ok <- Kubernetes.candidate_preflight(config, pins, opts),
+         true <- is_map(contract) and contract["worker_image"] == profile["worker_image"] do
+      {:ok,
+       %{
+         scope: safe_scope(config),
+         image_digest: profile["worker_image"],
+         template_uid: contract["template_uid"],
+         controller_uid: contract["controller_uid"],
+         controller_source_commit: contract["controller_source_commit"],
+         controller_image: contract["controller_image"],
+         # Recorded, never asserted: the candidate validator only accepts an unqualified contract.
+         candidate_stage: contract["stage"],
+         candidate_qualified: contract["qualified"] == true,
+         runtime_version: safe_report_reference(profile["runtime_version"]),
+         runtime_version_source: :operator_report,
+         quota_evidence: quota,
+         quota_evidence_source: :operator_report,
+         qualification_report: safe_report_reference(profile["qualification_report"]),
+         prerequisite_source: :operator_pinned_candidate_and_live_cluster_reads
+       }}
+    else
+      {:error, {_, code}} when is_atom(code) -> {:error, code}
+      {:error, code} when is_atom(code) -> {:error, code}
+      _ -> {:error, :kubernetes_prerequisites_unavailable}
     end
   end
 
