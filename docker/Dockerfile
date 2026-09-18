@@ -84,6 +84,16 @@ RUN git config --global --add safe.directory /app \
 ENV MIX_ENV=test
 RUN mix deps.get && mix compile
 
+# artifact_identity/0 hashes compiled BEAM object code, which is not reproducible: two builds
+# of the same commit produce different sha256 values (verified — stable within an image, not
+# across builds). So `consumer_artifact_sha256` must be READ OUT OF THE IMAGE you are about to
+# run, never precomputed from a commit or copied from a previous run's pins:
+#
+#   docker run --rm -w /app/elixir -e MIX_ENV=test <image> mix run \
+#     -e 'IO.puts(SymphonyElixir.ExecutionEnvironment.Kubernetes.Candidate.artifact_identity().sha256)'
+#
+# Getting this wrong is what made the 2026-09-18 run fail its second integrity check.
+
 COPY docker/candidate-launch.exs ./launch.exs
 
 # `runtime` sets ENTRYPOINT ["mix", "symphony"], which would otherwise prefix everything below
