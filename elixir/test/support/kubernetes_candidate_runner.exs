@@ -199,6 +199,11 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     |> Map.put("agent", agent)
     # The guest login PATH excludes these installed agent and tracker MCP executables.
     |> Map.put("claude", %{"command" => "/opt/symphony-worker/bin/claude", "linear_mcp_command" => "/opt/symphony-worker/bin/symphony"})
+    # Pin codex's invocation for the same reason claude's is pinned: the candidate run must not
+    # inherit how the agent under test is launched from an operator-supplied workflow. The
+    # `app-server` subcommand is the load-bearing part — a bare `codex` starts the interactive
+    # TUI, which exits 1 with "stdin is not a terminal" the moment it is driven over a pipe.
+    |> Map.put("codex", %{"command" => "/usr/local/bin/codex app-server"})
     |> update_in(["worker", "environment"], &Map.merge(&1, %{"deployment_id" => deployment, "terminal_retention_ms" => 0}))
   end
 
