@@ -512,7 +512,15 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
               worker_result(state, issue_id, environment_id, "failed")
             end
 
-          ending = observation_time("ended") |> Map.put(:termination, if(reason in [:normal, :shutdown, :killed], do: reason, else: :abnormal))
+          ending =
+            observation_time("ended")
+            |> Map.put(:termination, if(reason in [:normal, :shutdown, :killed], do: reason, else: :abnormal))
+            # The exit reason is the only account of why a dispatch died. Classifying it as
+            # :abnormal and dropping it makes a failed run undiagnosable from its own evidence,
+            # which costs a fresh single-use namespace per hypothesis. Inspected, not raw, so the
+            # evidence stays JSON-encodable, and truncated so a large reason cannot bloat it.
+            |> Map.put(:termination_reason, String.slice(inspect(reason, limit: 50, printable_limit: 2_048), 0, 4_096))
+
           update_in(state, [:dispatches, attempt_id], &(&1 |> Map.merge(ending) |> Map.put_new(:outcome, "failed")))
         end)
 
