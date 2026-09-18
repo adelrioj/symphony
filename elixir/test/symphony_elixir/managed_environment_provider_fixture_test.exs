@@ -6,6 +6,40 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Guard}
   alias SymphonyElixir.ManagedEnvironmentFixture.Provider
 
+  test "invalid scoped prerequisites cannot reach provider requests or allocation" do
+    opts = [timeout_ms: 1_000, request_fun: fn _ -> flunk("provider reached") end, command_fun: fn _, _, _ -> flunk("command reached") end]
+    assert {:error, :invalid_metadata_policy} = Provider.preflight(workstations_config(), %{"metadata_policy" => "allow_any"}, opts)
+    assert {:error, :permission_scope_required} = Provider.preflight(workstations_config(), %{"metadata_policy" => "scoped_gcp"}, opts)
+    assert {:ok, %{mode: "deny_all"}} = Provider.permission_preflight(workstations_config(), %{mode: "deny_all"}, %{}, opts)
+  end
+
+  test "scoped guest identity cannot substitute for actual VM and configuration accounts" do
+    expected = "worker@qual.iam.gserviceaccount.com"
+    image = "europe-west1-docker.pkg.dev/qual/images/worker@sha256:" <> String.duplicate("a", 64)
+    policy = %{mode: "scoped_gcp", scope: %{"service_account" => expected, "image_repository" => %{"image" => image}}}
+    record = %{key: "missing", metadata: %{}}
+    config = workstations_config()
+
+    for {vm_account, config_account, passes} <- [{expected, expected, true}, {"other@qual.iam.gserviceaccount.com", expected, false}, {expected, "other@qual.iam.gserviceaccount.com", false}] do
+      request = fn req ->
+        if String.ends_with?(req[:url], "/instances") do
+          instance = %{"id" => "123", "name" => "control", "selfLink" => "https://www.googleapis.com/compute/v1/projects/p/zones/l-a/instances/control",
+            "labels" => workstation_labels(), "status" => "RUNNING", "serviceAccounts" => [%{"email" => vm_account}]}
+          response(%{"items" => %{"zones/l-a" => %{"instances" => [instance]}}})
+        else
+          response(%{"uid" => "config-uid", "container" => %{"image" => image}, "host" => %{"gceInstance" => %{"serviceAccount" => config_account}}})
+        end
+      end
+
+      result = Provider.permission_identity(config, record, policy, workstation_opts(request))
+      if passes do
+        assert {:ok, %{service_account: ^expected, instance_id: "123", config_uid: "config-uid"}} = result
+      else
+        assert {:error, :permission_vm_identity_unavailable} = result
+      end
+    end
+  end
+
   test "single-attempt helper response loss retains exact accepted create attribution", context do
     config = kubernetes_config(context)
     entry = %{attempt_id: "worker-attempt", record: %{key: "se-ticket", issue_id: "issue-1"}}

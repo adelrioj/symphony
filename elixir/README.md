@@ -533,9 +533,11 @@ impersonation permission, and read-only project-wide Compute instance/disk inven
 Do not grant worker code those lifecycle or inventory credentials.
 
 Use distinct lifecycle and worker VM identities. Never attach the lifecycle service account to a
-worker VM or put its credentials in the image. Qualification must demonstrate **provider-enforced**
-isolation from usable cloud metadata credentials for privileged ticket code, or report the profile
-unavailable. An in-worker firewall controlled by root is not such an isolation boundary.
+worker VM or put its credentials in the image. The qualification harness defaults to
+**provider-enforced** denial of usable cloud metadata credentials, including for privileged
+ticket code. Its explicit development-only `scoped_gcp` policy instead verifies the narrow
+worker permissions described below. Neither policy is a production Config safety switch;
+an in-worker firewall controlled by root is not an isolation boundary.
 
 The qualified config must persist `/home`, with the checkout and private Docker data on persistent
 storage, `gcePd.reclaimPolicy: DELETE`, `archiveTimeout: 0s`, no normal or boost warm pool, no suspension
@@ -1376,6 +1378,8 @@ production provider mode or an authorization bypass:
 | `authorized_node_uids` | Kubernetes only: explicit nonempty allowlist of dedicated node UIDs; unrelated workload sharing is rejected. |
 | `denied_identity` | Kubernetes only: deliberately denied, non-`system:` Kubernetes username that the authorized caller can impersonate for the real stop-rejection probe, without impersonated groups. |
 | `candidate_pins` | Kubernetes only, and **required** there: the operator's pinned candidate identity, exactly the map the candidate runner consumes. Its `deployment_id` selects the run's deployment id, and its `contract.worker_image` must equal `worker_image`. Absent it the Kubernetes path stays blocked on the unproven v1.0.1 cleanup ordering; Workstations runs must omit it. |
+| `metadata_policy` | Omitted or `deny_all`: unchanged strict metadata-token denial. `scoped_gcp`: Workstations-only development permission qualification, requiring the complete scope below. All other values fail before allocation. |
+| `permission_scope` | Required only for `scoped_gcp`; exact resource references, never secret values, executable paths, proxy settings or arbitrary request URLs. |
 
 The rest of the workflow must satisfy the normal provider configuration and credential
 requirements documented above. Its `hooks.after_create` must clone an authorized
@@ -1397,6 +1401,104 @@ Returned tokens are never printed. A denied connection/authorization is distinct
 an unexpected usable credential response; ambiguous successful responses fail the check.
 Workstations prerequisite reads also require Compute regional quota visibility and an
 installed `gcloud` CLI whose JSON version output can be observed.
+
+#### Scoped development permission qualification
+
+`permission_scope` has exactly these keys; unknown keys (including nested keys) fail:
+
+| Key | Required value |
+| --- | --- |
+| `service_account` | Expected worker VM service-account email. Independently checked against both current config and actual owned Compute VM API data. |
+| `allowed_secret_versions` | One to sixteen unique, full `projects/.../secrets/.../versions/<number>` references to harmless approved values; no `latest` aliases. |
+| `denied_secret_versions` | One to sixteen unique, disjoint, existing harmless secret versions independently readable by the verifier. |
+| `image_repository` | Object with exactly `name` (`projects/.../locations/.../repositories/...`) and `image` (digest-pinned `LOCATION-docker.pkg.dev/PROJECT/REPOSITORY/IMAGE@sha256:...`). Must match the actual worker config image. |
+| `denied_image_repository` | Same object shape, naming a different existing private repository and harmless digest-pinned manifest. The registry host, project and repository must match the resource name. |
+| `denied_backup_object` | Exactly `bucket`, `object` and decimal-string `generation`, referring to an existing harmless versioned object in a denied control bucket. |
+| `denied_workstation` | Full resource name of an existing unrelated scratch workstation in a different config. It is used only for reads, permission queries and an access-token denial probe, never lifecycle mutations. |
+| `iam_review_reference` | Absolute path on the trusted runner to a private, bounded JSON effective-IAM review (regular file, mode `0600` or stricter, at most 1 MiB). It is read only during explicit live preflight and never copied into public evidence. |
+
+The trusted runner requires Python 3 and a separately authorized, noninteractive verifier:
+`SYMPHONY_PERMISSION_VERIFIER_CONFIGURATION` selects its existing gcloud configuration and
+`SYMPHONY_PERMISSION_VERIFIER_SERVICE_ACCOUNT` selects its impersonated service account.
+The verifier account must differ from both the worker and controller lifecycle identities.
+Do not add ordinary backup or production-data permissions to the controller for this test.
+Verifier token output remains in process memory; no worker metadata token is written to disk,
+arguments, evidence, or logs. The verifier's own existing gcloud authentication remains an
+operator prerequisite, not a credential bootstrap performed by this harness.
+
+The private review is independent operator evidence, not an automatically inferred security
+approval. It must cover conditional, inherited, direct and group-derived bindings, custom-role
+expansion, all relevant identities, and forbidden capabilities outside the sampled resources.
+Its JSON protocol is:
+
+- `worker_service_account`, `verifier_service_account`: the exact identities above.
+- `scope_sha256`: SHA-256 of the complete scope encoded as sorted-key, compact JSON.
+- `reviewed_at`, `expires_at`: Unix seconds, a current review no older than 24 hours,
+  with expiry no later than 24 hours after review.
+- `compute_instances`: one to sixteen existing scratch Compute instance resource names
+  (`projects/.../zones/.../instances/...`) on which write permissions must be absent.
+- `service_accounts`: three to sixteen unique full `projects/.../serviceAccounts/<email>`
+  resources, including worker, controller and verifier and every additional identity found
+  by the effective-binding review.
+- `resource_fingerprints`: exact resource-name-to-SHA-256 map of current read responses,
+  encoded as sorted-key, compact JSON. Include the worker config, denied config and
+  workstation, both repositories, named Compute instances and service accounts, denied
+  bucket, each config's cluster, every secret parent, and the projects of those resources.
+- `forbidden_permissions`: the exact sorted `FORBIDDEN` list from the reviewed
+  `test/support/managed_environment_fixture/gcp_permission_probe.py`.
+- `effective_bindings`: exactly the same resource keys. Each value has `ancestry`
+  (nonempty resource-reference array), `bindings` (IAM role/member binding objects,
+  retaining any conditions), and `effective_permissions` (the worker's expanded effective
+  permission names on that resource). Any forbidden grant, missing resource, expired
+  review, unreadable control or changed resource fingerprint blocks preflight.
+
+The verifier must independently collect these snapshots and evaluate IAM before authorizing
+a run. The harness verifies current resource existence, config identity and image, review
+coverage and hashes, reads **all** harmless controls with the independent verifier, and
+records only fingerprints and fixed permission-query recipes. It repeats those checks
+immediately before isolation and rejects changed receipts. This does not prove that an
+operator-authored IAM analysis is correct; independent review remains a mandatory gate.
+
+Worker probes run as the ordinary SSH user, `sudo -n` root, ordinary Docker and privileged
+host-network Docker. The digest-pinned worker image must already be loaded in each private
+Docker daemon and contain Python 3; `--pull=never` prevents an implicit mutable download.
+Each context must read every approved secret and the permitted manifest, match their
+independent fingerprints, and receive authenticated **403** on every denied secret,
+manifest, generation-pinned object and scratch Workstations gateway-token request.
+A 401, 404, redirect, timeout, malformed token/JSON, failed positive control, missing
+context or missing check is not authorization denial. AWS and Azure credentials remain
+forbidden. Host socket/credential-file and peer Docker/SSH isolation checks remain in place.
+
+Only fixed Google API hosts and validated resource-derived paths are used, with redirects,
+proxy discovery and retries disabled and bounded responses/deadlines. Access and identity
+tokens are used only in memory. Identity-token claims are a guest consistency check, not
+signature verification or a replacement for controller-side config/VM identity reads.
+The staged probe's SHA-256 enters evidence, but execution uses the trusted runner's reviewed
+bytes directly, never an agent-editable repository fixture. Output contains only fixed
+check IDs, HTTP statuses, completion, expected identity and bounded fingerprints.
+
+Mutation denial uses service-specific `testIamPermissions` diagnostics on existing resources:
+Artifact Registry repositories, Workstations configs/workstation, Secret Manager
+secret parents, Compute instances, IAM service accounts and the denied Storage bucket.
+Project queries cover project-scoped create/policy and cluster capabilities; they do not
+replace resource-level queries or effective-IAM review. Workstation clusters have
+[no IAM query method](https://docs.cloud.google.com/workstations/docs/reference/rest/v1/projects.locations.workstationClusters):
+their current identities and inherited bindings are independently reviewed instead.
+Queries require HTTP 200 and an explicit
+`permissions` array containing no requested forbidden permission; errors and missing arrays
+are inconclusive. No production mutation is attempted.
+[Workstations config queries](https://docs.cloud.google.com/workstations/docs/reference/rest/v1/projects.locations.workstationClusters.workstationConfigs/testIamPermissions)
+can fail open or return an empty set for nonexistent resources: they are **diagnostics, not
+an authorization boundary**. See also the resource-specific
+[Compute](https://docs.cloud.google.com/compute/docs/reference/rest/v1/instances/testIamPermissions),
+[IAM](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/testIamPermissions)
+and [Storage](https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/testIamPermissions)
+methods; Storage uses GET query parameters rather than the other services' POST JSON.
+
+Local synthetic-transport tests and nonnetwork smoke are not live IAM qualification.
+Live permission qualification, image rebuilds and deployment remain blocked pending
+independent evidence and explicit authorization. Lifecycle checks, the final `qualified?`
+rule, runner fencing, five-worker/session budgets, cleanup and inventory are unchanged.
 
 The physical-fault helper protocol is `fault_driver --request <private-json-file>`.
 Its JSON contains `scenario` (`storage_deletion`, `node_disconnection`, or `all`),
