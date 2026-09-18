@@ -86,6 +86,9 @@ RUN mix deps.get && mix compile
 
 COPY docker/candidate-launch.exs ./launch.exs
 
+# `runtime` sets ENTRYPOINT ["mix", "symphony"], which would otherwise prefix everything below
+# and turn the command into `mix symphony mix run launch.exs`. Clear it.
+ENTRYPOINT []
 # Operators drive this through `kubectl exec` against a pod whose command is `sleep infinity`,
 # so this default only documents the intended invocation.
 CMD ["mix", "run", "launch.exs"]
