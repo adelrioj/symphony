@@ -118,23 +118,35 @@ defmodule SymphonyElixir.ManagedEnvironmentPermissionPolicyTest do
             return mode, sentinel.encode()
         if mode == "timeout":
             raise RuntimeError("permission_transport_failed")
-        return 403, sentinel.encode()
+        if mode == "malformed_denial": return 403, sentinel.encode()
+        if mode == "billing_denial":
+            return 403, p.canonical({"error":{"code":403,"errors":[{"domain":"global","reason":"accountDisabled"}]}})
+        if "/manifests/" in url:
+            if mode == "malformed_manifest": return 403, p.canonical({"errors":[{"code":"DENIED","message":"billing disabled " + sentinel}]})
+            message = 'Permission "artifactregistry.repositories.downloadArtifacts" denied on resource "' + scope["denied_image_repository"]["name"] + '" (or it may not exist)'
+            return 403, p.canonical({"errors":[{"code":"DENIED","message":message}]})
+        if "storage.googleapis.com" in url:
+            if mode == "billing_object": return 403, p.canonical({"error":{"code":403,"errors":[{"domain":"global","reason":"UserProjectAccountProblem"}]}})
+            return 403, p.canonical({"error":{"code":403,"errors":[{"domain":"global","reason":"forbidden"}]}})
+        permission = "workstations.workstations.use" if url.endswith(":generateAccessToken") else "secretmanager.versions.access"
+        if mode == "unknown_gateway" and url.endswith(":generateAccessToken"):
+            return 403, p.canonical({"error":{"code":403,"status":"PERMISSION_DENIED"}})
+        if mode == "wrong_permission": permission = "unrelated.permission"
+        return 403, p.canonical({"error":{"code":403,"status":"PERMISSION_DENIED","details":[
+            {"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"googleapis.com","reason":"IAM_PERMISSION_DENIED","metadata":{"permission":permission}}]}})
     probe = p.Probe(scope, transport)
     evidence = probe.worker(receipt)
     assert evidence["complete"] and sentinel not in json.dumps(evidence)
     assert any(url.endswith(":generateAccessToken") for _,url in requests)
     assert any("/o/harmless%2Fcontrol.txt?alt=media&generation=123" in url for _,url in requests)
-    for mode in (200, 401, 404, 302, "timeout", "malformed_token", "wrong_identity", "positive_failed", "query_error", "query_missing", "query_granted", "query_unrequested"):
+    for mode in (200, 401, 404, 302, "timeout", "malformed_token", "wrong_identity", "positive_failed", "query_error", "query_missing", "query_granted", "query_unrequested", "malformed_denial", "billing_denial", "malformed_manifest", "billing_object", "unknown_gateway", "wrong_permission"):
         try: probe.worker(receipt)
         except (RuntimeError, ValueError): pass
         else: raise AssertionError("false pass: " + str(mode))
     for status in (200, 401, 404, None):
-        try: p.require_denied(status, True)
+        try: p.require_denied(status, b"{}", "secret", "")
         except RuntimeError: pass
         else: raise AssertionError("false denial")
-    try: p.require_denied(403, False)
-    except RuntimeError: pass
-    else: raise AssertionError("missing positive control")
     for url in ("https://evil.invalid/token", "https://storage.googleapis.com.evil.invalid", "https://storage.googleapis.com:444", "https://user@storage.googleapis.com"):
         try: probe.request(url, sentinel)
         except RuntimeError: pass
@@ -181,6 +193,8 @@ defmodule SymphonyElixir.ManagedEnvironmentPermissionPolicyTest do
             "compute_instances":[instance],"service_accounts":accounts,"forbidden_permissions":p.FORBIDDEN,
             "resource_fingerprints":{r:p.digest(p.canonical(b)) for r,b in objects.items()},
             "effective_bindings":{r:{"ancestry":["organizations/123","projects/qual"],"bindings":[{"role":"roles/viewer","members":["serviceAccount:"+scope["service_account"]]}],"effective_permissions":[]} for r in objects}}
+    review["effective_bindings"][scope["image_repository"]["name"]]["effective_permissions"]=["artifactregistry.repositories.downloadArtifacts","artifactregistry.repositories.get"]
+    review["effective_bindings"][scope["allowed_secret_versions"][0].rsplit("/versions/",1)[0]]["effective_permissions"]=["secretmanager.versions.access"]
     packet={"scope":scope,"config":{"name":config,"uid":"uid-config","controller_service_account":controller}}
     mode=None
     seen=[]
@@ -214,6 +228,19 @@ defmodule SymphonyElixir.ManagedEnvironmentPermissionPolicyTest do
         try: p.preflight(packet,transport,(verifier,"SYNTHETIC_VERIFIER_TOKEN"),(bad,"a"*64))
         except RuntimeError: pass
         else: raise AssertionError("invalid review passed")
+    for permission in ("compute.instances.setTags", "compute.disks.resize", "iam.serviceAccounts.actAs", "secretmanager.versions.access", "unknown.future.write"):
+        bad=copy.deepcopy(review)
+        bad["effective_bindings"][instance]["effective_permissions"]=[permission]
+        try: p.preflight(packet,transport,(verifier,"SYNTHETIC_VERIFIER_TOKEN"),(bad,"a"*64))
+        except RuntimeError: pass
+        else: raise AssertionError("unapproved effective grant passed: " + permission)
+    for resource,permission in ((scope["denied_image_repository"]["name"],"artifactregistry.repositories.downloadArtifacts"),
+                                (scope["denied_secret_versions"][0].rsplit("/versions/",1)[0],"secretmanager.versions.access")):
+        bad=copy.deepcopy(review)
+        bad["effective_bindings"][resource]["effective_permissions"]=[permission]
+        try: p.preflight(packet,transport,(verifier,"SYNTHETIC_VERIFIER_TOKEN"),(bad,"a"*64))
+        except RuntimeError: pass
+        else: raise AssertionError("read grant outside approved resource passed")
     try: p.preflight(packet,transport,(controller,"SYNTHETIC_VERIFIER_TOKEN"),(review,"a"*64))
     except RuntimeError: pass
     else: raise AssertionError("controller used as verifier")

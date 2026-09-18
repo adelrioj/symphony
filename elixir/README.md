@@ -1445,12 +1445,18 @@ Its JSON protocol is:
   workstation, both repositories, named Compute instances and service accounts, denied
   bucket, each config's cluster, every secret parent, and the projects of those resources.
 - `forbidden_permissions`: the exact sorted `FORBIDDEN` list from the reviewed
-  `test/support/managed_environment_fixture/gcp_permission_probe.py`.
+  `test/support/managed_environment_fixture/gcp_permission_probe.py`. This is the
+  diagnostic query set, not the complete capability boundary.
 - `effective_bindings`: exactly the same resource keys. Each value has `ancestry`
   (nonempty resource-reference array), `bindings` (IAM role/member binding objects,
   retaining any conditions), and `effective_permissions` (the worker's expanded effective
-  permission names on that resource). Any forbidden grant, missing resource, expired
-  review, unreadable control or changed resource fingerprint blocks preflight.
+  permission names on that resource). Only the fixed Artifact Registry Reader
+  permissions on the approved repository and Secret Accessor permissions on approved
+  secret parents are accepted. All other effective grants, including unknown/future
+  permission names, block preflight. A missing resource, expired review, unreadable
+  control or changed resource fingerprint also blocks preflight. The fixed reader
+  permissions follow the [published role](https://docs.cloud.google.com/iam/docs/roles-permissions/artifactregistry#artifactregistry.reader);
+  a role change requires a new source review.
 
 The verifier must independently collect these snapshots and evaluate IAM before authorizing
 a run. The harness verifies current resource existence, config identity and image, review
@@ -1468,14 +1474,20 @@ manifest, generation-pinned object and scratch Workstations gateway-token reques
 A 401, 404, redirect, timeout, malformed token/JSON, failed positive control, missing
 context or missing check is not authorization denial. AWS and Azure credentials remain
 forbidden. Host socket/credential-file and peer Docker/SSH isolation checks remain in place.
+HTTP status alone is insufficient. Secret Manager and Workstations require a structured
+IAM denial for the requested permission. Registry denials must identify download denial
+on the exact repository; Storage requires the documented access-denied reason.
+Malformed, unknown, billing, service, quota or authentication errors are inconclusive.
+Error bodies are bounded and classified only in memory, never emitted as evidence.
 
 Only fixed Google API hosts and validated resource-derived paths are used, with redirects,
 proxy discovery and retries disabled and bounded responses/deadlines. Access and identity
 tokens are used only in memory. Identity-token claims are a guest consistency check, not
 signature verification or a replacement for controller-side config/VM identity reads.
 The staged probe's SHA-256 enters evidence, but execution uses the trusted runner's reviewed
-bytes directly, never an agent-editable repository fixture. Output contains only fixed
-check IDs, HTTP statuses, completion, expected identity and bounded fingerprints.
+bytes directly with Python `-I -S`, never checkout/user-site modules or an agent-editable
+repository fixture. Output contains only fixed check IDs, HTTP statuses, completion,
+expected identity and bounded fingerprints.
 
 Mutation denial uses service-specific `testIamPermissions` diagnostics on existing resources:
 Artifact Registry repositories, Workstations configs/workstation, Secret Manager

@@ -25,11 +25,34 @@ WS_CONFIG = ["workstations.workstations.create", "workstations.workstationConfig
 WS_CLUSTER = ["workstations.workstationConfigs.create", "workstations.workstationClusters.update", "workstations.workstationClusters.delete"]
 SECRET = ["secretmanager.secrets.setIamPolicy", "secretmanager.secrets.update", "secretmanager.secrets.delete", "secretmanager.versions.add", "secretmanager.versions.destroy"]
 WS = ["workstations.workstations.update", "workstations.workstations.start", "workstations.workstations.stop", "workstations.workstations.delete", "workstations.workstations.use", "workstations.workstations.setIamPolicy"]
-COMPUTE = ["compute.instances.update", "compute.instances.delete", "compute.instances.start", "compute.instances.stop", "compute.instances.setMetadata", "compute.instances.setServiceAccount", "compute.instances.setIamPolicy"]
-SA = ["iam.serviceAccounts.getAccessToken", "iam.serviceAccounts.getOpenIdToken", "iam.serviceAccounts.signBlob", "iam.serviceAccounts.signJwt", "iam.serviceAccounts.setIamPolicy", "iam.serviceAccountKeys.create"]
+COMPUTE = ["compute.instances.update", "compute.instances.delete", "compute.instances.start", "compute.instances.stop", "compute.instances.setMetadata", "compute.instances.setTags", "compute.instances.setServiceAccount", "compute.instances.setIamPolicy"]
+SA = ["iam.serviceAccounts.actAs", "iam.serviceAccounts.getAccessToken", "iam.serviceAccounts.getOpenIdToken", "iam.serviceAccounts.signBlob", "iam.serviceAccounts.signJwt", "iam.serviceAccounts.setIamPolicy", "iam.serviceAccountKeys.create"]
 BACKUP = ["storage.objects.create", "storage.objects.delete", "storage.objects.update", "storage.buckets.setIamPolicy"]
 PROJECT = ["compute.instances.create", "compute.disks.create", "compute.firewalls.create", "compute.firewalls.update", "resourcemanager.projects.setIamPolicy", "workstations.workstationClusters.create"] + WS_CLUSTER
 FORBIDDEN = sorted(set(AR + WS_CONFIG + WS_CLUSTER + WS + SECRET + COMPUTE + SA + BACKUP + PROJECT))
+# Fixed permissions of roles/artifactregistry.reader, allowed only on the approved repository.
+# Unknown permissions, including future writes, must require a new reviewed source change.
+ARTIFACT_READER = {
+    f"artifactregistry.{resource}.{action}"
+    for resource in ("attachments", "dockerimages", "files", "locations", "mavenartifacts",
+                     "npmpackages", "packages", "pythonpackages", "repositories", "rules",
+                     "tags", "versions")
+    for action in ("get", "list")
+} | {
+    "artifactregistry.files.download", "artifactregistry.projectconfigs.get",
+    "artifactregistry.projectsettings.get", "artifactregistry.repositories.downloadArtifacts",
+    "artifactregistry.repositories.exportArtifacts", "artifactregistry.repositories.listEffectiveTags",
+    "artifactregistry.repositories.listTagBindings", "artifactregistry.repositories.readViaVirtualRepository",
+    "resourcemanager.projects.get",
+}
+
+
+def approved_permissions(scope, resource):
+    if resource == scope["image_repository"]["name"]:
+        return ARTIFACT_READER
+    if resource in {value.rsplit("/versions/", 1)[0] for value in scope["allowed_secret_versions"]}:
+        return {"secretmanager.versions.access", "resourcemanager.projects.get", "resourcemanager.projects.list"}
+    return set()
 
 
 def require(condition, code="permission_probe_inconclusive"):
@@ -99,10 +122,13 @@ class Transport:
                 require(len(data) <= LIMIT, "permission_response_too_large")
                 return response.status, data
         except urllib.error.HTTPError as error:
-            # Denied bodies can contain credentials/resource descriptions. Never consume them.
-            status = error.code
-            error.close()
-            return status, b""
+            # Classify bounded error data in memory; never serialize its body or messages.
+            try:
+                data = error.read(LIMIT + 1)
+                require(len(data) <= LIMIT, "permission_response_too_large")
+                return error.code, data
+            finally:
+                error.close()
         except (urllib.error.URLError, OSError, TimeoutError):
             raise RuntimeError("permission_transport_failed") from None
 
@@ -206,11 +232,11 @@ class Probe:
                 checks[name] = outcome(200)
         for name, control in controls.items():
             if not name.startswith("allowed_"):
-                status, _ = self.request(control[0], token)
-                require_denied(status, True)
+                status, body = self.request(control[0], token)
+                require_denied(status, body, control[1], self.scope["denied_image_repository"]["name"])
                 checks[name] = outcome(status)
-        status, _ = self.request("https://workstations.googleapis.com/v1/" + self.scope["denied_workstation"] + ":generateAccessToken", token, method="POST", body={"expireTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 60))})
-        require_denied(status, True)
+        status, body = self.request("https://workstations.googleapis.com/v1/" + self.scope["denied_workstation"] + ":generateAccessToken", token, method="POST", body={"expireTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 60))})
+        require_denied(status, body, "gateway", self.scope["denied_workstation"])
         checks["gateway_denied"] = outcome(status)
         for query in receipt["queries"]:
             self.permission_query(token, query)
@@ -251,9 +277,34 @@ def query_recipe(service, resource):
     return permissions, root + resource + suffix, "GET" if service == "storage" else "POST"
 
 
-def require_denied(status, positive_control_ok):
-    if not positive_control_ok or status != 403:
-        raise RuntimeError("permission_denial_not_established")
+def require_denied(status, body, kind, resource):
+    require(status == 403 and isinstance(body, bytes) and len(body) <= LIMIT, "permission_denial_not_established")
+    value = json.loads(body)
+    require(isinstance(value, dict))
+    if kind == "manifest":
+        errors = value.get("errors")
+        require(isinstance(errors, list) and errors)
+        message = 'Permission "artifactregistry.repositories.downloadArtifacts" denied on resource "' + resource + '" (or it may not exist)'
+        require(all(isinstance(error, dict) and error.get("code") == "DENIED" and
+                    error.get("message") in (message, message + ".") for error in errors))
+        return
+    error = value.get("error")
+    require(isinstance(error, dict) and type(error.get("code")) is int and error["code"] == 403)
+    if kind == "object":
+        errors = error.get("errors")
+        require(isinstance(errors, list) and errors)
+        require(all(isinstance(item, dict) and item.get("domain") == "global" and
+                    item.get("reason") == "forbidden" for item in errors))
+        return
+    require(kind in ("secret", "gateway") and error.get("status") == "PERMISSION_DENIED")
+    permission = "secretmanager.versions.access" if kind == "secret" else "workstations.workstations.use"
+    details = error.get("details")
+    require(isinstance(details, list))
+    reasons = [item for item in details if isinstance(item, dict) and item.get("@type") == "type.googleapis.com/google.rpc.ErrorInfo"]
+    require(reasons and all(item.get("reason") == "IAM_PERMISSION_DENIED" and
+                           item.get("domain") == "googleapis.com" and
+                           isinstance(item.get("metadata"), dict) and
+                           item["metadata"].get("permission") == permission for item in reasons))
 
 
 def outcome(status):
@@ -363,7 +414,7 @@ def preflight(packet, transport=None, credentials=None, review_input=None):
         require(isinstance(evidence["ancestry"], list) and evidence["ancestry"] and all(isinstance(v, str) and v for v in evidence["ancestry"]))
         require(isinstance(evidence["bindings"], list) and all(isinstance(v, dict) and isinstance(v.get("role"), str) and isinstance(v.get("members"), list) for v in evidence["bindings"]))
         require(isinstance(evidence["effective_permissions"], list) and all(isinstance(v, str) for v in evidence["effective_permissions"]))
-        require(not set(evidence["effective_permissions"]) & set(FORBIDDEN), "iam_review_forbidden_grant")
+        require(set(evidence["effective_permissions"]) <= approved_permissions(scope, resource), "iam_review_unapproved_grant")
     controls = {name: probe.readable(token, control) for name, control in probe.read_controls(token).items()}
     return {"controls": controls, "queries": queries, "resources": observed, "review_sha256": review_sha, "scope_sha256": digest(canonical(scope))}
 

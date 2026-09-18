@@ -615,7 +615,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
 
     observations = Map.new(commands, fn {context, command} ->
       # Execute runner-reviewed bytes, not the repository copy an agent can replace.
-      output = remote!(ctx, entry, "#{command} -c #{source} #{payload}")
+      output = remote!(ctx, entry, "#{command} -I -S -c #{source} #{payload}")
       require!(byte_size(output) <= 65_536, "permission_evidence_exceeds_bound")
       parsed = case Jason.decode(output) do
         {:ok, value} when is_map(value) -> value
