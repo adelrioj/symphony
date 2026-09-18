@@ -573,7 +573,7 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  # Shares `Scope.validate/1` with `Linear.Adapter.validate_config/1` so the request-time gate and
+  # Shares `Scope.validate/1` with `Linear.Adapter.validate_config/2` so the request-time gate and
   # the config-time gate cannot disagree about which scopes are readable.
   defp configured_tracker_for_read do
     tracker = Config.settings!().tracker

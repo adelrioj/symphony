@@ -219,6 +219,11 @@ mix symphony lanes export main --data-root /data
 Import creates a disabled lane, or appends a version to an existing slug while preserving enabled
 state. These commands open only the database, not schedulers. They are offline tools: importing in
 another process while serve runs is not applied live until restart; use the UI/API instead.
+Disabled imports validate tracker scope, provider configuration, and selected backend commands
+without requiring tracker credentials or `SYMPHONY_OPERATOR_TOKEN`. Credential references such as
+`$LINEAR_API_KEY` remain raw in SQLite and exports; imports do not substitute a secret into the saved
+workflow. Enabling a lane, editing or reimporting an already enabled lane, and runtime startup still
+require valid resolved tracker credentials. A disabled import is not a runtime-readiness check.
 For import, UI creation, and API create/update, lane slugs must match `^[a-z][a-z0-9-]{1,40}$`.
 The exact slug `new` is reserved for the creation page at `/lanes/new`; use an ordinary slug such as
 `main` or `new-work`. A rejected slug produces a field error without saving a lane or version.

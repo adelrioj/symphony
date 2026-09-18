@@ -41,6 +41,8 @@ and a Linear API key. Agents run unattended: use a trusted environment and scope
 
 Open <http://localhost:4000>, sign in with the operator token, and enable `main`.
 New lanes start disabled. Edit running lanes in the UI, not the imported file.
+Offline imports into disabled lanes need no tracker or operator secrets; runtime credentials are
+required when enabling and running lanes.
 
 [Full deployment guide](deploy/client-template/README.md) ·
 [Run from source](elixir/README.md#run) ·

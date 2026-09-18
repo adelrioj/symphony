@@ -215,6 +215,99 @@ defmodule SymphonyElixir.LanesTest do
     assert {:error, :no_version} = Lanes.export(%Lane{current_version_id: nil})
   end
 
+  @tag :tmp_dir
+  test "credential-free imports preserve raw references and remain disabled across edits and rollback", %{tmp_dir: tmp_dir} do
+    System.delete_env("LINEAR_API_KEY")
+    front = "tracker:\n  kind: linear\n  api_key: $LINEAR_API_KEY\n  project_slug: offline-project"
+    content = "---\n#{front}\n---\nOffline prompt\n"
+    path = Path.join(tmp_dir, "offline.md")
+    File.write!(path, content)
+
+    assert {:ok, lane, []} = Lanes.import_file(path, slug: "offline")
+    refute lane.enabled
+    assert {:ok, ^content} = Lanes.export(lane)
+    assert Lanes.current_version(lane).front_matter == front
+    assert {:ok, %{settings: %{tracker: %{api_key: "$LINEAR_API_KEY"}}}} = Lanes.validate_version(nil, front, "", :structure)
+    assert {:ok, updated, []} = Lanes.import_file(path, slug: "offline")
+    assert {:ok, %{enabled: false}} = Lanes.activate_version(updated, lane.current_version_id)
+    assert {:error, [%{path: "tracker"}]} = Lanes.set_enabled(lane, true)
+    assert {:error, [%{path: "tracker"}]} = Lanes.validate_version(nil, front, "")
+    refute Lanes.get!(lane.id).enabled
+  end
+
+  @tag :tmp_dir
+  test "enabled records cannot use offline import or version mutation to bypass credentials", %{tmp_dir: tmp_dir} do
+    System.delete_env("LINEAR_API_KEY")
+    front = "tracker:\n  kind: linear\n  api_key: $LINEAR_API_KEY\n  project_slug: offline-project"
+    path = Path.join(tmp_dir, "offline.md")
+    File.write!(path, "---\n#{front}\n---\n")
+
+    assert {:error, [%{path: "tracker"}]} = Lanes.create(%{slug: "enabled-create", enabled: true, front_matter: front})
+    assert {:ok, lane, []} = Lanes.import_file(path, slug: "enabled-existing")
+    Repo.update!(Ecto.Changeset.change(lane, enabled: true))
+    assert {:error, [%{path: "tracker"}]} = Lanes.import_file(path, slug: lane.slug)
+    assert {:error, [%{path: "tracker"}]} = Lanes.update(lane, %{prompt: "must not save"})
+    assert {:error, [%{path: "tracker"}]} = Lanes.activate_version(lane, lane.current_version_id)
+    assert [%LaneVersion{prompt: ""}] = Lanes.versions(lane)
+    assert {:ok, %{enabled: false}} = Lanes.set_enabled(lane, false)
+  end
+
+  test "offline validation rejects malformed tracker, managed provider and backend settings without credentials" do
+    System.delete_env("LINEAR_API_KEY")
+    front = "tracker:\n  kind: linear\n  api_key: $LINEAR_API_KEY\n  project_slug: offline-project"
+    invalid_provider = """
+
+    worker:
+      environment:
+        kind: google_workstations
+        deployment_id: offline
+        startup_timeout_ms: 1000
+        shutdown_timeout_ms: 1000
+        provider:
+          project: offline
+    """
+
+    for {slug, config, path} <- [
+          {"bad-scope", String.replace(front, "project_slug: offline-project", "provider:\n    team_keys: wrong"), "tracker"},
+          {"bad-key", String.replace(front, "$LINEAR_API_KEY", "[]"), "tracker.api_key"},
+          {"bad-provider-key", front <> "\n  provider:\n    api_key: []", "tracker"},
+          {"bad-provider", front <> invalid_provider, "worker"},
+          {"bad-backend", front <> "\ncodex:\n  command: ' '", "codex.command"}
+        ] do
+      assert {:error, errors} = Lanes.create(%{slug: slug, front_matter: config})
+      assert Enum.any?(errors, &(&1.path == path))
+    end
+
+    assert Lanes.list() == []
+    assert Repo.aggregate(LaneVersion, :count) == 0
+  end
+
+  test "all tracker adapters defer credential readiness but retain provider validation for disabled lanes" do
+    for name <- ["LINEAR_API_KEY", "GITHUB_TOKEN", "GITLAB_PAT", "ASANA_PAT", "JIRA_API_TOKEN", "JIRA_EMAIL"] do
+      previous = System.get_env(name)
+      System.delete_env(name)
+      on_exit(fn -> TestSupport.restore_env(name, previous) end)
+    end
+
+    for {kind, provider, active, terminal, invalid_provider} <- [
+          {"linear", %{project_slug: "offline"}, ["Todo"], ["Done"], %{team_keys: "wrong"}},
+          {"github", %{repo: "owner/repo"}, ["open"], ["closed"], %{repo: "not-a-repo"}},
+          {"gitlab", %{project_path: "group/repo"}, ["opened"], ["closed"], %{project_path: "group / repo"}},
+          {"asana", %{project_gid: "123"}, ["Todo"], ["Done"], %{project_gid: 123}},
+          {"jira", %{base_url: "https://example.atlassian.net", project_key: "OFF"}, ["Todo"], ["Done"], %{base_url: "http://insecure"}}
+        ] do
+      tracker = %{kind: kind, provider: provider, active_states: active, terminal_states: terminal}
+      front = Jason.encode!(%{tracker: tracker})
+      assert {:ok, lane} = Lanes.create(%{slug: "offline-#{kind}", front_matter: front})
+      assert {:error, [%{path: "tracker"}]} = Lanes.set_enabled(lane, true)
+      assert {:error, [%{path: "tracker"}]} = Lanes.validate_version(nil, front, "")
+      invalid_front = Jason.encode!(%{tracker: %{tracker | provider: invalid_provider}})
+      assert {:error, [%{path: "tracker"}]} = Lanes.update(lane, %{front_matter: invalid_front})
+      refute Lanes.get!(lane.id).enabled
+      assert [%LaneVersion{front_matter: ^front}] = Lanes.versions(lane)
+    end
+  end
+
   test "error formatting retains actionable field paths" do
     assert [%{path: "worker"}] = Lanes.errors_for({:invalid_workflow_config, "managed and static worker settings conflict"})
     assert [%{path: "codex.command", message: "can't be blank"}] = Lanes.errors_for({:invalid_workflow_config, "codex.command can't be blank"})

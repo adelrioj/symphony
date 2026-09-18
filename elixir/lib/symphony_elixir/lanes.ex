@@ -34,11 +34,14 @@ defmodule SymphonyElixir.Lanes do
   def current_version(%Lane{current_version_id: nil}), do: nil
   def current_version(%Lane{id: lane_id, current_version_id: id}), do: Repo.one(from(v in LaneVersion, where: v.id == ^id and v.lane_id == ^lane_id))
 
-  @spec validate_version(integer() | nil, term(), term()) :: {:ok, validated()} | {:error, [error()]}
-  def validate_version(lane_id, front_matter, prompt) when is_binary(front_matter) and is_binary(prompt) do
+  @doc "Validates runtime readiness by default; structural validation is only for disabled configuration writes."
+  @spec validate_version(integer() | nil, term(), term(), :runtime | :structure) :: {:ok, validated()} | {:error, [error()]}
+  def validate_version(lane_id, front_matter, prompt, validation \\ :runtime)
+
+  def validate_version(lane_id, front_matter, prompt, validation) when is_binary(front_matter) and is_binary(prompt) and validation in [:runtime, :structure] do
     with {:ok, workflow} <- Workflow.parse_parts(front_matter, prompt),
-         {:ok, settings} <- Schema.parse(Map.delete(workflow.config, "server"), errors: :list),
-         :ok <- Config.validate_settings(settings),
+         {:ok, settings} <- Schema.parse(Map.delete(workflow.config, "server"), errors: :list, resolve_secrets: validation == :runtime),
+         :ok <- Config.validate_settings(settings, validation),
          :ok <- LaneStore.check_identity(lane_id, settings) do
       {:ok, %{settings: settings, workflow: workflow, warnings: config_warnings(workflow.config)}}
     else
@@ -46,7 +49,7 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  def validate_version(_lane_id, front_matter, prompt) do
+  def validate_version(_lane_id, front_matter, prompt, _validation) do
     {:error, type_errors(%{"front_matter" => front_matter, "prompt" => prompt})}
   end
 
@@ -157,7 +160,7 @@ defmodule SymphonyElixir.Lanes do
     front_matter = Map.get(attrs, "front_matter", "")
     prompt = Map.get(attrs, "prompt", "")
 
-    with {:ok, _validated} <- validate_candidate(nil, front_matter, prompt, check),
+    with {:ok, _validated} <- validate_candidate(nil, front_matter, prompt, check, Map.get(attrs, "enabled", false)),
          {:ok, lane} <- Repo.insert(Lane.changeset(%Lane{}, Map.take(attrs, @lane_fields))) do
       add_version(lane, front_matter, prompt, attrs["note"])
     end
@@ -174,9 +177,10 @@ defmodule SymphonyElixir.Lanes do
     front_matter = Map.get(attrs, "front_matter", (current && current.front_matter) || "")
     prompt = Map.get(attrs, "prompt", (current && current.prompt) || "")
     new_version? = Map.has_key?(attrs, "front_matter") or Map.has_key?(attrs, "prompt")
-    validate? = new_version? or Map.get(attrs, "enabled", lane.enabled)
+    enabled? = Map.get(attrs, "enabled", lane.enabled)
+    validate? = new_version? or enabled?
 
-    with :ok <- validate_update(validate?, current, new_version?, front_matter, prompt, check),
+    with :ok <- validate_update(validate?, current, new_version?, front_matter, prompt, check, enabled?),
          {:ok, updated} <- Repo.update(Lane.changeset(lane, Map.take(attrs, @lane_fields))) do
       if new_version?, do: add_version(updated, front_matter, prompt, attrs["note"]), else: {:ok, updated}
     end
@@ -185,7 +189,7 @@ defmodule SymphonyElixir.Lanes do
   defp activate_lane_version(id, version_id, check) do
     with {:ok, lane} <- fetch_lane(id),
          {:ok, version} <- fetch_version(id, version_id),
-         {:ok, _} <- validate_candidate(nil, version.front_matter, version.prompt, check) do
+         {:ok, _} <- validate_candidate(nil, version.front_matter, version.prompt, check, lane.enabled) do
       lane |> Ecto.Changeset.change(current_version_id: version.id) |> Repo.update()
     end
   end
@@ -264,15 +268,17 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  defp validate_update(false, _current, _new?, _front, _prompt, _check), do: :ok
-  defp validate_update(true, nil, false, _front, _prompt, _check), do: {:error, [%{path: "version", message: "lane has no version"}]}
+  defp validate_update(false, _current, _new?, _front, _prompt, _check, _enabled?), do: :ok
+  defp validate_update(true, nil, false, _front, _prompt, _check, _enabled?), do: {:error, [%{path: "version", message: "lane has no version"}]}
 
-  defp validate_update(true, _current, _new?, front, prompt, check) do
-    with {:ok, _} <- validate_candidate(nil, front, prompt, check), do: :ok
+  defp validate_update(true, _current, _new?, front, prompt, check, enabled?) do
+    with {:ok, _} <- validate_candidate(nil, front, prompt, check, enabled?), do: :ok
   end
 
-  defp validate_candidate(lane_id, front, prompt, check) do
-    with {:ok, validated} <- validate_version(lane_id, front, prompt),
+  defp validate_candidate(lane_id, front, prompt, check, enabled?) do
+    validation = if enabled?, do: :runtime, else: :structure
+
+    with {:ok, validated} <- validate_version(lane_id, front, prompt, validation),
          :ok <- check.(validated.settings) do
       {:ok, validated}
     end

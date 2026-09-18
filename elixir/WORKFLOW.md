@@ -3,6 +3,8 @@
 # Running configuration lives in the database; edit it in the UI or with
 # PUT /api/v1/lanes/:slug. File edits do not update a running installation.
 # server: is ignored; use serve --port/--host. Use the same --data-root for import and serve.
+# Disabled imports need no tracker/operator credentials; $ENV references stay raw in SQLite.
+# Enabling a lane or updating an enabled lane still requires resolved tracker credentials.
 tracker:
   kind: linear
   provider:
