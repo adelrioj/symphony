@@ -65,7 +65,7 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
 
       with executable when is_binary(executable) <- System.find_executable("python3"),
            {:ok, %{status: 0, output: output}} <-
-             run_command(executable, ["-c", bytes, Base.encode64(Jason.encode!(packet))], command_opts),
+             run_command(executable, ["-I", "-S", "-c", bytes, Base.encode64(Jason.encode!(packet))], command_opts),
            {:ok, receipt} when is_map(receipt) <- Jason.decode(output),
            true <- Enum.sort(Map.keys(receipt)) == Enum.sort(~w(controls queries resources review_sha256 scope_sha256)),
            true <- is_map(receipt["controls"]) and is_list(receipt["queries"]) and receipt["queries"] != [] do

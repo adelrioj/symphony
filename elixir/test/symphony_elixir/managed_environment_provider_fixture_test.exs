@@ -13,6 +13,23 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
     assert {:ok, %{mode: "deny_all"}} = Provider.permission_preflight(workstations_config(), %{mode: "deny_all"}, %{}, opts)
   end
 
+  test "permission preflight cannot import code from the checkout" do
+    directory = Path.join(System.tmp_dir!(), "permission-import-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf!(directory) end)
+    File.write!(Path.join(directory, "base64.py"), "open('checkout-code-ran', 'w').close()\nraise RuntimeError('untrusted module')\n")
+
+    command = fn executable, args, _opts ->
+      {output, status} = System.cmd(executable, args, cd: directory, stderr_to_stdout: true)
+      {:ok, %{status: status, output: output}}
+    end
+
+    assert {:error, :permission_prerequisites_unavailable} =
+             Provider.permission_preflight(workstations_config(), %{mode: "scoped_gcp", scope: %{}},
+               %{template_uid: "config-uid"}, timeout_ms: 5_000, command_fun: command)
+    refute File.exists?(Path.join(directory, "checkout-code-ran"))
+  end
+
   test "scoped guest identity cannot substitute for actual VM and configuration accounts" do
     expected = "worker@qual.iam.gserviceaccount.com"
     image = "europe-west1-docker.pkg.dev/qual/images/worker@sha256:" <> String.duplicate("a", 64)
