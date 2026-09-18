@@ -54,6 +54,9 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
+          # Explicit: docker/Dockerfile also carries a `candidate` stage, which is last in the
+          # file and would otherwise become the default target and get published as production.
+          target: runtime
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=${{ matrix.slug }}
           cache-to: type=gha,mode=max,scope=${{ matrix.slug }}

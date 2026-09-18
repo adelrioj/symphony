@@ -1,4 +1,8 @@
 .git
+# ...except its contents, which the `candidate` stage needs: the runner resolves
+# `git rev-parse HEAD` and compares it to pins.consumer_source_commit. The `runtime` stage
+# never copies it, so production images are unaffected.
+!.git/
 .env
 **/_build
 **/deps
