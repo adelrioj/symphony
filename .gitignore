@@ -5,3 +5,9 @@
 # local agent/review artifacts: stored diffs of deleted client workflows live here, so this
 # must never be committed to a repo every client can read
 .superpowers/
+
+# The containerised test command in the docs mounts HEX_HOME/MIX_HOME into the repo
+# (docker run -e HEX_HOME=/app/.hexcache -e MIX_HOME=/app/.mixcache ...), so running the
+# suite would otherwise leave the worktree dirty.
+.hexcache/
+.mixcache/
