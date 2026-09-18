@@ -80,6 +80,32 @@ FROM runtime AS candidate
 # file's sha256 to pins.helper_sha256. Without it validation fails on a missing executable, which
 # reads like a pin mismatch rather than a missing file.
 COPY --from=helper /symphony-kubernetes-create /usr/local/bin/symphony-kubernetes-create
+
+# Kubernetes.Client shells out to `kubectl` for every non-POST call (only POST goes through
+# symphony-kubernetes-create), so without it candidate_preflight fails as
+# {:unknown, :kubernetes_command_failed} — indistinguishable from a bad kubeconfig.
+# Pinned to the cluster's server version; checksum verified against the official published one.
+ARG KUBECTL_VERSION=v1.33.13
+ARG TARGETARCH=amd64
+RUN curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
+ && curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256" \
+      | awk '{print $1"  /usr/local/bin/kubectl"}' | sha256sum -c - \
+ && chmod 0755 /usr/local/bin/kubectl \
+ && kubectl version --client >/dev/null
+
+# ssh drives the managed connection into the guest (ssh.ex, kubernetes.ex) and ssh-keygen mints
+# the per-sandbox client key in rotate_credentials/6. gcloud is Workstations-only and gh is only
+# used by a Mix task, so neither is installed here.
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client \
+ && rm -rf /var/lib/apt/lists/*
+
+# Every external binary this code resolves with System.find_executable/1 must exist, or the
+# failure surfaces far from its cause: a missing kubectl reads as {:unknown,
+# :kubernetes_command_failed}, which looks exactly like a bad kubeconfig. Assert the surface at
+# build time instead of discovering it one qualification run at a time.
+RUN set -e; for b in bash kill kubectl ssh ssh-keygen symphony symphony-kubernetes-create; do \
+      command -v "$b" >/dev/null || { echo "required executable missing from candidate image: $b" >&2; exit 1; }; \
+    done
 RUN symphony-kubernetes-create --help >/dev/null 2>&1 || true; \
     test -x "$(command -v symphony-kubernetes-create)" \
  || { echo "symphony-kubernetes-create is not executable on PATH" >&2; exit 1; }
