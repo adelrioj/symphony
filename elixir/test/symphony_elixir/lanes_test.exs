@@ -8,6 +8,7 @@ defmodule SymphonyElixir.LanesTest do
 
   @front_matter "tracker:\n  kind: memory\ncodex:\n  command: codex app-server"
   @fixtures Path.expand("../fixtures/lanes", __DIR__)
+  @offline_linear "tracker:\n  kind: linear\n  api_key: $LINEAR_API_KEY\n  project_slug: offline-project"
 
   setup do
     TestSupport.reset_lanes!()
@@ -275,6 +276,84 @@ defmodule SymphonyElixir.LanesTest do
     assert {:error, :no_version} = Lanes.export(%Lane{current_version_id: nil})
   end
 
+  @tag :tmp_dir
+  test "credential-free imports preserve raw references and remain disabled across edits and rollback", %{tmp_dir: tmp_dir} do
+    System.delete_env("LINEAR_API_KEY")
+    path = Path.join(tmp_dir, "offline.md")
+    File.write!(path, "---\n#{@offline_linear}\n---\nOffline prompt\n")
+
+    assert {:ok, lane, _warnings} = Lanes.import_file(path, slug: "offline")
+    refute lane.enabled
+    assert {:ok, exported} = Lanes.export(lane)
+    assert exported =~ "$LINEAR_API_KEY"
+    assert Lanes.current_version(lane).front_matter =~ "$LINEAR_API_KEY"
+    assert {:ok, %{settings: %{tracker: %{api_key: "$LINEAR_API_KEY"}}}} = Lanes.resolve_lane(lane, nil, :structure)
+    assert {:ok, updated, _warnings} = Lanes.import_file(path, slug: "offline")
+    assert {:ok, %{enabled: false}} = Lanes.activate_version(updated, lane.current_version_id)
+    assert {:error, [%{path: "config", message: ":missing_linear_api_token"}]} = Lanes.set_enabled(lane, true)
+    assert {:error, [%{path: "config"}]} = Lanes.resolve_lane(%{lane | enabled: true})
+    refute Lanes.get!(lane.id).enabled
+  end
+
+  @tag :tmp_dir
+  test "enabled records cannot use offline import or version mutation to bypass credentials", %{tmp_dir: tmp_dir} do
+    System.delete_env("LINEAR_API_KEY")
+    path = Path.join(tmp_dir, "offline.md")
+    File.write!(path, "---\n#{@offline_linear}\n---\n")
+
+    assert {:ok, lane, _warnings} = Lanes.import_file(path, slug: "enabled-existing")
+    Repo.update!(Ecto.Changeset.change(lane, enabled: true))
+    assert {:error, _} = Lanes.import_file(path, slug: lane.slug)
+    assert {:error, [%{path: "config"}]} = Lanes.update(lane, %{prompt: "must not save"})
+    assert {:error, [%{path: "config"}]} = Lanes.activate_version(lane, lane.current_version_id)
+    assert [%LaneVersion{prompt: ""}] = Lanes.versions(lane)
+    assert {:ok, %{enabled: false}} = Lanes.set_enabled(lane, false)
+  end
+
+  test "offline validation rejects malformed tracker, managed provider and backend settings without credentials" do
+    System.delete_env("LINEAR_API_KEY")
+    {:ok, %{config: base}} = Workflow.parse_parts(@offline_linear, "")
+
+    for {slug, config} <- [
+          {"bad-scope", put_in(base, ["tracker", "provider"], %{"team_keys" => "wrong"}) |> update_in(["tracker"], &Map.delete(&1, "project_slug"))},
+          {"bad-key", put_in(base, ["tracker", "api_key"], [])},
+          {"bad-provider-key", put_in(base, ["tracker", "provider"], %{"api_key" => []})},
+          {"bad-backend", Map.put(base, "codex", %{"command" => " "})}
+        ] do
+      assert {:error, [_ | _]} = Lanes.create(%{slug: slug, execution_profile_id: profile_id(), config: config})
+    end
+
+    managed = %{"environment" => %{"kind" => "google_workstations", "deployment_id" => "offline", "startup_timeout_ms" => 1000, "shutdown_timeout_ms" => 1000, "provider" => %{"project" => "offline"}}}
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Bad provider", workspace_base: System.tmp_dir!(), worker: managed})
+    assert {:error, [%{message: "invalid worker.environment provider configuration"} | _]} = Lanes.create(%{slug: "bad-provider", execution_profile_id: profile.id, config: base})
+
+    assert Lanes.list() == []
+    assert Repo.aggregate(LaneVersion, :count) == 0
+  end
+
+  test "all tracker adapters defer credential readiness but retain provider validation for disabled lanes" do
+    for name <- ["LINEAR_API_KEY", "GITHUB_TOKEN", "GITLAB_PAT", "ASANA_PAT", "JIRA_API_TOKEN", "JIRA_EMAIL"] do
+      previous = System.get_env(name)
+      System.delete_env(name)
+      on_exit(fn -> TestSupport.restore_env(name, previous) end)
+    end
+
+    for {kind, provider, active, terminal, invalid_provider} <- [
+          {"linear", %{"project_slug" => "offline"}, ["Todo"], ["Done"], %{"team_keys" => "wrong"}},
+          {"github", %{"repo" => "owner/repo"}, ["open"], ["closed"], %{"repo" => "not-a-repo"}},
+          {"gitlab", %{"project_path" => "group/repo"}, ["opened"], ["closed"], %{"project_path" => "group / repo"}},
+          {"asana", %{"project_gid" => "123"}, ["Todo"], ["Done"], %{"project_gid" => 123}},
+          {"jira", %{"base_url" => "https://example.atlassian.net", "project_key" => "OFF"}, ["Todo"], ["Done"], %{"base_url" => "http://insecure"}}
+        ] do
+      tracker = %{"kind" => kind, "provider" => provider, "active_states" => active, "terminal_states" => terminal}
+      assert {:ok, lane} = Lanes.create(%{slug: "offline-#{kind}", execution_profile_id: profile_id(), config: %{"tracker" => tracker}})
+      assert {:error, [%{path: "config"}]} = Lanes.set_enabled(lane, true)
+      assert {:error, [_ | _]} = Lanes.update(lane, %{config: %{"tracker" => %{tracker | "provider" => invalid_provider}}})
+      refute Lanes.get!(lane.id).enabled
+      assert [%LaneVersion{}] = Lanes.versions(lane)
+    end
+  end
+
   test "error formatting retains actionable field paths" do
     assert [%{path: "worker"}] = Lanes.errors_for({:invalid_workflow_config, "managed and static worker settings conflict"})
     assert {:error, structured_error} = Schema.parse(%{"polling" => %{"interval_ms" => "invalid"}}, errors: :list)
@@ -365,7 +444,7 @@ defmodule SymphonyElixir.LanesTest do
 
     File.write!(path, Workflow.render(Workflow.encode_config(config), "managed prompt"))
     assert {:ok, lane, _warnings} = Lanes.import_file(path, slug: "managed-reimport")
-    assert {:ok, %{settings: original_settings}} = Lanes.resolve_lane(lane)
+    assert {:ok, %{settings: original_settings}} = Lanes.resolve_lane(lane, nil, :structure)
     original_identity = EnvironmentConfig.identity(original_settings)
     assert is_binary(original_identity)
 

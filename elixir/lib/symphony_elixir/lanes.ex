@@ -46,13 +46,13 @@ defmodule SymphonyElixir.Lanes do
   def resolve_lane(%Lane{} = lane), do: resolve_lane(lane, nil)
 
   @doc false
-  @spec resolve_lane(Lane.t(), String.t() | nil) :: {:ok, validated()} | {:error, [error()]}
-  def resolve_lane(%Lane{} = lane, cached_root) do
+  @spec resolve_lane(Lane.t(), String.t() | nil, :runtime | :structure) :: {:ok, validated()} | {:error, [error()]}
+  def resolve_lane(%Lane{} = lane, cached_root, validation \\ :runtime) do
     with {:ok, profile} <- fetch_profile(lane.execution_profile_id),
          :ok <- profile_repair(profile),
          {:ok, version} <- fetch_current_version(lane),
          {:ok, config} <- lane_config(version.front_matter),
-         {:ok, value} <- Configuration.resolve(profile_attrs(profile), config, lane.workspace_subdir, version.prompt, cached_root) do
+         {:ok, value} <- Configuration.resolve(profile_attrs(profile), config, lane.workspace_subdir, version.prompt, cached_root, validation) do
       {:ok, value}
     else
       {:error, errors} when is_list(errors) -> {:error, errors}
@@ -205,7 +205,7 @@ defmodule SymphonyElixir.Lanes do
   defp effective_lane_workflow(lane) do
     case LaneStore.lookup(lane.id) do
       {:ok, %{workflow: %{}}} = result -> result
-      _ -> resolve_lane(lane)
+      _ -> resolve_lane(lane, nil, if(lane.enabled, do: :runtime, else: :structure))
     end
   end
 
@@ -263,7 +263,7 @@ defmodule SymphonyElixir.Lanes do
 
     with :ok <- reject_legacy_fields(attrs),
          {:ok, profile} <- fetch_profile(attrs["execution_profile_id"]),
-         {:ok, validated} <- validate_candidate(profile, config, subdir, prompt, nil, check),
+         {:ok, validated} <- validate_candidate(profile, config, subdir, prompt, nil, check, false),
          {:ok, lane} <- Repo.insert(Lane.changeset(%Lane{}, Map.merge(Map.take(attrs, @lane_fields), %{"slug" => slug, "workspace_subdir" => subdir, "executor" => "local"}))),
          {:ok, lane} <- add_version(lane, Workflow.encode_config(config), prompt, attrs["note"]) do
       _ = validated
@@ -290,7 +290,7 @@ defmodule SymphonyElixir.Lanes do
     validation = update_validation(current, new_version?, attrs, lane.enabled)
 
     with {:ok, profile} <- fetch_profile(profile_id),
-         :ok <- validate_update(validation, profile, config, subdir, prompt, lane.id, check),
+         :ok <- validate_update(validation, profile, config, subdir, prompt, lane.id, check, Map.get(attrs, "enabled", lane.enabled)),
          {:ok, updated} <- Repo.update(Lane.changeset(lane, Map.take(Map.put(attrs, "execution_profile_id", profile_id), @lane_fields))),
          {:ok, updated} <- maybe_add_version(updated, config, prompt, attrs["note"], new_version?) do
       repair_profile(updated, profile)
@@ -333,7 +333,7 @@ defmodule SymphonyElixir.Lanes do
          {:ok, version} <- fetch_version(id, version_id),
          {:ok, config} <- current_config(version.front_matter),
          {:ok, profile} <- fetch_profile(lane.execution_profile_id),
-         {:ok, _} <- validate_candidate(profile, config, lane.workspace_subdir, version.prompt, lane.id, check) do
+         {:ok, _} <- validate_candidate(profile, config, lane.workspace_subdir, version.prompt, lane.id, check, lane.enabled) do
       lane |> Ecto.Changeset.change(current_version_id: version.id) |> Repo.update()
     end
   end
@@ -410,7 +410,8 @@ defmodule SymphonyElixir.Lanes do
                })
              ),
            {:ok, lane} <- import_lane(slug, config, prompt, profile.id, opts, check) do
-        {:ok, {:batch, lane, [lane.id]}}
+        # A single-lane publication lets a disabled import without credentials publish as invalid.
+        {:ok, lane}
       else
         {:error, %Ecto.Changeset{} = changeset} -> {:error, errors_for(changeset)}
         {:error, errors} -> {:error, errors}
@@ -437,9 +438,9 @@ defmodule SymphonyElixir.Lanes do
   end
 
   defp offline_import_mutation(mutation, slug) do
-    with {:ok, {:batch, lane, _ids} = value} <- mutation.(&offline_identity_check(slug, &1)),
+    with {:ok, %Lane{} = lane} <- mutation.(&offline_identity_check(slug, &1)),
          :ok <- validate_offline_locations(lane.id) do
-      value
+      lane
     else
       {:error, error} -> Repo.rollback(error)
     end
@@ -528,7 +529,7 @@ defmodule SymphonyElixir.Lanes do
     end)
   end
 
-  defp offline_owner_settings(%Lane{id: id} = lane, target_id) when id == target_id do
+  defp offline_owner_settings(%Lane{id: id, enabled: true} = lane, target_id) when id == target_id do
     with {:ok, %{settings: settings}} <- resolve_lane(lane), do: {:ok, settings}
   end
 
@@ -561,20 +562,21 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  defp validate_update(:skip, _profile, _config, _subdir, _prompt, _lane_id, _check), do: :ok
+  defp validate_update(:skip, _profile, _config, _subdir, _prompt, _lane_id, _check, _enabled?), do: :ok
 
-  defp validate_update(:missing_version, _profile, _config, _subdir, _prompt, _lane_id, _check),
+  defp validate_update(:missing_version, _profile, _config, _subdir, _prompt, _lane_id, _check, _enabled?),
     do: {:error, [%{path: "version", message: "lane has no version"}]}
 
-  defp validate_update(:validate, profile, config, subdir, prompt, lane_id, check) do
-    with {:ok, _} <- validate_candidate(profile, config, subdir, prompt, lane_id, check), do: :ok
+  defp validate_update(:validate, profile, config, subdir, prompt, lane_id, check, enabled?) do
+    with {:ok, _} <- validate_candidate(profile, config, subdir, prompt, lane_id, check, enabled?), do: :ok
   end
 
-  defp validate_candidate(profile, config, subdir, prompt, lane_id, check) do
+  defp validate_candidate(profile, config, subdir, prompt, lane_id, check, enabled?) do
     attrs = profile_attrs(profile)
     cached_root = cached_root(lane_id, attrs, subdir)
+    validation = if enabled?, do: :runtime, else: :structure
 
-    with {:ok, validated} <- Configuration.resolve(attrs, config, subdir, prompt, cached_root),
+    with {:ok, validated} <- Configuration.resolve(attrs, config, subdir, prompt, cached_root, validation),
          :ok <- check.(validated.settings) do
       {:ok, validated}
     end

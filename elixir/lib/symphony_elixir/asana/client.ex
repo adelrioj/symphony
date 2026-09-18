@@ -26,9 +26,9 @@ defmodule SymphonyElixir.Asana.Client do
   ]
   @task_fields_query Enum.join(@task_fields, ",")
 
-  @spec validate_settings(map()) :: :ok | {:error, term()}
-  def validate_settings(tracker_settings) do
-    with {:ok, _settings} <- settings(tracker_settings), do: :ok
+  @spec validate_settings(map(), :runtime | :structure) :: :ok | {:error, term()}
+  def validate_settings(tracker_settings, validation \\ :runtime) when validation in [:runtime, :structure] do
+    with {:ok, _settings} <- settings(tracker_settings, validation), do: :ok
   end
 
   @spec secret_environment_names(map()) :: [String.t()]
@@ -322,17 +322,17 @@ defmodule SymphonyElixir.Asana.Client do
     end
   end
 
-  defp settings(tracker_settings) when is_map(tracker_settings) do
+  defp settings(tracker_settings, validation \\ :runtime) when is_map(tracker_settings) do
     provider = provider_settings(tracker_settings)
     endpoint = provider["endpoint"] || @default_endpoint
-    api_key = resolve_setting(provider["api_key"], System.get_env("ASANA_PAT"))
+    api_key = if validation == :runtime, do: resolve_setting(provider["api_key"], System.get_env("ASANA_PAT")), else: provider["api_key"]
     project_gid = resolve_setting(provider["project_gid"], nil)
 
     cond do
       not valid_endpoint?(endpoint) ->
         {:error, :invalid_asana_endpoint}
 
-      not present_string?(api_key) ->
+      not present_string?(api_key) and (validation == :runtime or not is_nil(api_key)) ->
         {:error, :missing_asana_api_key}
 
       not present_string?(project_gid) ->

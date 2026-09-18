@@ -12,9 +12,9 @@ defmodule SymphonyElixir.GitHub.Client do
   @page_size 100
   @user_agent "symphony"
 
-  @spec validate_settings(map()) :: :ok | {:error, term()}
-  def validate_settings(tracker_settings) do
-    with {:ok, _settings} <- settings(tracker_settings), do: :ok
+  @spec validate_settings(map(), :runtime | :structure) :: :ok | {:error, term()}
+  def validate_settings(tracker_settings, validation \\ :runtime) when validation in [:runtime, :structure] do
+    with {:ok, _settings} <- settings(tracker_settings, validation), do: :ok
   end
 
   @spec secret_environment_names(map()) :: [String.t()]
@@ -282,17 +282,17 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
-  defp settings(tracker_settings) when is_map(tracker_settings) do
+  defp settings(tracker_settings, validation \\ :runtime) when is_map(tracker_settings) do
     provider = provider_settings(tracker_settings)
     api_url = provider["api_url"] || @default_api_url
     repo = resolve_setting(provider["repo"], System.get_env("GITHUB_REPO"))
-    token = resolve_setting(provider["token"], System.get_env("GITHUB_TOKEN"))
+    token = if validation == :runtime, do: resolve_setting(provider["token"], System.get_env("GITHUB_TOKEN")), else: provider["token"]
 
     cond do
       not valid_api_url?(api_url) -> {:error, :invalid_github_api_url}
       not present_string?(repo) -> {:error, :missing_github_repo}
       not valid_repo?(repo) -> {:error, :invalid_github_repo}
-      not present_string?(token) -> {:error, :missing_github_token}
+      not present_string?(token) and (validation == :runtime or not is_nil(token)) -> {:error, :missing_github_token}
       true -> {:ok, %{api_url: String.trim_trailing(api_url, "/"), repo: repo, token: token}}
     end
   end

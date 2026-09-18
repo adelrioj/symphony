@@ -49,6 +49,8 @@ snapshot, and workspace/target identity changes are rejected while retained work
 Invalid lanes retain workspace ownership; failed credential validation does not free their resources.
 Version inspection redacts credentials, including nested values. Invalid historical configuration
 remains in storage for recovery but is hidden from the browser rather than exposed unsafely.
+Offline imports into disabled lanes need no tracker or operator secrets; runtime credentials are
+required when enabling and running lanes.
 
 [Full deployment guide](deploy/client-template/README.md) ·
 [Run from source](elixir/README.md#run) ·

@@ -24,7 +24,7 @@ defmodule SymphonyElixir.Tracker do
   @callback agent_tool_specs() :: [map()]
   @callback execute_agent_tool(String.t(), term(), keyword()) :: map()
   @callback secret_environment_names(map()) :: [String.t()]
-  @callback validate_config(map()) :: :ok | {:error, term()}
+  @callback validate_config(map(), :runtime | :structure) :: :ok | {:error, term()}
   @callback preflight(map()) :: :ok | {:error, term()}
   @callback scope_summary(map()) :: String.t()
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
@@ -35,7 +35,7 @@ defmodule SymphonyElixir.Tracker do
 
   @optional_callbacks agent_tool_specs: 0,
                       execute_agent_tool: 3,
-                      validate_config: 1,
+                      validate_config: 2,
                       preflight: 1,
                       scope_summary: 1,
                       create_comment: 2,
@@ -94,11 +94,12 @@ defmodule SymphonyElixir.Tracker do
     )
   end
 
-  @spec validate_config(map()) :: :ok | {:error, term()}
-  def validate_config(%{kind: kind} = tracker_settings) do
+  @doc "Structural validation retains provider checks without resolving or requiring runtime credentials."
+  @spec validate_config(map(), :runtime | :structure) :: :ok | {:error, term()}
+  def validate_config(%{kind: kind} = tracker_settings, validation \\ :runtime) when validation in [:runtime, :structure] do
     with {:ok, adapter} <- adapter_for_kind(kind) do
-      if Code.ensure_loaded?(adapter) and function_exported?(adapter, :validate_config, 1) do
-        adapter.validate_config(tracker_settings)
+      if Code.ensure_loaded?(adapter) and function_exported?(adapter, :validate_config, 2) do
+        adapter.validate_config(tracker_settings, validation)
       else
         :ok
       end

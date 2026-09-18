@@ -12,6 +12,8 @@
 # Structured editors display effective defaults without persisting unchanged omitted settings.
 # Explicit disabling values (for example an empty in-progress state) survive unrelated edits.
 # server: is ignored; use serve --port/--host. Use the same --data-root for import and serve.
+# Disabled imports need no tracker/operator credentials; $ENV references stay raw in SQLite.
+# Enabling a lane or updating an enabled lane still requires resolved tracker credentials.
 tracker:
   kind: linear
   provider:

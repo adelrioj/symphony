@@ -96,7 +96,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_provider: %{"team_keys" => ["MDZ"]}
     )
 
-    # Config gate: Config.validate!/0 -> Tracker.validate_config/1 -> Linear.Adapter.validate_config/1.
+    # Config gate: Config.validate!/0 -> Tracker.validate_config/2 -> Linear.Adapter.validate_config/2.
     assert :ok = Config.validate!()
 
     graphql_fun = fn _query, variables ->
@@ -121,7 +121,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_provider: %{"team_keys" => ["MDZ"], "current_cycle" => true}
     )
 
-    # Config gate: Config.validate!/0 -> Tracker.validate_config/1 -> Linear.Adapter.validate_config/1.
+    # Config gate: Config.validate!/0 -> Tracker.validate_config/2 -> Linear.Adapter.validate_config/2.
     assert :ok = Config.validate!()
 
     graphql_fun = fn _query, variables ->

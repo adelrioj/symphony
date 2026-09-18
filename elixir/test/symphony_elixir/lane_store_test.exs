@@ -497,6 +497,24 @@ defmodule SymphonyElixir.LaneStoreTest do
     refute Enum.any?(Lanes.list(), &(&1.execution_profile_id == profile.id))
   end
 
+  test "startup refuses persisted enabled lanes whose tracker credentials are unavailable" do
+    previous_key = System.get_env("LINEAR_API_KEY")
+    System.delete_env("LINEAR_API_KEY")
+    on_exit(fn -> TestSupport.restore_env("LINEAR_API_KEY", previous_key) end)
+
+    {:ok, lane} =
+      create_lane(%{slug: "missing-credential", front_matter: "tracker:\n  kind: linear\n  api_key: $LINEAR_API_KEY\n  project_slug: offline"})
+
+    Repo.update!(Ecto.Changeset.change(lane, enabled: true))
+    replace_store([])
+
+    assert {:ok, %Entry{enabled: false, settings: nil, error: error}} = LaneStore.lookup(lane.id)
+    assert error =~ "missing_linear_api_token"
+    assert {:error, {:lane_invalid, ^error}} = LaneStore.validate(lane.id)
+    refute Lanes.get!(lane.id).enabled
+    refute SymphonyElixir.LaneSupervisor.running?(lane.id)
+  end
+
   test "scheduler reads stay available while a DB write is blocked" do
     {:ok, lane} = create_lane(%{slug: "readers", front_matter: "tracker:\n  kind: memory", prompt: "before"})
     parent = self()

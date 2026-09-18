@@ -59,11 +59,13 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   def resolve(_profile, _lane_config, _workspace_subdir, _prompt), do: {:error, [error("config", "must be an object")]}
 
   @doc false
-  @spec resolve(map(), map(), String.t(), String.t(), String.t() | nil) ::
+  @spec resolve(map(), map(), String.t(), String.t(), String.t() | nil, :runtime | :structure) ::
           {:ok, map()} | {:error, [map()]}
-  def resolve(profile, lane_config, workspace_subdir, prompt, cached_root)
+  def resolve(profile, lane_config, workspace_subdir, prompt, cached_root, validation \\ :runtime)
+
+  def resolve(profile, lane_config, workspace_subdir, prompt, cached_root, validation)
       when is_map(profile) and is_map(lane_config) and is_binary(workspace_subdir) and is_binary(prompt) and
-             (is_binary(cached_root) or is_nil(cached_root)) do
+             (is_binary(cached_root) or is_nil(cached_root)) and validation in [:runtime, :structure] do
     with {:ok, worker} <- profile_worker(profile),
          :ok <- validate_lane_ownership(lane_config),
          {:ok, base_root} <- profile_workspace_base(profile),
@@ -71,8 +73,8 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
          effective_config <- compose(profile, worker, lane_config, effective_root),
          normalized_prompt <- prompt |> String.replace(~r/\R/u, "\n") |> String.trim(),
          workflow <- %{config: effective_config, prompt: normalized_prompt, prompt_template: normalized_prompt},
-         {:ok, settings} <- Schema.parse(Map.delete(workflow.config, "server"), errors: :list),
-         :ok <- Config.validate_settings(settings) do
+         {:ok, settings} <- Schema.parse(Map.delete(workflow.config, "server"), errors: :list, resolve_secrets: validation == :runtime),
+         :ok <- Config.validate_settings(settings, validation) do
       {:ok, %{settings: settings, workflow: workflow, warnings: warnings(workflow.config)}}
     else
       {:error, errors} when is_list(errors) -> {:error, errors}
@@ -80,7 +82,7 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
     end
   end
 
-  def resolve(_profile, _lane_config, _workspace_subdir, _prompt, _cached_root), do: {:error, [error("config", "must be an object")]}
+  def resolve(_profile, _lane_config, _workspace_subdir, _prompt, _cached_root, _validation), do: {:error, [error("config", "must be an object")]}
 
   @spec validate_profile(map()) :: :ok | {:error, [map()]}
   def validate_profile(profile) when is_map(profile) do

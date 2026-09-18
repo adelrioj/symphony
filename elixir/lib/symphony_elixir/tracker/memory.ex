@@ -13,8 +13,8 @@ defmodule SymphonyElixir.Tracker.Memory do
   @type operation :: :create_comment | :update_issue_state
 
   @impl true
-  @spec validate_config(map()) :: :ok
-  def validate_config(_tracker_settings), do: :ok
+  @spec validate_config(map(), :runtime | :structure) :: :ok
+  def validate_config(_tracker_settings, validation \\ :runtime) when validation in [:runtime, :structure], do: :ok
 
   @spec calls() :: [tuple()]
   def calls do

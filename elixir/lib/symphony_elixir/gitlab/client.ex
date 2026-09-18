@@ -10,9 +10,9 @@ defmodule SymphonyElixir.GitLab.Client do
   @default_api_url "https://gitlab.com/api/v4"
   @page_size 100
 
-  @spec validate_settings(map()) :: :ok | {:error, term()}
-  def validate_settings(tracker_settings) do
-    with {:ok, _settings} <- settings(tracker_settings), do: :ok
+  @spec validate_settings(map(), :runtime | :structure) :: :ok | {:error, term()}
+  def validate_settings(tracker_settings, validation \\ :runtime) when validation in [:runtime, :structure] do
+    with {:ok, _settings} <- settings(tracker_settings, validation), do: :ok
   end
 
   @spec secret_environment_names(map()) :: [String.t()]
@@ -293,12 +293,12 @@ defmodule SymphonyElixir.GitLab.Client do
     end
   end
 
-  defp settings(tracker_settings) when is_map(tracker_settings) do
+  defp settings(tracker_settings, validation \\ :runtime) when is_map(tracker_settings) do
     provider = provider_settings(tracker_settings)
     api_url = provider["api_url"] || @default_api_url
     project_path = resolve_setting(provider["project_path"], System.get_env("GITLAB_PROJECT_PATH"))
 
-    api_key = resolve_setting(provider["api_key"], System.get_env("GITLAB_PAT"))
+    api_key = if validation == :runtime, do: resolve_setting(provider["api_key"], System.get_env("GITLAB_PAT")), else: provider["api_key"]
 
     cond do
       not valid_api_url?(api_url) ->
@@ -310,7 +310,7 @@ defmodule SymphonyElixir.GitLab.Client do
       not valid_project_path?(project_path) ->
         {:error, :invalid_gitlab_project_path}
 
-      not present_string?(api_key) ->
+      not present_string?(api_key) and (validation == :runtime or not is_nil(api_key)) ->
         {:error, :missing_gitlab_api_key}
 
       true ->

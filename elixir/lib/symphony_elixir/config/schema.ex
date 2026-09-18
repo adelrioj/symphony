@@ -366,7 +366,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     case validate_worker_source(attrs) do
       :ok ->
-        parse_attributes(attrs, error_format)
+        parse_attributes(attrs, error_format, Keyword.get(opts, :resolve_secrets, true))
 
       {:error, {path, message}} ->
         errors =
@@ -379,13 +379,13 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp parse_attributes(attrs, error_format) do
+  defp parse_attributes(attrs, error_format, resolve_secrets?) do
     attrs
     |> drop_nil_values()
     |> changeset()
     |> apply_action(:validate)
     |> case do
-      {:ok, settings} -> {:ok, finalize_settings(settings)}
+      {:ok, settings} -> {:ok, finalize_settings(settings, resolve_secrets?)}
       {:error, changeset} -> {:error, {:invalid_workflow_config, format_errors(changeset, error_format)}}
     end
   end
@@ -501,7 +501,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:server, with: &Server.changeset/2)
   end
 
-  defp finalize_settings(settings) do
+  defp finalize_settings(settings, resolve_secrets?) do
     provider = normalize_optional_map(settings.tracker.provider) || %{}
 
     {api_key, assignee, provider, secret_environment_names} =
@@ -514,11 +514,15 @@ defmodule SymphonyElixir.Config.Schema do
             |> Map.put_new("project_slug", settings.tracker.project_slug)
             |> Map.put_new("assignee", settings.tracker.assignee)
 
-          resolved_api_key =
-            resolve_secret_setting(linear_provider["api_key"], System.get_env("LINEAR_API_KEY"))
-
-          resolved_assignee =
-            resolve_secret_setting(linear_provider["assignee"], System.get_env("LINEAR_ASSIGNEE"))
+          {resolved_api_key, resolved_assignee} =
+            if resolve_secrets? do
+              {
+                resolve_secret_setting(linear_provider["api_key"], System.get_env("LINEAR_API_KEY")),
+                resolve_secret_setting(linear_provider["assignee"], System.get_env("LINEAR_ASSIGNEE"))
+              }
+            else
+              {linear_provider["api_key"], linear_provider["assignee"]}
+            end
 
           {
             resolved_api_key,
