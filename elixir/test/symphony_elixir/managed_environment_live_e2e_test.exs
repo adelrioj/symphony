@@ -12,7 +12,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixir.ExecutionEnvironment.Lifecycle
   alias SymphonyElixir.ExecutionEnvironment.Operations
-  alias SymphonyElixir.ManagedEnvironmentFixture.{Control, Provider}
+  alias SymphonyElixir.ManagedEnvironmentFixture.{Control, PermissionPolicy, Provider}
   alias SymphonyElixir.Orchestrator
   alias SymphonyElixir.SSH
   alias SymphonyElixir.Tracker.Issue
@@ -26,7 +26,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   @orchestrator __MODULE__.Orchestrator
   @worker_tasks __MODULE__.WorkerTasks
   @checks ~w(prerequisites codex_workloads five_slots_and_queue isolation denied_stop review_and_resume claude_workloads zero_retention retained_restart_and_reopen tunnel_loss attempt_fencing delayed_storage_deletion deletion_restart lost_create lost_start unrelated_resources final_absence)
-  @fixture_files ["compose.yaml", "testcontainers_probe.py", "browser_probe.mjs"]
+  @fixture_files ["compose.yaml", "testcontainers_probe.py", "browser_probe.mjs", "gcp_permission_probe.py"]
 
   defmodule Failure do
     defexception [:code]
@@ -74,6 +74,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
         {:ok, adapter} = ExecutionEnvironment.adapter(config.kind)
         profile = Map.get(config.provider, "qualification", %{})
         require!(is_map(profile), "qualification_profile_required")
+        permission_policy = provider_value!(PermissionPolicy.validate(config.kind, profile))
         check_names = if config.kind == "kubernetes", do: @checks ++ ["delayed_gate_release", "node_disconnection"], else: @checks
         control_opts = [checks: check_names, session_limit: profile["max_backend_sessions"], config: config]
         {:ok, control} = Control.start_link(control_opts)
@@ -100,6 +101,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
           lane_id: SymphonyElixir.LaneContext.current!(),
           adapter: adapter,
           profile: profile,
+          permission_policy: permission_policy,
           control: control,
           tasks: tasks,
           issues: issues,
@@ -162,8 +164,8 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       assert_no_duplicate_resources!(ctx)
       pass(ctx, "five_slots_and_queue", %{environment_ids: Enum.map(first_five, &entry!(&1.id).record.key), queued_issue: issue(ctx, 6).id})
       begin_check("isolation")
-      isolation!(ctx, first_five)
-      pass(ctx, "isolation", %{issues: Enum.map(first_five, & &1.id)})
+      isolation = isolation!(ctx, first_five)
+      pass(ctx, "isolation", %{issues: Enum.map(first_five, & &1.id), permissions: isolation})
 
       begin_check("denied_stop")
       first = issue(ctx, 1)
@@ -557,6 +559,9 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   end
 
   defp isolation!(ctx, issues) do
+    prerequisite = control_snapshot(ctx).checks["prerequisites"].evidence
+    permissions = provider_value!(Provider.permission_preflight(ctx.config, ctx.permission_policy, prerequisite, provider_opts(ctx)))
+    ctx = Map.put(ctx, :current_permissions, permissions)
     addresses =
       Map.new(issues, fn issue ->
         targets = provider_value!(Provider.runtime_targets(ctx.config, entry!(issue.id).record, provider_opts(ctx)))
@@ -566,17 +571,61 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
 
     for issue <- issues do
       peers = addresses |> Map.delete(issue.id) |> Map.values() |> List.flatten() |> Enum.uniq()
-      require!(String.trim(remote!(ctx, entry!(issue.id), isolation_script(peers, ctx.config.provider["ssh_user"]))) == "isolation-ok", "isolation_probe_did_not_complete")
+      require!(String.trim(remote!(ctx, entry!(issue.id), isolation_script(peers, ctx.config.provider["ssh_user"], ctx.permission_policy.mode))) == "isolation-ok", "isolation_probe_did_not_complete")
+      metadata_policy!(ctx, entry!(issue.id))
     end
   end
 
-  defp isolation_script(peers, user) do
+  defp metadata_policy!(%{permission_policy: %{mode: "deny_all"}}, _entry) do
+    # The bounded isolation script has already proved the legacy strict token checks.
+    observations = %{"complete" => true, "checks" => %{"metadata_denied" => %{"status" => 200, "ok" => true}}}
+    require!(PermissionPolicy.evaluate(%{mode: "deny_all"}, observations) == :ok, "metadata_denial_incomplete")
+    %{mode: "deny_all"}
+  end
+
+  defp metadata_policy!(ctx, entry) do
+    identity = provider_value!(Provider.permission_identity(ctx.config, entry.record, ctx.permission_policy, provider_opts(ctx)))
+    original = control_snapshot(ctx).checks["prerequisites"].evidence
+    require!(identity.config_uid == original.template_uid, "permission_config_identity_changed")
+    prerequisite = ctx.current_permissions
+    require!(prerequisite.receipt == original.permission_policy.receipt and prerequisite.probe_sha256 == original.permission_policy.probe_sha256, "permission_controls_changed")
+    bytes = File.read!(Path.join(@fixture_root, "gcp_permission_probe.py"))
+    digest = :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+    require!(digest == prerequisite.probe_sha256, "permission_probe_source_changed")
+    packet = %{action: "worker", scope: ctx.permission_policy.scope, receipt: prerequisite.receipt}
+    payload = shell_quote(Base.encode64(Jason.encode!(packet)))
+    source = shell_quote(bytes)
+    image = shell_quote(ctx.permission_policy.scope["image_repository"]["image"])
+
+    commands = [
+      {"ordinary", "python3"},
+      {"root", "sudo -n python3"},
+      {"docker", "docker run --rm -i --pull=never --entrypoint python3 #{image}"},
+      {"privileged_docker", "docker run --rm -i --pull=never --privileged --network host --entrypoint python3 #{image}"}
+    ]
+
+    observations = Map.new(commands, fn {context, command} ->
+      # Execute runner-reviewed bytes, not the repository copy an agent can replace.
+      output = remote!(ctx, entry, "#{command} -c #{source} #{payload}")
+      require!(byte_size(output) <= 65_536, "permission_evidence_exceeds_bound")
+      parsed = case Jason.decode(output) do
+        {:ok, value} when is_map(value) -> value
+        _ -> require!(false, "permission_evidence_invalid")
+      end
+      {context, parsed}
+    end)
+
+    require!(PermissionPolicy.evaluate(ctx.permission_policy, observations) == :ok, "permission_evidence_incomplete")
+    %{mode: "scoped_gcp", identity: identity, probe_sha256: digest, observations: observations}
+  end
+
+  defp isolation_script(peers, user, mode) do
     payload = Base.encode64(Jason.encode!(peers))
 
     """
     set -euo pipefail
     for path in /run/containerd/containerd.sock /var/run/containerd/containerd.sock /run/crio/crio.sock /var/lib/kubelet /var/run/secrets/kubernetes.io/serviceaccount/token "$HOME/.kube/config" "$HOME/.config/gcloud/application_default_credentials.json" "$HOME/.config/gcloud/credentials.db"; do test ! -e "$path"; done
-    python3 - #{shell_quote(payload)} #{shell_quote(user)} <<'PY'
+    python3 - #{shell_quote(payload)} #{shell_quote(user)} #{shell_quote(mode)} <<'PY'
     import base64,concurrent.futures,json,re,socket,subprocess,sys,tempfile,urllib.error,urllib.parse,urllib.request
 
     class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -675,8 +724,9 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
             for port in (2375,2376):
                 jobs.append(executor.submit(deny_docker,host,port))
             jobs.append(executor.submit(deny_ssh,host,sys.argv[2],temporary+'/known-'+str(index)))
-        for host in ('metadata.google.internal','169.254.169.254'):
-            jobs.append(executor.submit(deny_token,'http://'+host+'/computeMetadata/v1/instance/service-accounts/default/token',{'Metadata-Flavor':'Google'}))
+        if sys.argv[3]=='deny_all':
+            for host in ('metadata.google.internal','169.254.169.254'):
+                jobs.append(executor.submit(deny_token,'http://'+host+'/computeMetadata/v1/instance/service-accounts/default/token',{'Metadata-Flavor':'Google'}))
         jobs.append(executor.submit(deny_aws))
         jobs.append(executor.submit(deny_token,'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F',{'Metadata':'true'}))
         for job in jobs:

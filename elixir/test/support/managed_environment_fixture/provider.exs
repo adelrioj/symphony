@@ -1,3 +1,5 @@
+Code.require_file("permission_policy.exs", __DIR__)
+
 defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   @moduledoc false
 
@@ -5,6 +7,7 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Client, as: KubernetesClient
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard
   alias SymphonyElixir.ExecutionEnvironment.Workstations.Client, as: WorkstationsClient
+  alias SymphonyElixir.ManagedEnvironmentFixture.PermissionPolicy
 
   @gate "symphony.dev/start-authorized"
   @pv_finalizer "external-provisioner.volume.kubernetes.io/finalizer"
@@ -27,14 +30,64 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Provider do
   # can turn the known v1.0.1 cleanup-ordering defect into a successful preflight.
   def preflight(config, profile, opts) do
     safely(:provider_prerequisites_unavailable, fn ->
-      with {:ok, quota} <- quota_evidence(profile),
+      with {:ok, policy} <- PermissionPolicy.validate(config.kind, profile),
+           {:ok, quota} <- quota_evidence(profile),
            :ok <- validate_driver(profile),
            true <- profile["storage_fault_authorized"] == true,
-           true <- pinned_image?(profile["worker_image"]) do
-        provider_preflight(config, profile, quota, bounded(opts))
+           true <- pinned_image?(profile["worker_image"]),
+           {:ok, evidence} <- provider_preflight(config, profile, quota, bounded(opts)),
+           {:ok, permissions} <- permission_preflight(config, policy, evidence, bounded(opts)) do
+        {:ok, Map.put(evidence, :permission_policy, permissions)}
       else
         {:error, code} when is_atom(code) -> {:error, code}
         _ -> {:error, :provider_prerequisites_unavailable}
+      end
+    end)
+  end
+
+  def permission_preflight(_config, %{mode: "deny_all"}, _evidence, _opts),
+    do: {:ok, %{mode: "deny_all"}}
+
+  def permission_preflight(config, %{mode: "scoped_gcp", scope: scope}, evidence, opts) do
+    safely(:permission_prerequisites_unavailable, fn ->
+      packet = %{
+        action: "preflight",
+        scope: scope,
+        config: %{
+          name: String.replace_prefix(workstation_parent(config), "/v1/", ""),
+          uid: evidence.template_uid,
+          controller_service_account: config.provider["impersonate_service_account"]
+        }
+      }
+
+      bytes = File.read!(Path.join(__DIR__, "gcp_permission_probe.py"))
+      command_opts = Keyword.put(bounded(opts), :max_output_bytes, 1_048_576)
+
+      with executable when is_binary(executable) <- System.find_executable("python3"),
+           {:ok, %{status: 0, output: output}} <-
+             run_command(executable, ["-c", bytes, Base.encode64(Jason.encode!(packet))], command_opts),
+           {:ok, receipt} when is_map(receipt) <- Jason.decode(output),
+           true <- Enum.sort(Map.keys(receipt)) == Enum.sort(~w(controls queries resources review_sha256 scope_sha256)),
+           true <- is_map(receipt["controls"]) and is_list(receipt["queries"]) and receipt["queries"] != [] do
+        {:ok, %{mode: "scoped_gcp", probe_sha256: sha256(bytes), receipt: receipt}}
+      else
+        _ -> {:error, :permission_prerequisites_unavailable}
+      end
+    end)
+  end
+
+  def permission_identity(config, record, %{mode: "scoped_gcp", scope: scope}, opts) do
+    safely(:permission_vm_identity_unavailable, fn ->
+      with {:ok, workers} <- current_workers(config, [record], bounded(opts), false),
+           [{_, instance}] <- Enum.filter(workers, fn {key, worker} -> key == record.key and potentially_runnable?(config.kind, worker) end),
+           [%{"email" => expected}] <- instance["serviceAccounts"],
+           true <- expected == scope["service_account"],
+           {:ok, template} <- get(config, workstation_parent(config), bounded(opts)),
+           true <- get_in(template, ["host", "gceInstance", "serviceAccount"]) == expected,
+           true <- get_in(template, ["container", "image"]) == scope["image_repository"]["image"] do
+        {:ok, %{service_account: expected, instance_id: instance["id"], config_uid: template["uid"]}}
+      else
+        _ -> {:error, :permission_vm_identity_unavailable}
       end
     end)
   end
