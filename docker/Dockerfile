@@ -2,6 +2,12 @@
 # Symphony runtime image: one container runs `mix symphony serve` for one installation with
 # multiple lanes. The built bin/symphony escript remains the agent-side --linear-mcp server.
 # node base gives us the Codex CLI prerequisite; mise pins Erlang/Elixir from the repo's mise.toml.
+# Global scope on purpose: an ARG referenced by a FROM must be declared before the first FROM.
+# Pinned by digest, not tag — `helper_sha256` pins the helper's exact bytes, so a moving tag would
+# reintroduce the same class of failure this stage exists to prevent. Override with
+# --build-arg HELPER_IMAGE=... when the helper is rebuilt, and repin helper_sha256 to match.
+ARG HELPER_IMAGE=ghcr.io/trazadera/agent-sandbox-symphony-helper@sha256:52e055ca90ddbb576ede5245ba73caaaa2c113cd3280ebb4d2ada00b98b3e0a7
+
 FROM node:20-bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -66,7 +72,17 @@ ENTRYPOINT ["mix", "symphony"]
 # hand-tagged, and baked a pre-model runner (405 lines against the repo's 741) under a tag that
 # named a current commit. Every pin in the candidate contract is content-addressed against files
 # in this image, so an image whose tag does not describe its contents makes all of them vacuous.
+FROM ${HELPER_IMAGE} AS helper
+
 FROM runtime AS candidate
+
+# Candidate.validate/2 does System.find_executable("symphony-kubernetes-create") and compares the
+# file's sha256 to pins.helper_sha256. Without it validation fails on a missing executable, which
+# reads like a pin mismatch rather than a missing file.
+COPY --from=helper /symphony-kubernetes-create /usr/local/bin/symphony-kubernetes-create
+RUN symphony-kubernetes-create --help >/dev/null 2>&1 || true; \
+    test -x "$(command -v symphony-kubernetes-create)" \
+ || { echo "symphony-kubernetes-create is not executable on PATH" >&2; exit 1; }
 
 # .git belongs at /app, one level above WORKDIR: the runner resolves HEAD from /app/elixir and
 # git walks up. Only elixir/ was copied into `runtime`, so scope the cleanliness check to it —
