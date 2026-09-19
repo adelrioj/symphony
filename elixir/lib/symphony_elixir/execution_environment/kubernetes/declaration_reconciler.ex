@@ -21,6 +21,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler d
 
   require Logger
 
+  alias SymphonyElixir.{Config, LaneContext}
+  alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Declaration, LossAlarm}
 
@@ -47,18 +49,42 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler d
   @impl true
   def init(opts) do
     interval = Keyword.get(opts, :interval_ms, @interval_ms)
-    {:ok, %{opts: opts, interval: interval, timer: Process.send_after(self(), :reconcile, interval)}}
+    state = %{opts: opts, lane_id: Keyword.get(opts, :lane_id), interval: interval, timer: nil}
+    {:ok, %{state | timer: Process.send_after(self(), :reconcile, interval)}}
   end
 
   @impl true
   def handle_info(:reconcile, state) do
-    case Keyword.fetch(state.opts, :config) do
-      {:ok, config} -> log_pass(reconcile(config, state.opts))
-      :error -> :ok
+    case environment(state) do
+      nil -> :ok
+      config -> log_pass(reconcile(config, state.opts))
     end
 
     {:noreply, %{state | timer: Process.send_after(self(), :reconcile, state.interval)}}
   end
+
+  # Resolved per pass rather than held from start-up. A lane's environment is refreshed while it
+  # runs, and a lane may be reconfigured onto or off Kubernetes without restarting anything.
+  defp environment(state) do
+    case Keyword.fetch(state.opts, :config) do
+      {:ok, config} -> config
+      :error -> lane_environment(state.lane_id)
+    end
+  end
+
+  defp lane_environment(nil), do: nil
+
+  defp lane_environment(lane_id) do
+    LaneContext.put(lane_id)
+
+    case Config.settings() do
+      {:ok, settings} -> kubernetes_only(EnvironmentConfig.runtime(settings))
+      _ -> nil
+    end
+  end
+
+  defp kubernetes_only(%{kind: "kubernetes"} = config), do: config
+  defp kubernetes_only(_config), do: nil
 
   defp log_pass({:ok, %{alarms: alarms} = summary}) when alarms > 0 do
     Logger.error("Host loss declaration contradicted, see host_loss_alarms summary=#{inspect(summary)}")
