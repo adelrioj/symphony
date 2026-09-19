@@ -60,3 +60,25 @@ defmodule SymphonyElixir.Repo.Migrations.CreateLanesAndRuns do
     create(index(:run_events, [:run_id, :id]))
   end
 end
+
+defmodule SymphonyElixir.Repo.Migrations.CreateHostLossAlarms do
+  @moduledoc false
+  use Ecto.Migration
+
+  @spec change() :: term()
+  def change do
+    # Contradictions to an irreversible finalization. Deliberately not tied to a run and never
+    # pruned: run retention owns run_events, and nothing owns this.
+    create table(:host_loss_alarms) do
+      add(:kind, :string, null: false)
+      add(:dedup_key, :string, null: false)
+      add(:declaration, :string, null: false)
+      add(:node_uid, :string)
+      add(:machine_id, :string)
+      add(:observed_at, :utc_datetime_usec, null: false)
+      add(:detail, :text, null: false, default: "{}")
+    end
+
+    create(unique_index(:host_loss_alarms, [:dedup_key]))
+  end
+end

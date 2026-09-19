@@ -11,7 +11,8 @@ defmodule SymphonyElixir.Repo do
   alias SymphonyElixir.Config
 
   @migrations [
-    {20_260_912_000_001, SymphonyElixir.Repo.Migrations.CreateLanesAndRuns}
+    {20_260_912_000_001, SymphonyElixir.Repo.Migrations.CreateLanesAndRuns},
+    {20_260_919_000_001, SymphonyElixir.Repo.Migrations.CreateHostLossAlarms}
   ]
 
   @impl true

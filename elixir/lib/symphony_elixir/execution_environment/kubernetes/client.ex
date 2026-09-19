@@ -126,6 +126,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
       ["apis", group, _version, "namespaces", ns, resource, name] ->
         patch_arguments(resource <> "." <> group, name, ns, file)
 
+      # A status subresource is a separate write with separate RBAC, which is the whole point of
+      # splitting it out: the adapter records an outcome without touching what it was given.
+      ["apis", group, _version, "namespaces", ns, resource, name, "status"] ->
+        patch_arguments(resource <> "." <> group, name, ns, file, ["--subresource=status"])
+
       _ ->
         {:error, {:invalid, :kubernetes_patch_path}}
     end
@@ -133,8 +138,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
 
   defp arguments(_, _, _), do: {:error, {:invalid, :kubernetes_method}}
 
-  defp patch_arguments(resource, name, namespace, file),
-    do: {:ok, ["patch", resource, name, "--namespace", namespace, "--type=json", "--patch-file", file, "-o", "json"]}
+  defp patch_arguments(resource, name, namespace, file, extra \\ []),
+    do: {:ok, ["patch", resource, name, "--namespace", namespace, "--type=json", "--patch-file", file, "-o", "json"] ++ extra}
 
   defp decode(output, 0, :watch) do
     output
