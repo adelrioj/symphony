@@ -78,14 +78,23 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     refute File.exists?(file)
   end
 
-  test "production discovery blocks allocation despite an otherwise qualified Kubernetes profile" do
+  test "production discovery is open on the approved baseline and allocates nothing by itself" do
+    # This asserted the cleanup-ordering stop until 2026-09-19. Discovery now succeeds, but
+    # the property worth keeping is the second one: discovery must still not mutate anything.
     {config, _record, opts} = api_fixture()
     inventory = api_state()
 
-    assert {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}} =
-             Operations.run(Kubernetes, config, nil, :discover, opts)
+    assert {:ok, _records} = Operations.run(Kubernetes, config, nil, :discover, opts)
 
     assert api_state() == inventory
+  end
+
+  test "production refuses a baseline the deployment does not match" do
+    {config, _record, opts} = api_fixture()
+    stale = put_in(api_state()["configmaps"]["qualification"]["data"]["contract.json"], Jason.encode!(%{"release" => "v1.0.1"}))
+    put_object("configmaps", %{"metadata" => meta("qualification", "qualification-uid"), "immutable" => true, "data" => %{"contract.json" => stale}})
+
+    assert {:error, _} = Kubernetes.preflight(config, opts)
   end
 
   test "cleanup retains storage before authoritative create-drain acknowledgement" do
@@ -1943,7 +1952,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     policy = put_in(policy, ["spec", "podSelector", "matchExpressions"], expressions)
     put_object("networkpolicies", policy)
-    assert {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}} = Kubernetes.preflight(config, opts)
+    assert :ok = Kubernetes.preflight(config, opts)
     invalid = expressions ++ [%{"key" => "profile", "operator" => "Unrecognized"}]
     put_object("networkpolicies", put_in(policy, ["spec", "podSelector", "matchExpressions"], invalid))
     assert {:error, {:invalid, :kubernetes_profile_not_qualified}, _} = Kubernetes.ensure(config, record, opts)
@@ -2591,18 +2600,18 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     }
 
     template = put_in(template, ["metadata", "annotations"], %{"symphony.dev/qualification" => "qualification"})
-    image = "registry.k8s.io/agent-sandbox/agent-sandbox-controller@sha256:" <> String.duplicate("a", 64)
+    image = "ghcr.io/trazadera/agent-sandbox-symphony-controller@sha256:" <> String.duplicate("a", 64)
 
     q = %{
-      "release" => "v1.0.1",
+      "release" => "approved-7140d4b65725",
       "template_uid" => "template-uid",
       "template_digest" => fixture_digest(template["spec"]),
       "qualification_report" => "operator-audit/test-profile",
-      "termination_contract" => "qualified-kubelet-all-containers-v1",
+      "termination_contract" => "approved-pending-fault-matrix-kubelet-all-containers-v1",
       "controller_namespace" => "controllers",
       "controller_name" => "sandbox",
       "controller_uid" => "controller-uid",
-      "controller_source_commit" => "3e77ccbac4db8a12b0157eafcad0d1ad5872f32a",
+      "controller_source_commit" => "7140d4b657253e6bf318bd93e2a66ba67094d8d3",
       "controller_image" => image,
       "runtime_class_uid" => "runtime-uid",
       "runtime_handler" => "qualified-vm",
@@ -2612,7 +2621,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       "network_profile_label" => "profile"
     }
 
-    schemas = __DIR__ |> Path.join("../fixtures/kubernetes_v1_0_1_schemas.json") |> File.read!() |> Jason.decode!()
+    schemas = __DIR__ |> Path.join("../fixtures/kubernetes_approved_schemas.json") |> File.read!() |> Jason.decode!()
 
     state = %{
       "sandboxtemplates" => %{"development" => template},
