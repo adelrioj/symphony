@@ -673,6 +673,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp annotation_hash(annotation), do: :crypto.hash(:sha256, annotation) |> Base.encode16(case: :lower)
 
+  # The proof type is shared across adapters, but an operator loss declaration is specific to
+  # the Kubernetes host model. Reaching Workstations means a record was routed to the wrong
+  # adapter; fail loudly rather than fall through as merely "not quiescent".
+  defp identity(_config, %Record{proof: {:operator_declared_lost, _}}), do: {:error, {:invalid, :workstations_proof_unsupported}}
+
   defp identity(config, record) do
     valid =
       record.kind == "google_workstations" and record.deployment_id == config.deployment_id and record.scope == Config.scope(config) and

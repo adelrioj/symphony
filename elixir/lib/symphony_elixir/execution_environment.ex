@@ -62,7 +62,7 @@ defmodule SymphonyElixir.ExecutionEnvironment do
             phase: SymphonyElixir.ExecutionEnvironment.phase(),
             desired: :running | :stopped | :absent,
             pending: [pending_operation()],
-            proof: :unknown | {:quiescent, term()} | {:compute_unknown, map()},
+            proof: :unknown | {:quiescent, term()} | {:compute_unknown, map()} | {:operator_declared_lost, map()},
             absent?: boolean(),
             metadata: map()
           }

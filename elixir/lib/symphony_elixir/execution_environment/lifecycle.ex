@@ -106,7 +106,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   end
 
   def step(%Entry{phase: :stopped} = entry, :destroy, _now) do
-    if quiescent?(entry.record) and not unresolved?(entry.record), do: operation(entry, :destroy, :deleting), else: {entry, []}
+    # Two distinct grounds may permit deletion, and they are deliberately not merged:
+    # an adapter observed quiescence, or an operator declared the host permanently lost.
+    # `not unresolved?/1` still gates both — a declaration settles no pending operation, so a
+    # record holding an unresolved create stays retained exactly as create-drain requires.
+    if (quiescent?(entry.record) or declared_lost?(entry.record)) and not unresolved?(entry.record),
+      do: operation(entry, :destroy, :deleting),
+      else: {entry, []}
   end
 
   def step(%Entry{phase: phase, operation_id: id} = entry, {:destroyed, id, %Record{absent?: true} = record}, _now) when phase in [:deleting, :unknown] and not is_nil(id) do
@@ -148,14 +154,24 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
 
   defp quiescent?(%Record{proof: {:quiescent, evidence}}), do: is_map(evidence) and map_size(evidence) > 0
   defp quiescent?(_record), do: false
+  # An operator assertion is never quiescence; it is a separate ground, reported separately.
+  defp declared_lost?(%Record{proof: {:operator_declared_lost, evidence}}), do: is_map(evidence) and map_size(evidence) > 0
+  defp declared_lost?(_record), do: false
   defp unresolved?(record), do: Enum.any?(record.pending, &(&1.outcome in [:pending, :unknown]))
   defp unresolved_start?(record), do: Enum.any?(record.pending, &(&1.verb in [:create, :start] and &1.outcome in [:pending, :unknown]))
   defp invalidate_start_proof(%Record{proof: {:compute_unknown, _}} = record), do: record
+  # A declaration records what an operator asserted. An unrelated unresolved start must not
+  # erase it; the start still blocks release through unresolved?/1.
+  defp invalidate_start_proof(%Record{proof: {:operator_declared_lost, _}} = record), do: record
   defp invalidate_start_proof(record), do: if(unresolved_start?(record), do: %{record | proof: :unknown}, else: record)
 
   defp retain_delete_proof(%Entry{phase: phase, record: old}, record) when phase in [:deleting, :unknown] do
     if old.desired == :absent or phase == :deleting do
-      proof = if quiescent?(old) and not match?({:compute_unknown, _}, record.proof), do: old.proof, else: record.proof
+      proof =
+        if (quiescent?(old) or declared_lost?(old)) and not match?({:compute_unknown, _}, record.proof),
+          do: old.proof,
+          else: record.proof
+
       %{record | proof: proof, desired: :absent}
     else
       record
