@@ -2,7 +2,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.ExecutionEnvironment.{Config, Kubernetes, Lifecycle, Operations, Record}
-  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Declaration, Guard}
+  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Declaration, DeclarationReconciler, Guard, LossAlarm}
+  alias SymphonyElixir.Repo
 
   test "a suspended sandbox with no visible pod is not physical stop evidence" do
     record = record(%{"authorized_pod_uids" => ["pod-before-partition"]})
@@ -326,7 +327,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       forbidden = {:ok, %{status: 1, output: "Error from server (Forbidden)"}}
 
       refuse = fn exe, args, options ->
-        reading? = "get" in args and String.contains?(arg(args, "--raw") || "", collection)
+        reading? = "get" in args and raw_path?(args, collection)
         if reading?, do: forbidden, else: api_command(exe, args, options)
       end
 
@@ -357,6 +358,253 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert {:ok, [again]} = Kubernetes.declare_lost(config, declaration, opts)
     assert first.proof == again.proof
     assert guard_data(record)["record"]["metadata"]["loss_declaration"]["name"] == declaration.name
+  end
+
+  test "the reconciler drives a pending declaration and records the outcome" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = publish_declaration(record)
+
+    assert {:ok, summary} = DeclarationReconciler.reconcile(config, opts)
+    assert summary.accepted == 1
+    assert summary.alarms == 0
+
+    status = declaration_status(declaration)
+    assert status["outcome"] == "accepted"
+    assert status["observedAt"]
+    assert Enum.sort(Enum.map(status["obligations"], & &1["uid"])) == ["pod-uid", "pvc-uid"]
+    assert Enum.all?(status["obligations"], &(&1["disposition"] == "discharged"))
+  end
+
+  test "the reconciler records a refusal without discharging anything" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["some-other-disk"])
+    declaration = publish_declaration(record)
+
+    assert {:ok, summary} = DeclarationReconciler.reconcile(config, opts)
+    assert summary.refused == 1
+    assert declaration_status(declaration)["outcome"] == "refused"
+    refute guard_data(record)["record"]["metadata"]["loss_declaration"]
+  end
+
+  test "the reconciler leaves a settled declaration alone" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = publish_declaration(record)
+
+    assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, opts)
+    settled = declaration_status(declaration)
+
+    assert {:ok, %{accepted: 0, refused: 0}} = DeclarationReconciler.reconcile(config, opts)
+    assert declaration_status(declaration) == settled
+  end
+
+  # Finalization is irreversible, so a host that comes back cannot be undone. Saying so exactly
+  # once is the whole of what is left to do.
+  test "a declared lost host observed again raises one standing alarm" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = publish_declaration(record)
+    assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, opts)
+
+    put_object("nodes", node_object())
+
+    assert {:ok, %{alarms: 1}} = DeclarationReconciler.reconcile(config, opts)
+    assert {:ok, %{alarms: 0}} = DeclarationReconciler.reconcile(config, opts)
+
+    assert [alarm] = LossAlarm.all()
+    assert alarm.kind == "host_reappeared"
+    assert alarm.declaration == declaration.name
+    assert alarm.machine_id == "machine"
+  end
+
+  test "a different machine under the declared node name is not the host coming back" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    publish_declaration(record)
+    assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, opts)
+
+    replacement = node_object() |> put_in(["metadata", "uid"], "a-new-node") |> put_in(["status", "nodeInfo", "machineID"], "a-new-machine")
+    put_object("nodes", replacement)
+
+    assert {:ok, %{alarms: 0}} = DeclarationReconciler.reconcile(config, opts)
+    assert LossAlarm.all() == []
+  end
+
+  test "monitoring for a reappearing host has an explicit end" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = publish_declaration(record)
+    assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, opts)
+
+    past = -DeclarationReconciler.monitoring_lifetime_ms() - 1000
+    expired = DateTime.utc_now() |> DateTime.add(past, :millisecond) |> DateTime.to_iso8601()
+    object = put_in(api_state()["hostlossdeclarations"][declaration.name], ["status", "observedAt"], expired)
+    put_object("hostlossdeclarations", object)
+    put_object("nodes", node_object())
+
+    assert {:ok, %{alarms: 0}} = DeclarationReconciler.reconcile(config, opts)
+    assert LossAlarm.all() == []
+  end
+
+  test "a declaration list that cannot be read is an error rather than an empty pass" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    destroy_host(["disk-ticket"])
+    _ = created
+
+    forbidden = {:ok, %{status: 1, output: "Error from server (Forbidden)"}}
+
+    refuse = fn exe, args, options ->
+      reading? = "get" in args and raw_path?(args, "hostlossdeclarations")
+      if reading?, do: forbidden, else: api_command(exe, args, options)
+    end
+
+    assert {:error, _} = DeclarationReconciler.reconcile(config, Keyword.put(opts, :command_fun, refuse))
+  end
+
+  test "a reconciler tick drives the pass and schedules the next one" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = publish_declaration(record)
+
+    {:ok, state} = DeclarationReconciler.init(Keyword.merge(opts, config: config, interval_ms: 60_000))
+    assert {:noreply, next} = DeclarationReconciler.handle_info(:reconcile, state)
+    assert next.timer
+    assert declaration_status(declaration)["outcome"] == "accepted"
+
+    put_object("nodes", node_object())
+    assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, next)
+    assert [_alarm] = LossAlarm.all()
+  end
+
+  test "a tick with no configured environment does nothing, and one that cannot read says so" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, _} = Kubernetes.ensure(config, record, opts)
+
+    {:ok, idle} = DeclarationReconciler.init(interval_ms: 60_000)
+    assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, idle)
+
+    forbidden = {:ok, %{status: 1, output: "Error from server (Forbidden)"}}
+
+    refuse = fn exe, args, options ->
+      reading? = "get" in args and raw_path?(args, "hostlossdeclarations")
+      if reading?, do: forbidden, else: api_command(exe, args, options)
+    end
+
+    {:ok, blind} = DeclarationReconciler.init(Keyword.merge(opts, config: config, command_fun: refuse, interval_ms: 60_000))
+    assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, blind)
+  end
+
+  test "the reconciler is startable anonymously or under its own name" do
+    spec = %{id: :anonymous_reconciler, start: {DeclarationReconciler, :start_link, [[name: nil, interval_ms: 60_000]]}}
+    anonymous = start_supervised!(spec)
+    assert Process.alive?(anonymous)
+
+    named = start_supervised!({DeclarationReconciler, [interval_ms: 60_000]})
+    assert Process.whereis(DeclarationReconciler) == named
+  end
+
+  test "a tick with nothing to do is quiet" do
+    {config, _record, opts} = api_fixture(pinned_host: true)
+    {:ok, state} = DeclarationReconciler.init(Keyword.merge(opts, config: config, interval_ms: 60_000))
+
+    assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, state)
+    assert api_state()["hostlossdeclarations"] == %{}
+  end
+
+  test "a declaration the schema should have rejected is refused rather than retried forever" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = publish_declaration(record)
+    object = update_in(api_state()["hostlossdeclarations"][declaration.name], ["spec"], &Map.delete(&1, "operatorSubject"))
+    put_object("hostlossdeclarations", object)
+
+    assert {:ok, %{refused: 1}} = DeclarationReconciler.reconcile(config, opts)
+    assert declaration_status(declaration)["outcome"] == "refused"
+  end
+
+  test "a pass that cannot read a predicate leaves the declaration unresolved and retryable" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = publish_declaration(record)
+    forbidden = {:ok, %{status: 1, output: "Error from server (Forbidden)"}}
+
+    refuse = fn exe, args, options ->
+      reading? = "get" in args and raw_path?(args, "configmaps")
+      if reading?, do: forbidden, else: api_command(exe, args, options)
+    end
+
+    assert {:ok, %{unresolved: 1}} = DeclarationReconciler.reconcile(config, Keyword.put(opts, :command_fun, refuse))
+    assert declaration_status(declaration)["outcome"] == "unresolved"
+  end
+
+  test "an outcome that could not be recorded is re-recorded on the next pass" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = publish_declaration(record)
+
+    block = fn exe, args, options ->
+      status? = "patch" in args and String.starts_with?(arg(args, "patch"), "hostlossdeclarations")
+      if status?, do: {:error, :timeout}, else: api_command(exe, args, options)
+    end
+
+    assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, Keyword.put(opts, :command_fun, block))
+    refute declaration_status(declaration)
+
+    assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, opts)
+    assert declaration_status(declaration)["outcome"] == "accepted"
+  end
+
+  test "a Node read that fails is not a host coming back" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    publish_declaration(record)
+    assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, opts)
+
+    put_object("nodes", node_object())
+    forbidden = {:ok, %{status: 1, output: "Error from server (Forbidden)"}}
+
+    refuse = fn exe, args, options ->
+      reading? = "get" in args and raw_path?(args, "/nodes")
+      if reading?, do: forbidden, else: api_command(exe, args, options)
+    end
+
+    assert {:ok, %{alarms: 0}} = DeclarationReconciler.reconcile(config, Keyword.put(opts, :command_fun, refuse))
+    assert LossAlarm.all() == []
   end
 
   test "cleanup retains storage before authoritative create-drain acknowledgement" do
@@ -2908,6 +3156,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
         "private" => %{"metadata" => meta("private", "policy-uid"), "spec" => %{"podSelector" => %{"matchLabels" => %{"profile" => "private"}}, "policyTypes" => ["Ingress", "Egress"]}}
       },
       "nodes" => if(options[:pinned_host], do: %{"worker-1" => node_object()}, else: %{}),
+      "hostlossdeclarations" => %{},
       "sandboxes" => %{},
       "pods" => %{},
       "persistentvolumeclaims" => %{},
@@ -2915,6 +3164,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       "secrets" => %{},
       "services" => %{}
     }
+
+    # Alarms are durable by design and nothing prunes them, so they outlive a test unless the
+    # fixture clears them.
+    Repo.delete_all(LossAlarm)
+    on_exit(fn -> Repo.delete_all(LossAlarm) end)
 
     Process.put(:kubernetes_api, state)
     Process.put(:kubernetes_options, options)
@@ -3373,6 +3627,16 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     declaration
   end
 
+  defp publish_declaration(record, overrides \\ %{}) do
+    declaration = loss_declaration(record)
+    object = %{"metadata" => meta(declaration.name, "declaration-uid"), "spec" => declaration.spec}
+    object = Map.merge(object, overrides)
+    put_object("hostlossdeclarations", object)
+    declaration
+  end
+
+  defp declaration_status(declaration), do: get_in(api_state(), ["hostlossdeclarations", declaration.name, "status"])
+
   defp meta(name, uid), do: %{"name" => name, "uid" => uid, "resourceVersion" => "1", "generation" => 1, "namespace" => "test"}
   defp put_object(resource, object), do: Process.put(:kubernetes_api, put_in(api_state(), [resource, object["metadata"]["name"]], object))
   defp remove_object(resource, name), do: Process.put(:kubernetes_api, Map.update!(api_state(), resource, &Map.delete(&1, name)))
@@ -3380,6 +3644,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   defp api_state, do: Process.get(:kubernetes_api)
   defp option(key), do: Keyword.get(Process.get(:kubernetes_options), key, false)
   defp arg(args, flag), do: Enum.at(args, Enum.find_index(args, &(&1 == flag)) + 1)
+  # arg/2 raises when the flag is absent, and a kubectl patch has no --raw at all.
+  defp raw_path?(args, fragment), do: "--raw" in args and String.contains?(arg(args, "--raw"), fragment)
   defp json(body), do: {:ok, %{status: 0, output: Jason.encode!(body)}}
   defp fixture_digest(value), do: :crypto.hash(:sha256, Jason.encode!(canonical_fixture(value))) |> Base.encode16(case: :lower) |> binary_part(0, 40)
   defp canonical_fixture(map) when is_map(map), do: map |> Enum.map(fn {key, value} -> [key, canonical_fixture(value)] end) |> Enum.sort()
