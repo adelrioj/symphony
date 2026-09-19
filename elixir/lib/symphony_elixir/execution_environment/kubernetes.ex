@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @behaviour SymphonyElixir.ExecutionEnvironment
 
   alias SymphonyElixir.ExecutionEnvironment.{Command, Config, Connection, Operations, Record}
-  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Guard}
+  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Declaration, Guard}
   alias SymphonyElixir.SSH.Target
 
   @api "agents.x-k8s.io/v1beta1"
@@ -128,6 +128,199 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
          :ok <- inventory_guard_ownership(config, objects, records) do
       {:ok, records |> Map.values() |> Enum.reject(& &1.absent?)}
     end
+  end
+
+  # An operator declares a worker host permanently lost so its retained obligations can be
+  # discharged. This is the only path that settles physical evidence on human authority rather
+  # than observation, so every predicate is positive and re-read on each attempt: the provider's
+  # destruction receipt, the Node's absence, the guard's own host binding, and exact cover of the
+  # obligations. Anything unreadable is unavailable, never false. Callable while allocation
+  # preflight fails, and it never allocates.
+  @impl true
+  @spec declare_lost(map(), Declaration.t(), keyword()) :: {:ok, [Record.t()]} | {:error, term()}
+  def declare_lost(config, %Declaration{spec: spec} = declaration, opts) do
+    opts = with_deadline(opts)
+
+    with :ok <- ordinary_options(opts),
+         :ok <- validate_config(config.provider),
+         true <- spec["deploymentId"] == config.deployment_id,
+         :ok <- whole_declaration(spec),
+         {:ok, receipt} <- destruction_receipt(config, declaration, opts),
+         :ok <- declared_host_absent(config, spec["host"], opts),
+         {:ok, objects} <- inventory(config, opts),
+         {:ok, records} <- discover_guards(config, objects, opts),
+         :ok <- declared_cover(declaration, records) do
+      discharge_declared(config, declaration, receipt, records, objects, opts)
+    else
+      false -> {:error, {:invalid, :kubernetes_declaration_foreign}}
+      error -> error
+    end
+  end
+
+  # A single environment's obligations can exceed one declaration's bound, and applying one chunk
+  # of a split declaration would discharge part of a host and leave the rest asserted but not
+  # settled. Nothing here verifies that every chunk was accepted first, so a chunked declaration
+  # is refused outright rather than applied partially.
+  defp whole_declaration(%{"chunkTotal" => 1}), do: :ok
+  defp whole_declaration(_), do: {:error, {:invalid, :kubernetes_declaration_chunked}}
+
+  defp destruction_receipt(config, %Declaration{spec: spec} = declaration, opts) do
+    case Client.lookup(config, collection(config, "configmaps"), spec["receiptName"], opts) do
+      {:ok, nil} -> {:error, {:unknown, :kubernetes_destruction_receipt_unavailable}}
+      {:ok, object} -> Declaration.receipt(object, declaration)
+      error -> error
+    end
+  end
+
+  # Node 404 is necessary and never sufficient: a Node object disappears for reasons that are not
+  # loss, which is why the receipt above carries the weight. A Node that is still there refuses
+  # the declaration outright — asserting the loss of a live host is a mistake worth failing on.
+  defp declared_host_absent(config, host, opts) do
+    case Client.lookup(config, "/api/v1/nodes", host["node_name"], opts) do
+      {:ok, nil} -> :ok
+      {:ok, _node} -> {:error, {:invalid, :kubernetes_declared_host_observable}}
+      error -> error
+    end
+  end
+
+  # Exact cover both ways. An omitted obligation would leave a physical identity discharged by
+  # implication; an extra one would let a declaration reach beyond the environments it names.
+  defp declared_cover(%Declaration{spec: spec}, records) do
+    with {:ok, owned} <- Enum.reduce_while(spec["environmentKeys"], {:ok, []}, &collect_owned(records[&1], elem(&2, 1))),
+         do: exact_cover(owned, spec["obligationUIDs"])
+  end
+
+  defp collect_owned(nil, _acc), do: {:halt, {:error, {:invalid, :kubernetes_declared_environment_missing}}}
+  defp collect_owned(record, acc), do: {:cont, {:ok, acc ++ owned_obligations(record)}}
+
+  defp exact_cover(owned, declared) do
+    if Enum.sort(owned) == Enum.sort(declared), do: :ok, else: {:error, {:invalid, :kubernetes_declared_obligations_inexact}}
+  end
+
+  defp owned_obligations(record) do
+    volumes = Enum.map(record.metadata["volumes"] || %{}, fn {_, volume} -> volume["pvc_uid"] end)
+    (record.metadata["authorized_pod_uids"] || []) ++ volumes
+  end
+
+  # Atomic per environment: an environment discharges wholly or not at all.
+  defp discharge_declared(config, declaration, receipt, records, objects, opts) do
+    Enum.reduce_while(declaration.spec["environmentKeys"], {:ok, []}, fn key, {:ok, acc} ->
+      case discharge_environment(config, declaration, receipt, records[key], objects, opts) do
+        {:ok, record} -> {:cont, {:ok, acc ++ [record]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp discharge_environment(config, declaration, receipt, record, objects, opts) do
+    snapshot = Enum.find(objects["configmaps"], &(name(&1) == Guard.name(record)))
+
+    with {:ok, guard} <- Guard.fetch(config, record, opts),
+         :ok <- declared_guard?(declaration, record, snapshot),
+         :ok <- declared_host?(declaration, guard),
+         {:ok, discharged} <- discharge_volumes(declaration, receipt, record, objects),
+         discharged = discharge_compute(declaration, guard, discharged),
+         {:ok, saved} <- Guard.save(config, discharged, encode_record(discharged), opts),
+         {:ok, durable} <- decode_guard_record(saved.data, config) do
+      {:ok, %{durable | phase: :stopped, proof: {:operator_declared_lost, durable.metadata["loss_declaration"]}}}
+    end
+  end
+
+  # The spec's guard UID and resourceVersion validate the initial snapshot only. A replay after an
+  # intervening guard write cannot match that resourceVersion any more, so it matches on the
+  # canonical name already recorded instead — otherwise replay would be impossible after any write.
+  defp declared_guard?(declaration, record, snapshot) do
+    reference = declaration.spec["guards"][record.key]
+    replay? = get_in(record.metadata, ["loss_declaration", "name"]) == declaration.name
+
+    if uid(snapshot) == reference["uid"] and (replay? or rv(snapshot) == reference["resourceVersion"]),
+      do: :ok,
+      else: {:error, {:invalid, :kubernetes_declared_guard_changed}}
+  end
+
+  # The binding was captured at creation from the Node's own API object. boot_id is deliberately
+  # not compared: it identifies a boot, and a reboot is not a loss.
+  defp declared_host?(declaration, guard) do
+    binding = guard.data["hostBinding"]
+    declared = declaration.spec["host"]
+
+    if is_map(binding) and Enum.all?(~w(node_name node_uid machine_id system_uuid), &(binding[&1] == declared[&1])),
+      do: :ok,
+      else: {:error, {:invalid, :kubernetes_declared_host_mismatch}}
+  end
+
+  # The amendment to SPEC.md:2946-2950 in force. The PV object outlives the machine and must still
+  # match the captured identity exactly, so the handle is bound to this claim by live state rather
+  # than by our own records; the receipt then proves that handle's disk is gone. PV absence is not
+  # a substitute and refuses here, as it does everywhere else.
+  defp discharge_volumes(declaration, receipt, record, objects) do
+    volumes = record.metadata["volumes"] || %{}
+
+    Enum.reduce_while(volumes, {:ok, volumes}, fn {key, volume}, {:ok, acc} ->
+      pv = Enum.find(objects["persistentvolumes"], &(name(&1) == volume["pv_name"]))
+
+      cond do
+        volume["deleted"] == true ->
+          {:cont, {:ok, acc}}
+
+        volume["pv_uid"] == nil ->
+          {:halt, {:error, {:invalid, :kubernetes_declared_volume_unbound}}}
+
+        not declared_volume?(pv, volume) ->
+          {:halt, {:error, {:invalid, :kubernetes_declared_volume_unverifiable}}}
+
+        not Declaration.destroyed?(receipt, volume["volume_handle"]) ->
+          {:halt, {:error, {:invalid, :kubernetes_declared_volume_not_in_receipt}}}
+
+        true ->
+          {:cont, {:ok, Map.put(acc, key, Map.merge(volume, discharge_stamp(declaration)))}}
+      end
+    end)
+    |> case do
+      {:ok, discharged} -> {:ok, %{record | metadata: Map.put(record.metadata, "volumes", discharged)}}
+      error -> error
+    end
+  end
+
+  defp declared_volume?(pv, volume) do
+    is_map(pv) and uid(pv) == volume["pv_uid"] and get_in(pv, ["spec", "csi", "volumeHandle"]) == volume["volume_handle"] and
+      get_in(pv, ["spec", "claimRef", "uid"]) == volume["pvc_uid"]
+  end
+
+  defp discharge_stamp(declaration),
+    do: %{"deleted" => true, "discharge" => "destruction_receipt", "declaration" => declaration.name, "receipt" => declaration.spec["receiptName"]}
+
+  # The compute half of the same evidence. A destroyed machine cannot still be running a container,
+  # so the receipt terminates every authorized Pod on it. The kind stays distinct from anything an
+  # adapter observed, so no later reader can mistake the declaration for an observation.
+  defp discharge_compute(declaration, guard, record) do
+    version = guard.data["hostBinding"]["node_resource_version"]
+
+    evidence =
+      Map.new(record.metadata["authorized_pod_uids"] || [], fn pod_uid ->
+        {pod_uid,
+         %{
+           "kind" => "host_destroyed",
+           "uid" => pod_uid,
+           "resourceVersion" => version,
+           "qualification_uid" => record.metadata["qualification_uid"],
+           "declaration" => declaration.name,
+           "receipt" => declaration.spec["receiptName"]
+         }}
+      end)
+
+    metadata =
+      record.metadata
+      |> Map.update("termination_evidence", evidence, &Map.merge(&1, evidence))
+      |> Map.put("loss_declaration", %{
+        "name" => declaration.name,
+        "node_uid" => declaration.spec["host"]["node_uid"],
+        "machine_id" => declaration.spec["host"]["machine_id"],
+        "receipt" => declaration.spec["receiptName"],
+        "operatorSubject" => declaration.spec["operatorSubject"]
+      })
+
+    %{record | metadata: metadata}
   end
 
   defp discover_guards(config, objects, opts) do
@@ -601,8 +794,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     end
   end
 
+  # Two distinct grounds for release, and never one standing in for the other: quiescence an
+  # adapter observed, or a host an operator declared lost and declare_lost/3 verified. The
+  # declaration reaches here through durable guard state, not through the caller's record.
   defp destroy_stopped(config, stopped, journal, guard, q, opts) do
-    with true <- match?({:quiescent, _}, stopped.proof),
+    with true <- match?({:quiescent, _}, stopped.proof) or match?({:operator_declared_lost, _}, stopped.proof),
          {:ok, objects} <- inventory(config, opts),
          {:ok, sandbox} <- parent(objects, stopped) do
       with_pod_obligations(stopped, sandbox, objects["pods"], q, fn stopped ->
@@ -873,7 +1069,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     cond do
       termination_proof?(termination, pod_uid, record) ->
-        safety = Map.put(termination, "kind", "terminated")
+        safety = Map.put(termination, "kind", terminal_kind(termination))
         {:ok, put_pod_safety(record, pod_uid, safety)}
 
       retained_pod_safety?(prior, pod, pod_uid, record, q) ->
@@ -915,8 +1111,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp put_pod_safety(record, pod_uid, safety),
     do: %{record | metadata: Map.update(record.metadata, "pod_safety", %{pod_uid => safety}, &Map.put(&1, pod_uid, safety))}
 
+  defp terminal_kind(%{"kind" => "host_destroyed"}), do: "host_destroyed"
+  defp terminal_kind(_), do: "terminated"
+
   defp valid_safety?(proof, pod_uid, record) when is_map(proof) do
-    proof["kind"] in ["never_executable", "terminated"] and proof["uid"] == pod_uid and
+    proof["kind"] in ["never_executable", "terminated", "host_destroyed"] and proof["uid"] == pod_uid and
       is_binary(proof["resourceVersion"]) and proof["resourceVersion"] != "" and
       proof["qualification_uid"] != nil and proof["qualification_uid"] == record.metadata["qualification_uid"]
   end
@@ -1027,6 +1226,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @spec normalize(Record.t(), map(), [map()], map()) :: Record.t()
   def normalize(record, sandbox, pods, termination_evidence) do
     cond do
+      # An operator assertion is a different kind of truth from an observation, so it keeps its
+      # own variant even though every physical condition below still has to hold.
+      declared_lost?(record) and stopped_sandbox?(record, sandbox, pods, termination_evidence) ->
+        %{record | phase: :stopped, pending: [], proof: {:operator_declared_lost, record.metadata["loss_declaration"]}}
+
       stopped_sandbox?(record, sandbox, pods, termination_evidence) ->
         proof = %{sandbox_uid: uid(sandbox), generation: get_in(sandbox, ["metadata", "generation"])}
         %{record | phase: :stopped, pending: [], proof: {:quiescent, proof}}
@@ -1041,6 +1245,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
         %{record | phase: :unknown, proof: :unknown}
     end
   end
+
+  defp declared_lost?(record), do: is_map(record.metadata["loss_declaration"]) and record.metadata["loss_declaration"] != %{}
 
   defp stopped_sandbox?(record, sandbox, pods, evidence) do
     suspension_acknowledged?(record, sandbox) and blueprint_gated?(sandbox) and
@@ -1328,9 +1534,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp remaining_backing?(objects, record) do
-    pvc_uids = Enum.map(record.metadata["volumes"] || %{}, fn {_, volume} -> volume["pvc_uid"] end)
+    volumes = record.metadata["volumes"] || %{}
+    pvc_uids = Enum.map(volumes, fn {_, volume} -> volume["pvc_uid"] end)
 
-    Enum.any?(objects["persistentvolumes"], fn pv ->
+    # A volume discharged by destruction receipt leaves a PV object its dead CSI driver can never
+    # finalize. The disk is gone and the receipt proves it; the tombstone is left standing rather
+    # than force-deleted, and it is not backing that still exists.
+    discharged = for {_, volume} <- volumes, volume["discharge"] == "destruction_receipt", do: volume["pv_uid"]
+
+    objects["persistentvolumes"]
+    |> Enum.reject(&(uid(&1) in discharged))
+    |> Enum.any?(fn pv ->
       claim = get_in(pv, ["spec", "claimRef"]) || %{}
 
       labeled_candidate?(pv, record) or (claim["uid"] != nil and claim["uid"] in pvc_uids) or
@@ -2491,7 +2705,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp termination_proof?(proof, pod_uid, record) when is_map(proof),
     do:
-      proof["kind"] in ["kubelet_terminated", "never_released"] and proof["uid"] == pod_uid and is_binary(proof["resourceVersion"]) and proof["qualification_uid"] != nil and
+      proof["kind"] in ["kubelet_terminated", "never_released", "host_destroyed"] and proof["uid"] == pod_uid and is_binary(proof["resourceVersion"]) and proof["qualification_uid"] != nil and
         proof["qualification_uid"] == record.metadata["qualification_uid"]
 
   defp termination_proof?(_, _, _), do: false

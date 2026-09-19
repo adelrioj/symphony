@@ -100,6 +100,11 @@ defmodule SymphonyElixir.ExecutionEnvironment do
   @callback stop(map(), Record.t(), keyword()) :: result()
   @callback destroy(map(), Record.t(), keyword()) :: result()
 
+  # Optional: only a provider whose hosts can be physically lost, and whose obligations are
+  # bound to a machine, has anything to declare. Callable while allocation preflight fails.
+  @callback declare_lost(map(), term(), keyword()) :: {:ok, [Record.t()]} | {:error, failure()}
+  @optional_callbacks declare_lost: 3
+
   @spec resource_key(String.t(), String.t(), String.t()) :: String.t()
   def resource_key(deployment_id, tracker_kind, issue_id) do
     encoded = :erlang.term_to_binary({deployment_id, tracker_kind, issue_id})

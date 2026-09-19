@@ -2,7 +2,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.ExecutionEnvironment.{Config, Kubernetes, Lifecycle, Operations, Record}
-  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Guard}
+  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Declaration, Guard}
 
   test "a suspended sandbox with no visible pod is not physical stop evidence" do
     record = record(%{"authorized_pod_uids" => ["pod-before-partition"]})
@@ -95,6 +95,189 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     put_object("configmaps", %{"metadata" => meta("qualification", "qualification-uid"), "immutable" => true, "data" => %{"contract.json" => stale}})
 
     assert {:error, _} = Kubernetes.preflight(config, opts)
+  end
+
+  test "a loss declaration is refused while the declared host's Node object still exists" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    put_object("nodes", node_object())
+
+    assert refusal(config, record, opts) == :kubernetes_declared_host_observable
+  end
+
+  test "a declared lost host discharges its obligations and the environment then releases" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _running} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+
+    assert {:ok, [declared]} = Kubernetes.declare_lost(config, loss_declaration(record), opts)
+    assert {:operator_declared_lost, evidence} = declared.proof
+    assert evidence["receipt"] == "destruction-receipt"
+    refute declared.absent?
+
+    assert {:ok, deleted} = Kubernetes.destroy(config, declared, opts)
+    assert deleted.absent?
+    assert guard_data(record)["phase"] == "Complete"
+  end
+
+  test "a declaration whose receipt names a different machine is refused" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    other = Jason.decode!(api_state()["configmaps"]["destruction-receipt"]["data"]["receipt.json"])
+    put_object("configmaps", put_in(api_state()["configmaps"]["destruction-receipt"], ["data", "receipt.json"], Jason.encode!(%{other | "machine_id" => "another-machine"})))
+
+    assert refusal(config, record, opts) == :kubernetes_destruction_receipt_invalid
+  end
+
+  test "a declaration is refused when no destruction receipt has been issued" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    remove_object("configmaps", "destruction-receipt")
+
+    assert refusal(config, record, opts) == :kubernetes_destruction_receipt_unavailable
+  end
+
+  test "a receipt that does not name this environment's volume handle discharges nothing" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["some-other-disk"])
+
+    assert refusal(config, record, opts) == :kubernetes_declared_volume_not_in_receipt
+    assert api_state()["persistentvolumes"]["pv-ticket"]
+  end
+
+  # The refusal comes from guard discovery rather than from the volume predicate, which is why
+  # this asserts the outcome and not a reason code: an absent PV leaves the environment's storage
+  # obligation unreadable, and nothing downstream may treat that absence as discharge.
+  test "an absent PersistentVolume is not a substitute for the receipt's evidence" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = loss_declaration(record)
+    remove_object("persistentvolumes", "pv-ticket")
+
+    assert {:error, _} = Kubernetes.declare_lost(config, declaration, opts)
+    saved = guard_data(record)["record"]["metadata"]
+    refute saved["loss_declaration"]
+    refute Enum.any?(saved["volumes"], fn {_, volume} -> volume["deleted"] == true end)
+  end
+
+  test "a reused node name is refused even when the machine behind it is new" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    reused = put_in(node_object(), ["metadata", "uid"], "a-different-node")
+    put_object("nodes", put_in(reused, ["status", "nodeInfo", "machineID"], "a-different-machine"))
+
+    assert refusal(config, record, opts) == :kubernetes_declared_host_observable
+  end
+
+  test "a declaration that omits an owned obligation is refused" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+
+    assert refusal(config, record, opts, %{"obligationUIDs" => ["pvc-uid"]}) == :kubernetes_declared_obligations_inexact
+    assert refusal(config, record, opts, %{"obligationUIDs" => ~w(pod-uid pvc-uid a-stranger)}) == :kubernetes_declared_obligations_inexact
+  end
+
+  test "a declaration naming a host this environment was never bound to is refused" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    host = %{"node_name" => "worker-1", "node_uid" => "someone-elses-node", "machine_id" => "machine", "system_uuid" => "system"}
+
+    assert refusal(config, record, opts, %{"host" => host}) == :kubernetes_declared_host_mismatch
+  end
+
+  test "an environment that pinned no host can never be declared lost" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    refute guard_data(record)["hostBinding"]
+
+    host = %{"node_name" => "worker-1", "node_uid" => "node-uid", "machine_id" => "machine", "system_uuid" => "system"}
+
+    guards = %{
+      record.key => %{"uid" => api_state()["configmaps"][Guard.name(record)]["metadata"]["uid"], "resourceVersion" => api_state()["configmaps"][Guard.name(record)]["metadata"]["resourceVersion"]}
+    }
+
+    {:ok, declaration} =
+      Declaration.decode(%{
+        "schemaVersion" => 1,
+        "deploymentId" => record.deployment_id,
+        "host" => host,
+        "environmentKeys" => [record.key],
+        "obligationUIDs" => ["pod-uid", "pvc-uid"],
+        "guards" => guards,
+        "receiptName" => "destruction-receipt",
+        "operatorSubject" => "operator@example.test",
+        "chunkIndex" => 0,
+        "chunkTotal" => 1
+      })
+
+    assert {:error, {_, :kubernetes_declared_host_mismatch}} = Kubernetes.declare_lost(config, declaration, opts)
+  end
+
+  test "a declaration never settles an unresolved Issued create" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = loss_declaration(record)
+    parent = api_state()["sandboxes"][record.key]
+    put_object("sandboxes", update_in(parent, ["status", "creationJournal", "operations"], &Enum.map(&1, fn op -> Map.put(op, "state", "Issued") end)))
+
+    assert {:error, _} = Kubernetes.declare_lost(config, declaration, opts)
+    refute guard_data(record)["record"]["metadata"]["loss_declaration"]
+  end
+
+  test "a chunked declaration is refused while no coordinator verifies every chunk" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+
+    assert refusal(config, record, opts, %{"chunkTotal" => 2}) == :kubernetes_declaration_chunked
+  end
+
+  test "a declaration replayed after an intervening guard write is the same declaration" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = loss_declaration(record)
+
+    assert {:ok, [first]} = Kubernetes.declare_lost(config, declaration, opts)
+    assert {:ok, [again]} = Kubernetes.declare_lost(config, declaration, opts)
+    assert first.proof == again.proof
+    assert guard_data(record)["record"]["metadata"]["loss_declaration"]["name"] == declaration.name
   end
 
   test "cleanup retains storage before authoritative create-drain acknowledgement" do
@@ -2600,6 +2783,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     }
 
     template = put_in(template, ["metadata", "annotations"], %{"symphony.dev/qualification" => "qualification"})
+
+    template =
+      if options[:pinned_host],
+        do: put_in(template, ["spec", "podTemplate", "spec", "nodeSelector"], %{"kubernetes.io/hostname" => "worker-1"}),
+        else: template
+
     image = "ghcr.io/trazadera/agent-sandbox-symphony-controller@sha256:" <> String.duplicate("a", 64)
 
     q = %{
@@ -2639,6 +2828,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       "networkpolicies" => %{
         "private" => %{"metadata" => meta("private", "policy-uid"), "spec" => %{"podSelector" => %{"matchLabels" => %{"profile" => "private"}}, "policyTypes" => ["Ingress", "Egress"]}}
       },
+      "nodes" => if(options[:pinned_host], do: %{"worker-1" => node_object()}, else: %{}),
       "sandboxes" => %{},
       "pods" => %{},
       "persistentvolumeclaims" => %{},
@@ -3056,6 +3246,53 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       Map.put(meta(name, uid), "ownerReferences", [
         %{"apiVersion" => "agents.x-k8s.io/v1beta1", "kind" => "Sandbox", "uid" => parent["metadata"]["uid"], "name" => parent["metadata"]["name"], "controller" => true}
       ])
+
+  defp node_object do
+    info = %{"machineID" => "machine", "systemUUID" => "system", "bootID" => "boot"}
+    %{"metadata" => meta("worker-1", "node-uid"), "status" => %{"nodeInfo" => info}}
+  end
+
+  # The machine is gone: its Node object is collected and the provider issues the receipt that
+  # names it and the disk that died with it.
+  defp destroy_host(handles) do
+    remove_object("nodes", "worker-1")
+
+    body = %{
+      "provider" => "fixture-provider",
+      "machine_id" => "machine",
+      "system_uuid" => "system",
+      "destroyedVolumeHandles" => handles,
+      "destroyedAt" => "2026-09-19T00:00:00Z"
+    }
+
+    put_object("configmaps", %{"metadata" => meta("destruction-receipt", "receipt-uid"), "immutable" => true, "data" => %{"receipt.json" => Jason.encode!(body)}})
+  end
+
+  defp refusal(config, record, opts, overrides \\ %{}) do
+    {:error, {_, reason}} = Kubernetes.declare_lost(config, loss_declaration(record, overrides), opts)
+    reason
+  end
+
+  defp loss_declaration(record, overrides \\ %{}) do
+    guard = api_state()["configmaps"][Guard.name(record)]
+    saved = guard_data(record)
+
+    spec = %{
+      "schemaVersion" => 1,
+      "deploymentId" => record.deployment_id,
+      "host" => Map.take(saved["hostBinding"], ~w(node_name node_uid machine_id system_uuid)),
+      "environmentKeys" => [record.key],
+      "obligationUIDs" => Enum.sort(saved["record"]["metadata"]["authorized_pod_uids"] ++ ["pvc-uid"]),
+      "guards" => %{record.key => %{"uid" => guard["metadata"]["uid"], "resourceVersion" => guard["metadata"]["resourceVersion"]}},
+      "receiptName" => "destruction-receipt",
+      "operatorSubject" => "operator@example.test",
+      "chunkIndex" => 0,
+      "chunkTotal" => 1
+    }
+
+    {:ok, declaration} = Declaration.decode(Map.merge(spec, overrides))
+    declaration
+  end
 
   defp meta(name, uid), do: %{"name" => name, "uid" => uid, "resourceVersion" => "1", "generation" => 1, "namespace" => "test"}
   defp put_object(resource, object), do: Process.put(:kubernetes_api, put_in(api_state(), [resource, object["metadata"]["name"]], object))
