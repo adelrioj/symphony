@@ -153,9 +153,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler d
     path = collection(config) <> "/" <> URI.encode(name(object), &URI.char_unreserved?/1) <> "/status"
 
     case Client.request(config, :patch, path, patch, opts) do
-      {:ok, %{status: code}} when code in 200..299 -> summary
-      # The outcome stands even if recording it failed; the next pass re-reads and records again.
-      _ -> summary
+      {:ok, %{status: code}} when code in 200..299 ->
+        summary
+
+      # The outcome stands and the next pass records it again, so this is not fatal. But only the
+      # adapter identity may write this subresource, and an identity that is refused it would
+      # otherwise retry for ever, writing nothing and saying nothing about why.
+      other ->
+        Logger.warning("Host loss outcome could not be recorded declaration=#{name(object)} outcome=#{status["outcome"]} reason=#{inspect(other)}")
+        summary
     end
   end
 

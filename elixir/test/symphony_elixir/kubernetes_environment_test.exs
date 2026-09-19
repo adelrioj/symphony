@@ -624,7 +624,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       if status?, do: {:error, :timeout}, else: api_command(exe, args, options)
     end
 
-    assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, Keyword.put(opts, :command_fun, block))
+    # Silence here is expensive: an identity that is refused the status subresource retries for
+    # ever, writing nothing and saying nothing about why.
+    log = ExUnit.CaptureLog.capture_log(fn -> assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, Keyword.put(opts, :command_fun, block)) end)
+    assert log =~ "outcome could not be recorded"
+    assert log =~ declaration.name
     refute declaration_status(declaration)
 
     assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, opts)
