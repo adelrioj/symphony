@@ -1,9 +1,9 @@
 defmodule SymphonyElixir.KubernetesEnvironmentTest do
   use ExUnit.Case, async: false
 
+  alias SymphonyElixir.{AgentRuntimeSupervisor, Lanes, Repo, TestSupport}
   alias SymphonyElixir.ExecutionEnvironment.{Config, Kubernetes, Lifecycle, Operations, Record}
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Declaration, DeclarationReconciler, Guard, LossAlarm}
-  alias SymphonyElixir.Repo
 
   test "a suspended sandbox with no visible pod is not physical stop evidence" do
     record = record(%{"authorized_pod_uids" => ["pod-before-partition"]})
@@ -524,6 +524,51 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     named = start_supervised!({DeclarationReconciler, [interval_ms: 60_000]})
     assert Process.whereis(DeclarationReconciler) == named
+  end
+
+  test "a tick resolves the lane's own environment and skips one that is not Kubernetes" do
+    {config, _record, opts} = api_fixture(pinned_host: true)
+
+    # No lane and no injected config: nothing to reconcile, and no crash for the absence.
+    {:ok, laneless} = DeclarationReconciler.init(interval_ms: 60_000)
+    assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, laneless)
+
+    # A lane id that resolves to nothing at all is skipped the same way.
+    {:ok, missing} = DeclarationReconciler.init(lane_id: 424_242, interval_ms: 60_000)
+    assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, missing)
+
+    # A real lane running somewhere other than Kubernetes is not this reconciler's business.
+    TestSupport.reset_lanes!()
+    on_exit(&TestSupport.reset_lanes!/0)
+    {:ok, plain} = Lanes.create(%{slug: "reconciler-plain", front_matter: "tracker:\n  kind: memory", prompt: "P"})
+    {:ok, unmanaged} = DeclarationReconciler.init(lane_id: plain.id, interval_ms: 60_000)
+    assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, unmanaged)
+
+    # A lane that does run on Kubernetes resolves its own provider and reconciles against it.
+    {:ok, managed} = Lanes.create(%{slug: "reconciler-managed", front_matter: kubernetes_front_matter(), prompt: "P"})
+    {:ok, on_k8s} = DeclarationReconciler.init(Keyword.merge(opts, lane_id: managed.id, interval_ms: 60_000))
+    assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, on_k8s)
+
+    {:ok, injected} = DeclarationReconciler.init(Keyword.merge(opts, config: config, interval_ms: 60_000))
+    assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, injected)
+  end
+
+  # The reconciler shares a one_for_all runtime with the Orchestrator, so a provider that blows up
+  # mid-pass must not take agent execution down with it. The audited transport is what contains
+  # it; the reconciler adds no rescue of its own and so hides no real bug.
+  test "a provider that raises mid-pass is contained and the reconciler carries on" do
+    {config, _record, opts} = api_fixture(pinned_host: true)
+
+    explode = fn _exe, _args, _options -> raise "provider exploded" end
+
+    {:ok, state} = DeclarationReconciler.init(Keyword.merge(opts, config: config, command_fun: explode, interval_ms: 60_000))
+    assert {:noreply, next} = DeclarationReconciler.handle_info(:reconcile, state)
+    assert next.timer
+  end
+
+  test "the lane runtime supervises a declaration reconciler" do
+    children = AgentRuntimeSupervisor.child_specs(lane_id: 7)
+    assert Enum.any?(children, &(&1.id == DeclarationReconciler))
   end
 
   test "a tick with nothing to do is quiet" do
@@ -3579,6 +3624,29 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       Map.put(meta(name, uid), "ownerReferences", [
         %{"apiVersion" => "agents.x-k8s.io/v1beta1", "kind" => "Sandbox", "uid" => parent["metadata"]["uid"], "name" => parent["metadata"]["name"], "controller" => true}
       ])
+
+  defp kubernetes_front_matter do
+    """
+    tracker:
+      kind: memory
+    workspace:
+      root: /state/workspaces
+    worker:
+      environment:
+        kind: kubernetes
+        deployment_id: deployment
+        startup_timeout_ms: 1000
+        shutdown_timeout_ms: 1000
+        provider:
+          kubeconfig: #{__ENV__.file}
+          context: test
+          namespace: test
+          template: development
+          ssh_user: worker
+          ssh_port: 2222
+          ssh_auth_volume: ssh-auth
+    """
+  end
 
   defp node_object do
     info = %{"machineID" => "machine", "systemUUID" => "system", "bootID" => "boot"}
