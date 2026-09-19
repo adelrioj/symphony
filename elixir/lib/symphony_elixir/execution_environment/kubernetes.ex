@@ -17,13 +17,22 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @protocol "symphony-create-drain-v1"
   @persist_attempts 3
 
+  # The production baseline, approved 2026-09-18 (Gate 1). This replaces the upstream
+  # Agent Sandbox v1.0.1 pin, which lacks authoritative child-create cleanup ordering
+  # acknowledgment and therefore can never prove cleanup completed.
+  #
+  # The termination contract names its own limit on purpose. Approval rests on the five-slot
+  # concurrency run and both agent backends (qual6 Claude, qual9 Codex, 5/5 each); the
+  # physical fault matrix has NOT been run. Anything relying on qualified node- or disk-fault
+  # behaviour must not read this baseline as covering it. Rename the contract only when that
+  # matrix passes, and only together with the deployment's qualification ConfigMap.
   @stock_baseline %{
-    release: "v1.0.1",
-    termination_contract: "qualified-kubelet-all-containers-v1",
-    controller_source_commit: "3e77ccbac4db8a12b0157eafcad0d1ad5872f32a",
-    controller_image_prefix: "registry.k8s.io/agent-sandbox/agent-sandbox-controller@sha256:",
+    release: "approved-7140d4b65725",
+    termination_contract: "approved-pending-fault-matrix-kubelet-all-containers-v1",
+    controller_source_commit: "7140d4b657253e6bf318bd93e2a66ba67094d8d3",
+    controller_image_prefix: "ghcr.io/trazadera/agent-sandbox-symphony-controller@sha256:",
     schemas: [
-      {"sandboxes.agents.x-k8s.io", "37f0b89594ba20ca4d37b93714c362bcd694369f"},
+      {"sandboxes.agents.x-k8s.io", "37a7a827d77c8dd22fe8a2af41c7e41e1b1d5f67"},
       {"sandboxtemplates.extensions.agents.x-k8s.io", "6c5c594b1a0cddda9b330bb094272e1c465d11c2"}
     ]
   }
@@ -98,11 +107,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   def preflight(config, opts) do
     opts = with_deadline(opts)
 
+    # The cleanup-ordering stop that used to terminate this chain was lifted on 2026-09-19,
+    # once Gate 1 approved a baseline that supplies the create-drain acknowledgment the
+    # upstream one lacked. Gate 2 (permanent host or disk loss recovery) is still open: a lost
+    # host strands its records, which is an availability cost, not a safety one.
     with :ok <- ordinary_options(opts),
          :ok <- validate_config(config.provider),
          {:ok, _} <- qualification(config, opts),
          {:ok, _} <- inventory(config, opts),
-         do: {:error, {:unknown, :kubernetes_controller_cleanup_ordering_unproven}}
+         do: :ok
   end
 
   @spec discover(map(), keyword()) :: {:ok, [Record.t()]} | {:error, term()}
