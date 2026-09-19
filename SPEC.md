@@ -2949,6 +2949,14 @@ The final event may contain the prior stored finalizer list when removing the la
 deletes the object atomically. Mere PVC/PV absence, lost watch history, or removing finalizers
 to force progress MUST NOT substitute for that evidence.
 
+One narrow exception applies. For a host-local volume whose node has been declared permanently lost
+under an accepted `HostLossDeclaration`, an immutable provider-side destruction receipt, keyed by the
+machine identity recorded in that declaration and naming the exact CSI volume handle, MAY substitute
+for the exact-UID PV `DELETED` watch event. Absence of the PV, lost watch history, and finalizer
+removal remain forbidden as substitutes, with or without a declaration. The exception never applies to
+a volume on a live node, and the receipt is issued by the infrastructure provider, never by the
+operator asserting the loss.
+
 A complete `ReadyToFinalize` receipt MUST be durably persisted and exactly read back before removing
 the exact parent's cleanup finalizer. Parent, child and backing absence precede durable `Complete`
 readback and successful ownership release. Lost write responses require exact payload/state readback,
