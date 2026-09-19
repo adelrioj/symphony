@@ -9,13 +9,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Declaration do
   @max_keys 64
   @max_obligations 512
   @host_fields ~w(node_name node_uid machine_id system_uuid)
+  # The prefix the admission policy binds its protections to. A receipt named anything else is
+  # unprotected: nothing would stop the operator asserting the loss from also writing it.
+  @receipt_name ~r/^symphony-destruction-receipt-[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/
   @required ~w(schemaVersion deploymentId host environmentKeys obligationUIDs guards receiptName operatorSubject chunkIndex chunkTotal)
 
   @spec decode(term()) :: {:ok, t()} | {:error, term()}
   def decode(spec) when is_map(spec) do
     with true <- Enum.all?(@required, &Map.has_key?(spec, &1)),
          true <- spec["schemaVersion"] == @version,
-         true <- nonempty?(spec["deploymentId"]) and nonempty?(spec["receiptName"]) and nonempty?(spec["operatorSubject"]),
+         true <- nonempty?(spec["deploymentId"]) and nonempty?(spec["operatorSubject"]),
+         true <- is_binary(spec["receiptName"]) and Regex.match?(@receipt_name, spec["receiptName"]),
          true <- host?(spec["host"]),
          true <- keys?(spec["environmentKeys"]),
          true <- obligations?(spec["obligationUIDs"]),

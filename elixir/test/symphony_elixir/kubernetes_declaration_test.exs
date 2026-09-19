@@ -69,6 +69,14 @@ defmodule SymphonyElixir.KubernetesDeclarationTest do
     assert {:error, _} = Declaration.decode(spec(%{"chunkIndex" => -1, "chunkTotal" => 1}))
   end
 
+  test "a receipt name outside the protected prefix is rejected" do
+    for name <- ["destruction-receipt", "symphony-guard-abc", "qualification", "symphony-destruction-receipt-", ""] do
+      assert {:error, _} = Declaration.decode(spec(%{"receiptName" => name})), "#{name} was accepted"
+    end
+
+    assert {:ok, _} = Declaration.decode(spec(%{"receiptName" => "symphony-destruction-receipt-3070466"}))
+  end
+
   test "an unknown schema version is rejected" do
     assert {:error, _} = Declaration.decode(spec(%{"schemaVersion" => 2}))
   end
@@ -112,7 +120,7 @@ defmodule SymphonyElixir.KubernetesDeclarationTest do
         overrides
       )
 
-    %{"metadata" => %{"name" => "destruction-receipt"}, "immutable" => true, "data" => %{"receipt.json" => Jason.encode!(body)}}
+    %{"metadata" => %{"name" => "symphony-destruction-receipt-3070466"}, "immutable" => true, "data" => %{"receipt.json" => Jason.encode!(body)}}
   end
 
   defp spec(overrides) do
@@ -124,7 +132,7 @@ defmodule SymphonyElixir.KubernetesDeclarationTest do
         "environmentKeys" => ["se-ticket"],
         "obligationUIDs" => ["pod-uid"],
         "guards" => %{"se-ticket" => %{"uid" => "guard-uid", "resourceVersion" => "7"}},
-        "receiptName" => "destruction-receipt",
+        "receiptName" => "symphony-destruction-receipt-3070466",
         "operatorSubject" => "operator@example.test",
         "chunkIndex" => 0,
         "chunkTotal" => 1
