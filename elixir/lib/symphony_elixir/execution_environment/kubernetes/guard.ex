@@ -18,6 +18,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
          {:ok, data} when is_map(data) <- Jason.decode(get_in(object, ["data", "guard.json"]) || ""),
          true <- data["protocol"] == @protocol and data["identity"] == identity(record),
          true <- data["phase"] in @phases and is_map(data["record"]) and is_map(data["evidence"]),
+         true <- data["hostBinding"] == nil or valid_host_binding?(data["hostBinding"]),
          true <- record_identity?(data["record"], record),
          true <- valid_operations?(data["operations"], uid(object), record),
          true <- valid_phase?(data),
@@ -74,6 +75,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
   end
 
   defp post_bootstrap(config, record, encoded, opts) do
+    with {:ok, binding} <- host_binding(config, opts) do
+      post_bootstrap(config, record, encoded, binding, opts)
+    end
+  end
+
+  defp post_bootstrap(config, record, encoded, binding, opts) do
     initial = %{
       "protocol" => @protocol,
       "identity" => identity(record),
@@ -84,6 +91,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
       "record" => Jason.decode!(encoded),
       "evidence" => %{}
     }
+
+    initial = if binding, do: Map.put(initial, "hostBinding", binding), else: initial
 
     metadata = %{
       "name" => name(record),
@@ -428,4 +437,70 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
   defp nonempty?(value), do: is_binary(value) and value != ""
   defp random_id, do: Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
   defp unknown(reason), do: {:error, {:unknown, reason}}
+
+  # The host a permanently-lost-host declaration can name. Captured once, at guard creation,
+  # because after the machine is gone none of it can be recovered — and an environment without
+  # it can never be declared lost. Every field is an API read of the Node object; nothing here
+  # touches the host, so no /etc/machine-id and no SSH.
+  #
+  # boot_id identifies a boot, not a machine: machine_id + system_uuid + node_uid identify the
+  # machine, and a boot_id change on its own is a reboot.
+  @host_binding_version 1
+  @host_binding_fields ~w(node_name node_uid machine_id system_uuid boot_id)
+
+  # Two outcomes, and the difference is deliberate. A deployment that does not pin its worker to
+  # one host has nothing to bind, so the binding is simply absent and that environment can never
+  # be declared lost — the documented consequence, not an error. But a deployment that DOES pin a
+  # host and then cannot read that Node has failed to capture something it should have, and that
+  # fails allocation rather than silently producing an undeclarable environment.
+  @spec host_binding(map(), keyword()) :: {:ok, map() | nil} | {:error, term()}
+  def host_binding(config, opts) do
+    case pinned_host(config, opts) do
+      {:ok, nil} -> {:ok, nil}
+      {:ok, node_name} -> bind_pinned_host(config, node_name, opts)
+    end
+  end
+
+  defp bind_pinned_host(config, node_name, opts) do
+    with {:ok, node} when is_map(node) <- Client.lookup(config, "/api/v1/nodes", node_name, opts),
+         info when is_map(info) <- get_in(node, ["status", "nodeInfo"]),
+         binding = %{
+           "version" => @host_binding_version,
+           "node_name" => node_name,
+           "node_uid" => get_in(node, ["metadata", "uid"]),
+           "machine_id" => info["machineID"],
+           "system_uuid" => info["systemUUID"],
+           "boot_id" => info["bootID"],
+           "node_resource_version" => get_in(node, ["metadata", "resourceVersion"])
+         },
+         true <- valid_host_binding?(binding) do
+      {:ok, binding}
+    else
+      _ -> unknown(:kubernetes_host_binding_unavailable)
+    end
+  end
+
+  # The node is pinned by configuration rather than scheduled, so it is known before creation.
+  # Exactly one hostname, or the binding is meaningless.
+  defp pinned_host(config, opts) do
+    # Any inability to resolve a pinned host means there is nothing to bind, never an error:
+    # guard creation must not fail for a reason that belongs to placement.
+    case Client.lookup(config, template_collection(config), config.provider["template"], opts) do
+      {:ok, template} when is_map(template) ->
+        host = get_in(template, ["spec", "podTemplate", "spec", "nodeSelector", "kubernetes.io/hostname"])
+        if is_binary(host) and String.trim(host) != "", do: {:ok, host}, else: {:ok, nil}
+
+      _ ->
+        {:ok, nil}
+    end
+  end
+
+  defp template_collection(config),
+    do: "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/#{URI.encode_www_form(config.provider["namespace"])}/sandboxtemplates"
+
+  @spec valid_host_binding?(term()) :: boolean()
+  def valid_host_binding?(binding) do
+    is_map(binding) and binding["version"] == @host_binding_version and
+      Enum.all?(@host_binding_fields, &(is_binary(binding[&1]) and String.trim(binding[&1]) != ""))
+  end
 end
