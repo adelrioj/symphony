@@ -110,7 +110,9 @@ defmodule SymphonyElixir.KubernetesGuardTest do
   end
 
   test "a lost bootstrap response is recoverable from the exact permanent guard", %{opts: opts} do
-    requests([{:get, "configmaps", inventory([])}, {:get, "sandboxtemplates", inventory([])}, {:post, "configmaps", {:error, :timeout}}, {:get, "configmaps", inventory([object()])}])
+    none = inventory([])
+    lost = {:post, "configmaps", {:error, :timeout}}
+    requests([{:get, "configmaps", none}, {:get, "sandboxtemplates", none}, lost, {:get, "configmaps", inventory([object()])}])
     assert {:ok, guard} = Guard.establish(config(), record(), encoded(), opts)
     assert {:error, {:unknown, :kubernetes_provider_issuance_unresolved}} = Guard.drained(guard)
     assert_finished()
@@ -302,6 +304,29 @@ defmodule SymphonyElixir.KubernetesGuardTest do
     assert binding["system_uuid"] == "system-1"
     assert binding["boot_id"] == "boot-1"
     assert Guard.valid_host_binding?(binding)
+  end
+
+  test "a pinned host whose Node cannot be read fails allocation", %{opts: opts} do
+    # The converse of the unpinned case. Here the deployment says which machine it uses and we
+    # failed to record it, so allocation fails rather than silently producing an environment
+    # that could never be declared lost.
+    template = %{
+      "metadata" => %{"name" => "development"},
+      "spec" => %{"podTemplate" => %{"spec" => %{"nodeSelector" => %{"kubernetes.io/hostname" => "worker-1"}}}}
+    }
+
+    for nodes <- [inventory([]), status(403), inventory([%{"metadata" => %{"name" => "worker-1"}}])] do
+      requests([
+        {:get, "configmaps", inventory([])},
+        {:get, "sandboxtemplates", inventory([template])},
+        {:get, "nodes", nodes}
+      ])
+
+      assert {:error, {:unknown, :kubernetes_host_binding_unavailable}} =
+               Guard.establish(config(), record(), encoded(), opts)
+
+      assert_finished()
+    end
   end
 
   test "an unpinned worker yields no host binding rather than failing", %{opts: opts} do
