@@ -256,6 +256,85 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     refute guard_data(record)["record"]["metadata"]["loss_declaration"]
   end
 
+  test "a declaration for another deployment is refused" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+
+    assert refusal(config, record, opts, %{"deploymentId" => "another-deployment"}) == :kubernetes_declaration_foreign
+  end
+
+  test "a declaration naming an environment this deployment does not hold is refused" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    stranger = %{"environmentKeys" => ["se-stranger"], "guards" => %{"se-stranger" => %{"uid" => "guard-uid", "resourceVersion" => "1"}}}
+
+    assert refusal(config, record, opts, stranger) == :kubernetes_declared_environment_missing
+  end
+
+  test "a declaration whose guard reference no longer matches is refused" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    guards = %{record.key => %{"uid" => "a-different-guard", "resourceVersion" => "1"}}
+
+    assert refusal(config, record, opts, %{"guards" => guards}) == :kubernetes_declared_guard_changed
+  end
+
+  # Capture re-reads the handle from live state, so a swapped handle does not show up as a
+  # mismatch against our own records. The receipt is what catches it: it names the disk that was
+  # destroyed, and that is no longer the disk this claim points at.
+  test "a volume whose handle was swapped is not the disk the receipt destroyed" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    put_object("persistentvolumes", put_in(api_state()["persistentvolumes"]["pv-ticket"], ["spec", "csi", "volumeHandle"], "a-different-disk"))
+
+    assert refusal(config, record, opts) == :kubernetes_declared_volume_not_in_receipt
+  end
+
+  test "a claim that never bound is not host-local storage and is not discharged by a receipt" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    state = api_state() |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil) |> Map.put("persistentvolumes", %{})
+    Process.put(:kubernetes_api, state)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+
+    assert refusal(config, record, opts) == :kubernetes_declared_volume_unbound
+  end
+
+  test "an unreadable predicate is unavailable and never false" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, _} = Kubernetes.start(config, intended, opts)
+    destroy_host(["disk-ticket"])
+    declaration = loss_declaration(record)
+
+    for collection <- ["/api/v1/nodes", "configmaps"] do
+      forbidden = {:ok, %{status: 1, output: "Error from server (Forbidden)"}}
+
+      refuse = fn exe, args, options ->
+        reading? = "get" in args and String.contains?(arg(args, "--raw") || "", collection)
+        if reading?, do: forbidden, else: api_command(exe, args, options)
+      end
+
+      assert {:error, {reason, _}} = Kubernetes.declare_lost(config, declaration, Keyword.put(opts, :command_fun, refuse))
+      assert reason in [:denied, :unknown]
+    end
+  end
+
   test "a chunked declaration is refused while no coordinator verifies every chunk" do
     {config, record, opts} = api_fixture(pinned_host: true)
     {:ok, created} = Kubernetes.ensure(config, record, opts)

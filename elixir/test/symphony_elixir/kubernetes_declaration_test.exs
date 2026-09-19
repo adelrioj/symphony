@@ -13,6 +13,27 @@ defmodule SymphonyElixir.KubernetesDeclarationTest do
     assert byte_size(one.name) <= 63
   end
 
+  test "anything that is not a map is not a declaration" do
+    for value <- ["a string", nil, 7, []] do
+      assert {:error, _} = Declaration.decode(value)
+    end
+  end
+
+  test "a receipt whose body is malformed or incomplete is rejected" do
+    {:ok, declaration} = Declaration.decode(spec(%{}))
+    object = receipt()
+
+    assert {:error, _} = Declaration.receipt(put_in(object, ["data", "receipt.json"], "{not json"), declaration)
+    assert {:error, _} = Declaration.receipt(Map.put(object, "data", %{}), declaration)
+
+    for field <- ~w(provider destroyedAt) do
+      assert {:error, _} = Declaration.receipt(receipt(%{field => ""}), declaration)
+    end
+
+    assert {:error, _} = Declaration.receipt(receipt(%{"destroyedVolumeHandles" => "handle-1"}), declaration)
+    assert {:error, _} = Declaration.receipt(receipt(%{"destroyedVolumeHandles" => [""]}), declaration)
+  end
+
   test "a spec missing a required immutable field is rejected" do
     for field <- ~w(schemaVersion deploymentId host environmentKeys obligationUIDs guards receiptName operatorSubject chunkIndex chunkTotal) do
       assert {:error, _} = Declaration.decode(Map.delete(spec(%{}), field)), "#{field} was accepted as absent"

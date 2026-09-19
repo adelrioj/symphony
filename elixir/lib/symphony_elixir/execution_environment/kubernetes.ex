@@ -136,7 +136,6 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   # destruction receipt, the Node's absence, the guard's own host binding, and exact cover of the
   # obligations. Anything unreadable is unavailable, never false. Callable while allocation
   # preflight fails, and it never allocates.
-  @impl true
   @spec declare_lost(map(), Declaration.t(), keyword()) :: {:ok, [Record.t()]} | {:error, term()}
   def declare_lost(config, %Declaration{spec: spec} = declaration, opts) do
     opts = with_deadline(opts)
@@ -218,7 +217,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     with {:ok, guard} <- Guard.fetch(config, record, opts),
          :ok <- declared_guard?(declaration, record, snapshot),
          :ok <- declared_host?(declaration, guard),
-         {:ok, discharged} <- discharge_volumes(declaration, receipt, record, objects),
+         {:ok, discharged} <- discharge_volumes(declaration, receipt, record),
          discharged = discharge_compute(declaration, guard, discharged),
          {:ok, saved} <- Guard.save(config, discharged, encode_record(discharged), opts),
          {:ok, durable} <- decode_guard_record(saved.data, config) do
@@ -249,25 +248,22 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       else: {:error, {:invalid, :kubernetes_declared_host_mismatch}}
   end
 
-  # The amendment to SPEC.md:2946-2950 in force. The PV object outlives the machine and must still
-  # match the captured identity exactly, so the handle is bound to this claim by live state rather
-  # than by our own records; the receipt then proves that handle's disk is gone. PV absence is not
-  # a substitute and refuses here, as it does everywhere else.
-  defp discharge_volumes(declaration, receipt, record, objects) do
+  # The amendment to SPEC.md:2946-2950 in force. The handle is already bound to this claim by live
+  # state: capture refuses a PV whose UID was replaced, and qualified_volume?/3 requires the claim
+  # reference, driver and reclaim policy to match before a handle is ever recorded. What remains is
+  # for the receipt to name that handle, which is what proves its disk is gone. Absence substitutes
+  # for nothing — a missing PV leaves the obligation unreadable and refuses upstream of here.
+  defp discharge_volumes(declaration, receipt, record) do
     volumes = record.metadata["volumes"] || %{}
 
     Enum.reduce_while(volumes, {:ok, volumes}, fn {key, volume}, {:ok, acc} ->
-      pv = Enum.find(objects["persistentvolumes"], &(name(&1) == volume["pv_name"]))
-
       cond do
         volume["deleted"] == true ->
           {:cont, {:ok, acc}}
 
+        # A claim that never bound has no host-local disk, so no receipt can speak for it.
         volume["pv_uid"] == nil ->
           {:halt, {:error, {:invalid, :kubernetes_declared_volume_unbound}}}
-
-        not declared_volume?(pv, volume) ->
-          {:halt, {:error, {:invalid, :kubernetes_declared_volume_unverifiable}}}
 
         not Declaration.destroyed?(receipt, volume["volume_handle"]) ->
           {:halt, {:error, {:invalid, :kubernetes_declared_volume_not_in_receipt}}}
@@ -280,11 +276,6 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       {:ok, discharged} -> {:ok, %{record | metadata: Map.put(record.metadata, "volumes", discharged)}}
       error -> error
     end
-  end
-
-  defp declared_volume?(pv, volume) do
-    is_map(pv) and uid(pv) == volume["pv_uid"] and get_in(pv, ["spec", "csi", "volumeHandle"]) == volume["volume_handle"] and
-      get_in(pv, ["spec", "claimRef", "uid"]) == volume["pvc_uid"]
   end
 
   defp discharge_stamp(declaration),
