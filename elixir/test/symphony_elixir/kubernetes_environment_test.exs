@@ -117,7 +117,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     assert {:ok, [declared]} = Kubernetes.declare_lost(config, loss_declaration(record), opts)
     assert {:operator_declared_lost, evidence} = declared.proof
-    assert evidence["receipt"] == "destruction-receipt"
+    assert evidence["receipt"] == "symphony-destruction-receipt-3070466"
     refute declared.absent?
 
     assert {:ok, deleted} = Kubernetes.destroy(config, declared, opts)
@@ -131,8 +131,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     {:ok, _} = Kubernetes.start(config, intended, opts)
     destroy_host(["disk-ticket"])
-    other = Jason.decode!(api_state()["configmaps"]["destruction-receipt"]["data"]["receipt.json"])
-    put_object("configmaps", put_in(api_state()["configmaps"]["destruction-receipt"], ["data", "receipt.json"], Jason.encode!(%{other | "machine_id" => "another-machine"})))
+    other = Jason.decode!(api_state()["configmaps"]["symphony-destruction-receipt-3070466"]["data"]["receipt.json"])
+    put_object("configmaps", put_in(api_state()["configmaps"]["symphony-destruction-receipt-3070466"], ["data", "receipt.json"], Jason.encode!(%{other | "machine_id" => "another-machine"})))
 
     assert refusal(config, record, opts) == :kubernetes_destruction_receipt_invalid
   end
@@ -143,7 +143,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     {:ok, _} = Kubernetes.start(config, intended, opts)
     destroy_host(["disk-ticket"])
-    remove_object("configmaps", "destruction-receipt")
+    remove_object("configmaps", "symphony-destruction-receipt-3070466")
 
     assert refusal(config, record, opts) == :kubernetes_destruction_receipt_unavailable
   end
@@ -233,7 +233,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
         "environmentKeys" => [record.key],
         "obligationUIDs" => ["pod-uid", "pvc-uid"],
         "guards" => guards,
-        "receiptName" => "destruction-receipt",
+        "receiptName" => "symphony-destruction-receipt-3070466",
         "operatorSubject" => "operator@example.test",
         "chunkIndex" => 0,
         "chunkTotal" => 1
@@ -3344,7 +3344,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       "destroyedAt" => "2026-09-19T00:00:00Z"
     }
 
-    put_object("configmaps", %{"metadata" => meta("destruction-receipt", "receipt-uid"), "immutable" => true, "data" => %{"receipt.json" => Jason.encode!(body)}})
+    put_object("configmaps", %{"metadata" => meta("symphony-destruction-receipt-3070466", "receipt-uid"), "immutable" => true, "data" => %{"receipt.json" => Jason.encode!(body)}})
   end
 
   defp refusal(config, record, opts, overrides \\ %{}) do
@@ -3363,7 +3363,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       "environmentKeys" => [record.key],
       "obligationUIDs" => Enum.sort(saved["record"]["metadata"]["authorized_pod_uids"] ++ ["pvc-uid"]),
       "guards" => %{record.key => %{"uid" => guard["metadata"]["uid"], "resourceVersion" => guard["metadata"]["resourceVersion"]}},
-      "receiptName" => "destruction-receipt",
+      "receiptName" => "symphony-destruction-receipt-3070466",
       "operatorSubject" => "operator@example.test",
       "chunkIndex" => 0,
       "chunkTotal" => 1
