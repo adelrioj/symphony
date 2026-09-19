@@ -96,7 +96,13 @@ defmodule SymphonyElixir.KubernetesGuardTest do
 
   test "bootstrap requires exact authoritative readback even after a successful POST", %{opts: opts} do
     for readback <- [inventory([]), status(403), inventory([object(%{"evidence" => %{"foreign" => true}})])] do
-      requests([{:get, "configmaps", inventory([])}, {:post, "configmaps", object()}, {:get, "configmaps", readback}])
+      requests([
+        {:get, "configmaps", inventory([])},
+        {:get, "sandboxtemplates", inventory([])},
+        {:post, "configmaps", object()},
+        {:get, "configmaps", readback}
+      ])
+
       result = Guard.establish(config(), record(), encoded(), opts)
       assert {:error, {:unknown, :kubernetes_guard_bootstrap_unknown}} = result
       assert_finished()
@@ -104,7 +110,7 @@ defmodule SymphonyElixir.KubernetesGuardTest do
   end
 
   test "a lost bootstrap response is recoverable from the exact permanent guard", %{opts: opts} do
-    requests([{:get, "configmaps", inventory([])}, {:post, "configmaps", {:error, :timeout}}, {:get, "configmaps", inventory([object()])}])
+    requests([{:get, "configmaps", inventory([])}, {:get, "sandboxtemplates", inventory([])}, {:post, "configmaps", {:error, :timeout}}, {:get, "configmaps", inventory([object()])}])
     assert {:ok, guard} = Guard.establish(config(), record(), encoded(), opts)
     assert {:error, {:unknown, :kubernetes_provider_issuance_unresolved}} = Guard.drained(guard)
     assert_finished()
@@ -241,6 +247,7 @@ defmodule SymphonyElixir.KubernetesGuardTest do
     {method, resource} =
       cond do
         Path.basename(executable) == "symphony-kubernetes-create" ->
+          Process.put(:guard_posted, args |> arg("--file") |> File.read!() |> Jason.decode!())
           {:post, args |> arg("--path") |> URI.parse() |> Map.fetch!(:path) |> String.split("/") |> List.last()}
 
         "patch" in args ->
@@ -264,9 +271,77 @@ defmodule SymphonyElixir.KubernetesGuardTest do
   defp reply({:error, _} = error), do: error
   defp reply(body), do: {:ok, %{status: 0, output: Jason.encode!(body)}}
   defp arg(args, flag), do: Enum.at(args, Enum.find_index(args, &(&1 == flag)) + 1)
+
+  test "a guard captures the host binding when the worker is pinned to one node", %{opts: opts} do
+    # Every field is an API read of the Node object. Captured at guard creation because after
+    # the machine is gone none of it can be recovered.
+    template = %{
+      "metadata" => %{"name" => "development"},
+      "spec" => %{"podTemplate" => %{"spec" => %{"nodeSelector" => %{"kubernetes.io/hostname" => "worker-1"}}}}
+    }
+
+    node = %{
+      "metadata" => %{"name" => "worker-1", "uid" => "node-uid", "resourceVersion" => "42"},
+      "status" => %{"nodeInfo" => %{"machineID" => "machine-1", "systemUUID" => "system-1", "bootID" => "boot-1"}}
+    }
+
+    requests([
+      {:get, "configmaps", inventory([])},
+      {:get, "sandboxtemplates", inventory([template])},
+      {:get, "nodes", inventory([node])},
+      {:post, "configmaps", object()},
+      {:get, "configmaps", inventory([object()])}
+    ])
+
+    Guard.establish(config(), record(), encoded(), opts)
+    binding = Process.get(:guard_posted) |> get_in(["data", "guard.json"]) |> Jason.decode!() |> Map.get("hostBinding")
+
+    assert binding["node_name"] == "worker-1"
+    assert binding["node_uid"] == "node-uid"
+    assert binding["machine_id"] == "machine-1"
+    assert binding["system_uuid"] == "system-1"
+    assert binding["boot_id"] == "boot-1"
+    assert Guard.valid_host_binding?(binding)
+  end
+
+  test "an unpinned worker yields no host binding rather than failing", %{opts: opts} do
+    # Nothing to bind is not an error. Such an environment simply can never be declared lost,
+    # which is the documented consequence, and allocation must not fail for it.
+    unpinned = %{"metadata" => %{"name" => "development"}, "spec" => %{"podTemplate" => %{"spec" => %{}}}}
+
+    requests([
+      {:get, "configmaps", inventory([])},
+      {:get, "sandboxtemplates", inventory([unpinned])},
+      {:post, "configmaps", object()},
+      {:get, "configmaps", inventory([object()])}
+    ])
+
+    Guard.establish(config(), record(), encoded(), opts)
+
+    refute Process.get(:guard_posted) |> get_in(["data", "guard.json"]) |> Jason.decode!() |> Map.has_key?("hostBinding")
+  end
+
+  test "a malformed host binding is rejected on decode" do
+    for bad <- [%{}, %{"version" => 1}, %{"version" => 2, "node_name" => "w"}, %{"version" => 1, "node_name" => " "}] do
+      refute Guard.valid_host_binding?(bad)
+    end
+
+    assert Guard.valid_host_binding?(%{
+             "version" => 1,
+             "node_name" => "w",
+             "node_uid" => "u",
+             "machine_id" => "m",
+             "system_uuid" => "s",
+             "boot_id" => "b"
+           })
+  end
+
   defp inventory(items), do: %{"metadata" => %{}, "items" => items}
   defp status(code), do: %{"kind" => "Status", "code" => code}
-  defp config, do: %{provider: %{"kubeconfig" => __ENV__.file, "context" => "test", "namespace" => "test"}}
+
+  defp config,
+    do: %{provider: %{"kubeconfig" => __ENV__.file, "context" => "test", "namespace" => "test", "template" => "development"}}
+
   defp encoded, do: Jason.encode!(record())
 
   defp record do
