@@ -109,7 +109,8 @@ defmodule SymphonyElixir.ExecutionEnvironment do
   def resource_key(deployment_id, tracker_kind, issue_id) do
     encoded = :erlang.term_to_binary({deployment_id, tracker_kind, issue_id})
     digest = :crypto.hash(:sha256, encoded) |> Base.encode16(case: :lower)
-    "se-" <> binary_part(digest, 0, 56)
+    # Workstations limits the complete ID, including the prefix, to 56 characters.
+    "se-" <> binary_part(digest, 0, 53)
   end
 
   @spec adapter(String.t()) :: {:ok, module()} | {:error, term()}
