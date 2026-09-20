@@ -16,7 +16,10 @@ defmodule SymphonyElixirWeb.Presenter do
 
   @spec lane_payload(Entry.t(), timeout()) :: map()
   def lane_payload(%Entry{} = entry, snapshot_timeout_ms) do
-    entry |> orchestrator_for() |> state_payload(snapshot_timeout_ms) |> Map.put(:lane, entry.slug)
+    entry
+    |> orchestrator_for()
+    |> state_payload(snapshot_timeout_ms)
+    |> Map.merge(%{lane: entry.slug, execution_profile: %{id: entry.profile_id, name: entry.profile_name, workspace_subdir: entry.workspace_subdir}})
   end
 
   @spec lanes() :: [Entry.t()]

@@ -59,6 +59,11 @@ defmodule SymphonyElixirWeb.Router do
 
     get("/state", ObservabilityApiController, :state)
     post("/refresh", ObservabilityApiController, :refresh)
+    get("/execution-profiles", ExecutionProfilesApiController, :index)
+    post("/execution-profiles", ExecutionProfilesApiController, :create)
+    get("/execution-profiles/:id", ExecutionProfilesApiController, :show)
+    put("/execution-profiles/:id", ExecutionProfilesApiController, :update)
+    delete("/execution-profiles/:id", ExecutionProfilesApiController, :delete)
     get("/lanes", LanesApiController, :index)
     post("/lanes", LanesApiController, :create)
     put("/lanes/:slug", LanesApiController, :update)

@@ -1,0 +1,102 @@
+defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
+  @moduledoc "Execution profile configuration for automation."
+
+  use Phoenix.Controller, formats: [:json]
+
+  alias Plug.Conn
+  alias SymphonyElixir.ExecutionProfiles
+  alias SymphonyElixir.ExecutionProfiles.Profile
+
+  @profile_params ~w(name description workspace_base worker)
+  @max_sqlite_id 9_223_372_036_854_775_807
+
+  @spec index(Conn.t(), map()) :: Conn.t()
+  def index(conn, _params), do: json(conn, %{execution_profiles: Enum.map(ExecutionProfiles.list(), &profile_json/1)})
+
+  @spec show(Conn.t(), map()) :: Conn.t()
+  def show(conn, _params), do: with_profile(conn, &json(conn, profile_json(&1)))
+
+  @spec create(Conn.t(), map()) :: Conn.t()
+  def create(conn, _params) do
+    with_attributes(conn, fn attrs ->
+      case ExecutionProfiles.create(attrs) do
+        {:ok, profile} -> conn |> put_status(201) |> json(profile_json(profile))
+        {:error, errors} -> errors_response(conn, errors)
+      end
+    end)
+  end
+
+  @spec update(Conn.t(), map()) :: Conn.t()
+  def update(conn, _params) do
+    with_profile(conn, fn profile ->
+      with_attributes(conn, fn attrs ->
+        case ExecutionProfiles.update(profile, attrs) do
+          {:ok, updated} -> json(conn, profile_json(updated))
+          {:error, errors} -> errors_response(conn, errors)
+        end
+      end)
+    end)
+  end
+
+  @spec delete(Conn.t(), map()) :: Conn.t()
+  def delete(conn, _params) do
+    with_profile(conn, fn profile ->
+      case ExecutionProfiles.delete(profile) do
+        :ok -> send_resp(conn, 204, "")
+        {:error, errors} -> errors_response(conn, errors)
+      end
+    end)
+  end
+
+  defp with_profile(conn, fun) do
+    case parse_id(conn.path_params["id"]) do
+      {:ok, id} ->
+        case ExecutionProfiles.get(id) do
+          nil -> conn |> put_status(404) |> json(%{error: %{code: "execution_profile_not_found", message: "Execution profile not found"}})
+          %Profile{} = profile -> fun.(profile)
+        end
+
+      :error ->
+        errors_response(conn, [%{path: "id", message: "must be a positive integer id"}])
+    end
+  end
+
+  defp with_attributes(conn, fun) do
+    case conn.body_params do
+      %{"_json" => _} ->
+        errors_response(conn, [%{path: "body", message: "must be a JSON object"}])
+
+      %{} = attrs ->
+        forbidden =
+          ["config", "executor", "front_matter", "workspace"]
+          |> Enum.filter(&Map.has_key?(attrs, &1))
+          |> Enum.map(&%{path: &1, message: "is not a profile attribute"})
+
+        if forbidden == [], do: fun.(Map.take(attrs, @profile_params)), else: errors_response(conn, forbidden)
+    end
+  end
+
+  defp profile_json(%Profile{} = profile) do
+    %{
+      id: profile.id,
+      name: profile.name,
+      description: profile.description,
+      workspace_base: profile.workspace_base,
+      worker: profile.worker,
+      repair_error: profile.repair_error,
+      linked_lane_ids: Enum.map(ExecutionProfiles.linked_lanes(profile), & &1.id),
+      updated_at: profile.updated_at
+    }
+  end
+
+  defp errors_response(conn, errors), do: conn |> put_status(422) |> json(%{errors: errors})
+
+  defp parse_id(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {id, ""} when id > 0 and id <= @max_sqlite_id -> {:ok, id}
+      _ -> :error
+    end
+  end
+
+  defp parse_id(_value), do: :error
+end

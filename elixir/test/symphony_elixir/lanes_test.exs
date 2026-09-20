@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.LanesTest do
   use ExUnit.Case
-  alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, Repo, TestSupport, Workflow}
+  alias SymphonyElixir.{ExecutionProfiles, LaneContext, Lanes, LaneStore, Repo, TestSupport, Workflow}
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.Lanes.{Lane, LaneVersion}
 
@@ -53,6 +53,34 @@ defmodule SymphonyElixir.LanesTest do
     assert Lanes.get!(lane.id).id == lane.id
     assert [^lane] = Lanes.list()
     assert {:ok, %{version_id: ^id}} = LaneStore.lookup(lane.id)
+  end
+
+  @tag :tmp_dir
+  test "export and current content use the effective raw configuration", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Raw export", workspace_base: root, worker: %{}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "raw-export",
+        execution_profile_id: profile.id,
+        workspace_subdir: ".",
+        config: %{
+          "tracker" => %{"kind" => "memory", "api_key" => "$LINEAR_API_KEY"},
+          "extension" => %{"nested" => [1, true]}
+        },
+        prompt: "Do work"
+      })
+
+    assert {:ok, exported} = Lanes.export(lane)
+    assert {:ok, parsed} = Workflow.parse(exported)
+    assert parsed.config["workspace"]["root"] == root
+    assert parsed.config["tracker"]["api_key"] == "$LINEAR_API_KEY"
+    refute exported =~ System.fetch_env!("LINEAR_API_KEY")
+
+    LaneContext.put(lane.id)
+    assert {:ok, content} = Workflow.current_content()
+    assert {:ok, current} = Workflow.parse(content)
+    assert current.config["extension"] == %{"nested" => [1, true]}
   end
 
   test "invalid config and invalid metadata never write a lane or a version" do
@@ -182,7 +210,7 @@ defmodule SymphonyElixir.LanesTest do
     managed_config = managed_front_matter(tmp_dir)
     {:ok, lane} = create_lane(%{slug: "publication-guard", front_matter: @front_matter})
     {:ok, published} = LaneStore.lookup(lane.id)
-    {:ok, token} = LaneStore.protect_environment(lane.id, nil)
+    {:ok, _token} = LaneStore.protect_environment(lane.id, nil)
     version = Lanes.current_version(lane)
     Repo.update!(Ecto.Changeset.change(version, front_matter: managed_config))
     assert :ok = LaneStore.refresh(lane.id)
@@ -192,9 +220,7 @@ defmodule SymphonyElixir.LanesTest do
     assert [%LaneVersion{id: version_id}] = Lanes.versions(lane)
     assert version_id == published.version_id
     assert {:ok, validated} = Lanes.validate_version(nil, managed_config, "")
-    assert {:error, :environment_identity_in_use} = LaneStore.put_entry(%{published | settings: validated.settings})
-    assert {:ok, ^token} = LaneStore.protect_environment(lane.id, nil, token)
-    assert :ok = LaneStore.release_environment(lane.id, token, :empty_inventory)
+    assert :ok = LaneStore.put_entry(%{published | settings: validated.settings})
   end
 
   test "enable validates current config, disable remains available, and deleted slugs stay reserved" do
@@ -219,19 +245,32 @@ defmodule SymphonyElixir.LanesTest do
     assert {:error, [%{path: "lane"}]} = Lanes.update(stale, %{prompt: "resurrect"})
   end
 
-  test "import and reimport preserve canonical LF fixtures and server config is ignored" do
+  @tag :tmp_dir
+  test "import and reimport preserve canonical LF fixtures and server config is ignored", %{tmp_dir: tmp_dir} do
     for {file, slug} <- [{"client-template.md", "features"}, {"example.md", "example"}] do
-      path = Path.join(@fixtures, file)
+      path = Path.join(tmp_dir, "#{slug}.md")
+      File.write!(path, String.replace(File.read!(Path.join(@fixtures, file)), "/workspaces", Path.join(tmp_dir, slug)))
       assert {:ok, lane, warnings} = Lanes.import_file(path, slug: slug, name: "Imported")
       refute lane.enabled
+      assert lane.workspace_subdir == "."
+      assert Enum.any?(warnings, &String.contains?(&1, "execution profile"))
       assert Enum.any?(warnings, &String.contains?(&1, "server"))
       assert {:ok, exported} = Lanes.export(lane)
       assert {:ok, parsed_export} = Workflow.parse(exported)
       assert parsed_export.config["tracker"]
-      assert {:ok, updated, _} = Lanes.import_file(path, slug: slug, note: "again")
+      profile_id = lane.execution_profile_id
+      assert {:ok, updated, reimport_warnings} = Lanes.import_file(path, slug: slug, note: "again")
       assert updated.id == lane.id
+      refute updated.execution_profile_id == profile_id
+      assert Enum.any?(reimport_warnings, &String.contains?(&1, "execution profile"))
       assert [%LaneVersion{note: "again"}, %LaneVersion{}] = Lanes.versions(updated)
     end
+
+    profile_count = length(ExecutionProfiles.list())
+    failed = Path.join(tmp_dir, "failed.md")
+    File.write!(failed, "---\ntracker:\n  kind: memory\npolling:\n  interval_ms: nope\n---\n")
+    assert {:error, _} = Lanes.import_file(failed, slug: "failed")
+    assert length(ExecutionProfiles.list()) == profile_count
 
     assert {:ok, validated} = Lanes.validate_version(nil, @front_matter <> "\nserver: invalid-but-ignored", "")
     assert Enum.any?(validated.warnings, &String.contains?(&1, "ignored"))

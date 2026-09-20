@@ -46,6 +46,18 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
 
   def resolve(_profile, _lane_config, _workspace_subdir, _prompt), do: {:error, [error("config", "must be an object")]}
 
+  @spec validate_profile(map()) :: :ok | {:error, [map()]}
+  def validate_profile(profile) when is_map(profile) do
+    with {:ok, _worker} <- profile_worker(profile),
+         {:ok, _root} <- profile_workspace_base(profile) do
+      :ok
+    else
+      {:error, errors} when is_list(errors) -> {:error, normalize_profile_errors(errors)}
+    end
+  end
+
+  def validate_profile(_profile), do: {:error, [error("profile", "must be an object")]}
+
   defp pop_if_present(map, key) do
     case Map.fetch(map, key) do
       :error -> {%{}, map}
@@ -167,4 +179,11 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   defp errors_for(reason), do: [error("config", inspect(reason))]
 
   defp error(path, message), do: %{path: path, message: message}
+
+  defp normalize_profile_errors(errors) do
+    Enum.map(errors, fn
+      %{path: "profile." <> path} = error -> %{error | path: path}
+      error -> error
+    end)
+  end
 end

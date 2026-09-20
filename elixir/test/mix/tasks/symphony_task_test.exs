@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.SymphonyTest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.TestSupport
+  alias SymphonyElixir.{TestSupport, Workflow}
 
   @project_root Path.expand("../../..", __DIR__)
   test "Mix dispatch starts a usable daemon and remains attached while it runs" do
@@ -113,7 +113,9 @@ defmodule Mix.Tasks.SymphonyTest do
       )
 
     assert status == 0, output
-    assert output == content
+    assert {:ok, parsed} = Workflow.parse(output)
+    assert parsed.config["tracker"] == %{"kind" => "memory"}
+    assert parsed.prompt == "Exact prompt"
 
     TestSupport.import_coverage(SymphonyElixir.CLI, import_cover)
     TestSupport.import_coverage(SymphonyElixir.CLI, export_cover)

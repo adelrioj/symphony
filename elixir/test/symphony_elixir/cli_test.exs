@@ -192,7 +192,13 @@ defmodule SymphonyElixir.CLITest do
     assert Lanes.current_version(lane).note == "initial"
     assert output =~ "imported lane #{slug} version #{lane.current_version_id}"
     assert output =~ "warning:"
-    assert capture_io(fn -> assert :ok = CLI.evaluate(["lanes", "export", slug, "--data-root", root], offline) end) == content
+    assert output =~ "created execution profile Imported"
+
+    exported = capture_io(fn -> assert :ok = CLI.evaluate(["lanes", "export", slug, "--data-root", root], offline) end)
+    assert {:ok, parsed} = Workflow.parse(exported)
+    assert parsed.config["tracker"] == %{"kind" => "memory"}
+    assert parsed.config["server"]["port"] == 9999
+    assert parsed.prompt == "Prompt with trailing spaces"
   end
 
   test "import reports real field validation and unreadable files", %{root: root} do
@@ -286,6 +292,7 @@ defmodule SymphonyElixir.CLITest do
 
   test "serve_linear_mcp_loop/2 handles Content-Length framed requests and responses", %{root: root} do
     File.mkdir_p!(root)
+    TestSupport.reset_lanes!()
     :ok = TestSupport.write_workflow_file!(Path.join(root, "WORKFLOW.md"))
     on_exit(fn -> TestSupport.reset_lanes!() end)
 

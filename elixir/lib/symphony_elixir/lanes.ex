@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Lanes do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ExecutionProfiles
   alias SymphonyElixir.ExecutionProfiles.Configuration
+  alias SymphonyElixir.ExecutionProfiles.Profile
   alias SymphonyElixir.Lanes.{Lane, LaneVersion}
 
   @type error :: %{path: String.t(), message: String.t()}
@@ -138,8 +139,23 @@ defmodule SymphonyElixir.Lanes do
   @spec export(Lane.t()) :: {:ok, String.t()} | {:error, :no_version}
   def export(%Lane{} = lane) do
     case current_version(lane) do
-      nil -> {:error, :no_version}
-      version -> {:ok, Workflow.render(version.front_matter, version.prompt)}
+      nil ->
+        {:error, :no_version}
+
+      _version ->
+        case LaneStore.lookup(lane.id) do
+          {:ok, %{workflow: %{config: config, prompt: prompt}}} ->
+            {:ok, Workflow.render(Workflow.encode_config(config), prompt)}
+
+          _ ->
+            case resolve_lane(lane) do
+              {:ok, %{workflow: %{config: config, prompt: prompt}}} ->
+                {:ok, Workflow.render(Workflow.encode_config(config), prompt)}
+
+              _ ->
+                {:error, :no_version}
+            end
+        end
     end
   end
 
@@ -279,30 +295,90 @@ defmodule SymphonyElixir.Lanes do
 
     with {:ok, workflow} <- Workflow.parse_parts(front_matter, prompt),
          {profile_attrs, config} = Configuration.split(workflow.config),
-         {:ok, profile} <-
-           ExecutionProfiles.create(%{
-             name: "Imported #{slug} #{System.unique_integer([:positive])}",
-             workspace_base: profile_attrs["workspace_base"] || %Schema.Workspace{}.root,
-             worker: profile_attrs["worker"] || %{}
-           }),
-         {:ok, lane} <- import_lane(slug, config, prompt, profile.id, opts) do
-      {:ok, lane, warnings(front_matter)}
+         {:ok, %{lane: lane, profile_name: profile_name}} <- import_mutation(slug, profile_attrs, config, prompt, opts) do
+      {:ok, lane, ["created execution profile #{profile_name}" | warnings(front_matter)]}
     else
       {:error, errors} when is_list(errors) -> {:error, errors_for(errors)}
       {:error, reason} -> {:error, errors_for(reason)}
     end
   end
 
-  defp import_lane(slug, config, prompt, profile_id, opts) do
+  defp import_mutation(slug, profile_attrs, config, prompt, opts) do
+    profile_name = imported_profile_name(slug)
+
+    mutation = fn check ->
+      with {:ok, profile} <-
+             Repo.insert(
+               Profile.changeset(%Profile{}, %{
+                 "name" => profile_name,
+                 "workspace_base" => profile_attrs["workspace_base"] || %Schema.Workspace{}.root,
+                 "worker" => profile_attrs["worker"] || %{}
+               })
+             ),
+           {:ok, lane} <- import_lane(slug, config, prompt, profile.id, opts, check) do
+        {:ok, {:batch, lane, [lane.id]}}
+      else
+        {:error, %Ecto.Changeset{} = changeset} -> {:error, errors_for(changeset)}
+        {:error, errors} -> {:error, errors}
+      end
+    end
+
+    result =
+      if Process.whereis(LaneStore) do
+        LaneStore.mutate(nil, mutation, nil)
+      else
+        Repo.transaction(fn ->
+          case mutation.(fn _settings -> :ok end) do
+            {:ok, value} -> value
+            {:error, error} -> Repo.rollback(error)
+          end
+        end)
+      end
+
+    result
+    |> case do
+      {:ok, {:batch, lane, _ids}} -> {:ok, %{lane: lane, profile_name: profile_name}}
+      {:ok, lane} -> {:ok, %{lane: lane, profile_name: profile_name}}
+      {:error, errors} when is_list(errors) -> {:error, errors}
+      {:error, reason} -> {:error, errors_for(reason)}
+    end
+  end
+
+  defp import_lane(slug, config, prompt, profile_id, opts, check) do
     case get_by_slug(slug) do
       nil ->
-        create(%{slug: slug, name: Keyword.get(opts, :name, slug), enabled: false, execution_profile_id: profile_id, config: config, prompt: prompt, note: Keyword.get(opts, :note, "import")})
+        create_lane(
+          %{
+            "slug" => slug,
+            "name" => Keyword.get(opts, :name, slug),
+            "enabled" => false,
+            "execution_profile_id" => profile_id,
+            "workspace_subdir" => ".",
+            "config" => config,
+            "prompt" => prompt,
+            "note" => Keyword.get(opts, :note, "import")
+          },
+          check
+        )
 
       lane ->
-        attrs = %{execution_profile_id: profile_id, config: config, prompt: prompt, note: Keyword.get(opts, :note, "import")}
-        attrs = if Keyword.has_key?(opts, :name), do: Map.put(attrs, :name, opts[:name]), else: attrs
-        update(lane, attrs)
+        attrs = %{
+          "execution_profile_id" => profile_id,
+          "workspace_subdir" => ".",
+          "config" => config,
+          "prompt" => prompt,
+          "note" => Keyword.get(opts, :note, "import")
+        }
+
+        attrs = if Keyword.has_key?(opts, :name), do: Map.put(attrs, "name", opts[:name]), else: attrs
+        update_lane(lane.id, attrs, check)
     end
+  end
+
+  defp imported_profile_name(slug) do
+    candidate = "Imported #{slug} #{System.unique_integer([:positive])}"
+
+    if Enum.any?(ExecutionProfiles.list(), &(&1.name == candidate)), do: imported_profile_name(slug), else: candidate
   end
 
   defp mutate(lane_id, fun, reason \\ nil) do
@@ -317,7 +393,7 @@ defmodule SymphonyElixir.Lanes do
   defp transact_mutation(fun, check) do
     Repo.transaction(fn ->
       case fun.(check) do
-        {:ok, lane} -> lane
+        {:ok, value} -> value
         {:error, error} -> Repo.rollback(error)
       end
     end)
@@ -399,7 +475,10 @@ defmodule SymphonyElixir.Lanes do
     errors =
       [
         Map.has_key?(attrs, "front_matter") && %{path: "front_matter", message: "is no longer accepted; use config"},
-        Map.has_key?(attrs, "executor") && %{path: "executor", message: "is no longer accepted; use execution_profile_id"}
+        Map.has_key?(attrs, "executor") && %{path: "executor", message: "is no longer accepted; use execution_profile_id"},
+        Map.has_key?(attrs, "worker") && %{path: "worker", message: "is owned by the execution profile"},
+        Map.has_key?(attrs, "workspace") && %{path: "workspace", message: "is owned by the execution profile"},
+        Map.has_key?(attrs, "workspace_base") && %{path: "workspace_base", message: "is owned by the execution profile"}
       ]
       |> Enum.reject(&is_boolean/1)
 

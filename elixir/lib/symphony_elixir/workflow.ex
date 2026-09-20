@@ -45,8 +45,8 @@ defmodule SymphonyElixir.Workflow do
   @spec current_content() :: {:ok, String.t()} | {:error, term()}
   def current_content do
     with {:ok, entry} <- LaneContext.capture() do
-      if is_binary(entry.front_matter) do
-        {:ok, render(entry.front_matter, entry.prompt)}
+      if is_map(entry.workflow) and is_map(entry.workflow.config) do
+        {:ok, render(encode_config(entry.workflow.config), entry.workflow.prompt)}
       else
         {:error, {:lane_invalid, entry.error}}
       end
