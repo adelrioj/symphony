@@ -21,13 +21,21 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     def handle_call({:mode, mode}, _from, state), do: {:reply, :ok, %{state | mode: mode}}
   end
 
+  test "resource keys fit the Workstations ID length and character constraints" do
+    key = Environment.resource_key("Deployment:/α", "linear", String.duplicate("Issue:/β", 100))
+
+    assert byte_size(key) <= 56
+    assert String.match?(key, ~r/\A[a-z][a-z0-9-]*[a-z0-9]\z/)
+  end
+
   test "opaque issue keys cannot collide through separator or display-name changes" do
     left = Environment.resource_key("deployment:a", "linear", "b")
     right = Environment.resource_key("deployment", "a:linear", "b")
     refute left == right
     assert left == Environment.resource_key("deployment:a", "linear", "b")
-    assert String.match?(left, ~r/^se-[0-9a-f]{56}$/)
     refute left == Environment.resource_key("deployment:a", "linear", "B")
+    refute left == Environment.resource_key("deployment:b", "linear", "b")
+    refute left == Environment.resource_key("deployment:a", "github", "b")
   end
 
   test "managed startup cannot have a zero deadline" do
