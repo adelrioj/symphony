@@ -5,6 +5,9 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.PathSafety
 
+  @redacted "$REDACTED"
+  @missing :__symphony_missing__
+
   @spec split(map()) :: {map(), map()}
   def split(config) when is_map(config) do
     {profile, lane_config} = pop_if_present(config, "worker")
@@ -23,6 +26,24 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
         {profile, lane_config}
     end
   end
+
+  @spec redact_secrets(term()) :: term()
+  def redact_secrets(map) when is_map(map) do
+    Map.new(map, fn {key, value} ->
+      value =
+        if secret_key?(key) and is_binary(value) and not String.starts_with?(value, "$"),
+          do: @redacted,
+          else: redact_secrets(value)
+
+      {key, value}
+    end)
+  end
+
+  def redact_secrets(list) when is_list(list), do: Enum.map(list, &redact_secrets/1)
+  def redact_secrets(value), do: value
+
+  @spec restore_redacted(term(), term(), String.t()) :: {:ok, term()} | {:error, [map()]}
+  def restore_redacted(value, original, path) when is_binary(path), do: restore_redacted_value(value, original, path)
 
   @spec resolve(map(), map(), String.t(), String.t()) ::
           {:ok, map()} | {:error, [map()]}
@@ -80,6 +101,17 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   end
 
   def location_source(_profile, _workspace_subdir), do: nil
+
+  @doc false
+  @spec workspace_base(map()) :: String.t() | nil
+  def workspace_base(profile) when is_map(profile) do
+    profile
+    |> Map.get("workspace_base", Map.get(profile, :workspace_base))
+    |> case do
+      value when is_binary(value) and value != "" -> resolve_workspace_base(value)
+      _ -> nil
+    end
+  end
 
   defp pop_if_present(map, key) do
     case Map.fetch(map, key) do
@@ -226,4 +258,40 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
       error -> error
     end)
   end
+
+  defp restore_redacted_value(@redacted, original, _path) when original not in [@missing, @redacted], do: {:ok, original}
+  defp restore_redacted_value(@redacted, _original, path), do: {:error, [error(path, "cannot redact a value that does not already exist")]}
+
+  defp restore_redacted_value(value, original, path) when is_map(value) do
+    Enum.reduce_while(value, {:ok, %{}}, fn {key, child}, {:ok, restored} ->
+      child_original = if is_map(original), do: Map.get(original, key, @missing), else: @missing
+
+      case restore_redacted_value(child, child_original, child_path(path, key)) do
+        {:ok, result} -> {:cont, {:ok, Map.put(restored, key, result)}}
+        {:error, errors} -> {:halt, {:error, errors}}
+      end
+    end)
+  end
+
+  defp restore_redacted_value(value, original, path) when is_list(value) do
+    value
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {child, index}, {:ok, restored} ->
+      child_original = if is_list(original), do: Enum.at(original, index, @missing), else: @missing
+
+      case restore_redacted_value(child, child_original, "#{path}[#{index}]") do
+        {:ok, result} -> {:cont, {:ok, [result | restored]}}
+        {:error, errors} -> {:halt, {:error, errors}}
+      end
+    end)
+    |> case do
+      {:ok, restored} -> {:ok, Enum.reverse(restored)}
+      error -> error
+    end
+  end
+
+  defp restore_redacted_value(value, _original, _path), do: {:ok, value}
+  defp child_path("", key), do: to_string(key)
+  defp child_path(path, key), do: path <> "." <> to_string(key)
+  defp secret_key?(key), do: Regex.match?(~r/(api.?key|token|secret|password|credential)/i, to_string(key))
 end

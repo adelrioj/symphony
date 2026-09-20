@@ -4,7 +4,9 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias SymphonyElixir.ExecutionProfiles
+  alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.Lanes
+  alias SymphonyElixir.Workflow
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @impl true
@@ -13,7 +15,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
 
     case Lanes.get_by_slug(slug) do
       nil -> {:ok, socket |> put_flash(:error, "No lane with slug #{slug}") |> push_navigate(to: "/")}
-      lane -> {:ok, assign(socket, lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: Lanes.versions(lane), errors: [])}
+      lane -> {:ok, assign(socket, lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: version_rows(lane), errors: [])}
     end
   end
 
@@ -31,7 +33,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
       {:ok, lane} ->
         {:noreply,
          socket
-         |> assign(lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: Lanes.versions(lane), errors: [])
+         |> assign(lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: version_rows(lane), errors: [])
          |> put_flash(:info, "Historical lane settings use the currently selected profile; infrastructure is not rolled back.")}
 
       {:error, errors} ->
@@ -43,7 +45,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
   def handle_info({:lane_updated, _slug}, socket) do
     case Lanes.get_by_slug(socket.assigns.lane.slug) do
       nil -> {:noreply, socket |> put_flash(:error, "Lane no longer exists") |> push_navigate(to: "/")}
-      lane -> {:noreply, assign(socket, lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: Lanes.versions(lane))}
+      lane -> {:noreply, assign(socket, lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: version_rows(lane))}
     end
   end
 
@@ -66,16 +68,17 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
           <table class="data-table" id="versions">
             <thead><tr><th>Version</th><th>Saved</th><th>Note</th><th></th></tr></thead>
             <tbody>
-              <tr :for={version <- @versions} id={"version-#{version.id}"}>
-                <td class="mono">#{version.id}</td>
-                <td class="mono">{DateTime.to_iso8601(version.inserted_at)}</td>
-                <td>{version.note}</td>
+              <tr :for={row <- @versions} id={"version-#{row.version.id}"}>
+                <td class="mono">#{row.version.id}</td>
+                <td class="mono">{DateTime.to_iso8601(row.version.inserted_at)}</td>
+                <td>{row.version.note}</td>
                 <td>
-                  <%= if version.id == @lane.current_version_id do %>
+                  <%= if row.version.id == @lane.current_version_id do %>
                     <span class="state-badge state-badge-active">current</span>
                   <% else %>
-                    <button type="button" class="subtle-button" phx-click="activate" phx-value-id={version.id}>Make current</button>
+                    <button type="button" class="subtle-button" phx-click="activate" phx-value-id={row.version.id}>Make current</button>
                   <% end %>
+                  <details class="version-inspection"><summary>Inspect</summary><p :if={row.invalid?} class="field-error">Invalid historical front matter; repair by saving a replacement version.</p><pre class="mono">{row.content}</pre></details>
                 </td>
               </tr>
             </tbody>
@@ -84,5 +87,24 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
       </section>
     </section>
     """
+  end
+
+  defp version_rows(lane), do: lane |> Lanes.versions() |> Enum.map(&version_row/1)
+
+  defp version_row(version) do
+    case Workflow.parse_parts(version.front_matter, version.prompt) do
+      {:ok, workflow} ->
+        {_profile, config} = Configuration.split(workflow.config)
+        %{version: version, invalid?: false, content: Workflow.render(Workflow.encode_config(Configuration.redact_secrets(config)), workflow.prompt)}
+
+      {:error, _reason} ->
+        %{version: version, invalid?: true, content: Workflow.render(redact_invalid_source(version.front_matter), version.prompt)}
+    end
+  end
+
+  defp redact_invalid_source(source) do
+    Regex.replace(~r/^(\s*[^#\n]*(?:api.?key|token|secret|password|credential)[^:\n]*:\s*)(.*)$/mi, source, fn line, prefix, value ->
+      if String.starts_with?(String.trim(value), "$"), do: line, else: prefix <> "$REDACTED"
+    end)
   end
 end

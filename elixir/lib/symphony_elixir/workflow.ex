@@ -3,6 +3,7 @@ defmodule SymphonyElixir.Workflow do
   Loads workflow configuration and prompt from WORKFLOW.md.
   """
 
+  alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.LaneContext
 
   @workflow_file_name "WORKFLOW.md"
@@ -46,7 +47,7 @@ defmodule SymphonyElixir.Workflow do
   def current_content do
     with {:ok, entry} <- LaneContext.capture() do
       if is_map(entry.workflow) and is_map(entry.workflow.config) do
-        {:ok, render(encode_config(entry.workflow.config), entry.workflow.prompt)}
+        {:ok, render(encode_config(Configuration.redact_secrets(entry.workflow.config)), entry.workflow.prompt)}
       else
         {:error, {:lane_invalid, entry.error}}
       end

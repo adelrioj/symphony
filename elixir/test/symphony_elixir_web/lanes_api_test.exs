@@ -73,6 +73,20 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     assert created["config"]["tracker"]["api_key"] == "$REDACTED"
     assert created["config"]["extension"]["token"] == "$EXTENSION_TOKEN"
     refute Jason.encode!(json_response(get(api_conn(), "/api/v1/lanes"), 200)) =~ "literal-tracker-secret"
+
+    round_tripped =
+      json_response(
+        put(api_conn(), "/api/v1/lanes/secret-safe-lane", Jason.encode!(%{"config" => created["config"], "name" => "Round tripped"})),
+        200
+      )
+
+    assert round_tripped["config"]["tracker"]["api_key"] == "$REDACTED"
+    assert {:ok, stored} = Workflow.parse_parts(Lanes.current_version(Lanes.get_by_slug("secret-safe-lane")).front_matter, "")
+    assert stored.config["tracker"]["api_key"] == "literal-tracker-secret"
+
+    bad_attrs = attrs("unmatched-redaction") |> Map.put(:config, %{"tracker" => %{"kind" => "memory", "api_key" => "$REDACTED"}})
+    errors = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(bad_attrs)), 422)["errors"]
+    assert Enum.any?(errors, &(&1["path"] == "config.tracker.api_key"))
   end
 
   test "invalid JSON field types and nonobject bodies are rejected without persisting changes" do

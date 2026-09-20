@@ -5,7 +5,7 @@ defmodule SymphonyElixir.LaneStore do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Config, LaneRegistry, Lanes, LaneSupervisor, Repo, Runs, Workflow, Workspace}
+  alias SymphonyElixir.{Config, LaneRegistry, Lanes, LaneSupervisor, PathSafety, Repo, Runs, Workflow, Workspace}
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixir.ExecutionProfiles.Configuration
@@ -26,6 +26,7 @@ defmodule SymphonyElixir.LaneStore do
       :executor,
       :profile_id,
       :profile_name,
+      :workspace_base,
       :workspace_subdir,
       :location_source,
       :version_id,
@@ -661,6 +662,7 @@ defmodule SymphonyElixir.LaneStore do
       executor: lane.executor,
       profile_id: lane.execution_profile_id,
       profile_name: profile_name(lane),
+      workspace_base: profile_workspace_base(lane),
       workspace_subdir: lane.workspace_subdir,
       location_source: location_source,
       version_id: lane.current_version_id,
@@ -703,6 +705,7 @@ defmodule SymphonyElixir.LaneStore do
       executor: lane.executor,
       profile_id: lane.execution_profile_id,
       profile_name: profile_name(lane),
+      workspace_base: profile_workspace_base(lane),
       workspace_subdir: lane.workspace_subdir,
       version_id: lane.current_version_id,
       generation: make_ref(),
@@ -722,6 +725,31 @@ defmodule SymphonyElixir.LaneStore do
           %{name: name} -> name
           _ -> nil
         end
+    end
+  end
+
+  defp profile_workspace_base(lane) do
+    profile =
+      case lane.execution_profile do
+        %SymphonyElixir.ExecutionProfiles.Profile{} = profile -> profile
+        _ -> SymphonyElixir.ExecutionProfiles.get(lane.execution_profile_id)
+      end
+
+    case profile do
+      %SymphonyElixir.ExecutionProfiles.Profile{worker: worker} = profile ->
+        base = Configuration.workspace_base(Map.from_struct(profile))
+
+        if is_binary(base) and worker["ssh_hosts"] in [nil, []] and not is_map(worker["environment"]) do
+          case PathSafety.canonicalize(Path.expand(base, Config.data_root())) do
+            {:ok, canonical} -> canonical
+            _ -> base
+          end
+        else
+          base
+        end
+
+      _ ->
+        nil
     end
   end
 

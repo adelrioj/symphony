@@ -265,9 +265,9 @@ defmodule SymphonyElixir.Workspace do
   @spec remove_recorded(Path.t(), ExecutionContext.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove_recorded(workspace, %ExecutionContext{mode: :local} = context) when is_binary(workspace) do
     if Path.type(workspace) == :absolute do
-      case validate_recorded_workspace_path(workspace) do
+      case validate_workspace_path(workspace, context) do
         :ok ->
-          remove_local_workspace(workspace, %{context | workspace_root: Path.dirname(workspace)})
+          remove_local_workspace(workspace, context)
 
         {:error, reason} ->
           {:error, reason, ""}
@@ -559,8 +559,8 @@ defmodule SymphonyElixir.Workspace do
   end
 
   @spec validate_workspace_path(Path.t(), ExecutionContext.t()) :: :ok | {:error, term()}
-  def validate_workspace_path(workspace, %ExecutionContext{mode: :local, workspace_root: root}) when is_binary(workspace) do
-    validate_local_workspace_path(workspace, root)
+  def validate_workspace_path(workspace, %ExecutionContext{mode: :local, workspace_root: root, workspace_base: base}) when is_binary(workspace) do
+    validate_local_workspace_path(workspace, root, base || root)
   end
 
   def validate_workspace_path(workspace, %ExecutionContext{} = context) when is_binary(workspace) do
@@ -568,7 +568,8 @@ defmodule SymphonyElixir.Workspace do
       String.trim(workspace) == "" ->
         {:error, {:workspace_path_unreadable, workspace, :empty}}
 
-      invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root) ->
+      invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root) or
+          invalid_remote_path?(context.workspace_base || context.workspace_root) ->
         {:error, {:workspace_path_unreadable, workspace, :invalid_characters}}
 
       true ->
@@ -597,7 +598,12 @@ defmodule SymphonyElixir.Workspace do
   defp invalid_remote_path?(_path), do: true
 
   defp remote_workspace_guard(workspace, %ExecutionContext{} = context) do
-    invalid_path? = invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root)
+    base = context.workspace_base || context.workspace_root
+
+    invalid_path? =
+      invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root) or
+        invalid_remote_path?(base)
+
     identity_mismatch? = context.mode == :managed and workspace != context.workspace_path
 
     if invalid_path? or identity_mismatch? do
@@ -605,10 +611,16 @@ defmodule SymphonyElixir.Workspace do
     else
       [
         "set -eu",
+        remote_shell_assign("workspace_base", base),
         remote_shell_assign("workspace_root", context.workspace_root),
         remote_shell_assign("workspace", workspace),
+        "base_real=$(realpath -m -- \"$workspace_base\")",
         "root_real=$(realpath -m -- \"$workspace_root\")",
         "workspace_real=$(realpath -m -- \"$workspace\")",
+        "case \"$root_real\" in",
+        "  \"$base_real\"|\"$base_real\"/*) ;;",
+        "  *) exit 64 ;;",
+        "esac",
         "case \"$workspace_real\" in",
         "  \"$root_real\"/*) test \"$workspace_real\" != \"$root_real\" ;;",
         "  *) exit 64 ;;",
@@ -618,21 +630,23 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp validate_recorded_workspace_path(workspace) when is_binary(workspace) do
-    validate_local_workspace_path(workspace, Path.dirname(workspace))
-  end
-
-  defp validate_local_workspace_path(workspace, workspace_root)
-       when is_binary(workspace) and is_binary(workspace_root) do
+  defp validate_local_workspace_path(workspace, workspace_root, workspace_base)
+       when is_binary(workspace) and is_binary(workspace_root) and is_binary(workspace_base) do
     expanded_workspace = Path.expand(workspace)
     expanded_root = Path.expand(workspace_root)
+    expanded_base = Path.expand(workspace_base)
     expanded_root_prefix = expanded_root <> "/"
 
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
-         {:ok, canonical_root} <- PathSafety.canonicalize(expanded_root) do
+         {:ok, canonical_root} <- PathSafety.canonicalize(expanded_root),
+         {:ok, canonical_base} <- PathSafety.canonicalize(expanded_base),
+         {:ok, root_contained?} <- PathSafety.contained?(canonical_root, canonical_base) do
       canonical_root_prefix = canonical_root <> "/"
 
       cond do
+        not root_contained? ->
+          {:error, {:workspace_root_outside_base, canonical_root, canonical_base}}
+
         canonical_workspace == canonical_root ->
           {:error, {:workspace_equals_root, canonical_workspace, canonical_root}}
 

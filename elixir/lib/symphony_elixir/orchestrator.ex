@@ -1583,8 +1583,22 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_issue_workspace(_issue_or_identifier, _worker_host), do: :ok
 
-  defp static_execution_context(nil), do: ExecutionContext.local(Config.local_workspace_root())
-  defp static_execution_context(host), do: ExecutionContext.ssh(Config.settings!().workspace.root, host)
+  defp static_execution_context(nil) do
+    root = Config.local_workspace_root()
+    ExecutionContext.local(root, snapshot_workspace_base(root))
+  end
+
+  defp static_execution_context(host) do
+    root = Config.settings!().workspace.root
+    ExecutionContext.ssh(root, host, snapshot_workspace_base(root))
+  end
+
+  defp snapshot_workspace_base(fallback) do
+    case LaneContext.snapshot() do
+      {:ok, %{workspace_base: base}} when is_binary(base) and base != "" -> base
+      _ -> fallback
+    end
+  end
 
   defp run_terminal_workspace_cleanup do
     case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do

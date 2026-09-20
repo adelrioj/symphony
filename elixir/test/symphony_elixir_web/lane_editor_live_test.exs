@@ -107,6 +107,41 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert get_in(workflow.config, ["polling", "interval_ms"]) == 17
   end
 
+  test "a blank new-lane workspace follows the complete slug", %{conn: conn} do
+    profile = new_profile!()
+    {:ok, view, _html} = live(conn, "/lanes/new")
+
+    render_change(view, "validate", %{"lane" => %{"slug" => "f"}})
+    assert has_element?(view, "#lane-workspace-subdir[value='']")
+    render_change(view, "validate", %{"lane" => %{"slug" => "features"}})
+
+    view
+    |> form("#lane-form", lane: %{slug: "features", name: "Features", execution_profile_id: profile.id, tracker_kind: "memory"})
+    |> render_submit()
+
+    assert Lanes.get_by_slug("features").workspace_subdir == "features"
+  end
+
+  @tag :tmp_dir
+  test "an unchanged SSH location remains editable while its host is unavailable", %{conn: conn, tmp_dir: root} do
+    fake_ssh = Path.join(root, "ssh")
+    previous_path = System.get_env("PATH")
+    File.write!(fake_ssh, "#!/bin/sh\nprintf '/remote/base\\t/remote/base/ssh-editor\\n'\n")
+    File.chmod!(fake_ssh, 0o755)
+    System.put_env("PATH", root <> ":" <> (previous_path || ""))
+    on_exit(fn -> restore_env("PATH", previous_path) end)
+
+    {:ok, profile} = ExecutionProfiles.create(%{name: "SSH editor", workspace_base: "/remote/base", worker: %{"ssh_hosts" => ["host-a"]}})
+    {:ok, lane} = Lanes.create(%{slug: "ssh-editor", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    File.rm!(fake_ssh)
+
+    {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
+    view |> form("#lane-form", lane: %{name: "Renamed offline"}) |> render_submit()
+
+    assert_redirect(view, "/lanes/#{lane.slug}")
+    assert Lanes.get!(lane.id).name == "Renamed offline"
+  end
+
   test "unknown nested config and raw secret references survive an unrelated name edit", %{conn: conn} do
     config = %{"tracker" => %{"kind" => "memory", "api_key" => "$LINEAR_API_KEY"}, "extension" => %{"nested" => [%{"keep" => true}]}}
     profile = new_profile!()

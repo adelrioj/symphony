@@ -264,7 +264,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
           <.lane_field_errors errors={@errors} field="execution_profile_id" path="execution_profile_id" />
           <button type="button" class="subtle-button" phx-click="open_profile_create">Create profile inline</button>
           <p :if={selected_profile(@profiles, @params["execution_profile_id"])} class="field-help"><a class="issue-link" href={"/execution-profiles/#{selected_profile(@profiles, @params["execution_profile_id"]).id}"}>View selected profile</a> · {profile_summary(selected_profile(@profiles, @params["execution_profile_id"]))}</p>
-          <p :if={selected_profile(@profiles, @params["execution_profile_id"])} class="field-help">Effective workspace: <span class="mono">{effective_workspace(selected_profile(@profiles, @params["execution_profile_id"]), @params["workspace_subdir"])}</span></p>
+          <p :if={selected_profile(@profiles, @params["execution_profile_id"])} class="field-help">Effective workspace: <span class="mono">{effective_workspace(selected_profile(@profiles, @params["execution_profile_id"]), workspace_subdir(@params))}</span></p>
           <p :if={@profiles == []} class="empty-state">No execution profiles exist. Create one to continue.</p>
           <label for="lane-workspace-subdir">Advanced workspace subdirectory</label><input id="lane-workspace-subdir" type="text" name="lane[workspace_subdir]" value={@params["workspace_subdir"]} />
           <.lane_field_errors errors={@errors} field="workspace_subdir" path="workspace_subdir" />
@@ -358,10 +358,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
         if is_binary(value) or is_boolean(value) or is_integer(value), do: {Map.put(params, field, value), errors}, else: {params, [%{path: field, message: "must be a scalar form value"} | errors]}
       end)
 
-    params =
-      params
-      |> Map.put("_submitted_fields", submitted_fields)
-      |> then(&if(&1["workspace_subdir"] in [nil, ""], do: Map.put(&1, "workspace_subdir", &1["slug"]), else: &1))
+    params = Map.put(params, "_submitted_fields", submitted_fields)
 
     {params, errors}
   end
@@ -380,7 +377,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
     errors =
       case config_result do
-        {:ok, config} -> lane_errors ++ validate_against_profile(params, config)
+        {:ok, config} -> lane_errors ++ validate_against_profile(lane, params, config)
         {:error, errors} -> lane_errors ++ errors
       end
 
@@ -393,7 +390,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {config_result, errors, warnings}
   end
 
-  defp validate_against_profile(params, config) do
+  defp validate_against_profile(lane, params, config) do
     case integer_param(params["execution_profile_id"]) do
       {:ok, id} ->
         case ExecutionProfiles.get(id) do
@@ -401,12 +398,15 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
             [%{path: "execution_profile_id", message: "not found"}]
 
           profile ->
+            subdir = workspace_subdir(params)
+
             errors_for_resolution(
               Configuration.resolve(
                 profile_attrs(profile),
                 config,
-                workspace_subdir(params),
-                params["prompt"]
+                subdir,
+                params["prompt"],
+                Lanes.cached_root(lane && lane.id, profile_attrs(profile), subdir)
               )
             )
         end

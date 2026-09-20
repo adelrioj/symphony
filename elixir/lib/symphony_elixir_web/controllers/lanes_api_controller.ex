@@ -15,21 +15,12 @@ defmodule SymphonyElixirWeb.LanesApiController do
   def index(conn, _params), do: json(conn, %{lanes: Enum.map(Lanes.list(), &lane_json/1)})
 
   @spec create(Conn.t(), map()) :: Conn.t()
-  def create(conn, _params) do
-    with_attributes(conn, fn attrs ->
-      case Lanes.create(attrs) do
-        {:ok, lane} -> conn |> put_status(201) |> json(lane_json(lane))
-        {:error, errors} -> errors_response(conn, errors)
-      end
-    end)
-  end
+  def create(conn, _params), do: with_attributes(conn, &create_lane(conn, &1))
 
   @spec update(Conn.t(), map()) :: Conn.t()
   def update(conn, _params) do
     with_lane(conn, fn lane ->
-      with_attributes(conn, fn attrs ->
-        lane_response(conn, Lanes.update(lane, attrs))
-      end)
+      with_attributes(conn, &update_lane(conn, lane, &1))
     end)
   end
 
@@ -93,6 +84,22 @@ defmodule SymphonyElixirWeb.LanesApiController do
   defp lane_response(conn, {:ok, lane}), do: json(conn, lane_json(lane))
   defp lane_response(conn, {:error, errors}), do: errors_response(conn, errors)
 
+  defp create_lane(conn, attrs) do
+    with {:ok, attrs} <- restore_config(attrs, %{}),
+         {:ok, lane} <- Lanes.create(attrs) do
+      conn |> put_status(201) |> json(lane_json(lane))
+    else
+      {:error, errors} -> errors_response(conn, errors)
+    end
+  end
+
+  defp update_lane(conn, lane, attrs) do
+    case restore_config(attrs, lane_config(lane)) do
+      {:ok, attrs} -> lane_response(conn, Lanes.update(lane, attrs))
+      {:error, errors} -> errors_response(conn, errors)
+    end
+  end
+
   defp errors_response(conn, errors), do: conn |> put_status(422) |> json(%{errors: errors})
 
   defp lane_json(%Lane{} = lane) do
@@ -133,6 +140,19 @@ defmodule SymphonyElixirWeb.LanesApiController do
           _ ->
             %{}
         end
+    end
+  end
+
+  defp restore_config(attrs, original) do
+    case Map.fetch(attrs, "config") do
+      {:ok, config} ->
+        case Configuration.restore_redacted(config, original, "config") do
+          {:ok, restored} -> {:ok, Map.put(attrs, "config", restored)}
+          error -> error
+        end
+
+      :error ->
+        {:ok, attrs}
     end
   end
 end

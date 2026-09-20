@@ -64,6 +64,17 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
 
     listed = json_response(get(api_conn(), "/api/v1/execution-profiles"), 200)
     refute Jason.encode!(listed) =~ "literal-worker-secret"
+
+    updated =
+      created
+      |> Map.put("description", "round trip")
+      |> then(&json_response(put(api_conn(), "/api/v1/execution-profiles/#{created["id"]}", Jason.encode!(&1)), 200))
+
+    assert updated["worker"]["api_key"] == "$REDACTED"
+    assert ExecutionProfiles.get(created["id"]).worker["api_key"] == "literal-worker-secret"
+
+    errors = json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "No source", worker: %{api_key: "$REDACTED"}})), 422)["errors"]
+    assert Enum.any?(errors, &(&1["path"] == "worker.api_key"))
   end
 
   test "duplicate names and invalid profile maps return field errors" do

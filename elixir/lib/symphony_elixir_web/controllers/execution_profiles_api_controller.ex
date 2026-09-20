@@ -6,6 +6,7 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
 
   alias Plug.Conn
   alias SymphonyElixir.ExecutionProfiles
+  alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.ExecutionProfiles.Profile
   alias SymphonyElixirWeb.ConfigurationFields
 
@@ -21,9 +22,15 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
   @spec create(Conn.t(), map()) :: Conn.t()
   def create(conn, _params) do
     with_attributes(conn, fn attrs ->
-      case ExecutionProfiles.create(attrs) do
-        {:ok, profile} -> conn |> put_status(201) |> json(profile_json(profile))
-        {:error, errors} -> errors_response(conn, errors)
+      case restore_worker(attrs, %{}) do
+        {:ok, attrs} ->
+          case ExecutionProfiles.create(attrs) do
+            {:ok, profile} -> conn |> put_status(201) |> json(profile_json(profile))
+            {:error, errors} -> errors_response(conn, errors)
+          end
+
+        {:error, errors} ->
+          errors_response(conn, errors)
       end
     end)
   end
@@ -32,9 +39,15 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
   def update(conn, _params) do
     with_profile(conn, fn profile ->
       with_attributes(conn, fn attrs ->
-        case ExecutionProfiles.update(profile, attrs) do
-          {:ok, updated} -> json(conn, profile_json(updated))
-          {:error, errors} -> errors_response(conn, errors)
+        case restore_worker(attrs, profile.worker) do
+          {:ok, attrs} ->
+            case ExecutionProfiles.update(profile, attrs) do
+              {:ok, updated} -> json(conn, profile_json(updated))
+              {:error, errors} -> errors_response(conn, errors)
+            end
+
+          {:error, errors} ->
+            errors_response(conn, errors)
         end
       end)
     end)
@@ -89,6 +102,19 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
       linked_lane_ids: Enum.map(ExecutionProfiles.linked_lanes(profile), & &1.id),
       updated_at: profile.updated_at
     }
+  end
+
+  defp restore_worker(attrs, original) do
+    case Map.fetch(attrs, "worker") do
+      {:ok, worker} ->
+        case Configuration.restore_redacted(worker, original, "worker") do
+          {:ok, restored} -> {:ok, Map.put(attrs, "worker", restored)}
+          error -> error
+        end
+
+      :error ->
+        {:ok, attrs}
+    end
   end
 
   defp errors_response(conn, errors), do: conn |> put_status(422) |> json(%{errors: errors})

@@ -136,12 +136,12 @@ defmodule SymphonyElixir.Lanes do
       _version ->
         case LaneStore.lookup(lane.id) do
           {:ok, %{workflow: %{config: config, prompt: prompt}}} ->
-            {:ok, Workflow.render(Workflow.encode_config(config), prompt)}
+            {:ok, Workflow.render(Workflow.encode_config(Configuration.redact_secrets(config)), prompt)}
 
           _ ->
             case resolve_lane(lane) do
               {:ok, %{workflow: %{config: config, prompt: prompt}}} ->
-                {:ok, Workflow.render(Workflow.encode_config(config), prompt)}
+                {:ok, Workflow.render(Workflow.encode_config(Configuration.redact_secrets(config)), prompt)}
 
               _ ->
                 {:error, :no_version}
@@ -507,7 +507,9 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  defp cached_root(lane_id, profile, subdir) do
+  @doc false
+  @spec cached_root(term(), map(), String.t()) :: String.t() | nil
+  def cached_root(lane_id, profile, subdir) do
     source = Configuration.location_source(profile, subdir)
 
     case LaneStore.lookup(lane_id) do

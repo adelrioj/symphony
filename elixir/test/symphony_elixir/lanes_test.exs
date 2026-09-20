@@ -57,7 +57,7 @@ defmodule SymphonyElixir.LanesTest do
 
   @tag :tmp_dir
   test "export and current content use the effective raw configuration", %{tmp_dir: root} do
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Raw export", workspace_base: root, worker: %{}})
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Raw export", workspace_base: root, worker: %{"api_key" => "literal-worker-secret"}})
 
     {:ok, lane} =
       Lanes.create(%{
@@ -65,7 +65,8 @@ defmodule SymphonyElixir.LanesTest do
         execution_profile_id: profile.id,
         workspace_subdir: ".",
         config: %{
-          "tracker" => %{"kind" => "memory", "api_key" => "$LINEAR_API_KEY"},
+          "tracker" => %{"kind" => "memory", "api_key" => "literal-tracker-secret"},
+          "references" => %{"token" => "$LINEAR_API_KEY"},
           "extension" => %{"nested" => [1, true]}
         },
         prompt: "Do work"
@@ -74,13 +75,19 @@ defmodule SymphonyElixir.LanesTest do
     assert {:ok, exported} = Lanes.export(lane)
     assert {:ok, parsed} = Workflow.parse(exported)
     assert parsed.config["workspace"]["root"] == root
-    assert parsed.config["tracker"]["api_key"] == "$LINEAR_API_KEY"
+    assert parsed.config["tracker"]["api_key"] == "$REDACTED"
+    assert parsed.config["worker"]["api_key"] == "$REDACTED"
+    assert parsed.config["references"]["token"] == "$LINEAR_API_KEY"
+    refute exported =~ "literal-tracker-secret"
+    refute exported =~ "literal-worker-secret"
     refute exported =~ System.fetch_env!("LINEAR_API_KEY")
 
     LaneContext.put(lane.id)
     assert {:ok, content} = Workflow.current_content()
     assert {:ok, current} = Workflow.parse(content)
     assert current.config["extension"] == %{"nested" => [1, true]}
+    assert current.config["tracker"]["api_key"] == "$REDACTED"
+    assert current.config["worker"]["api_key"] == "$REDACTED"
   end
 
   test "invalid config and invalid metadata never write a lane or a version" do

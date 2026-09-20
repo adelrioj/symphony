@@ -134,8 +134,8 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
     :ok
   end
 
-  @spec down() :: :ok
-  def down, do: :ok
+  @spec down() :: no_return()
+  def down, do: raise("AddExecutionProfiles is irreversible because existing lane and run ownership data cannot be reconstructed safely")
 
   defp backfill_profiles do
     %{rows: rows} =

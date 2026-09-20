@@ -567,13 +567,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                SymphonyElixir.PathSafety.canonicalize(recorded_root)
 
       assert {:error, {:workspace_symlink_escape, ^recorded_workspace, ^canonical_recorded_root}, ""} =
-               Workspace.remove_recorded(recorded_workspace, SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               Workspace.remove_recorded(recorded_workspace, SymphonyElixir.ExecutionContext.local(recorded_root))
 
       refute File.exists?(hook_marker)
       assert File.exists?(outside_root)
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "captured profile base rejects a lane root replaced by a symlink" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-profile-base-swap-#{System.unique_integer([:positive])}")
+    base = Path.join(test_root, "base")
+    lane_root = Path.join(base, "lane")
+    outside = Path.join(test_root, "outside")
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+    File.mkdir_p!(base)
+    File.mkdir_p!(outside)
+    File.ln_s!(outside, lane_root)
+
+    context = ExecutionContext.local(lane_root, base)
+    assert {:error, {:workspace_root_outside_base, _, _}} = Workspace.create_for_issue("ESCAPE-1", context)
+    refute File.exists?(Path.join(outside, "ESCAPE-1"))
+
+    remote = ExecutionContext.ssh(lane_root, managed_shell_target!(test_root), base)
+    assert {:error, _} = Workspace.create_for_issue("ESCAPE-SSH", remote)
+    refute File.exists?(Path.join(outside, "ESCAPE-SSH"))
   end
 
   test "workspace canonicalizes symlinked workspace roots before creating issue directories" do

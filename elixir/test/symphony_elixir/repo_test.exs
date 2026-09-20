@@ -50,6 +50,18 @@ defmodule SymphonyElixir.RepoTest do
     assert [] = Repo.query!("PRAGMA foreign_key_check").rows
   end
 
+  test "execution profile migration refuses a destructive rollback" do
+    isolated_repo()
+    :ok = Repo.migrate()
+
+    assert_raise RuntimeError, ~r/irreversible/, fn ->
+      Ecto.Migrator.down(Repo, 20_260_920_000_001, SymphonyElixir.Repo.Migrations.AddExecutionProfiles, log: false)
+    end
+
+    assert [[1]] = Repo.query!("SELECT count(*) FROM schema_migrations WHERE version = 20260920000001").rows
+    assert [["execution_profiles"]] = Repo.query!("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'execution_profiles'").rows
+  end
+
   test "database rejects unsupported lane executors and duplicate lane slugs" do
     isolated_repo()
     :ok = Repo.migrate()

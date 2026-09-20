@@ -3,6 +3,8 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
 
   use Phoenix.Component
 
+  alias SymphonyElixir.ExecutionProfiles.Configuration
+
   @spec profile_attributes(map(), map()) :: {map(), [map()]}
   def profile_attributes(params, original \\ %{}) when is_map(params) and is_map(original) do
     with {:ok, worker} <- worker_attributes(params, original),
@@ -131,19 +133,7 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
   def safe_json(value), do: value |> safe_value() |> Jason.encode!(pretty: true)
 
   @spec safe_value(term()) :: term()
-  def safe_value(map) when is_map(map) do
-    Map.new(map, fn {key, value} ->
-      value =
-        if secret_key?(key) and is_binary(value) and not String.starts_with?(value, "$"),
-          do: "$REDACTED",
-          else: safe_value(value)
-
-      {key, value}
-    end)
-  end
-
-  def safe_value(list) when is_list(list), do: Enum.map(list, &safe_value/1)
-  def safe_value(value), do: value
+  def safe_value(value), do: Configuration.redact_secrets(value)
 
   @spec field_errors([map()], String.t()) :: [map()]
   def field_errors(errors, path), do: Enum.filter(errors, &(&1.path == path))
@@ -241,6 +231,4 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
   end
 
   defp worker_value(worker, key), do: Map.get(worker, key, Map.get(worker, String.to_atom(key)))
-
-  defp secret_key?(key), do: Regex.match?(~r/(api.?key|token|secret|password|credential)/i, to_string(key))
 end
