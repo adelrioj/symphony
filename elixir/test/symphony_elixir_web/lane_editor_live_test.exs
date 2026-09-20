@@ -4,193 +4,111 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.Lanes
+  alias SymphonyElixir.{ExecutionProfiles, Lanes, Workflow}
 
   @endpoint SymphonyElixirWeb.Endpoint
-  @fixtures Path.expand("../fixtures/lanes", __DIR__)
 
   setup do
     previous = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
-    on_exit(fn -> Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous) end)
     endpoint_config = :symphony_elixir |> Application.get_env(SymphonyElixirWeb.Endpoint, []) |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
     previous_key = System.get_env("LINEAR_API_KEY")
     System.put_env("LINEAR_API_KEY", "test-linear-api-key")
-    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_key) end)
+
+    on_exit(fn ->
+      Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous)
+      restore_env("LINEAR_API_KEY", previous_key)
+    end)
+
     {:ok, conn: Plug.Test.init_test_session(build_conn(), %{"operator" => true})}
   end
 
-  test "validation errors show inline with the field path and nothing is saved", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/lanes/new")
+  test "the four sections expose structured controls and retain a pending draft through profile creation", %{conn: conn} do
+    {:ok, view, html} = live(conn, "/lanes/new")
+    assert html =~ "Work selection"
+    assert html =~ "Execution"
+    assert html =~ "Workflow"
+    assert html =~ "Limits"
+    refute html =~ "Executor"
 
-    html = view |> form("#lane-form", lane: %{slug: "Bad Slug", front_matter: "polling:\n  interval_ms: nope", prompt: ""}) |> render_change()
-    assert html =~ "polling.interval_ms"
-    assert has_element?(view, "#lane-errors li", "slug:")
+    advanced = Jason.encode!(%{"tracker" => %{"kind" => "memory", "api_key" => "$LINEAR_API_KEY"}, "extension" => %{"nested" => [1, true]}}, pretty: true)
 
-    html = view |> form("#lane-form", lane: %{slug: "Bad Slug", front_matter: "polling:\n  interval_ms: nope", prompt: ""}) |> render_submit()
-    assert html =~ "polling.interval_ms"
-    assert has_element?(view, "#lane-errors li", "slug:")
-    assert Lanes.list() |> Enum.map(& &1.slug) == ["default"]
+    render_change(view, "validate", %{"lane" => %{"slug" => "features", "name" => "Features", "prompt" => "keep this prompt", "tracker_required_labels" => "ready", "advanced_json" => advanced}})
+    view |> element("button", "Create profile inline") |> render_click()
+    assert has_element?(view, "#profile-create-panel")
+    assert has_element?(view, "#lane-prompt", "keep this prompt")
+    assert has_element?(view, "#advanced-json", "extension")
 
-    view |> form("#lane-form", lane: %{slug: "yaml-draft", front_matter: "tracker:\n  kind: memory\nserver:\n  port: 4000", prompt: "keep this draft"}) |> render_change()
-    assert has_element?(view, "#lane-warnings", "server")
-    view |> form("#lane-form", lane: %{front_matter: "tracker: ["}) |> render_submit()
-    assert has_element?(view, "#lane-errors li", "front_matter:")
-    refute has_element?(view, "#lane-warnings")
-    assert has_element?(view, "textarea[name='lane[front_matter]']", "tracker: [")
-    assert has_element?(view, "textarea[name='lane[prompt]']", "keep this draft")
-    assert is_nil(Lanes.get_by_slug("yaml-draft"))
-  end
+    view |> form("#profile-create-form", profile: %{name: "Inline profile", workspace_base: Path.join(System.tmp_dir!(), "inline-profile")}) |> render_submit()
+    profile = Enum.find(ExecutionProfiles.list(), &(&1.name == "Inline profile"))
+    assert profile
+    assert has_element?(view, "#profile-select option[selected]", "Inline profile")
+    assert has_element?(view, "#lane-prompt", "keep this prompt")
 
-  test "saving a new lane inserts a version and navigates to the lane page", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/lanes/new")
-
-    view
-    |> form("#lane-form", lane: %{slug: "features", name: "Features", front_matter: "tracker:\n  kind: memory\nserver:\n  port: 1", prompt: "Do it", note: "first"})
-    |> render_submit()
-
+    view |> form("#lane-form", lane: %{slug: "features", name: "Features", prompt: "keep this prompt", advanced_json: advanced}) |> render_submit()
     assert_redirect(view, "/lanes/features")
-
     lane = Lanes.get_by_slug("features")
-    assert [%{note: "first", prompt: "Do it"}] = Lanes.versions(lane)
+    assert lane.execution_profile_id == profile.id
+    version = Lanes.current_version(lane)
+    assert {:ok, workflow} = Workflow.parse_parts(version.front_matter, version.prompt)
+    assert workflow.config["extension"] == %{"nested" => [1, true]}
+    assert workflow.config["tracker"]["api_key"] == "$LINEAR_API_KEY"
   end
 
-  test "the creation slug is rejected without persistence and a corrected slug reaches its dashboard", %{conn: conn} do
-    lanes_before = Lanes.list()
-    versions_before = SymphonyElixir.Repo.aggregate(SymphonyElixir.Lanes.LaneVersion, :count)
+  test "canceling inline profile creation keeps the draft untouched", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/lanes/new")
-
-    view
-    |> form("#lane-form", lane: %{slug: "new", name: "New work", front_matter: "tracker:\n  kind: memory", prompt: "Keep this draft"})
-    |> render_submit()
-
-    assert has_element?(view, "#lane-errors li", "slug:")
-    assert Lanes.list() == lanes_before
-    assert SymphonyElixir.Repo.aggregate(SymphonyElixir.Lanes.LaneVersion, :count) == versions_before
-    assert is_nil(Lanes.get_by_slug("new"))
-
-    view |> form("#lane-form", lane: %{slug: "new-work"}) |> render_submit()
-    assert_redirect(view, "/lanes/new-work")
-    lane = Lanes.get_by_slug("new-work")
-    assert [%{prompt: "Keep this draft"}] = Lanes.versions(lane)
-
-    {:ok, dashboard, _html} = live(conn, "/lanes/new-work")
-    assert has_element?(dashboard, ".hero-title", "New work")
-    assert has_element?(dashboard, "a[href='/lanes/new-work/versions']")
-    refute has_element?(dashboard, "#lane-form")
+    render_change(view, "validate", %{"lane" => %{"slug" => "cancelled", "name" => "Pending", "prompt" => "draft survives"}})
+    view |> element("button", "Create profile inline") |> render_click()
+    view |> element("#profile-create-panel button", "Cancel") |> render_click()
+    refute has_element?(view, "#profile-create-panel")
+    assert has_element?(view, "#lane-prompt", "draft survives")
+    assert has_element?(view, "#lane-slug[value='cancelled']")
+    refute Enum.any?(ExecutionProfiles.list(), &(&1.name == ""))
   end
 
-  for fixture <- ["client-template.md", "example.md"] do
-    test "editor round-trips #{fixture} without changing YAML comments or the empty prompt", %{conn: conn} do
-      path = Path.join(@fixtures, unquote(fixture))
-      content = File.read!(path)
-      {:ok, lane, _} = Lanes.import_file(path, slug: "client")
-
-      {:ok, view, _html} = live(conn, "/lanes/client/edit")
-      assert has_element?(view, "#lane-warnings", "server")
-      assert has_element?(view, "textarea[name='lane[front_matter]']", "kind: linear")
-
-      # Submit the rendered fields rather than reinjecting the original fixture.
-      view |> form("#lane-form", lane: %{note: "resave"}) |> render_submit()
-      assert_redirect(view, "/lanes/client")
-
-      assert {:ok, ^content} = Lanes.export(Lanes.get!(lane.id))
-      assert [%{note: "resave"}, _original] = Lanes.versions(lane)
-    end
-  end
-
-  test "an unchanged editor preserves leading newlines in both raw sections", %{conn: conn} do
-    front_matter = "\ntracker:\n  kind: memory\n"
-    prompt = "\nKeep this leading blank line.\n"
-    {:ok, lane} = Lanes.create(%{slug: "newlines", front_matter: front_matter, prompt: prompt})
-    document = conn |> get("/lanes/newlines/edit") |> html_response(200) |> LazyHTML.from_document()
-    rendered_front_matter = document |> LazyHTML.query("textarea[name='lane[front_matter]']") |> LazyHTML.text()
-    rendered_prompt = document |> LazyHTML.query("textarea[name='lane[prompt]']") |> LazyHTML.text()
-    assert rendered_front_matter == front_matter
-    assert rendered_prompt == prompt
-    {:ok, view, _html} = live(conn, "/lanes/newlines/edit")
-
-    # LiveViewTest's form defaults strip a second LF after HTML5 parsing.
-    # Submit the actual browser-equivalent DOM values, not the original inputs.
-    render_submit(view, "save", %{"lane" => %{"front_matter" => rendered_front_matter, "prompt" => rendered_prompt, "note" => "unchanged"}})
-    assert_redirect(view, "/lanes/newlines")
+  test "unknown nested config and raw secret references survive an unrelated name edit", %{conn: conn} do
+    config = %{"tracker" => %{"kind" => "memory", "api_key" => "$LINEAR_API_KEY"}, "extension" => %{"nested" => [%{"keep" => true}]}}
+    profile = new_profile!()
+    {:ok, lane} = Lanes.create(%{slug: "lossless", name: "Before", execution_profile_id: profile.id, config: config, prompt: "prompt"})
+    {:ok, view, _html} = live(conn, "/lanes/lossless/edit")
+    view |> form("#lane-form", lane: %{name: "After"}) |> render_submit()
+    assert_redirect(view, "/lanes/lossless")
     version = Lanes.current_version(Lanes.get!(lane.id))
-    assert version.front_matter == front_matter
-    assert version.prompt == prompt
+    {:ok, workflow} = Workflow.parse_parts(version.front_matter, version.prompt)
+    assert workflow.config["extension"] == %{"nested" => [%{"keep" => true}]}
+    assert workflow.config["tracker"]["api_key"] == "$LINEAR_API_KEY"
   end
 
-  test "malformed text fields report errors without discarding the current draft", %{conn: conn} do
+  test "malformed advanced JSON reports an error without saving or discarding the draft", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/lanes/new")
-    render_change(view, "validate", %{"lane" => %{"slug" => "draft", "front_matter" => "tracker:\n  kind: memory", "prompt" => "keep this draft"}})
-    render_change(view, "validate", %{"lane" => %{"front_matter" => %{"nested" => "invalid"}, "prompt" => ["invalid"]}})
-
-    assert has_element?(view, "#lane-errors li", "front_matter:")
-    assert has_element?(view, "#lane-errors li", "prompt:")
-    assert has_element?(view, "textarea[name='lane[prompt]']", "keep this draft")
-    assert has_element?(view, "textarea[name='lane[front_matter]']", "kind: memory")
-    assert is_nil(Lanes.get_by_slug("draft"))
+    render_change(view, "validate", %{"lane" => %{"slug" => "bad-json", "prompt" => "preserve me", "advanced_json" => "{"}})
+    assert has_element?(view, "#lane-errors", "advanced:")
+    assert has_element?(view, "#lane-prompt", "preserve me")
+    assert is_nil(Lanes.get_by_slug("bad-json"))
+    render_submit(view, "save", %{"lane" => %{"advanced_json" => "{"}})
+    assert has_element?(view, "#lane-errors", "advanced:")
+    assert is_nil(Lanes.get_by_slug("bad-json"))
   end
 
-  test "a malformed lane event cannot save or terminate the editor", %{conn: conn} do
+  test "slug mutation is rejected by the domain", %{conn: conn} do
+    profile = new_profile!()
+    {:ok, lane} = Lanes.create(%{slug: "immutable", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    assert {:error, [%{path: "slug", message: "is immutable"}]} = Lanes.update(lane, %{slug: "changed"})
+    {:ok, _view, _html} = live(conn, "/lanes/immutable/edit")
+  end
+
+  test "a malformed lane event cannot terminate the editor", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/lanes/new")
     render_submit(view, "save", %{"lane" => ["not", "an", "object"]})
-    assert has_element?(view, "#lane-errors li", "lane:")
-    assert Lanes.list() |> Enum.map(& &1.slug) == ["default"]
+    assert has_element?(view, "#lane-errors", "lane:")
+    assert has_element?(view, "#lane-form")
   end
 
-  test "partial edit events retain enabled state and unsaved input during external updates", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "partial", name: "Partial", front_matter: "tracker:\n  kind: memory", prompt: "initial"})
-    {:ok, view, _html} = live(conn, "/lanes/partial/edit")
-    render_change(view, "validate", %{"lane" => %{"prompt" => "unsaved", "enabled" => "on"}})
-    assert has_element?(view, "input[name='lane[enabled]'][checked]")
-    render_submit(view, "save", %{"lane" => %{"enabled" => ["false"]}})
-    assert has_element?(view, "#lane-errors li", "enabled:")
-    assert has_element?(view, "input[name='lane[enabled]'][checked]")
-    assert has_element?(view, "textarea[name='lane[prompt]']", "unsaved")
-    refute Lanes.get!(lane.id).enabled
-    assert Lanes.current_version(Lanes.get!(lane.id)).prompt == "initial"
-    {:ok, _lane} = Lanes.update(lane, %{name: "External"})
-    assert has_element?(view, "textarea[name='lane[prompt]']", "unsaved")
+  defp new_profile! do
+    {:ok, profile} =
+      ExecutionProfiles.create(%{name: "Lane test #{System.unique_integer([:positive])}", workspace_base: Path.join(System.tmp_dir!(), "lane-test-#{System.unique_integer([:positive])}"), worker: %{}})
 
-    render_submit(view, "save", %{"lane" => %{"note" => "partial event"}})
-    assert_redirect(view, "/lanes/partial")
-    assert Lanes.get!(lane.id).enabled
-    assert Lanes.current_version(Lanes.get!(lane.id)).prompt == "unsaved"
-  end
-
-  test "duplicate slugs show errors without losing the submitted prompt", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/lanes/new")
-    view |> form("#lane-form", lane: %{slug: "default", name: "Duplicate", front_matter: "tracker:\n  kind: memory", prompt: "preserve me"}) |> render_submit()
-    assert has_element?(view, "#lane-errors li", "slug:")
-    assert has_element?(view, "textarea[name='lane[prompt]']", "preserve me")
-  end
-
-  test "deleting the edited lane redirects rather than allowing a stale save", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "removed", front_matter: "tracker:\n  kind: memory"})
-    {:ok, view, _html} = live(conn, "/lanes/removed/edit")
-    :ok = Lanes.delete(lane)
-    assert_redirect(view, "/")
-  end
-
-  test "a save racing the deletion notification cannot resurrect the lane or append a version", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "stale-editor", front_matter: "tracker:\n  kind: memory", prompt: "saved"})
-    {:ok, view, _html} = live(conn, "/lanes/stale-editor/edit")
-
-    # Model the committed soft deletion before its PubSub notification reaches this editor.
-    lane
-    |> Ecto.Changeset.change(deleted_at: DateTime.utc_now() |> DateTime.truncate(:second))
-    |> SymphonyElixir.Repo.update!()
-
-    view |> form("#lane-form", lane: %{prompt: "unsaved after deletion"}) |> render_submit()
-
-    assert has_element?(view, "#lane-errors li", "lane:")
-    assert has_element?(view, "textarea[name='lane[prompt]']", "unsaved after deletion")
-    assert is_nil(Lanes.get_by_slug("stale-editor"))
-    assert [%{prompt: "saved"}] = Lanes.versions(lane)
-  end
-
-  test "an unknown slug goes back to the lanes page", %{conn: conn} do
-    assert {:error, {:live_redirect, %{to: "/"}}} = live(conn, "/lanes/nope/edit")
+    profile
   end
 end

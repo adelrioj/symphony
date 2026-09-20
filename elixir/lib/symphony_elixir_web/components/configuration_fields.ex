@@ -3,6 +3,20 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
 
   use Phoenix.Component
 
+  @spec profile_attributes(map(), map()) :: {map(), [map()]}
+  def profile_attributes(params, original \\ %{}) when is_map(params) and is_map(original) do
+    with {:ok, worker} <- worker_attributes(params, original),
+         {:ok, workspace_base} <- required_text(params["workspace_base"], "workspace_base") do
+      {name, name_errors} = required_text(params["name"], "name") |> result_pair()
+      description = if String.trim(params["description"] || "") == "", do: nil, else: params["description"]
+
+      {%{"name" => name, "description" => description, "workspace_base" => workspace_base, "worker" => worker}, name_errors}
+    else
+      {:error, errors} ->
+        {%{"name" => params["name"], "description" => params["description"], "workspace_base" => params["workspace_base"], "worker" => original}, errors}
+    end
+  end
+
   @spec profile_fields(map()) :: Phoenix.LiveView.Rendered.t()
   def profile_fields(assigns) do
     ~H"""
@@ -106,11 +120,91 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
 
   def parse_duration(_value, path), do: {:error, %{path: path, message: "must be a nonnegative decimal number of seconds"}}
 
-  @spec safe_json(map()) :: String.t()
-  def safe_json(value) when is_map(value), do: value |> redact_secrets() |> Jason.encode!(pretty: true)
+  @spec safe_json(term()) :: String.t()
+  def safe_json(value), do: value |> redact_secrets() |> Jason.encode!(pretty: true)
 
   @spec field_errors([map()], String.t()) :: [map()]
   def field_errors(errors, path), do: Enum.filter(errors, &(&1.path == path))
+
+  defp worker_attributes(params, original) do
+    with {:ok, provider} <- decode_provider(params["provider_json"], original),
+         {:ok, worker} <- worker_mode_attributes(params, original),
+         {:ok, environment} <- environment_attributes(params, provider, original) do
+      worker = if params["worker_mode"] == "managed", do: Map.put(worker, "environment", environment), else: Map.delete(worker, "environment")
+      {:ok, worker}
+    end
+  end
+
+  defp worker_mode_attributes(%{"worker_mode" => "local"}, original), do: {:ok, original |> Map.delete("ssh_hosts") |> Map.delete("max_concurrent_agents_per_host")}
+
+  defp worker_mode_attributes(%{"worker_mode" => "ssh"} = params, original) do
+    hosts = params["ssh_hosts"] |> String.split(~r/[\r\n,]+/, trim: true) |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
+
+    with {:ok, limit} <- optional_integer(params["max_concurrent_agents_per_host"], "worker.max_concurrent_agents_per_host") do
+      worker = original |> Map.delete("environment") |> Map.put("ssh_hosts", hosts)
+      {:ok, if(limit, do: Map.put(worker, "max_concurrent_agents_per_host", limit), else: Map.delete(worker, "max_concurrent_agents_per_host"))}
+    end
+  end
+
+  defp worker_mode_attributes(%{"worker_mode" => "managed"}, original), do: {:ok, original |> Map.delete("ssh_hosts") |> Map.delete("max_concurrent_agents_per_host")}
+  defp worker_mode_attributes(_params, _original), do: {:error, [%{path: "worker_mode", message: "must be local, static SSH, or managed"}]}
+
+  defp environment_attributes(params, provider, original) do
+    if params["worker_mode"] != "managed" do
+      {:ok, Map.get(original, "environment", %{})}
+    else
+      with {:ok, startup} <- parse_duration(params["startup_timeout"], "worker.environment.startup_timeout_ms"),
+           {:ok, shutdown} <- parse_duration(params["shutdown_timeout"], "worker.environment.shutdown_timeout_ms"),
+           {:ok, retention} <- parse_duration(params["terminal_retention"], "worker.environment.terminal_retention_ms"),
+           {:ok, kind} <- required_text(params["environment_kind"], "worker.environment.kind"),
+           {:ok, deployment} <- required_text(params["deployment_id"], "worker.environment.deployment_id") do
+        environment = Map.get(original, "environment", %{})
+
+        {:ok,
+         Map.merge(environment, %{
+           "kind" => kind,
+           "deployment_id" => deployment,
+           "provider" => provider,
+           "startup_timeout_ms" => startup,
+           "shutdown_timeout_ms" => shutdown,
+           "terminal_retention_ms" => retention
+         })}
+      end
+    end
+  end
+
+  defp decode_provider(value, original) do
+    original_provider = get_in(original, ["environment", "provider"]) || %{}
+
+    case Jason.decode(value || "") do
+      {:ok, provider} when is_map(provider) -> {:ok, restore_redacted(provider, original_provider)}
+      {:ok, _} -> {:error, [%{path: "worker.environment.provider", message: "must be a JSON object"}]}
+      {:error, reason} -> {:error, [%{path: "worker.environment.provider", message: "invalid JSON: #{Exception.message(reason)}"}]}
+    end
+  end
+
+  defp restore_redacted(value, original) when value == "$REDACTED", do: original
+  defp restore_redacted(map, original) when is_map(map), do: Map.new(map, fn {key, child} -> {key, restore_redacted(child, Map.get(original || %{}, key))} end)
+  defp restore_redacted(value, _original), do: value
+
+  defp required_text(value, path) when is_binary(value) do
+    if String.trim(value) == "", do: {:error, %{path: path, message: "must not be blank"}}, else: {:ok, String.trim(value)}
+  end
+
+  defp required_text(_value, path), do: {:error, %{path: path, message: "must be a string"}}
+
+  defp optional_integer(value, _path) when value in [nil, ""], do: {:ok, nil}
+
+  defp optional_integer(value, path) when is_binary(value) do
+    case Integer.parse(value) do
+      {number, ""} when number > 0 -> {:ok, number}
+      _ -> {:error, %{path: path, message: "must be a positive integer"}}
+    end
+  end
+
+  defp optional_integer(_value, path), do: {:error, %{path: path, message: "must be a positive integer"}}
+  defp result_pair({:ok, value}), do: {value, []}
+  defp result_pair({:error, error}), do: {nil, [error]}
 
   defp duration_number(whole, fraction, path) do
     numerator = String.to_integer(whole <> fraction)

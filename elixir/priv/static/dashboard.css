@@ -38,6 +38,15 @@
   gap: 1.25rem;
 }
 
+.inline-panel {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.inline-panel form {
+  margin-top: 1rem;
+}
+
 .config-form {
   display: grid;
   gap: 1.25rem;

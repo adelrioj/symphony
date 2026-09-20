@@ -4,6 +4,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias SymphonyElixir.Lanes
+  alias SymphonyElixir.ExecutionProfiles
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @impl true
@@ -12,7 +13,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
 
     case Lanes.get_by_slug(slug) do
       nil -> {:ok, socket |> put_flash(:error, "No lane with slug #{slug}") |> push_navigate(to: "/")}
-      lane -> {:ok, assign(socket, lane: lane, versions: Lanes.versions(lane), errors: [])}
+      lane -> {:ok, assign(socket, lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: Lanes.versions(lane), errors: [])}
     end
   end
 
@@ -27,8 +28,14 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
       end
 
     case result do
-      {:ok, lane} -> {:noreply, assign(socket, lane: lane, versions: Lanes.versions(lane), errors: [])}
-      {:error, errors} -> {:noreply, assign(socket, errors: errors)}
+      {:ok, lane} ->
+        {:noreply,
+         socket
+         |> assign(lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: Lanes.versions(lane), errors: [])
+         |> put_flash(:info, "Historical lane settings use the currently selected profile; infrastructure is not rolled back.")}
+
+      {:error, errors} ->
+        {:noreply, assign(socket, errors: errors)}
     end
   end
 
@@ -36,7 +43,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
   def handle_info({:lane_updated, _slug}, socket) do
     case Lanes.get_by_slug(socket.assigns.lane.slug) do
       nil -> {:noreply, socket |> put_flash(:error, "Lane no longer exists") |> push_navigate(to: "/")}
-      lane -> {:noreply, assign(socket, lane: lane, versions: Lanes.versions(lane))}
+      lane -> {:noreply, assign(socket, lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: Lanes.versions(lane))}
     end
   end
 
@@ -50,7 +57,8 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
       <header class="hero-card">
         <p class="eyebrow">Versions</p>
         <h1 class="hero-title">{@lane.name} <span class="muted mono">{@lane.slug}</span></h1>
-        <p class="hero-copy"><a class="issue-link" href={"/lanes/#{@lane.slug}"}>Back to lane</a></p>
+        <p class="hero-copy"><a class="issue-link" href={"/lanes/#{@lane.slug}"}>Back to lane</a> · <a :if={@profile} class="issue-link" href={"/execution-profiles/#{@profile.id}"}>profile: {@profile.name}</a></p>
+        <p class="section-copy">History changes lane-owned settings only. Activating a record resolves it against the current profile and does not roll back infrastructure.</p>
       </header>
       <ul :if={@errors != []} id="version-errors" class="error-copy" role="alert"><li :for={error <- @errors}>{error.path}: {error.message}</li></ul>
       <section class="section-card">
