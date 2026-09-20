@@ -3176,7 +3176,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       "controller_namespace" => "controllers",
       "controller_name" => "sandbox",
       "controller_uid" => "controller-uid",
-      "controller_source_commit" => "7140d4b657253e6bf318bd93e2a66ba67094d8d3",
+      "controller_source_commit" => "c313905c1c2233c2076c600399735cd1c3c5c8c1",
       "controller_image" => image,
       "runtime_class_uid" => "runtime-uid",
       "runtime_handler" => "qualified-vm",
