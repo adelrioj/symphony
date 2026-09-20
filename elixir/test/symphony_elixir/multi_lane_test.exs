@@ -206,6 +206,65 @@ defmodule SymphonyElixir.MultiLaneTest do
     assert {:ok, _} = ExecutionProfiles.update(updated_profile, %{workspace_base: old_entry.settings.workspace.root <> "-replacement"})
   end
 
+  test "linked lanes publish profile edits and restart from the current profile", %{a: a, b: b} do
+    {:ok, b} = Lanes.update(b, %{execution_profile_id: a.execution_profile_id, workspace_subdir: "linked"})
+    parent = self()
+
+    runner = fn label ->
+      fn issue, _recipient, _opts ->
+        send(parent, {:linked_attempt, label, issue.id, self(), Config.settings!().worker.max_concurrent_agents_per_host})
+
+        receive do
+          {:read_linked_profile, caller} ->
+            send(caller, {:linked_profile, self(), Config.settings!().worker.max_concurrent_agents_per_host})
+            receive do: (:finish -> :ok)
+
+          :finish ->
+            :ok
+        end
+      end
+    end
+
+    owner_a = start_reader(a, parent)
+    :sys.replace_state(owner_a, &%{&1 | runner_fun: runner.(:a)})
+    old_entry = LaneStore.lookup(a.id) |> elem(1)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue("linked-first", "Queue A")])
+    send(owner_a, :run_poll_cycle)
+    assert_receive {:linked_attempt, :a, "linked-first", worker, nil}, 5_000
+
+    profile = ExecutionProfiles.get(a.execution_profile_id)
+    assert {:ok, updated_profile} = ExecutionProfiles.update(profile, %{worker: %{"max_concurrent_agents_per_host" => 2}})
+    assert {:ok, %{settings: %{worker: %{max_concurrent_agents_per_host: 2}}}} = LaneStore.lookup(a.id)
+    assert {:ok, %{settings: %{worker: %{max_concurrent_agents_per_host: 2}}}} = LaneStore.lookup(b.id)
+
+    send(worker, {:read_linked_profile, self()})
+    assert_receive {:linked_profile, ^worker, nil}, 5_000
+
+    File.mkdir_p!(Path.join(old_entry.settings.workspace.root, "retained"))
+    assert {:error, _} = ExecutionProfiles.update(updated_profile, %{workspace_base: old_entry.settings.workspace.root <> "-replacement"})
+    send(worker, :finish)
+    wait_until(fn -> Orchestrator.snapshot(owner_a, 5_000).running == [] end)
+    assert {:error, _} = ExecutionProfiles.update(updated_profile, %{workspace_base: old_entry.settings.workspace.root <> "-replacement"})
+
+    File.rm_rf!(old_entry.settings.workspace.root)
+    assert {:ok, _} = ExecutionProfiles.update(updated_profile, %{workspace_base: old_entry.settings.workspace.root <> "-replacement"})
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue("linked-next", "Queue B")])
+    owner_b = start_reader(b, parent)
+    :sys.replace_state(owner_b, &%{&1 | runner_fun: runner.(:b)})
+    send(owner_b, :run_poll_cycle)
+    assert_receive {:linked_attempt, :b, "linked-next", next_worker, 2}, 5_000
+    send(next_worker, :finish)
+    wait_until(fn -> Orchestrator.snapshot(owner_b, 5_000).running == [] end)
+
+    {:ok, _} = Lanes.set_enabled(a, false)
+    {:ok, _} = Lanes.set_enabled(b, false)
+    :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, LaneStore)
+    {:ok, _} = Supervisor.restart_child(SymphonyElixir.Supervisor, LaneStore)
+    assert {:ok, %{profile_id: profile_id, settings: %{worker: %{max_concurrent_agents_per_host: 2}}}} = LaneStore.lookup(a.id)
+    assert profile_id == a.execution_profile_id
+  end
+
   test "one-for-all scheduler restart finalizes its attempt without stopping another lane", %{a: a, b: b} do
     parent = self()
     owner_a = start_reader(a, parent)

@@ -218,7 +218,8 @@ Fields:
 Parsed workflow version, imported from `WORKFLOW.md` or saved through the lane configuration API:
 
 - `config` (map)
-  - YAML front matter root object.
+  - Lane-owned raw configuration map. Flattened WORKFLOW front matter may also contain profile-owned
+    `worker` and `workspace.root`, which are split into the selected execution profile on import.
 - `prompt_template` (string)
   - Markdown body after front matter, trimmed.
 
@@ -227,12 +228,13 @@ Parsed workflow version, imported from `WORKFLOW.md` or saved through the lane c
 
 #### 4.1.3 Service Config (Typed View)
 
-Typed per-lane runtime values derived from `WorkflowDefinition.config` plus environment resolution.
+Typed per-lane runtime values composed from `WorkflowDefinition.config`, the selected execution
+profile and environment resolution.
 
 Examples:
 
 - poll interval
-- workspace root
+- effective workspace root from the selected profile and lane `workspace_subdir`
 - active and terminal issue states
 - concurrency limits
 - coding-agent executable/args/timeouts
@@ -256,6 +258,7 @@ Fields (logical):
 
 - `lane_id`
 - `lane_version_id`
+- `execution_profile_id` and immutable effective configuration identity
 - `attempt_id` (stable history identifier)
 - `executor`
 - `issue_id`
@@ -348,7 +351,9 @@ Fields:
 `symphony lanes export <slug> --data-root <dir>`. Use the same data root as `symphony serve`.
 The command spelling is illustrative; implementations MAY expose equivalent host entrypoints.
 
-- Import creates a disabled lane, or saves a new version for an existing slug.
+- Import creates a disabled lane and a dedicated execution profile, or replaces the selected
+  lane's profile with a new dedicated profile when the slug already exists. The generated profile
+  name is reported to the operator.
 - Lane slugs follow the create/update rules below: `^[a-z][a-z0-9-]{1,40}$`, excluding the reserved
   word `new` so `/lanes/new` remains the creation page. Imports reject it with a slug field error.
 - Import/export are offline database operations, not filesystem watches. An import in another
@@ -370,6 +375,9 @@ Design note:
 
 - `WORKFLOW.md` SHOULD describe one lane's prompt, runtime settings, hooks and tracker selection.
   Installation-level listener, authentication, data-root and retention settings are out of band.
+- The file remains a flattened interchange format. Live editing uses structured lane and execution
+  profile controls; importing a file splits profile-owned worker/workspace infrastructure from
+  lane-owned policy without resolving or persisting secret values.
 
 Parsing rules:
 
@@ -391,10 +399,13 @@ Top-level keys:
 - `tracker`
 - `polling`
 - `workspace`
+- `worker`
 - `hooks`
 - `agent`
 - `codex`
 - `claude`
+- `observability`
+- `server`
 
 Unknown keys SHOULD be ignored for forward compatibility.
 
@@ -455,6 +466,8 @@ Fields:
 Fields:
 
 - `root` (path string or `$VAR`)
+  - Owned by the selected execution profile in the live database. In a flattened workflow it is
+    imported into `profile.workspace_base` and rendered again on export.
   - Default: `<system-temp>/symphony_workspaces`
   - `~` is expanded.
   - Relative local paths are resolved against the installation data root.
@@ -621,6 +634,29 @@ Fallback prompt behavior:
 - Workflow file read/parse failures are configuration/validation errors and SHOULD NOT silently fall
   back to a prompt.
 
+#### 5.3.8 Execution profiles and lane ownership
+
+An execution profile is mutable shared infrastructure selected by one or more lanes:
+
+- `name` and optional `description` identify the profile.
+- `worker` owns local/static-SSH/managed execution settings and credential references.
+- `workspace_base` owns the worker-side workspace root.
+- A lane owns tracker selection, prompt, hooks, backend, limits, observability, and
+  `workspace_subdir`; its `execution_profile_id` selects the profile used to compose effective
+  settings.
+- A profile edit validates every linked lane, including disabled lanes and soft-deleted references,
+  then publishes all valid effective entries atomically. Future dispatches use the new settings;
+  active attempts, retries already captured, and cleanup helpers retain their dispatch snapshot.
+- Profiles do not form a global scheduling pool. Each lane keeps its own scheduler and concurrency
+  limits; a shared SSH host is subject only to the configured per-host limit semantics.
+- New lanes are disabled and slugs are immutable. Changing a workspace/target identity is rejected
+  while a dispatch reservation, active attempt, retained workspace/resource, or unverifiable remote
+  inventory still owns the old identity. Repair or supported cleanup must clear ownership first.
+- Deleting a profile is refused while any lane reference remains, including soft-deleted history.
+  Profile saves never provision infrastructure, create revisions, or provide profile-history rollback.
+- Persisted configuration and exports retain `$VAR`/secret-reference syntax. Resolved credentials
+  MUST NOT appear in database attributes, API responses, UI summaries, exports, or errors.
+
 ### 5.5 Workflow Validation and Error Surface
 
 Error classes:
@@ -643,8 +679,10 @@ Dispatch gating behavior:
 
 Configuration is resolved in this order:
 
-1. Select the lane's current immutable database version (or the attempt's captured version).
-2. Parse its YAML front matter into a raw config map; retain raw YAML/prompt separately for export.
+1. Select the lane's current immutable database version (or the attempt's captured version) and its
+   selected execution profile.
+2. Parse the lane-owned raw map, retain raw prompt/config values separately for export, and compose
+   profile-owned worker/workspace infrastructure without serializing a finalized schema struct.
 3. Apply built-in defaults for missing OPTIONAL fields.
 4. Resolve `$VAR_NAME` indirection for config values that explicitly contain `$VAR_NAME`, plus any
    adapter-owned fallback environment names documented for omitted provider fields.
@@ -675,6 +713,10 @@ Live application of saved lane versions is REQUIRED:
   multi-turn continuation and deferred completion work MUST retain that same snapshot.
 - A later retry dispatch captures a new snapshot; saving a lane MUST NOT switch the configuration
   underneath an already active attempt or implicitly restart it.
+- A profile edit is one serialized all-or-nothing mutation across every linked lane. Non-location
+  edits apply automatically to future dispatches; a location/identity edit is rejected until all
+  active, retained, and inspectable ownership has been safely cleared. An unavailable remote
+  inventory is not proof that the old identity is free.
 - Invalid saves MUST NOT insert a version, move the current pointer, or crash the service; return
   field-path validation errors and retain the last good effective configuration.
 - Managed-resource identity guards (Appendix B) MUST serialize with mutation and publication:
@@ -757,12 +799,13 @@ not require recognizing or validating extension fields unless that extension is 
 
 ### 6.5 Lane Configuration Store
 
-One service process runs zero or more enabled lanes. A lane is a named configuration unit (tracker
-scope, workspace root, agent settings, hooks, prompt) with its own scheduler authority.
+One service process runs zero or more enabled lanes. A lane is a named policy unit (tracker scope,
+prompt, hooks, backend and limits) with its own scheduler authority and selected execution profile.
 
-- The database stores lanes and immutable versions under the installation data root. A workflow
-  save inserts a version and advances the pointer; metadata-only edits do not insert a version.
-  Rollback validates and activates an existing version of the same lane, never another lane's version.
+- The database stores profiles, lanes and immutable lane-owned versions under the installation data
+  root. A workflow save inserts a version and advances the pointer; metadata-only edits do not
+  insert a version. Rollback validates and activates an existing lane version against the currently
+  selected profile; it does not roll back worker infrastructure or select a historical profile.
 - New lanes default disabled. Enabling validates and preflights before runtime start. Disabling stops
   the lane runtime and its agents; soft deletion requires a disabled, stopped lane, retains history,
   and reserves the slug.
@@ -772,12 +815,15 @@ scope, workspace root, agent settings, hooks, prompt) with its own scheduler aut
 - Tracker preflight (11.6) runs at lane runtime start and after tracker changes. A current failure
   disables the lane with the adapter's message; generations prevent stale outcomes taking effect.
 - Runtime reads resolve through lane context; active attempts use immutable dispatch snapshots.
+- The dashboard exposes structured lane/profile forms. Raw flattened YAML remains the explicit
+  import/export interchange, not the live write API.
 - Data root, HTTP host/port, operator credential and event-retention window are installation settings.
   Imported `server` settings are ignored with a warning, not applied to the installation.
 - Durable attempts/events are observability records only. Scheduling state is rebuilt from the
   tracker on restart; history MUST NOT be replayed into claims, sessions or retry timers.
 - The HTTP extension (13.7), when provided, protects lane reads/writes with one operator credential
-  per installation and exposes list/create/update/activation/export/soft-delete operations.
+  per installation and exposes lane plus execution-profile list/create/update/export/soft-delete
+  operations.
 
 ## 7. Orchestration State Machine
 
@@ -1726,7 +1772,8 @@ Installation settings and authentication:
 
 #### 13.7.1 Human-Readable Dashboard (`/`)
 
-- Host the lane list at `/`, with creation at `/lanes/new`, per-lane runtime at `/lanes/:slug`,
+- Host the lane list at `/`, execution profiles at `/execution-profiles` with creation at
+  `/execution-profiles/new`, per-lane creation at `/lanes/new`, per-lane runtime at `/lanes/:slug`,
   editing at `/lanes/:slug/edit`, versions at `/lanes/:slug/versions`, attempt details at
   `/runs/:attempt_id`, and login at `/login`.
 - Show per-lane sessions, retries, totals, events, health/error indicators and durable attempt history.
@@ -1892,17 +1939,33 @@ All routes require the same installation authentication:
 | POST | `/api/v1/lanes/:slug/versions/:id/activate` | `200` lane object |
 | GET | `/api/v1/lanes/:slug/export` | `200 text/markdown` current workflow |
 | DELETE | `/api/v1/lanes/:slug` | `204`; `409` if enabled or still running |
+| GET | `/api/v1/execution-profiles` | `200 {"execution_profiles":[...]}` |
+| POST | `/api/v1/execution-profiles` | `201` profile object |
+| GET | `/api/v1/execution-profiles/:id` | `200` profile object; `404` when absent |
+| PUT | `/api/v1/execution-profiles/:id` | `200` updated profile object |
+| DELETE | `/api/v1/execution-profiles/:id` | `204`; `422` while referenced |
 
-Create/update accepts `slug`, `name`, `enabled`, `executor`, `front_matter`, `prompt`, and `note`.
-Workflow fields are raw strings (YAML without delimiters and Markdown prompt); `enabled` is boolean,
-`note` is string or null. The reference profile requires slugs matching `^[a-z][a-z0-9-]{1,40}$`,
-excluding exactly `new`, which is reserved for `/lanes/new`. Create, import, and slug updates MUST
-reject that value with a slug field error before persisting a lane or version. Only executor `"local"`
-is accepted; workflow worker settings still select local/SSH/managed execution.
-Partial updates preserve omitted values. Either submitted workflow field creates an immutable version;
-metadata-only updates do not. New lanes default disabled. Missing lanes return `404`; invalid writes
-or version activation return `422 {"errors":[{"path":"...","message":"..."}]}`. Version IDs must belong
-to the addressed lane. Soft deletion retains its versions/history and reserves its slug.
+Lane create/update accepts the canonical JSON attributes `slug`, `name`, `enabled`,
+`execution_profile_id`, `workspace_subdir`, lane-owned `config`, `prompt`, and `note`. `config` is a
+string-keyed JSON object containing lane-owned values only; `worker`, `workspace`, and
+`workspace_base` are profile-owned and rejected in lane writes. Slugs match
+`^[a-z][a-z0-9-]{1,40}$`, are immutable after creation, and exclude `new`. New lanes default
+disabled. Partial updates preserve omitted values; a supplied config replaces the lane map, while
+the structured form patches the original map to preserve unknown nested fields. Version activation
+uses the currently selected profile. Invalid writes return
+`422 {"errors":[{"path":"...","message":"..."}]}`; soft deletion retains history and reserves
+the slug.
+
+Profile create/update accepts `name`, `description`, `workspace_base`, and raw `worker`. Responses
+include `id`, safe profile fields, `repair_error`, and linked lane IDs, never resolved credentials.
+Profile updates validate and publish every linked lane atomically. Profile routes are authenticated
+like lane routes. The structured UI provides profile CRUD and lane editing; no profile history or
+infrastructure provisioning is implied.
+
+Lane responses include `execution_profile_id`, `execution_profile_name`, `workspace_subdir`, and
+the lane-owned `config` map alongside lane identity, current version, health and warnings. Offline
+import creates a collision-safe generated profile name and reports it in CLI warnings; re-import
+creates a new dedicated profile rather than mutating a shared one.
 
 Lane objects include identity, name, enabled/executor, current version ID, update time and runtime
 health (`running`, `error`, `warnings`, restart count and last crash). For example, enable a reviewed
@@ -1911,8 +1974,10 @@ lane with authenticated `PUT /api/v1/lanes/main` and body `{"enabled":true}`.
 ### 13.8 Durable Attempt History
 
 Attempts and events MAY be recorded in the installation database. Attempts retain their immutable
-lane/version identity, executor, issue identity, status, timing, turn count and token totals including
-cached usage. Event categories include agent messages, turns, blocked results, hooks and errors.
+lane/version/profile/configuration identity, executor, issue identity, status, timing, turn count
+and token totals including cached usage. Event categories include agent messages, turns, blocked
+results, hooks and errors. Rollback changes future dispatch resolution through the current profile;
+it does not rewrite an attempt or restore historical worker infrastructure.
 Writes MUST be ordered and asynchronous relative to scheduling. Failed writes are logged; pending
 uncommitted commands may be lost and need not be retried. History MUST NOT gate dispatch or cleanup.
 Lane disable finalizes active attempts as stopped; abnormal runtime death finalizes them as failed.
@@ -2591,6 +2656,8 @@ Use the same validation profiles as Section 17:
 ### 18.1 REQUIRED for Conformance
 
 - DB-backed lanes with explicit workflow import/export and immutable validated versions
+- Mutable execution profiles with atomic propagation, profile-owned worker/workspace infrastructure,
+  and immutable attempt snapshots
 - `WORKFLOW.md` loader with raw YAML/prompt preservation and canonical export semantics
 - Typed config layer with defaults and `$` resolution
 - Live lane-save/activation publication, managed identity guards and stale-preflight generation fencing

@@ -38,7 +38,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "enabling starts a real lane runtime only after actual tracker preflight succeeds" do
-    {:ok, lane} = Lanes.create(%{slug: "passing", front_matter: @linear})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "passing", front_matter: @linear})
     assert {:ok, %{enabled: true}} = Lanes.set_enabled(lane, true)
     assert_receive {:preflight, worker}, 1000
     refute LaneSupervisor.running?(lane.id)
@@ -57,7 +57,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "actual preflight transport failure disables persisted lane and exposes the reason" do
-    {:ok, lane} = Lanes.create(%{slug: "failing", front_matter: @linear, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "failing", front_matter: @linear, enabled: true})
     assert_receive {:preflight, worker}, 1000
     finish_preflight(worker, {:error, :transport_down})
     refute Lanes.get!(lane.id).enabled
@@ -68,7 +68,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "invalid tracker scope disables the lane with actionable provider reasons" do
-    {:ok, lane} = Lanes.create(%{slug: "invalid-scope", front_matter: @linear, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "invalid-scope", front_matter: @linear, enabled: true})
     assert_receive {:preflight, worker}, 1000
     finish_preflight(worker, {:ok, %{"data" => %{"teams" => %{"nodes" => []}}}})
     refute Lanes.get!(lane.id).enabled
@@ -79,7 +79,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
 
   test "raised and thrown preflight failures fail closed without poisoning later enable attempts" do
     owner = Process.whereis(LaneStore)
-    {:ok, lane} = Lanes.create(%{slug: "preflight-exceptions", front_matter: @linear, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "preflight-exceptions", front_matter: @linear, enabled: true})
     assert_receive {:preflight, raising_worker}, 1000
     finish_preflight(raising_worker, {:raise, "credential refresh failed"})
     refute Lanes.get!(lane.id).enabled
@@ -104,7 +104,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "registry outage fails runtime startup closed and registration recovers on explicit reenable" do
-    {:ok, lane} = Lanes.create(%{slug: "registry-recovery", front_matter: @memory})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "registry-recovery", front_matter: @memory})
     assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, LaneRegistry)
 
     try do
@@ -127,9 +127,9 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "a stale failing preflight cannot disable a newer valid version" do
-    {:ok, lane} = Lanes.create(%{slug: "stale-failure", front_matter: @linear, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "stale-failure", front_matter: @linear, enabled: true})
     assert_receive {:preflight, old_worker}, 1000
-    {:ok, current} = Lanes.update(lane, %{front_matter: @memory, prompt: "new version"})
+    {:ok, current} = TestSupport.update_lane_from_front_matter(lane, %{front_matter: @memory, prompt: "new version"})
     eventually(fn -> LaneSupervisor.running?(lane.id) end)
     finish_preflight(old_worker, {:error, :old_scope_failed})
     assert Lanes.get!(lane.id).enabled
@@ -139,10 +139,10 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "pending tracker failure survives metadata and prompt saves on an already running lane" do
-    {:ok, lane} = Lanes.create(%{slug: "pending-save", front_matter: @memory, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "pending-save", front_matter: @memory, enabled: true})
     eventually(fn -> LaneSupervisor.running?(lane.id) end)
     original_runtime = LaneRegistry.whereis(lane.id, :runtime)
-    {:ok, _} = Lanes.update(lane, %{front_matter: @linear})
+    {:ok, _} = TestSupport.update_lane_from_front_matter(lane, %{front_matter: @linear})
     assert_receive {:preflight, tracker_worker}, 1000
     {:ok, _} = Lanes.update(lane, %{name: "Renamed while checking"})
     assert_receive {:preflight, metadata_worker}, 1000
@@ -161,7 +161,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "queued explicit stop during runtime startup does not consume crash allowance after reenable" do
-    {:ok, lane} = Lanes.create(%{slug: "queued-stop", front_matter: @linear, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "queued-stop", front_matter: @linear, enabled: true})
     assert_receive {:preflight, worker}, 1000
     :ok = :sys.suspend(LaneSupervisor)
 
@@ -199,7 +199,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "normal runtime shutdown clears health without counting a crash" do
-    {:ok, lane} = Lanes.create(%{slug: "normal-stop", front_matter: @memory, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "normal-stop", front_matter: @memory, enabled: true})
     eventually(fn -> match?({:ok, %{runtime: %{started_at: %DateTime{}}}}, LaneStore.lookup(lane.id)) end)
     runtime = LaneRegistry.whereis(lane.id, :runtime)
     assert :ok = Supervisor.stop(runtime, :normal)
@@ -209,7 +209,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "a stale successful preflight cannot start a newer generation still awaiting preflight" do
-    {:ok, lane} = Lanes.create(%{slug: "stale-success", front_matter: @linear, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "stale-success", front_matter: @linear, enabled: true})
     assert_receive {:preflight, old_worker}, 1000
     {:ok, _} = Lanes.update(lane, %{prompt: "second"})
     assert_receive {:preflight, new_worker}, 1000
@@ -221,7 +221,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "disable then reenable fences the prior generation even with the same version ID" do
-    {:ok, lane} = Lanes.create(%{slug: "toggle", front_matter: @linear, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "toggle", front_matter: @linear, enabled: true})
     assert_receive {:preflight, old_worker}, 1000
     assert {:ok, _} = Lanes.set_enabled(lane, false)
     assert {:ok, _} = Lanes.set_enabled(lane, true)
@@ -234,7 +234,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "disabled and deleted lanes cannot be resurrected by pending enable success" do
-    {:ok, lane} = Lanes.create(%{slug: "deleted", front_matter: @linear, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "deleted", front_matter: @linear, enabled: true})
     assert_receive {:preflight, worker}, 1000
     assert {:ok, _} = Lanes.set_enabled(lane, false)
     assert :ok = Lanes.delete(lane)
@@ -245,8 +245,8 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "five real runtime deaths stop only the failing lane and persist the disabled state" do
-    {:ok, lane} = Lanes.create(%{slug: "crash-loop", front_matter: @memory, enabled: true})
-    {:ok, healthy} = Lanes.create(%{slug: "healthy", front_matter: @memory, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "crash-loop", front_matter: @memory, enabled: true})
+    {:ok, healthy} = TestSupport.create_lane_from_front_matter(%{slug: "healthy", front_matter: @memory, enabled: true})
     eventually(fn -> LaneSupervisor.running?(healthy.id) end)
     healthy_pid = LaneRegistry.whereis(healthy.id, :runtime)
 
@@ -266,13 +266,13 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "authority recovery replaces stale runtime ownership and completes orphaned runs" do
-    {:ok, lane} = Lanes.create(%{slug: "recovery", front_matter: @memory, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "recovery", front_matter: @memory, enabled: true})
     eventually(fn -> LaneSupervisor.running?(lane.id) end)
     old_runtime = LaneRegistry.whereis(lane.id, :runtime)
     attempt_id = "orphan-#{System.unique_integer([:positive])}"
     Runs.started(%{lane_id: lane.id, issue: %Issue{id: "issue-orphan", identifier: "TEAM-2", state: "Todo"}, attempt_id: attempt_id})
     assert %{status: "running"} = Runs.get_by_attempt(attempt_id)
-    assert {:ok, _} = Lanes.update(lane, %{front_matter: @linear})
+    assert {:ok, _} = TestSupport.update_lane_from_front_matter(lane, %{front_matter: @linear})
     assert_receive {:preflight, old_worker}, 1000
     assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, LaneStore)
     assert {:ok, _} = Supervisor.restart_child(SymphonyElixir.Supervisor, LaneStore)
@@ -295,7 +295,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "disabling a crashed lane fences its queued restart" do
-    {:ok, lane} = Lanes.create(%{slug: "cancel-restart", front_matter: @memory, enabled: true})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "cancel-restart", front_matter: @memory, enabled: true})
     eventually(fn -> LaneSupervisor.running?(lane.id) end)
     runtime = LaneRegistry.whereis(lane.id, :runtime)
     monitor = Process.monitor(runtime)
@@ -315,7 +315,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "authority recovery monitors a runtime created by the old authority's queued start" do
-    {:ok, lane} = Lanes.create(%{slug: "late-start-recovery", front_matter: @memory})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "late-start-recovery", front_matter: @memory})
     supervisor = Process.whereis(LaneSupervisor)
     old_store = Process.whereis(LaneStore)
     :ok = :sys.suspend(supervisor)
@@ -382,8 +382,8 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "metadata and prompt saves preserve adoption of a late runtime registered during restoration" do
-    {:ok, lane} = Lanes.create(%{slug: "visible-late-start", front_matter: @linear})
-    {:ok, barrier_lane} = Lanes.create(%{slug: "restore-barrier", front_matter: @memory})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "visible-late-start", front_matter: @linear})
+    {:ok, barrier_lane} = TestSupport.create_lane_from_front_matter(%{slug: "restore-barrier", front_matter: @memory})
     supervisor = Process.whereis(LaneSupervisor)
     old_store = Process.whereis(LaneStore)
     parent = self()
@@ -459,7 +459,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "failed recovery preflight drains old authority starts before leaving the lane disabled" do
-    {:ok, lane} = Lanes.create(%{slug: "failed-late-start", front_matter: @linear})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "failed-late-start", front_matter: @linear})
     supervisor = Process.whereis(LaneSupervisor)
     old_store = Process.whereis(LaneStore)
     :ok = :sys.suspend(supervisor)

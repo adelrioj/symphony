@@ -877,6 +877,8 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   defp scheduler(mode \\ :isolated) do
     parent = self()
     lane_id = LaneContext.current!()
+    {:ok, entry} = LaneStore.lookup(lane_id)
+    :ok = LaneStore.put_entry(%{entry | enabled: true})
     tasks = if mode == :registered, do: LaneRegistry.via(lane_id, :tasks), else: start_supervised!({Task.Supervisor, []}, id: make_ref())
 
     operation_fun = fn _adapter, config, entry, operation, opts ->

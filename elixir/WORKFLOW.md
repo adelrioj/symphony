@@ -1,7 +1,11 @@
 ---
-# Import format for one lane: mix symphony lanes import WORKFLOW.md --slug main.
-# Running configuration lives in the database; edit it in the UI or with
-# PUT /api/v1/lanes/:slug. File edits do not update a running installation.
+# Flattened import/export format for one lane: mix symphony lanes import WORKFLOW.md --slug main.
+# Import creates a disabled lane and a dedicated execution profile from worker/workspace.root.
+# Running configuration lives in the database; edit structured lane/profile state in the UI or
+# with /api/v1/lanes/:slug and /api/v1/execution-profiles/:id. File edits do not update a running
+# installation and there is no runtime watched-file configuration.
+# Shared profile edits apply to future runs on every linked lane. Active attempts and cleanup keep
+# their dispatch snapshot. Profile history and infrastructure provisioning are not provided.
 # server: is ignored; use serve --port/--host. Use the same --data-root for import and serve.
 tracker:
   kind: linear

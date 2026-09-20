@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.RunsTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{LaneContext, LaneStore, Repo, Runs}
+  alias SymphonyElixir.{LaneContext, LaneStore, Repo, Runs, TestSupport}
   alias SymphonyElixir.Runs.{Event, Run}
   alias SymphonyElixirWeb.ObservabilityPubSub
 
@@ -107,7 +107,7 @@ defmodule SymphonyElixir.RunsTest do
   test "lane finalization preserves successful attempts and distinguishes disable from crash" do
     lane_id = LaneContext.current!()
     {:ok, entry} = LaneStore.lookup(lane_id)
-    {:ok, other_lane} = SymphonyElixir.Lanes.create(%{slug: "other-history", front_matter: entry.front_matter, prompt: entry.prompt})
+    {:ok, other_lane} = TestSupport.create_lane_from_front_matter(%{slug: "other-history", front_matter: entry.front_matter, prompt: entry.prompt})
     start_run("other-lane", %{lane_id: other_lane.id})
     start_run("done")
     Runs.finished("done", "done")
@@ -407,7 +407,8 @@ defmodule SymphonyElixir.RunsTest do
     database = Path.join(#{inspect(root)}, "symphony.sqlite3")
     {:ok, repo} = Repo.start_link(database: database, pool_size: 1)
     {:ok, _writer} = Runs.start_link()
-    Repo.query!("INSERT INTO lanes (id, slug, name, inserted_at, updated_at) VALUES (1, 'boundary', 'Boundary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+    Repo.query!("INSERT INTO execution_profiles (id, name, workspace_base, worker, inserted_at, updated_at) VALUES (1, 'Boundary profile', ?, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", [Path.join(#{inspect(root)}, "workspaces")])
+    Repo.query!("INSERT INTO lanes (id, slug, name, execution_profile_id, workspace_subdir, inserted_at, updated_at) VALUES (1, 'boundary', 'Boundary', 1, '.', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
     Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, 'tracker: {}', 'Run', CURRENT_TIMESTAMP)")
     attrs = %{lane_id: 1, lane_version_id: 1, executor: "local", issue: %SymphonyElixir.Tracker.Issue{id: "boundary-issue", identifier: "BD-1", state: "Todo"}, attempt_id: "boundary"}
     #{body}

@@ -28,6 +28,8 @@ defmodule SymphonyElixir.TestSupport do
           reload_workflow!: 0,
           reset_lanes!: 0,
           ensure_lane_store_started!: 0,
+          create_lane_from_front_matter: 1,
+          update_lane_from_front_matter: 2,
           restore_env: 2,
           stop_default_http_server: 0,
           start_test_orchestrator: 1
@@ -72,6 +74,7 @@ defmodule SymphonyElixir.TestSupport do
     name = Keyword.fetch!(opts, :name)
     runtime_name = Module.concat(name, RuntimeSupervisor)
     task_name = Module.concat(name, TaskSupervisor)
+    {:ok, _lane} = SymphonyElixir.Lanes.set_enabled(current_fixture_lane(), true)
 
     ExUnit.Callbacks.start_supervised!(
       {SymphonyElixir.AgentRuntimeSupervisor, Keyword.merge(opts, name: runtime_name, task_supervisor_name: task_name, orchestrator_name: name)},
@@ -89,6 +92,65 @@ defmodule SymphonyElixir.TestSupport do
   def default_lane_slug, do: "default"
 
   def reload_workflow!, do: import_workflow(SymphonyElixir.Workflow.workflow_file_path())
+
+  def create_lane_from_front_matter(attrs) when is_map(attrs) do
+    with {:ok, workflow} <- parse_fixture_workflow(attrs),
+         {profile_attrs, config} = SymphonyElixir.ExecutionProfiles.Configuration.split(workflow.config),
+         {:ok, profile} <-
+           SymphonyElixir.ExecutionProfiles.create(%{
+             name: "Test #{Map.fetch!(attrs, :slug)} #{System.unique_integer([:positive])}",
+             workspace_base: profile_attrs["workspace_base"] || Path.join(SymphonyElixir.Config.data_root(), "workspaces-#{Map.fetch!(attrs, :slug)}"),
+             worker: profile_attrs["worker"] || %{}
+           }) do
+      attrs =
+        attrs
+        |> Map.drop([:front_matter])
+        |> Map.put(:execution_profile_id, profile.id)
+        |> Map.put_new(:workspace_subdir, ".")
+        |> Map.put(:config, config)
+        |> Map.put(:prompt, workflow.prompt)
+
+      enabled? = Map.get(attrs, :enabled, false) == true
+
+      case SymphonyElixir.Lanes.create(attrs) do
+        {:ok, lane} when enabled? -> SymphonyElixir.Lanes.set_enabled(lane, true)
+        result -> result
+      end
+    end
+  end
+
+  def update_lane_from_front_matter(lane, attrs) when is_map(attrs) do
+    with {:ok, workflow} <- parse_fixture_workflow(attrs),
+         {profile_attrs, config} = SymphonyElixir.ExecutionProfiles.Configuration.split(workflow.config),
+         :ok <- update_fixture_profile(lane, profile_attrs) do
+      attrs =
+        attrs
+        |> Map.drop([:front_matter])
+        |> Map.put(:config, config)
+        |> Map.put(:prompt, workflow.prompt)
+
+      SymphonyElixir.Lanes.update(lane, attrs)
+    end
+  end
+
+  defp parse_fixture_workflow(attrs) do
+    case SymphonyElixir.Workflow.parse_parts(Map.fetch!(attrs, :front_matter), Map.get(attrs, :prompt, "")) do
+      {:ok, workflow} -> {:ok, workflow}
+      {:error, reason} -> {:error, SymphonyElixir.Lanes.errors_for(reason)}
+    end
+  end
+
+  defp update_fixture_profile(_lane, profile_attrs) when map_size(profile_attrs) == 0, do: :ok
+
+  defp update_fixture_profile(lane, profile_attrs) do
+    case SymphonyElixir.ExecutionProfiles.update(
+           SymphonyElixir.ExecutionProfiles.get(lane.execution_profile_id),
+           profile_attrs
+         ) do
+      {:ok, _profile} -> :ok
+      {:error, errors} -> {:error, errors}
+    end
+  end
 
   defp import_workflow(path) do
     %{front_matter: front_matter, prompt: prompt} = SymphonyElixir.Workflow.split(File.read!(path))

@@ -404,6 +404,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     active_states = Keyword.get(opts, :active_states, ["Implemented"])
     backend_by_state = Keyword.get(opts, :backend_by_state, ~s({"implemented": "claude"}))
     in_progress_state = Keyword.get(opts, :in_progress_state, "In Progress")
+    File.rm_rf!(Config.local_workspace_root())
 
     File.write!(Workflow.workflow_file_path(), """
     ---
