@@ -94,26 +94,109 @@ defmodule SymphonyElixir.TestSupport do
     %{front_matter: front_matter, prompt: prompt} = SymphonyElixir.Workflow.split(File.read!(path))
 
     with {:ok, workflow} <- SymphonyElixir.Workflow.parse_parts(front_matter, prompt),
+         :ok <- validate_fixture_config(workflow.config),
          {profile_attrs, lane_config} = SymphonyElixir.ExecutionProfiles.Configuration.split(workflow.config),
          {:ok, profile} <-
            SymphonyElixir.ExecutionProfiles.create(%{
              name: "Test #{default_lane_slug()} #{System.unique_integer([:positive])}",
-             workspace_base: profile_attrs["workspace_base"] || Path.join(System.tmp_dir!(), "symphony_workspaces"),
+             workspace_base: profile_workspace_base(profile_attrs),
              worker: profile_attrs["worker"] || %{}
            }),
          {:ok, lane} <- workflow_lane(profile, lane_config, prompt) do
       SymphonyElixir.LaneContext.put(lane.id)
       :ok
+    else
+      {:error, errors} when is_list(errors) -> {:error, Enum.map(errors, &fixture_error/1)}
+      error -> error
+    end
+  end
+
+  defp fixture_error(%{path: "profile." <> path} = error), do: %{error | path: path}
+  defp fixture_error(error), do: error
+
+  defp validate_fixture_config(config) do
+    case SymphonyElixir.Config.Schema.parse(Map.delete(config, "server"), errors: :list) do
+      {:ok, settings} ->
+        case SymphonyElixir.Config.validate_settings(settings) do
+          :ok -> :ok
+          {:error, reason} -> {:error, SymphonyElixir.Lanes.errors_for(reason)}
+        end
+
+      {:error, {:invalid_workflow_config, errors}} ->
+        {:error, Enum.map(errors, fn {path, message} -> %{path: path, message: message} end)}
     end
   end
 
   defp workflow_lane(profile, config, prompt) do
-    case SymphonyElixir.Lanes.get_by_slug(default_lane_slug()) do
+    current_lane = current_fixture_lane()
+
+    case current_lane do
       nil ->
-        SymphonyElixir.Lanes.create(%{slug: default_lane_slug(), execution_profile_id: profile.id, config: config, prompt: prompt})
+        SymphonyElixir.Lanes.create(%{slug: default_lane_slug(), execution_profile_id: profile.id, workspace_subdir: ".", config: config, prompt: prompt})
 
       lane ->
-        SymphonyElixir.Lanes.update(lane, %{execution_profile_id: profile.id, config: config, prompt: prompt})
+        case SymphonyElixir.Lanes.update(lane, %{execution_profile_id: profile.id, workspace_subdir: ".", config: config, prompt: prompt}) do
+          {:ok, _lane} = result ->
+            result
+
+          {:error, errors} = error ->
+            if not lane.enabled and Enum.any?(errors, &(&1.path == "worker.environment")) do
+              fixture_relink(profile, config, prompt, lane) ||
+                SymphonyElixir.Lanes.create(%{
+                  slug: "#{default_lane_slug()}-#{System.unique_integer([:positive])}",
+                  execution_profile_id: profile.id,
+                  workspace_subdir: ".",
+                  config: config,
+                  prompt: prompt
+                })
+            else
+              error
+            end
+        end
+    end
+  end
+
+  defp fixture_relink(profile, config, prompt, current_lane) do
+    attrs = %{execution_profile_id: profile.id, workspace_subdir: ".", config: config, prompt: prompt}
+
+    SymphonyElixir.LaneStore.list()
+    |> Enum.find_value(fn entry ->
+      if entry.lane_id != current_lane.id and not entry.enabled and
+           match?(%SymphonyElixir.Config.Schema{}, entry.settings) and
+           entry.workspace_subdir == "." and entry.settings.workspace.root == profile.workspace_base do
+        case SymphonyElixir.Lanes.update(SymphonyElixir.Lanes.get!(entry.lane_id), attrs) do
+          {:ok, lane} -> {:ok, lane}
+          _ -> nil
+        end
+      end
+    end)
+  end
+
+  defp current_fixture_lane do
+    case SymphonyElixir.LaneContext.current() do
+      {:ok, lane_id} -> SymphonyElixir.Lanes.get(lane_id)
+      :error -> nil
+    end || SymphonyElixir.Lanes.get_by_slug(default_lane_slug())
+  end
+
+  defp fixture_workspace_base do
+    case current_fixture_lane() do
+      %{execution_profile_id: profile_id} ->
+        case SymphonyElixir.ExecutionProfiles.get(profile_id) do
+          %{workspace_base: workspace_base} -> workspace_base
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end || Path.join(SymphonyElixir.Config.data_root(), "workspaces")
+  end
+
+  defp profile_workspace_base(profile_attrs) do
+    if Map.has_key?(profile_attrs, "workspace_base") do
+      profile_attrs["workspace_base"] || Path.join(System.tmp_dir!(), "symphony_workspaces")
+    else
+      fixture_workspace_base()
     end
   end
 

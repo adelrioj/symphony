@@ -34,7 +34,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "a persisted lane without an active version cannot supply agent or MCP prompts" do
-    lane = Repo.insert!(%SymphonyElixir.Lanes.Lane{slug: "never-configured", name: "Never configured"})
+    {:ok, profile} = SymphonyElixir.ExecutionProfiles.create(%{name: "Never configured", workspace_base: System.tmp_dir!(), worker: %{}})
+    lane = Repo.insert!(%SymphonyElixir.Lanes.Lane{slug: "never-configured", name: "Never configured", execution_profile_id: profile.id})
     LaneContext.put(lane.id)
     assert :ok = LaneStore.refresh(lane.id)
 

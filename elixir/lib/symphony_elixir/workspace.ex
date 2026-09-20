@@ -5,10 +5,59 @@ defmodule SymphonyElixir.Workspace do
 
   require Logger
   alias SymphonyElixir.{Config, ExecutionContext, PathSafety, SSH}
+  alias SymphonyElixir.Config.Schema
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @type hook_result :: :ok | {:error, {:managed_execution_unknown, term()}}
   @type hook_observer :: (%{event: :hook, timestamp: DateTime.t(), payload: String.t()} -> term()) | nil
+
+  @doc false
+  @spec location_inventory(Schema.t()) :: :empty | :retained | {:error, term()}
+  def location_inventory(%Schema{} = settings) do
+    worker = settings.worker
+
+    case worker.ssh_hosts do
+      [] -> local_inventory(settings.workspace.root)
+      hosts -> remote_inventories(hosts, settings.workspace.root)
+    end
+  end
+
+  defp local_inventory(root) do
+    case PathSafety.canonicalize(root) do
+      {:ok, canonical_root} ->
+        case File.ls(canonical_root) do
+          {:ok, []} -> :empty
+          {:ok, _entries} -> :retained
+          {:error, :enoent} -> :empty
+          {:error, reason} -> {:error, {:workspace_inventory_unverifiable, :local, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:workspace_inventory_unverifiable, :local, reason}}
+    end
+  end
+
+  defp remote_inventories(hosts, root) do
+    Enum.reduce_while(hosts, :empty, fn host, _acc ->
+      case remote_inventory(host, root) do
+        :empty -> {:cont, :empty}
+        result -> {:halt, result}
+      end
+    end)
+  end
+
+  defp remote_inventory(host, root) do
+    command = remote_shell_assign("workspace_root", root) <> "\n" <> "find \"$workspace_root\" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null"
+
+    task = Task.async(fn -> SSH.run(host, command, stderr_to_stdout: true) end)
+
+    case Task.yield(task, 2_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {output, 0}} -> if(String.trim(output) == "", do: :empty, else: :retained)
+      {:ok, {output, status}} -> {:error, {:workspace_inventory_unverifiable, host, status, output}}
+      {:error, reason} -> {:error, {:workspace_inventory_unverifiable, host, reason}}
+      nil -> {:error, {:workspace_inventory_unverifiable, host, :timeout}}
+    end
+  end
 
   @spec create_for_issue(map() | String.t() | nil, ExecutionContext.t(), hook_observer()) ::
           {:ok, Path.t()} | {:error, term()}

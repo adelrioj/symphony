@@ -92,6 +92,35 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
     end
   end
 
+  @doc false
+  @spec location(map()) :: %{mode: :local | :ssh | :managed, root: String.t(), targets: [term()]}
+  def location(settings) do
+    case runtime(settings) do
+      nil ->
+        worker = value(settings, :worker) || %{}
+        root = value(value(settings, :workspace) || %{}, :root) || ""
+        hosts = value(worker, :ssh_hosts) || []
+
+        if hosts == [] do
+          %{mode: :local, root: canonical_local_root(root), targets: [:local]}
+        else
+          %{mode: :ssh, root: root, targets: Enum.uniq(hosts)}
+        end
+
+      config ->
+        %{mode: :managed, root: config.workspace_root, targets: [{:managed, identity(settings)}]}
+    end
+  end
+
+  @doc false
+  @spec location_identity(map()) :: binary()
+  def location_identity(settings) do
+    location(settings)
+    |> canonical()
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+  end
+
   @doc "Returns the provider ownership scope from captured runtime configuration."
   @spec scope(map()) :: map()
   def scope(%{kind: "google_workstations", provider: provider}), do: Map.take(provider, @workstations_scope)
@@ -110,6 +139,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
       _ -> raise ArgumentError, "invalid managed execution environment configuration"
     end
   end
+
+  defp canonical_local_root(root) when is_binary(root) do
+    case SymphonyElixir.PathSafety.canonicalize(root) do
+      {:ok, canonical} -> canonical
+      {:error, _reason} -> Path.expand(root)
+    end
+  end
+
+  defp canonical_local_root(root), do: inspect(root)
 
   defp value(map, key) when is_map(map), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
   defp value(_map, _key), do: nil

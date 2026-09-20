@@ -3,7 +3,7 @@ defmodule SymphonyElixir.LaneStore do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Config, LaneRegistry, Lanes, LaneSupervisor, Repo, Runs, Workflow}
+  alias SymphonyElixir.{Config, LaneRegistry, Lanes, LaneSupervisor, Repo, Runs, Workflow, Workspace}
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixirWeb.ObservabilityPubSub
@@ -25,6 +25,7 @@ defmodule SymphonyElixir.LaneStore do
       :profile_name,
       :workspace_subdir,
       :version_id,
+      :config_identity,
       :settings,
       :workflow,
       :front_matter,
@@ -109,6 +110,14 @@ defmodule SymphonyElixir.LaneStore do
   @spec refresh(lane_id()) :: :ok | {:error, :environment_identity_in_use}
   def refresh(lane_id), do: GenServer.call(__MODULE__, {:refresh, lane_id}, :infinity)
 
+  @doc false
+  @spec reserve_dispatch(lane_id()) :: {:ok, reference(), Entry.t()} | {:error, term()}
+  def reserve_dispatch(lane_id), do: GenServer.call(__MODULE__, {:reserve_dispatch, lane_id, self()}, :infinity)
+
+  @doc false
+  @spec release_dispatch(lane_id(), reference()) :: :ok
+  def release_dispatch(lane_id, token), do: GenServer.call(__MODULE__, {:release_dispatch, lane_id, token})
+
   @doc "Quiesces and removes a lane from this authority, including queued preflights and restarts."
   @spec remove(lane_id()) :: :ok
   def remove(lane_id), do: GenServer.call(__MODULE__, {:remove, lane_id}, :infinity)
@@ -128,7 +137,7 @@ defmodule SymphonyElixir.LaneStore do
   def check_identity(lane_id, settings) do
     case Process.whereis(__MODULE__) do
       nil -> :ok
-      pid -> GenServer.call(pid, {:check_identity, lane_id, EnvironmentConfig.identity(settings)})
+      pid -> GenServer.call(pid, {:check_identity, lane_id, effective_identity(settings), settings})
     end
   end
 
@@ -152,7 +161,16 @@ defmodule SymphonyElixir.LaneStore do
   @impl true
   def init(opts) do
     :ets.new(@table, [:named_table, :set, :protected, read_concurrency: true])
-    state = %{guards: %{}, monitors: %{}, pending_preflights: %{}, file?: Keyword.has_key?(opts, :file)}
+
+    state = %{
+      guards: %{},
+      monitors: %{},
+      reservation_monitors: %{},
+      reservations: %{},
+      retained: %{},
+      pending_preflights: %{},
+      file?: Keyword.has_key?(opts, :file)
+    }
 
     case Keyword.fetch(opts, :file) do
       {:ok, path} ->
@@ -192,6 +210,28 @@ defmodule SymphonyElixir.LaneStore do
     end
   end
 
+  def handle_call({:reserve_dispatch, id, owner}, _from, state) do
+    case lookup(id) do
+      {:ok, %Entry{enabled: true, error: nil, settings: %Schema{}} = entry} ->
+        token = make_ref()
+        monitor = Process.monitor(owner)
+        reservation = %{lane_id: id, owner: owner, monitor: monitor, identity: effective_identity(entry.settings)}
+
+        state = %{state | reservations: Map.put(state.reservations, token, reservation), reservation_monitors: Map.put(state.reservation_monitors, monitor, token)}
+        {:reply, {:ok, token, entry}, state}
+
+      {:ok, %Entry{error: error}} ->
+        {:reply, {:error, {:lane_invalid, error}}, state}
+
+      _ ->
+        {:reply, {:error, {:lane_unavailable, id}}, state}
+    end
+  end
+
+  def handle_call({:release_dispatch, id, token}, _from, state) do
+    {:reply, :ok, release_reservation(state, id, token)}
+  end
+
   def handle_call({:remove, id}, _from, state), do: {:reply, :ok, remove_lane(id, state)}
 
   def handle_call({:stop_runtime, id}, _from, state) do
@@ -216,7 +256,7 @@ defmodule SymphonyElixir.LaneStore do
     {:reply, :ok, state}
   end
 
-  def handle_call({:check_identity, id, identity}, _from, state), do: {:reply, identity_check(state, id, identity), state}
+  def handle_call({:check_identity, id, identity, settings}, _from, state), do: {:reply, identity_check(state, id, identity, settings), state}
 
   def handle_call({:protect_environment, id, identity, token}, _from, state) do
     case Map.get(state.guards, id) do
@@ -226,17 +266,25 @@ defmodule SymphonyElixir.LaneStore do
   end
 
   def handle_call({:protect_environment, id, identity}, _from, state) do
-    current =
-      case settings(id) do
-        {:ok, settings} -> EnvironmentConfig.identity(settings)
-        _ -> :unavailable
-      end
-
-    if current == identity and identity_check(state, id, identity) == :ok do
+    if state.file? and id == file_lane_id() and is_nil(identity) do
       token = make_ref()
-      {:reply, {:ok, token}, put_in(state.guards[id], %{identity: identity, token: token})}
+      {:reply, {:ok, token}, put_in(state.guards[id], %{identity: nil, token: token})}
     else
-      {:reply, {:error, :environment_identity_in_use}, state}
+      current =
+        case settings(id) do
+          {:ok, settings} ->
+            if is_nil(EnvironmentConfig.identity(settings)), do: nil, else: effective_identity(settings)
+
+          _ ->
+            :unavailable
+        end
+
+      if current == identity and identity_check(state, id, identity) == :ok do
+        token = make_ref()
+        {:reply, {:ok, token}, put_in(state.guards[id], %{identity: identity, token: token})}
+      else
+        {:reply, {:error, :environment_identity_in_use}, state}
+      end
     end
   end
 
@@ -261,6 +309,27 @@ defmodule SymphonyElixir.LaneStore do
 
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    case Map.pop(state.reservation_monitors, ref) do
+      {token, reservation_monitors} when not is_nil(token) ->
+        state = %{state | reservation_monitors: reservation_monitors, reservations: Map.delete(state.reservations, token)}
+        {:noreply, state}
+
+      {nil, _} ->
+        handle_runtime_down(ref, reason, state)
+    end
+  end
+
+  def handle_info({:restart_lane, id, generation}, state) do
+    state =
+      case lookup(id) do
+        {:ok, %Entry{generation: ^generation, enabled: true, error: nil} = entry} -> apply_runtime(nil, entry, state)
+        _ -> state
+      end
+
+    {:noreply, state}
+  end
+
+  defp handle_runtime_down(ref, reason, state) do
     {id, monitors} = Map.pop!(state.monitors, ref)
     {:ok, entry} = lookup(id)
     state = %{state | monitors: monitors}
@@ -274,16 +343,6 @@ defmodule SymphonyElixir.LaneStore do
     else
       {:noreply, record_crash(entry, reason, state)}
     end
-  end
-
-  def handle_info({:restart_lane, id, generation}, state) do
-    state =
-      case lookup(id) do
-        {:ok, %Entry{generation: ^generation, enabled: true, error: nil} = entry} -> apply_runtime(nil, entry, state)
-        _ -> state
-      end
-
-    {:noreply, state}
   end
 
   defp allow_identity(_settings), do: :ok
@@ -309,7 +368,7 @@ defmodule SymphonyElixir.LaneStore do
   end
 
   defp prepare_mutation(lane_id, fun, state) do
-    check = fn settings -> identity_check(state, lane_id, EnvironmentConfig.identity(settings)) end
+    check = fn settings -> identity_check(state, lane_id, effective_identity(settings), settings) end
 
     case fun.(check) do
       {:ok, value} -> prepare_publication(value, lane_id, state)
@@ -319,6 +378,7 @@ defmodule SymphonyElixir.LaneStore do
 
   defp prepare_publication({:batch, value, ids}, _lane_id, state) when is_list(ids) do
     entries = Enum.map(ids, &prepare_entry!(&1, state, false))
+    validate_location_ownership!(entries)
     {:mutation, value, entries, ids}
   end
 
@@ -326,8 +386,52 @@ defmodule SymphonyElixir.LaneStore do
     id = if lane, do: lane.id, else: lane_id
     ids = if is_nil(id), do: [], else: [id]
     entries = Enum.map(ids, &prepare_entry!(&1, state, true))
+    validate_location_ownership!(entries)
     {:mutation, lane, entries, ids}
   end
+
+  defp validate_location_ownership!(prepared) do
+    current = Map.new(list(), &{&1.lane_id, &1})
+
+    current =
+      Enum.reduce(prepared, current, fn
+        %{id: id, entry: nil}, acc -> Map.delete(acc, id)
+        %{id: id, entry: entry}, acc -> Map.put(acc, id, entry)
+      end)
+
+    entries = Map.values(current)
+
+    case Enum.find_value(entries, fn left ->
+           Enum.find_value(entries, fn right ->
+             if left.lane_id < right.lane_id and locations_overlap?(left.settings, right.settings),
+               do: {:workspace_identity_in_use, left.lane_id, right.lane_id}
+           end)
+         end) do
+      nil -> :ok
+      reason -> Repo.rollback(reason)
+    end
+  end
+
+  defp locations_overlap?(%Schema{} = left, %Schema{} = right) do
+    left = EnvironmentConfig.location(left)
+    right = EnvironmentConfig.location(right)
+
+    targets_overlap?(left.targets, right.targets) and roots_overlap?(left.root, right.root)
+  end
+
+  defp locations_overlap?(_, _), do: false
+
+  defp targets_overlap?(left, right), do: Enum.any?(left, &(&1 in right))
+
+  defp roots_overlap?(left, right) when is_binary(left) and is_binary(right) do
+    left_parts = Path.split(left)
+    right_parts = Path.split(right)
+    prefix?(left_parts, right_parts) or prefix?(right_parts, left_parts)
+  end
+
+  defp roots_overlap?(_, _), do: false
+
+  defp prefix?(parts, prefix), do: Enum.take(parts, length(prefix)) == prefix
 
   defp prepare_entry!(id, state, allow_invalid) do
     lane = Lanes.get_any(id)
@@ -353,9 +457,12 @@ defmodule SymphonyElixir.LaneStore do
         if allow_invalid do
           %{id: id, lane: lane, previous: previous, entry: nil}
         else
-          case Lanes.resolve_lane(lane) do
-            {:ok, _validated} -> %{id: id, lane: lane, previous: previous, entry: nil}
-            {:error, error} -> Repo.rollback({:lane_invalid, id, error})
+          case build_entry(lane, previous) do
+            {:ok, entry} ->
+              if identity_allowed?(state, entry), do: %{id: id, lane: lane, previous: previous, entry: nil}, else: Repo.rollback(:environment_identity_in_use)
+
+            {:error, error} ->
+              Repo.rollback({:lane_invalid, id, error})
           end
         end
     end
@@ -501,7 +608,17 @@ defmodule SymphonyElixir.LaneStore do
     case Lanes.resolve_lane(lane) do
       {:ok, validated} ->
         version = Lanes.current_version(lane)
-        {:ok, %{base | front_matter: version.front_matter, prompt: version.prompt, settings: validated.settings, workflow: validated.workflow, warnings: validated.warnings}}
+
+        {:ok,
+         %{
+           base
+           | config_identity: config_identity(base, validated),
+             front_matter: version.front_matter,
+             prompt: version.prompt,
+             settings: validated.settings,
+             workflow: validated.workflow,
+             warnings: validated.warnings
+         }}
 
       {:error, error} ->
         {:error, error}
@@ -582,6 +699,22 @@ defmodule SymphonyElixir.LaneStore do
 
   defp forget_preflight(state, id), do: %{state | pending_preflights: Map.delete(state.pending_preflights, id)}
 
+  defp release_reservation(state, id, token) do
+    case Map.get(state.reservations, token) do
+      %{lane_id: ^id, monitor: monitor} ->
+        Process.demonitor(monitor, [:flush])
+
+        %{
+          state
+          | reservations: Map.delete(state.reservations, token),
+            reservation_monitors: Map.delete(state.reservation_monitors, monitor)
+        }
+
+      _ ->
+        state
+    end
+  end
+
   # A successful start and its monitor are one serialized transition. An
   # explicit stop can never be followed by an attachment to the old runtime.
   defp attach_runtime(state, id, pid) do
@@ -610,7 +743,23 @@ defmodule SymphonyElixir.LaneStore do
     end
 
     state = state |> forget_monitors(id) |> forget_preflight(id)
-    %{state | guards: Map.delete(state.guards, id)}
+
+    reservations =
+      Enum.reduce(state.reservations, state.reservations, fn {token, reservation}, acc ->
+        if reservation.lane_id == id, do: Map.delete(acc, token), else: acc
+      end)
+
+    reservation_monitors =
+      Enum.reduce(state.reservation_monitors, state.reservation_monitors, fn {monitor, token}, acc ->
+        if not Map.has_key?(reservations, token) do
+          Process.demonitor(monitor, [:flush])
+          Map.delete(acc, monitor)
+        else
+          acc
+        end
+      end)
+
+    %{state | guards: Map.delete(state.guards, id), reservations: reservations, reservation_monitors: reservation_monitors, retained: Map.delete(state.retained, id)}
   end
 
   defp forget_monitors(state, id) do
@@ -627,24 +776,77 @@ defmodule SymphonyElixir.LaneStore do
     %{state | monitors: monitors}
   end
 
-  defp identity_check(_state, nil, _identity), do: :ok
+  defp identity_check(state, id, identity, settings \\ nil)
+  defp identity_check(_state, nil, _identity, _settings), do: :ok
 
-  defp identity_check(state, id, identity) do
-    case Map.get(state.guards, id) do
-      nil -> :ok
-      %{identity: ^identity} -> :ok
-      _ -> {:error, :environment_identity_in_use}
+  defp identity_check(state, id, identity, settings) do
+    reservation = Enum.find_value(state.reservations, fn {_token, value} -> if value.lane_id == id, do: value end)
+
+    cond do
+      reservation && reservation.identity != identity ->
+        {:error, :environment_identity_in_use}
+
+      reservation ->
+        :ok
+
+      true ->
+        case Map.get(state.guards, id) do
+          nil -> :ok
+          %{identity: ^identity} -> :ok
+          %{identity: old_identity} -> allow_identity_change(state, id, old_identity, settings)
+        end
     end
   end
 
   defp identity_allowed?(_state, %Entry{settings: nil}), do: true
-  defp identity_allowed?(state, entry), do: identity_check(state, entry.lane_id, EnvironmentConfig.identity(entry.settings)) == :ok
+  defp identity_allowed?(state, entry), do: identity_check(state, entry.lane_id, effective_identity(entry.settings), entry.settings) == :ok
+
+  defp allow_identity_change(state, id, old_identity, new_settings) do
+    case Map.get(state.retained, id) || previous_entry(id) do
+      %Entry{settings: %Schema{} = settings} ->
+        if managed_identity?(settings) do
+          {:error, :environment_identity_in_use}
+        else
+          case Workspace.location_inventory(settings) do
+            :empty -> verify_new_location(new_settings)
+            _ -> {:error, :environment_identity_in_use}
+          end
+        end
+
+      _ ->
+        if old_identity == nil, do: verify_new_location(new_settings), else: {:error, :environment_identity_in_use}
+    end
+  end
+
+  defp verify_new_location(%Schema{} = settings) do
+    if managed_identity?(settings) do
+      :ok
+    else
+      case Workspace.location_inventory(settings) do
+        :empty -> :ok
+        _ -> {:error, :environment_identity_in_use}
+      end
+    end
+  end
+
+  defp verify_new_location(_settings), do: :ok
+
+  defp managed_identity?(settings), do: not is_nil(EnvironmentConfig.identity(settings))
+
+  defp effective_identity(settings) do
+    EnvironmentConfig.identity(settings) || EnvironmentConfig.location_identity(settings)
+  end
+
+  defp config_identity(%Entry{profile_id: profile_id, workspace_subdir: subdir}, validated) do
+    :crypto.hash(:sha256, :erlang.term_to_binary({profile_id, subdir, validated.settings, validated.workflow}))
+  end
 
   defp ensure_guard(state, %Entry{settings: %Schema{} = settings, lane_id: id}) do
-    case {EnvironmentConfig.identity(settings), Map.get(state.guards, id)} do
-      {nil, _} -> state
-      {_, %{}} -> state
-      {identity, nil} -> put_in(state.guards[id], %{identity: identity, token: make_ref()})
+    identity = effective_identity(settings)
+
+    case Map.get(state.guards, id) do
+      %{identity: ^identity} -> state
+      _ -> put_in(state.guards[id], %{identity: identity, token: make_ref()})
     end
   end
 

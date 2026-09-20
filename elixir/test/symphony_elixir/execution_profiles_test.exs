@@ -141,4 +141,56 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
 
     assert Enum.any?(errors, &(&1.path == "profile.workspace_base"))
   end
+
+  @tag :tmp_dir
+  test "location changes fail closed when the new SSH target cannot be inventoried", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "SSH target", workspace_base: root, worker: %{}})
+    {:ok, _lane} = Lanes.create(%{slug: "ssh-target", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    assert {:error, errors} =
+             ExecutionProfiles.update(profile, %{
+               workspace_base: "/remote/workspaces",
+               worker: %{"ssh_hosts" => ["127.0.0.1:1"]}
+             })
+
+    assert errors != []
+    assert ExecutionProfiles.get(profile.id).workspace_base == root
+  end
+
+  @tag :tmp_dir
+  test "disabled lanes still prevent overlapping effective workspaces", %{tmp_dir: root} do
+    {:ok, first_profile} = ExecutionProfiles.create(%{name: "First", workspace_base: root, worker: %{}})
+    {:ok, second_profile} = ExecutionProfiles.create(%{name: "Second", workspace_base: root, worker: %{}})
+    {:ok, _first} = Lanes.create(%{slug: "first", execution_profile_id: first_profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+
+    assert {:error, errors} =
+             Lanes.create(%{slug: "second", execution_profile_id: second_profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+
+    assert errors != []
+  end
+
+  @tag :tmp_dir
+  test "concurrent profile edits, relinking and deletion leave complete results", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Concurrent", workspace_base: root, worker: %{"max_concurrent_agents_per_host" => 2}})
+    {:ok, other} = ExecutionProfiles.create(%{name: "Other", workspace_base: Path.join(root, "other"), worker: %{"max_concurrent_agents_per_host" => 7}})
+    {:ok, first} = Lanes.create(%{slug: "concurrent-first", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, second} = Lanes.create(%{slug: "concurrent-second", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    results =
+      [
+        Task.async(fn -> ExecutionProfiles.update(profile, %{worker: %{"max_concurrent_agents_per_host" => 5}}) end),
+        Task.async(fn -> Lanes.update(second, %{execution_profile_id: other.id}) end),
+        Task.async(fn -> ExecutionProfiles.delete(profile) end)
+      ]
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert [{:ok, _updated}, {:ok, _relinked}, {:error, errors}] = results
+    assert Enum.any?(errors, &(&1.path == "lanes"))
+
+    assert {:ok, first_entry} = LaneStore.lookup(first.id)
+    assert {:ok, second_entry} = LaneStore.lookup(second.id)
+    assert first_entry.settings.worker.max_concurrent_agents_per_host == 5
+    assert second_entry.settings.worker.max_concurrent_agents_per_host == 7
+    assert Lanes.get!(second.id).execution_profile_id == other.id
+  end
 end
