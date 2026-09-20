@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.LaneStoreTest do
   use ExUnit.Case
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.{LaneRegistry, Lanes, LaneStore, Repo, TestSupport, Workflow}
+  alias SymphonyElixir.{ExecutionProfiles, LaneRegistry, Lanes, LaneStore, Repo, TestSupport, Workflow}
+  alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.Lanes.Lane
   alias SymphonyElixir.LaneStore.Entry
   alias SymphonyElixirWeb.ObservabilityPubSub
@@ -58,11 +59,13 @@ defmodule SymphonyElixir.LaneStoreTest do
     Process.flag(:trap_exit, true)
     assert {:error, {:workflow_parse_error, _}} = LaneStore.start_link(file: path)
 
-    assert {:ok, lane} = Lanes.create(%{slug: "offline", front_matter: "tracker:\n  kind: memory", prompt: "imported offline"})
+    assert {:ok, lane} = create_lane(%{slug: "offline", front_matter: "tracker:\n  kind: memory", prompt: "imported offline"})
     assert {:ok, updated} = Lanes.update(lane, %{prompt: "\nsaved offline\n"})
-    assert {:error, [%{path: "front_matter"}]} = Lanes.update(updated, %{name: "must roll back", front_matter: "tracker: ["})
+    assert {:error, [%{path: "front_matter", message: _}]} = Lanes.update(updated, %{name: "must roll back", front_matter: "tracker: ["})
     assert Lanes.get!(lane.id).name == "offline"
-    assert {:ok, "---\ntracker:\n  kind: memory\n---\n\nsaved offline\n"} = Lanes.export(Lanes.get!(lane.id))
+    assert {:ok, exported} = Lanes.export(Lanes.get!(lane.id))
+    assert {:ok, parsed} = Workflow.parse(exported)
+    assert parsed.config["tracker"] == %{"kind" => "memory"}
     assert :error = LaneStore.lookup(lane.id)
     assert {:ok, _} = Supervisor.restart_child(SymphonyElixir.Supervisor, LaneStore)
     assert {:ok, %{prompt: "saved offline"}} = LaneStore.workflow(lane.id)
@@ -86,9 +89,11 @@ defmodule SymphonyElixir.LaneStoreTest do
   end
 
   test "a persisted lane without a version is disabled until a valid version repairs it" do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Missing version #{System.unique_integer([:positive])}", workspace_base: Path.join(System.tmp_dir!(), "symphony_workspaces"), worker: %{}})
+
     lane =
       %Lane{}
-      |> Lane.changeset(%{slug: "missing-version", name: "Missing version", enabled: true})
+      |> Lane.changeset(%{slug: "missing-version", name: "Missing version", enabled: true, execution_profile_id: profile.id, workspace_subdir: "missing-version"})
       |> Repo.insert!()
 
     assert :ok = LaneStore.refresh(lane.id)
@@ -98,15 +103,15 @@ defmodule SymphonyElixir.LaneStoreTest do
     assert {:error, [%{path: "version"}]} = Lanes.set_enabled(lane, true)
     assert {:error, :no_version} = Lanes.export(Lanes.get!(lane.id))
     assert Lanes.versions(lane) == []
-    assert {:ok, repaired} = Lanes.update(lane, %{front_matter: "tracker:\n  kind: memory", prompt: "repaired"})
+    assert {:ok, repaired} = Lanes.update(lane, %{config: %{"tracker" => %{"kind" => "memory"}}, prompt: "repaired"})
     assert repaired.current_version_id
     assert {:ok, %{prompt: "repaired"}} = LaneStore.workflow(lane.id)
     assert {:ok, %Entry{enabled: false, error: nil}} = LaneStore.lookup(lane.id)
   end
 
   test "guard survives acquiring process death and only the newest authority can release it" do
-    {:ok, lane} = Lanes.create(%{slug: "guarded", front_matter: "tracker:\n  kind: memory"})
-    {:ok, other} = Lanes.create(%{slug: "other", front_matter: "tracker:\n  kind: memory"})
+    {:ok, lane} = create_lane(%{slug: "guarded", front_matter: "tracker:\n  kind: memory"})
+    {:ok, other} = create_lane(%{slug: "other", front_matter: "tracker:\n  kind: memory"})
     parent = self()
 
     {owner, monitor} =
@@ -128,7 +133,7 @@ defmodule SymphonyElixir.LaneStoreTest do
   end
 
   test "refresh keeps the effective last good version, and startup disables invalid DB lanes visibly" do
-    {:ok, lane} = Lanes.create(%{slug: "reload", enabled: true, front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 2000", prompt: "one"})
+    {:ok, lane} = create_lane(%{slug: "reload", enabled: true, front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 2000", prompt: "one"})
     version = Lanes.current_version(lane)
     Repo.update!(Ecto.Changeset.change(version, front_matter: "polling:\n  interval_ms: nope"))
     assert :ok = LaneStore.refresh(lane.id)
@@ -144,7 +149,7 @@ defmodule SymphonyElixir.LaneStoreTest do
   end
 
   test "scheduler reads stay available while a DB write is blocked" do
-    {:ok, lane} = Lanes.create(%{slug: "readers", front_matter: "tracker:\n  kind: memory", prompt: "before"})
+    {:ok, lane} = create_lane(%{slug: "readers", front_matter: "tracker:\n  kind: memory", prompt: "before"})
     parent = self()
 
     holder =
@@ -168,7 +173,7 @@ defmodule SymphonyElixir.LaneStoreTest do
   test "publication and errors broadcast both global and lane subscriptions without orchestrator polling" do
     :ok = ObservabilityPubSub.subscribe()
     :ok = ObservabilityPubSub.subscribe_lane("visible")
-    {:ok, lane} = Lanes.create(%{slug: "visible", front_matter: "tracker:\n  kind: memory"})
+    {:ok, lane} = create_lane(%{slug: "visible", front_matter: "tracker:\n  kind: memory"})
     assert_receive :observability_updated
     assert_receive {:lane_updated, "visible"}
     :ok = LaneStore.mark_error(lane.id, "needs attention")
@@ -186,5 +191,30 @@ defmodule SymphonyElixir.LaneStoreTest do
       if pid = Process.whereis(LaneStore), do: GenServer.stop(pid)
       Supervisor.restart_child(SymphonyElixir.Supervisor, LaneStore)
     end)
+  end
+
+  defp create_lane(attrs) do
+    front_matter = Map.fetch!(attrs, :front_matter)
+    prompt = Map.get(attrs, :prompt, "")
+    {:ok, workflow} = Workflow.parse_parts(front_matter, prompt)
+    {profile_attrs, config} = Configuration.split(workflow.config)
+
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Test #{Map.fetch!(attrs, :slug)} #{System.unique_integer([:positive])}",
+        workspace_base: profile_attrs["workspace_base"] || Path.join(System.tmp_dir!(), "symphony_workspaces"),
+        worker: profile_attrs["worker"] || %{}
+      })
+
+    lane_attrs =
+      attrs
+      |> Map.drop([:front_matter, :enabled])
+      |> Map.put(:execution_profile_id, profile.id)
+      |> Map.put(:config, config)
+      |> Map.put(:prompt, prompt)
+
+    with {:ok, lane} <- Lanes.create(lane_attrs) do
+      if Map.get(attrs, :enabled, false), do: Lanes.set_enabled(lane, true), else: {:ok, lane}
+    end
   end
 end

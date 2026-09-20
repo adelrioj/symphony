@@ -1,8 +1,34 @@
 defmodule SymphonyElixir.ExecutionProfilesTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias SymphonyElixir.ExecutionProfiles.Configuration
+  alias SymphonyElixir.{ExecutionProfiles, LaneStore, Lanes, TestSupport}
   alias SymphonyElixir.Workflow
+
+  setup do
+    TestSupport.reset_lanes!()
+    on_exit(fn -> TestSupport.reset_lanes!() end)
+    :ok
+  end
+
+  @tag :tmp_dir
+  test "shared profile validation is all or nothing", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Shared", workspace_base: root, worker: %{}})
+    {:ok, first} = Lanes.create(%{slug: "first", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, second} = Lanes.create(%{slug: "second", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    assert {:ok, updated} = ExecutionProfiles.update(profile, %{worker: %{"max_concurrent_agents_per_host" => 2}})
+    assert updated.worker == %{"max_concurrent_agents_per_host" => 2}
+    assert {:ok, %{settings: %{worker: %{max_concurrent_agents_per_host: 2}}}} = LaneStore.lookup(first.id)
+    assert {:ok, %{settings: %{worker: %{max_concurrent_agents_per_host: 2}}}} = LaneStore.lookup(second.id)
+    {:ok, before_invalid_first} = LaneStore.lookup(first.id)
+    {:ok, before_invalid_second} = LaneStore.lookup(second.id)
+
+    assert {:error, errors} = ExecutionProfiles.update(updated, %{worker: %{"max_concurrent_agents_per_host" => -1}})
+    assert errors != []
+    assert ExecutionProfiles.get(profile.id).worker == updated.worker
+    assert {:ok, ^before_invalid_first} = LaneStore.lookup(first.id)
+    assert {:ok, ^before_invalid_second} = LaneStore.lookup(second.id)
+  end
 
   @tag :tmp_dir
   test "profile infrastructure cannot be shadowed and nested lane values survive", %{tmp_dir: root} do

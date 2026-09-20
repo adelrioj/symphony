@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.RepoTest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.{Config, Repo}
+  alias SymphonyElixir.{Config, Lanes, Repo}
+  alias SymphonyElixir.Lanes.Lane
 
   setup do
     keys = [:data_root, :server_port]
@@ -22,7 +23,7 @@ defmodule SymphonyElixir.RepoTest do
 
   test "migration preserves existing lane versions, runs and events when repeated" do
     isolated_repo()
-    assert :ok = Repo.migrate()
+    assert :ok = legacy_migrate()
 
     Repo.query!("INSERT INTO lanes (id, slug, name, inserted_at, updated_at) VALUES (1, 'features', 'Features', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
     Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, 'tracker: {}', 'Build it', CURRENT_TIMESTAMP)")
@@ -45,28 +46,86 @@ defmodule SymphonyElixir.RepoTest do
              JOIN runs ON runs.lane_version_id = lane_versions.id
              JOIN run_events ON run_events.run_id = runs.id
              """).rows
+
+    assert [] = Repo.query!("PRAGMA foreign_key_check").rows
   end
 
   test "database rejects unsupported lane executors and duplicate lane slugs" do
     isolated_repo()
     :ok = Repo.migrate()
+    profile_id = create_profile("Executor test")
 
-    insert = "INSERT INTO lanes (slug, name, executor, inserted_at, updated_at) VALUES (?, 'Features', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-    assert {:error, %Exqlite.Error{}} = Repo.query(insert, ["features", "kubernetes"])
-    assert {:ok, _} = Repo.query(insert, ["features", "local"])
+    insert = "INSERT INTO lanes (slug, name, executor, execution_profile_id, inserted_at, updated_at) VALUES (?, 'Features', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    assert {:error, %Exqlite.Error{}} = Repo.query(insert, ["features", "kubernetes", profile_id])
+    assert {:ok, _} = Repo.query(insert, ["features", "local", profile_id])
     assert {:error, %Exqlite.Error{}} = Repo.query(insert, ["features", "local"])
     assert {:error, %Exqlite.Error{}} = Repo.query("UPDATE lanes SET executor = 'remote' WHERE slug = 'features'")
     assert [["local"]] = Repo.query!("SELECT executor FROM lanes").rows
   end
 
+  @tag :tmp_dir
+  test "profile migration backfills every lane without changing retained history", %{root: root} do
+    isolated_repo()
+    :ok = legacy_migrate()
+    enabled_root = Path.join(root, "enabled")
+    disabled_root = Path.join(root, "disabled")
+
+    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (1, 'enabled', 'Enabled', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+
+    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, ?, 'run it', CURRENT_TIMESTAMP)", [
+      "workspace:\n  root: #{enabled_root}\nworker:\n  ssh_hosts: [worker.example]\ntracker:\n  kind: memory"
+    ])
+
+    Repo.query!("UPDATE lanes SET current_version_id = 1 WHERE id = 1")
+
+    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (2, 'disabled', 'Disabled', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+
+    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (2, 2, ?, 'disabled', CURRENT_TIMESTAMP)", [
+      "workspace:\n  root: #{disabled_root}\ntracker:\n  kind: memory"
+    ])
+
+    Repo.query!("UPDATE lanes SET current_version_id = 2 WHERE id = 2")
+
+    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, deleted_at, inserted_at, updated_at) VALUES (3, 'deleted', 'Deleted', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (3, 3, 'tracker:\n  kind: memory', 'deleted', CURRENT_TIMESTAMP)")
+    Repo.query!("UPDATE lanes SET current_version_id = 3 WHERE id = 3")
+
+    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (4, 'malformed', 'Malformed', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (4, 4, 'tracker: [', 'broken', CURRENT_TIMESTAMP)")
+    Repo.query!("UPDATE lanes SET current_version_id = 4 WHERE id = 4")
+    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (5, 'missing-version', 'Missing', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+
+    Repo.query!("INSERT INTO runs (id, lane_id, lane_version_id, issue_id, issue_identifier, attempt_id, started_at) VALUES (1, 1, 1, 'issue-1', 'TEST-1', 'migration-attempt', CURRENT_TIMESTAMP)")
+    Repo.query!("INSERT INTO run_events (run_id, at, kind, payload) VALUES (1, CURRENT_TIMESTAMP, 'started', '{\"kept\":true}')")
+
+    :ok = Repo.migrate()
+
+    assert [[5]] = Repo.query!("SELECT count(*) FROM execution_profiles").rows
+    assert [] = Repo.query!("PRAGMA foreign_key_check").rows
+    assert {:ok, %{settings: %{workspace: %{root: ^enabled_root}}}} = Lanes.resolve_lane(Repo.get!(Lane, 1))
+
+    assert [["run it", "migration-attempt", "started", "{\"kept\":true}"]] =
+             Repo.query!("""
+             SELECT lane_versions.prompt, runs.attempt_id, run_events.kind, run_events.payload
+             FROM lane_versions JOIN runs ON runs.lane_version_id = lane_versions.id
+             JOIN run_events ON run_events.run_id = runs.id WHERE lane_versions.id = 1
+             """).rows
+
+    assert [["."], ["."], ["."], ["."], ["."]] = Repo.query!("SELECT workspace_subdir FROM lanes ORDER BY id").rows
+    assert [[repair_error]] = Repo.query!("SELECT repair_error FROM execution_profiles WHERE name = 'Legacy malformed'").rows
+    assert repair_error =~ "repair"
+    assert Repo.get!(Lane, 3).deleted_at
+  end
+
   test "foreign keys protect history while run deletion cascades to events" do
     isolated_repo()
     :ok = Repo.migrate()
+    profile_id = create_profile("History test")
 
     assert {:error, %Exqlite.Error{}} =
              Repo.query("INSERT INTO lane_versions (lane_id, front_matter, prompt, inserted_at) VALUES (999, '', '', CURRENT_TIMESTAMP)")
 
-    Repo.query!("INSERT INTO lanes (id, slug, name, inserted_at, updated_at) VALUES (1, 'features', 'Features', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+    Repo.query!("INSERT INTO lanes (id, slug, name, execution_profile_id, inserted_at, updated_at) VALUES (1, 'features', 'Features', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", [profile_id])
     Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, '', '', CURRENT_TIMESTAMP)")
 
     insert_run = "INSERT INTO runs (id, lane_id, lane_version_id, issue_id, issue_identifier, attempt_id, started_at) VALUES (?, 1, 1, 'issue-1', 'TEST-1', 'attempt-1', CURRENT_TIMESTAMP)"
@@ -80,6 +139,21 @@ defmodule SymphonyElixir.RepoTest do
     assert [[0]] = Repo.query!("SELECT count(*) FROM run_events").rows
     Repo.query!("DELETE FROM lanes WHERE id = 1")
     assert [[0]] = Repo.query!("SELECT count(*) FROM lane_versions").rows
+  end
+
+  test "profile references are enforced for direct SQL and soft-deleted lanes" do
+    isolated_repo()
+    :ok = Repo.migrate()
+    profile_id = create_profile("Referenced")
+    assert {:error, %Exqlite.Error{}} = Repo.query("INSERT INTO lanes (slug, name, inserted_at, updated_at) VALUES ('missing-profile', 'Missing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+
+    assert {:error, %Exqlite.Error{}} =
+             Repo.query("INSERT INTO lanes (slug, name, execution_profile_id, inserted_at, updated_at) VALUES ('bad-profile', 'Bad', 999999, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+
+    Repo.query!("INSERT INTO lanes (slug, name, execution_profile_id, inserted_at, updated_at) VALUES ('referenced', 'Referenced', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", [profile_id])
+    assert {:error, %Exqlite.Error{}} = Repo.query("DELETE FROM execution_profiles WHERE id = ?", [profile_id])
+    Repo.query!("UPDATE lanes SET deleted_at = CURRENT_TIMESTAMP WHERE slug = 'referenced'")
+    assert {:error, %Exqlite.Error{}} = Repo.query("DELETE FROM execution_profiles WHERE id = ?", [profile_id])
   end
 
   test "an uncreated data root becomes a usable persistent database directory", %{root: root} do
@@ -157,5 +231,19 @@ defmodule SymphonyElixir.RepoTest do
   defp isolated_repo do
     pid = start_supervised!({Repo, name: nil, database: ":memory:", pool_size: 1, journal_mode: :memory})
     Repo.put_dynamic_repo(pid)
+  end
+
+  defp legacy_migrate do
+    Ecto.Migrator.up(Repo, 20_260_912_000_001, SymphonyElixir.Repo.Migrations.CreateLanesAndRuns, log: false)
+    :ok
+  end
+
+  defp create_profile(name) do
+    Repo.query!("INSERT INTO execution_profiles (name, workspace_base, worker, inserted_at, updated_at) VALUES (?, ?, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", [
+      name,
+      Path.join(System.tmp_dir!(), name)
+    ])
+
+    Repo.query!("SELECT id FROM execution_profiles WHERE name = ?", [name]).rows |> hd() |> hd()
   end
 end

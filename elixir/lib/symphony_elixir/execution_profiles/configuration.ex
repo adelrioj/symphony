@@ -104,6 +104,9 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
 
   defp effective_root(worker, base_root, workspace_subdir) do
     cond do
+      workspace_subdir == "." ->
+        {:ok, base_root}
+
       absolute_path?(workspace_subdir) ->
         {:error, [error("workspace_subdir", "must be relative")]}
 

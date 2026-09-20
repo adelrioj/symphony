@@ -21,6 +21,9 @@ defmodule SymphonyElixir.LaneStore do
       :name,
       :enabled,
       :executor,
+      :profile_id,
+      :profile_name,
+      :workspace_subdir,
       :version_id,
       :settings,
       :workflow,
@@ -290,7 +293,17 @@ defmodule SymphonyElixir.LaneStore do
     # together rather than letting those tokens outlive their owner.
     if LaneSupervisor.running?(lane.id), do: LaneSupervisor.stop_lane(lane.id)
     Runs.finish_lane(lane.id, "failed")
-    entry = lane |> build_entry(nil) |> disable_invalid_entry()
+
+    entry =
+      case build_entry(lane, nil) do
+        {:ok, entry} ->
+          entry
+
+        {:error, error} ->
+          persist_disabled(lane.id)
+          invalid_entry(lane, nil, error)
+      end
+
     publish(entry)
     ensure_guard(state, entry)
   end
@@ -299,35 +312,99 @@ defmodule SymphonyElixir.LaneStore do
     check = fn settings -> identity_check(state, lane_id, EnvironmentConfig.identity(settings)) end
 
     case fun.(check) do
-      {:ok, lane} -> prepare_publication(lane, lane_id, state)
+      {:ok, value} -> prepare_publication(value, lane_id, state)
       {:error, error} -> Repo.rollback(error)
     end
   end
 
-  defp prepare_publication(lane, lane_id, state) do
-    id = if lane, do: lane.id, else: lane_id
-    previous = previous_entry(id)
-    entry = mutation_entry(lane, previous)
-    if entry && not identity_allowed?(state, entry), do: Repo.rollback(:environment_identity_in_use)
-    {lane, id, previous, entry}
+  defp prepare_publication({:batch, value, ids}, _lane_id, state) when is_list(ids) do
+    entries = Enum.map(ids, &prepare_entry!(&1, state, false))
+    {:mutation, value, entries, ids}
   end
 
-  defp mutation_entry(nil, _previous), do: nil
+  defp prepare_publication(lane, lane_id, state) do
+    id = if lane, do: lane.id, else: lane_id
+    ids = if is_nil(id), do: [], else: [id]
+    entries = Enum.map(ids, &prepare_entry!(&1, state, true))
+    {:mutation, lane, entries, ids}
+  end
 
-  defp mutation_entry(%{deleted_at: nil} = lane, previous),
-    do: lane |> build_entry(previous) |> keep_last_known_good(previous)
+  defp prepare_entry!(id, state, allow_invalid) do
+    lane = Lanes.get_any(id)
+    previous = previous_entry(id)
 
-  defp mutation_entry(_lane, _previous), do: nil
+    case lane do
+      nil ->
+        %{id: id, lane: nil, previous: previous, entry: nil}
 
-  defp publish_mutation({:ok, {lane, id, _previous, nil}}, _reason, state),
-    do: {:reply, {:ok, lane}, remove_lane(id, state)}
+      %{deleted_at: nil} ->
+        case build_entry(lane, previous) do
+          {:ok, entry} ->
+            if identity_allowed?(state, entry), do: %{id: id, lane: lane, previous: previous, entry: entry}, else: Repo.rollback(:environment_identity_in_use)
 
-  defp publish_mutation({:ok, {lane, _id, previous, entry}}, reason, state) do
-    entry = if reason, do: %{entry | error: reason}, else: entry
-    {:reply, {:ok, lane}, publish_runtime(previous, entry, state)}
+          {:error, error} when allow_invalid and not lane.enabled ->
+            %{id: id, lane: lane, previous: previous, entry: invalid_entry(lane, previous, error)}
+
+          {:error, error} ->
+            Repo.rollback({:lane_invalid, id, error})
+        end
+
+      lane ->
+        if allow_invalid do
+          %{id: id, lane: lane, previous: previous, entry: nil}
+        else
+          case Lanes.resolve_lane(lane) do
+            {:ok, _validated} -> %{id: id, lane: lane, previous: previous, entry: nil}
+            {:error, error} -> Repo.rollback({:lane_invalid, id, error})
+          end
+        end
+    end
+  end
+
+  defp publish_mutation({:ok, {:mutation, value, prepared, _ids}}, reason, state) do
+    entries = Enum.map(prepared, &maybe_reason(&1.entry, reason))
+
+    true =
+      :ets.insert(
+        @table,
+        Enum.flat_map(entries, fn
+          nil -> []
+          entry -> [{entry.lane_id, entry}]
+        end)
+      )
+
+    Enum.each(entries, fn entry ->
+      if entry do
+        broadcast(entry)
+        log_entry(entry)
+      end
+    end)
+
+    state =
+      Enum.zip(prepared, entries)
+      |> Enum.reduce(state, fn
+        {%{previous: _previous}, nil}, acc ->
+          acc
+
+        {%{previous: previous}, entry}, acc ->
+          acc
+          |> ensure_guard(entry)
+          |> then(fn acc ->
+            if entry.enabled, do: acc, else: forget_monitors(acc, entry.lane_id)
+          end)
+          |> then(&apply_runtime(previous, entry, &1))
+      end)
+
+    removed = Enum.filter(prepared, &is_nil(&1.entry))
+    state = Enum.reduce(removed, state, fn %{id: id}, acc -> remove_lane(id, acc) end)
+    {:reply, {:ok, value}, state}
   end
 
   defp publish_mutation({:error, error}, _reason, state), do: {:reply, {:error, error}, state}
+
+  defp maybe_reason(nil, _reason), do: nil
+  defp maybe_reason(entry, nil), do: entry
+  defp maybe_reason(entry, reason), do: %{entry | error: reason}
 
   defp publish_runtime(previous, entry, state) do
     publish(entry)
@@ -371,22 +448,40 @@ defmodule SymphonyElixir.LaneStore do
   end
 
   defp refresh_entry(lane, previous, state) do
-    entry = lane |> build_entry(previous) |> keep_last_known_good(previous)
+    case build_entry(lane, previous) do
+      {:ok, entry} ->
+        if identity_allowed?(state, entry) do
+          {:ok, publish_runtime(previous, entry, state)}
+        else
+          {:error, :environment_identity_in_use}
+        end
 
-    if identity_allowed?(state, entry) do
-      entry = disable_invalid_entry(entry)
-      {:ok, publish_runtime(previous, entry, state)}
-    else
-      {:error, :environment_identity_in_use}
+      {:error, error} ->
+        persist_disabled(lane.id)
+        entry = invalid_entry(lane, previous, error)
+
+        entry =
+          case previous do
+            %Entry{settings: %Schema{}} ->
+              %{
+                previous
+                | enabled: false,
+                  name: lane.name,
+                  slug: lane.slug,
+                  profile_id: lane.execution_profile_id,
+                  profile_name: profile_name(lane),
+                  workspace_subdir: lane.workspace_subdir,
+                  generation: entry.generation,
+                  error: Lanes.format_errors(error)
+              }
+
+            _ ->
+              entry
+          end
+
+        {:ok, publish_runtime(previous, entry, state)}
     end
   end
-
-  defp disable_invalid_entry(%Entry{settings: nil} = entry) do
-    persist_disabled(entry.lane_id)
-    %{entry | enabled: false}
-  end
-
-  defp disable_invalid_entry(entry), do: entry
 
   defp build_entry(lane, previous) do
     base = %Entry{
@@ -395,33 +490,60 @@ defmodule SymphonyElixir.LaneStore do
       name: lane.name,
       enabled: lane.enabled,
       executor: lane.executor,
+      profile_id: lane.execution_profile_id,
+      profile_name: profile_name(lane),
+      workspace_subdir: lane.workspace_subdir,
       version_id: lane.current_version_id,
       generation: make_ref(),
       runtime: (previous && previous.runtime) || %Entry{}.runtime
     }
 
-    case Lanes.current_version(lane) do
-      nil ->
-        %{base | error: "lane has no version yet"}
+    case Lanes.resolve_lane(lane) do
+      {:ok, validated} ->
+        version = Lanes.current_version(lane)
+        {:ok, %{base | front_matter: version.front_matter, prompt: version.prompt, settings: validated.settings, workflow: validated.workflow, warnings: validated.warnings}}
 
-      version ->
-        base = %{base | front_matter: version.front_matter, prompt: version.prompt}
-
-        case Lanes.validate_version(nil, version.front_matter, version.prompt) do
-          {:ok, validated} ->
-            %{base | settings: validated.settings, workflow: validated.workflow, warnings: validated.warnings}
-
-          {:error, errors} ->
-            %{base | error: Lanes.format_errors(errors)}
-        end
+      {:error, error} ->
+        {:error, error}
     end
   end
 
-  # Keep the effective version ID and raw content pinned to the usable settings.
-  defp keep_last_known_good(%Entry{settings: nil} = entry, %Entry{settings: %Schema{}} = previous),
-    do: %{previous | enabled: entry.enabled, name: entry.name, slug: entry.slug, generation: entry.generation, error: entry.error}
+  defp invalid_entry(lane, previous, error) do
+    version = Lanes.current_version(lane)
 
-  defp keep_last_known_good(entry, _previous), do: entry
+    base = %Entry{
+      lane_id: lane.id,
+      slug: lane.slug,
+      name: lane.name,
+      enabled: false,
+      executor: lane.executor,
+      profile_id: lane.execution_profile_id,
+      profile_name: profile_name(lane),
+      workspace_subdir: lane.workspace_subdir,
+      version_id: lane.current_version_id,
+      generation: make_ref(),
+      runtime: (previous && previous.runtime) || %Entry{}.runtime
+    }
+
+    if version do
+      %{base | front_matter: version.front_matter, prompt: version.prompt, error: Lanes.format_errors(error)}
+    else
+      %{base | error: Lanes.format_errors(error)}
+    end
+  end
+
+  defp profile_name(lane) do
+    case lane.execution_profile do
+      %SymphonyElixir.ExecutionProfiles.Profile{name: name} ->
+        name
+
+      _ ->
+        case SymphonyElixir.ExecutionProfiles.get(lane.execution_profile_id) do
+          %{name: name} -> name
+          _ -> nil
+        end
+    end
+  end
 
   defp apply_runtime(_previous, %Entry{enabled: false} = entry, state) do
     Runs.finish_lane(entry.lane_id, "stopped")
@@ -529,18 +651,15 @@ defmodule SymphonyElixir.LaneStore do
   defp ensure_guard(state, _entry), do: state
 
   defp publish(entry) do
-    case lookup(entry.lane_id) do
-      {:ok, %{generation: generation}} when generation == entry.generation ->
-        :ok
-
-      _ ->
-        Enum.each(entry.warnings, &Logger.warning("Lane configuration warning lane_id=#{entry.lane_id} lane=#{entry.slug} message=#{&1}"))
-        if entry.error, do: Logger.error("Lane configuration error lane_id=#{entry.lane_id} lane=#{entry.slug} reason=#{entry.error}")
-    end
-
     :ets.insert(@table, {entry.lane_id, entry})
+    log_entry(entry)
     broadcast(entry)
     :ok
+  end
+
+  defp log_entry(entry) do
+    Enum.each(entry.warnings, &Logger.warning("Lane configuration warning lane_id=#{entry.lane_id} lane=#{entry.slug} message=#{&1}"))
+    if entry.error, do: Logger.error("Lane configuration error lane_id=#{entry.lane_id} lane=#{entry.slug} reason=#{entry.error}")
   end
 
   defp broadcast(entry) do

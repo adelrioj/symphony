@@ -4,12 +4,14 @@ defmodule SymphonyElixir.Lanes do
   import Ecto.Query, only: [from: 2]
   alias SymphonyElixir.{Config, LaneStore, LaneSupervisor, Repo, Workflow}
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.ExecutionProfiles
+  alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.Lanes.{Lane, LaneVersion}
 
   @type error :: %{path: String.t(), message: String.t()}
   @type validated :: %{settings: Schema.t(), workflow: Workflow.loaded_workflow(), warnings: [String.t()]}
-  @lane_fields ~w(slug name enabled executor)
-  @string_fields ~w(slug name executor front_matter prompt)
+  @lane_fields ~w(name enabled execution_profile_id workspace_subdir)
+  @string_fields ~w(slug name workspace_subdir prompt front_matter)
   @path_pattern ~r/^([a-z_]+(?:\.[a-z_]+)+) (.+)$/s
   @max_sqlite_id 9_223_372_036_854_775_807
 
@@ -19,6 +21,10 @@ defmodule SymphonyElixir.Lanes do
   @spec get(term()) :: Lane.t() | nil
   def get(id) when is_integer(id) and id > 0 and id <= @max_sqlite_id, do: Repo.one(from(l in Lane, where: l.id == ^id and is_nil(l.deleted_at)))
   def get(_id), do: nil
+
+  @spec get_any(term()) :: Lane.t() | nil
+  def get_any(id) when is_integer(id) and id > 0 and id <= @max_sqlite_id, do: Repo.get(Lane, id)
+  def get_any(_id), do: nil
 
   @spec get!(integer()) :: Lane.t()
   def get!(id), do: get(id) || raise(Ecto.NoResultsError, queryable: Lane)
@@ -48,6 +54,21 @@ defmodule SymphonyElixir.Lanes do
 
   def validate_version(_lane_id, front_matter, prompt) do
     {:error, type_errors(%{"front_matter" => front_matter, "prompt" => prompt})}
+  end
+
+  @doc false
+  @spec resolve_lane(Lane.t()) :: {:ok, validated()} | {:error, [error()]}
+  def resolve_lane(%Lane{} = lane) do
+    with {:ok, profile} <- fetch_profile(lane.execution_profile_id),
+         :ok <- profile_repair(profile),
+         {:ok, version} <- fetch_current_version(lane),
+         {:ok, config} <- lane_config(version.front_matter),
+         {:ok, value} <- Configuration.resolve(profile_attrs(profile), config, lane.workspace_subdir, version.prompt) do
+      {:ok, value}
+    else
+      {:error, errors} when is_list(errors) -> {:error, errors}
+      {:error, reason} -> {:error, errors_for(reason)}
+    end
   end
 
   @spec warnings(String.t()) :: [String.t()]
@@ -142,6 +163,12 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
+  def errors_for({:lane_invalid, lane_id, errors}) when is_list(errors) do
+    Enum.map(errors, &%{path: "lanes.#{lane_id}.#{&1.path}", message: &1.message})
+  end
+
+  def errors_for({:profile_repair, message}), do: [%{path: "profile", message: message}]
+
   def errors_for(:environment_identity_in_use), do: [%{path: "worker.environment", message: "cannot change a guarded field while the lane owns environments or has unresolved operations"}]
   def errors_for(:missing_tracker_kind), do: [%{path: "tracker.kind", message: "can't be blank"}]
   def errors_for({:unsupported_tracker_kind, kind}), do: [%{path: "tracker.kind", message: "unsupported tracker kind: #{inspect(kind)}"}]
@@ -154,38 +181,65 @@ defmodule SymphonyElixir.Lanes do
   def format_errors(errors), do: Enum.map_join(errors, "; ", &"#{&1.path}: #{&1.message}")
 
   defp create_lane(attrs, check) do
-    front_matter = Map.get(attrs, "front_matter", "")
+    config = Map.get(attrs, "config", %{})
     prompt = Map.get(attrs, "prompt", "")
+    slug = attrs["slug"]
+    subdir = Map.get(attrs, "workspace_subdir", slug)
+    attrs = Map.put(attrs, "enabled", false)
 
-    with {:ok, _validated} <- validate_candidate(nil, front_matter, prompt, check),
-         {:ok, lane} <- Repo.insert(Lane.changeset(%Lane{}, Map.take(attrs, @lane_fields))) do
-      add_version(lane, front_matter, prompt, attrs["note"])
+    with :ok <- reject_legacy_fields(attrs),
+         {:ok, profile} <- fetch_profile(attrs["execution_profile_id"]),
+         {:ok, validated} <- validate_candidate(profile, config, subdir, prompt, nil, check),
+         {:ok, lane} <- Repo.insert(Lane.changeset(%Lane{}, Map.merge(Map.take(attrs, @lane_fields), %{"slug" => slug, "workspace_subdir" => subdir, "executor" => "local"}))),
+         {:ok, lane} <- add_version(lane, Workflow.encode_config(config), prompt, attrs["note"]) do
+      _ = validated
+      {:ok, lane}
     end
   end
 
   defp update_lane(id, attrs, check) do
-    with {:ok, lane} <- fetch_lane(id) do
+    with {:ok, lane} <- fetch_lane(id),
+         :ok <- immutable_slug(attrs),
+         :ok <- reject_legacy_fields(attrs) do
       update_current_lane(lane, attrs, check)
     end
   end
 
   defp update_current_lane(lane, attrs, check) do
     current = current_version(lane)
-    front_matter = Map.get(attrs, "front_matter", (current && current.front_matter) || "")
-    prompt = Map.get(attrs, "prompt", (current && current.prompt) || "")
-    new_version? = Map.has_key?(attrs, "front_matter") or Map.has_key?(attrs, "prompt")
-    validate? = new_version? or Map.get(attrs, "enabled", lane.enabled)
 
-    with :ok <- validate_update(validate?, current, new_version?, front_matter, prompt, check),
-         {:ok, updated} <- Repo.update(Lane.changeset(lane, Map.take(attrs, @lane_fields))) do
-      if new_version?, do: add_version(updated, front_matter, prompt, attrs["note"]), else: {:ok, updated}
+    current_config =
+      case current do
+        nil ->
+          nil
+
+        version ->
+          case current_config(version.front_matter) do
+            {:ok, config} -> config
+            {:error, _} -> nil
+          end
+      end
+
+    config = Map.get(attrs, "config", current_config || %{})
+    prompt = Map.get(attrs, "prompt", (current && current.prompt) || "")
+    profile_id = Map.get(attrs, "execution_profile_id", lane.execution_profile_id)
+    subdir = Map.get(attrs, "workspace_subdir", lane.workspace_subdir)
+    new_version? = Map.has_key?(attrs, "config") or Map.has_key?(attrs, "prompt")
+    validate? = new_version? or Map.has_key?(attrs, "execution_profile_id") or Map.has_key?(attrs, "workspace_subdir") or Map.get(attrs, "enabled", lane.enabled)
+
+    with {:ok, profile} <- fetch_profile(profile_id),
+         :ok <- validate_update(validate?, current, new_version?, profile, config, subdir, prompt, lane.id, check),
+         {:ok, updated} <- Repo.update(Lane.changeset(lane, Map.take(Map.put(attrs, "execution_profile_id", profile_id), @lane_fields))) do
+      if new_version?, do: add_version(updated, Workflow.encode_config(config), prompt, attrs["note"]), else: {:ok, updated}
     end
   end
 
   defp activate_lane_version(id, version_id, check) do
     with {:ok, lane} <- fetch_lane(id),
          {:ok, version} <- fetch_version(id, version_id),
-         {:ok, _} <- validate_candidate(nil, version.front_matter, version.prompt, check) do
+         {:ok, config} <- current_config(version.front_matter),
+         {:ok, profile} <- fetch_profile(lane.execution_profile_id),
+         {:ok, _} <- validate_candidate(profile, config, lane.workspace_subdir, version.prompt, lane.id, check) do
       lane |> Ecto.Changeset.change(current_version_id: version.id) |> Repo.update()
     end
   end
@@ -219,21 +273,33 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  defp import_content(content, path, opts) do
+  defp import_content(content, _path, opts) do
     %{front_matter: front_matter, prompt: prompt} = Workflow.split(content)
-    attrs = %{front_matter: front_matter, prompt: prompt, note: Keyword.get(opts, :note, "import #{Path.basename(path)}")}
+    slug = Keyword.get(opts, :slug)
 
-    with {:ok, lane} <- import_lane(Keyword.get(opts, :slug), attrs, opts) do
+    with {:ok, workflow} <- Workflow.parse_parts(front_matter, prompt),
+         {profile_attrs, config} = Configuration.split(workflow.config),
+         {:ok, profile} <-
+           ExecutionProfiles.create(%{
+             name: "Imported #{slug} #{System.unique_integer([:positive])}",
+             workspace_base: profile_attrs["workspace_base"] || %Schema.Workspace{}.root,
+             worker: profile_attrs["worker"] || %{}
+           }),
+         {:ok, lane} <- import_lane(slug, config, prompt, profile.id, opts) do
       {:ok, lane, warnings(front_matter)}
+    else
+      {:error, errors} when is_list(errors) -> {:error, errors_for(errors)}
+      {:error, reason} -> {:error, errors_for(reason)}
     end
   end
 
-  defp import_lane(slug, attrs, opts) do
+  defp import_lane(slug, config, prompt, profile_id, opts) do
     case get_by_slug(slug) do
       nil ->
-        create(Map.merge(attrs, %{slug: slug, name: Keyword.get(opts, :name, slug), enabled: false, executor: "local"}))
+        create(%{slug: slug, name: Keyword.get(opts, :name, slug), enabled: false, execution_profile_id: profile_id, config: config, prompt: prompt, note: Keyword.get(opts, :note, "import")})
 
       lane ->
+        attrs = %{execution_profile_id: profile_id, config: config, prompt: prompt, note: Keyword.get(opts, :note, "import")}
         attrs = if Keyword.has_key?(opts, :name), do: Map.put(attrs, :name, opts[:name]), else: attrs
         update(lane, attrs)
     end
@@ -264,18 +330,80 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  defp validate_update(false, _current, _new?, _front, _prompt, _check), do: :ok
-  defp validate_update(true, nil, false, _front, _prompt, _check), do: {:error, [%{path: "version", message: "lane has no version"}]}
+  defp validate_update(false, _current, _new_version, _profile, _config, _subdir, _prompt, _lane_id, _check), do: :ok
 
-  defp validate_update(true, _current, _new?, front, prompt, check) do
-    with {:ok, _} <- validate_candidate(nil, front, prompt, check), do: :ok
+  defp validate_update(true, nil, true, profile, config, subdir, prompt, lane_id, check),
+    do: validate_update(true, %{}, false, profile, config, subdir, prompt, lane_id, check)
+
+  defp validate_update(true, nil, false, _profile, _config, _subdir, _prompt, _lane_id, _check),
+    do: {:error, [%{path: "version", message: "lane has no version"}]}
+
+  defp validate_update(true, _current, _new_version, nil, _config, _subdir, _prompt, _lane_id, _check),
+    do: {:error, [%{path: "execution_profile_id", message: "can't be blank"}]}
+
+  defp validate_update(true, _current, _new_version, profile, config, subdir, prompt, lane_id, check) do
+    with {:ok, _} <- validate_candidate(profile, config, subdir, prompt, lane_id, check), do: :ok
   end
 
-  defp validate_candidate(lane_id, front, prompt, check) do
-    with {:ok, validated} <- validate_version(lane_id, front, prompt),
+  defp validate_candidate(profile, config, subdir, prompt, _lane_id, check) do
+    with {:ok, validated} <- Configuration.resolve(profile_attrs(profile), config, subdir, prompt),
          :ok <- check.(validated.settings) do
       {:ok, validated}
     end
+  end
+
+  defp fetch_profile(id) when is_integer(id) and id > 0 and id <= @max_sqlite_id do
+    case ExecutionProfiles.get(id) do
+      nil -> {:error, [%{path: "execution_profile_id", message: "not found"}]}
+      profile -> {:ok, profile}
+    end
+  end
+
+  defp fetch_profile(_id), do: {:error, [%{path: "execution_profile_id", message: "must be an integer"}]}
+
+  defp profile_attrs(profile) do
+    %{
+      "name" => profile.name,
+      "description" => profile.description,
+      "workspace_base" => profile.workspace_base,
+      "worker" => profile.worker
+    }
+  end
+
+  defp profile_repair(%{repair_error: nil}), do: :ok
+  defp profile_repair(%{repair_error: error}), do: {:error, {:profile_repair, error}}
+
+  defp fetch_current_version(%Lane{} = lane) do
+    case current_version(lane) do
+      nil -> {:error, [%{path: "version", message: "lane has no version"}]}
+      version -> {:ok, version}
+    end
+  end
+
+  defp lane_config(front_matter) do
+    with {:ok, workflow} <- Workflow.parse_parts(front_matter, "") do
+      {_profile, config} = Configuration.split(workflow.config)
+      {:ok, config}
+    else
+      {:error, reason} -> {:error, errors_for(reason)}
+    end
+  end
+
+  defp current_config(front_matter), do: lane_config(front_matter)
+
+  defp immutable_slug(attrs) do
+    if Map.has_key?(attrs, "slug"), do: {:error, [%{path: "slug", message: "is immutable"}]}, else: :ok
+  end
+
+  defp reject_legacy_fields(attrs) do
+    errors =
+      [
+        Map.has_key?(attrs, "front_matter") && %{path: "front_matter", message: "is no longer accepted; use config"},
+        Map.has_key?(attrs, "executor") && %{path: "executor", message: "is no longer accepted; use execution_profile_id"}
+      ]
+      |> Enum.reject(&is_boolean/1)
+
+    if errors == [], do: :ok, else: {:error, errors}
   end
 
   defp add_version(lane, front_matter, prompt, note) do
@@ -302,6 +430,8 @@ defmodule SymphonyElixir.Lanes do
       cond do
         key in @string_fields and not is_binary(value) -> [%{path: key, message: "must be a string"}]
         key == "enabled" and not is_boolean(value) -> [%{path: key, message: "must be a boolean"}]
+        key == "config" and not is_map(value) -> [%{path: key, message: "must be an object"}]
+        key == "execution_profile_id" and not is_integer(value) -> [%{path: key, message: "must be an integer"}]
         key == "note" and not (is_binary(value) or is_nil(value)) -> [%{path: key, message: "must be a string or null"}]
         true -> []
       end

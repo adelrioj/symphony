@@ -11,7 +11,7 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Codex.AppServer
       alias SymphonyElixir.Config
       alias SymphonyElixir.HttpServer
-      alias SymphonyElixir.{LaneContext, Lanes, LaneStore}
+      alias SymphonyElixir.{ExecutionProfiles, LaneContext, Lanes, LaneStore}
       alias SymphonyElixir.Linear.Client
       alias SymphonyElixir.Orchestrator
       alias SymphonyElixir.PromptBuilder
@@ -91,13 +91,29 @@ defmodule SymphonyElixir.TestSupport do
   def reload_workflow!, do: import_workflow(SymphonyElixir.Workflow.workflow_file_path())
 
   defp import_workflow(path) do
-    case SymphonyElixir.Lanes.import_file(path, slug: default_lane_slug()) do
-      {:ok, lane, _warnings} ->
-        SymphonyElixir.LaneContext.put(lane.id)
-        :ok
+    %{front_matter: front_matter, prompt: prompt} = SymphonyElixir.Workflow.split(File.read!(path))
 
-      {:error, _errors} = error ->
-        error
+    with {:ok, workflow} <- SymphonyElixir.Workflow.parse_parts(front_matter, prompt),
+         {profile_attrs, lane_config} = SymphonyElixir.ExecutionProfiles.Configuration.split(workflow.config),
+         {:ok, profile} <-
+           SymphonyElixir.ExecutionProfiles.create(%{
+             name: "Test #{default_lane_slug()} #{System.unique_integer([:positive])}",
+             workspace_base: profile_attrs["workspace_base"] || Path.join(System.tmp_dir!(), "symphony_workspaces"),
+             worker: profile_attrs["worker"] || %{}
+           }),
+         {:ok, lane} <- workflow_lane(profile, lane_config, prompt) do
+      SymphonyElixir.LaneContext.put(lane.id)
+      :ok
+    end
+  end
+
+  defp workflow_lane(profile, config, prompt) do
+    case SymphonyElixir.Lanes.get_by_slug(default_lane_slug()) do
+      nil ->
+        SymphonyElixir.Lanes.create(%{slug: default_lane_slug(), execution_profile_id: profile.id, config: config, prompt: prompt})
+
+      lane ->
+        SymphonyElixir.Lanes.update(lane, %{execution_profile_id: profile.id, config: config, prompt: prompt})
     end
   end
 
@@ -111,6 +127,7 @@ defmodule SymphonyElixir.TestSupport do
     Repo.delete_all(SymphonyElixir.Runs.Run)
     Repo.delete_all(SymphonyElixir.Lanes.LaneVersion)
     Repo.delete_all(SymphonyElixir.Lanes.Lane)
+    Repo.delete_all(SymphonyElixir.ExecutionProfiles.Profile)
     Enum.each(ids, &LaneStore.refresh/1)
     :ok
   end
