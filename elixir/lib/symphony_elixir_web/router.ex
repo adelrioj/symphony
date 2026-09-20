@@ -46,6 +46,10 @@ defmodule SymphonyElixirWeb.Router do
 
     live_session :operator, on_mount: SymphonyElixirWeb.LiveAuth do
       live("/", LanesLive, :index)
+      live("/execution-profiles", ExecutionProfilesLive, :index)
+      live("/execution-profiles/new", ExecutionProfileEditorLive, :new)
+      live("/execution-profiles/:id/edit", ExecutionProfileEditorLive, :edit)
+      live("/execution-profiles/:id", ExecutionProfileLive, :show)
       live("/lanes/new", LaneEditorLive, :new)
       live("/lanes/:slug/edit", LaneEditorLive, :edit)
       live("/lanes/:slug/versions", LaneVersionsLive, :index)

@@ -19,6 +19,9 @@
 }
 
 .app-nav {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
   max-width: 1600px;
   margin: 0 auto;
   padding: 0.75rem 1.5rem;
@@ -35,7 +38,13 @@
   gap: 1.25rem;
 }
 
-.lane-form label {
+.config-form {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.lane-form label,
+.config-form label {
   display: grid;
   gap: 0.4rem;
   font-weight: 600;
@@ -43,7 +52,10 @@
 
 .lane-form input:not([type="checkbox"]):not([type="hidden"]),
 .lane-form select,
-.lane-form textarea {
+.lane-form textarea,
+.config-form input:not([type="checkbox"]):not([type="hidden"]),
+.config-form select,
+.config-form textarea {
   width: 100%;
   min-width: 0;
   border: 1px solid var(--line-strong);
@@ -63,6 +75,14 @@
   tab-size: 2;
 }
 
+.config-form textarea.mono {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  resize: vertical;
+  tab-size: 2;
+}
+
 .lane-form input[readonly] {
   background: var(--card-muted);
 }
@@ -75,6 +95,94 @@
 
 .lane-form button {
   justify-self: start;
+}
+
+.form-section {
+  display: grid;
+  gap: 0.65rem;
+  min-inline-size: 0;
+  padding: 0;
+  border: 0;
+}
+
+.form-section legend {
+  padding: 0;
+  font-size: 1.08rem;
+  font-weight: 700;
+}
+
+.config-subsection {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 0.4rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--page-soft);
+}
+
+.field-help,
+.field-error {
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.field-help {
+  color: var(--muted);
+}
+
+.field-error {
+  color: var(--danger);
+}
+
+.error-summary {
+  margin: 0;
+  padding: 0.85rem 1rem 0.85rem 2rem;
+  color: var(--danger);
+  border: 1px solid #f6d3cf;
+  border-radius: 16px;
+  background: var(--danger-soft);
+}
+
+.error-summary a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.form-actions,
+.profile-actions {
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.danger-button {
+  border-color: var(--danger);
+  background: var(--danger);
+  box-shadow: none;
+}
+
+.affected-lanes ul {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: minmax(10rem, 0.5fr) minmax(0, 1.5fr);
+  gap: 0.7rem 1rem;
+  margin: 1rem 0 0;
+}
+
+.summary-grid dt {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.summary-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 :is(a, button, input, select, textarea):focus-visible {
@@ -547,5 +655,14 @@ pre,
   .error-card {
     border-radius: 20px;
     padding: 1rem;
+  }
+
+  .summary-grid {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+
+  .summary-grid dd {
+    margin-bottom: 0.65rem;
   }
 }

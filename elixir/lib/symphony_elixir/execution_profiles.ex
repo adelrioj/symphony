@@ -6,6 +6,7 @@ defmodule SymphonyElixir.ExecutionProfiles do
   alias SymphonyElixir.{LaneStore, Lanes, Repo}
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.ExecutionProfiles.Profile
+  alias SymphonyElixirWeb.ObservabilityPubSub
 
   @max_sqlite_id 9_223_372_036_854_775_807
 
@@ -36,6 +37,7 @@ defmodule SymphonyElixir.ExecutionProfiles do
           nil
         )
         |> result_errors()
+        |> broadcast_result()
       end
     end
   end
@@ -70,6 +72,7 @@ defmodule SymphonyElixir.ExecutionProfiles do
               nil
             )
             |> result_errors()
+            |> broadcast_result()
           end
       end
     end
@@ -100,11 +103,24 @@ defmodule SymphonyElixir.ExecutionProfiles do
       nil
     )
     |> case do
-      {:ok, :ok} -> :ok
-      {:error, errors} when is_list(errors) -> {:error, errors}
-      {:error, reason} -> {:error, Lanes.errors_for(reason)}
+      {:ok, :ok} ->
+        ObservabilityPubSub.broadcast_profiles()
+        :ok
+
+      {:error, errors} when is_list(errors) ->
+        {:error, errors}
+
+      {:error, reason} ->
+        {:error, Lanes.errors_for(reason)}
     end
   end
+
+  defp broadcast_result({:ok, value}) do
+    ObservabilityPubSub.broadcast_profiles()
+    {:ok, value}
+  end
+
+  defp broadcast_result(error), do: error
 
   defp linked_lane_ids(%Profile{} = profile), do: linked_lanes(profile) |> Enum.map(& &1.id)
 
@@ -141,5 +157,14 @@ defmodule SymphonyElixir.ExecutionProfiles do
   defp result_errors({:ok, {:batch, value, _ids}}), do: {:ok, value}
   defp result_errors({:ok, value}), do: {:ok, value}
   defp result_errors({:error, errors}) when is_list(errors), do: {:error, errors}
+
+  defp result_errors({:error, {:workspace_identity_in_use, left, right}}) do
+    {:error,
+     [
+       %{path: "lanes.#{left}.workspace", message: "location conflicts with lane #{right}"},
+       %{path: "lanes.#{right}.workspace", message: "location conflicts with lane #{left}"}
+     ]}
+  end
+
   defp result_errors({:error, reason}), do: {:error, Lanes.errors_for(reason)}
 end

@@ -5,6 +5,7 @@ defmodule SymphonyElixirWeb.ObservabilityPubSub do
 
   @pubsub SymphonyElixir.PubSub
   @topic "observability:dashboard"
+  @profiles_topic "observability:execution-profiles"
   @update_message :observability_updated
 
   @spec subscribe() :: :ok | {:error, term()}
@@ -14,6 +15,12 @@ defmodule SymphonyElixirWeb.ObservabilityPubSub do
 
   @spec broadcast_update() :: :ok
   def broadcast_update, do: safe_broadcast(@topic, @update_message)
+
+  @spec subscribe_profiles() :: :ok | {:error, term()}
+  def subscribe_profiles, do: Phoenix.PubSub.subscribe(@pubsub, @profiles_topic)
+
+  @spec broadcast_profiles() :: :ok
+  def broadcast_profiles, do: safe_broadcast(@profiles_topic, :profiles_updated)
 
   @spec subscribe_lane(String.t()) :: :ok | {:error, term()}
   def subscribe_lane(slug) when is_binary(slug), do: Phoenix.PubSub.subscribe(@pubsub, "lane:" <> slug)
