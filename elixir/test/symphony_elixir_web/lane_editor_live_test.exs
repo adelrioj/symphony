@@ -197,6 +197,17 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert_redirect(view, "/")
   end
 
+  test "saving an open editor does not overwrite a newer enabled state", %{conn: conn} do
+    profile = new_profile!()
+    {:ok, lane} = Lanes.create(%{slug: "enabled-editor", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
+
+    assert {:ok, %{enabled: true}} = Lanes.set_enabled(lane, true)
+    view |> form("#lane-form", lane: %{name: "Saved while running"}) |> render_submit()
+    assert_redirect(view, "/lanes/#{lane.slug}")
+    assert Lanes.get!(lane.id).enabled
+  end
+
   defp new_profile! do
     {:ok, profile} =
       ExecutionProfiles.create(%{name: "Lane test #{System.unique_integer([:positive])}", workspace_base: Path.join(System.tmp_dir!(), "lane-test-#{System.unique_integer([:positive])}"), worker: %{}})

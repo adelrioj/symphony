@@ -6,7 +6,8 @@ defmodule SymphonyElixir.Lanes do
 
   import Ecto.Query, only: [from: 2]
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.{ExecutionProfiles, LaneStore, LaneSupervisor, Repo, Workflow}
+  alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
+  alias SymphonyElixir.{ExecutionProfiles, LaneStore, LaneSupervisor, Repo, Workflow, Workspace}
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.ExecutionProfiles.Profile
   alias SymphonyElixir.Lanes.{Lane, LaneVersion}
@@ -45,12 +46,16 @@ defmodule SymphonyElixir.Lanes do
 
   @doc false
   @spec resolve_lane(Lane.t()) :: {:ok, validated()} | {:error, [error()]}
-  def resolve_lane(%Lane{} = lane) do
+  def resolve_lane(%Lane{} = lane), do: resolve_lane(lane, nil)
+
+  @doc false
+  @spec resolve_lane(Lane.t(), String.t() | nil) :: {:ok, validated()} | {:error, [error()]}
+  def resolve_lane(%Lane{} = lane, cached_root) do
     with {:ok, profile} <- fetch_profile(lane.execution_profile_id),
          :ok <- profile_repair(profile),
          {:ok, version} <- fetch_current_version(lane),
          {:ok, config} <- lane_config(version.front_matter),
-         {:ok, value} <- Configuration.resolve(profile_attrs(profile), config, lane.workspace_subdir, version.prompt) do
+         {:ok, value} <- Configuration.resolve(profile_attrs(profile), config, lane.workspace_subdir, version.prompt, cached_root) do
       {:ok, value}
     else
       {:error, errors} when is_list(errors) -> {:error, errors}
@@ -171,6 +176,13 @@ defmodule SymphonyElixir.Lanes do
 
   def errors_for({:profile_repair, message}), do: [%{path: "profile", message: message}]
 
+  def errors_for({:workspace_identity_in_use, left, right}) do
+    [
+      %{path: "lanes.#{left}.workspace", message: "location conflicts with lane #{right}"},
+      %{path: "lanes.#{right}.workspace", message: "location conflicts with lane #{left}"}
+    ]
+  end
+
   def errors_for(:environment_identity_in_use), do: [%{path: "worker.environment", message: "cannot change a guarded field while the lane owns environments or has unresolved operations"}]
   def errors_for(:lane_resources_retained), do: [%{path: "lane", message: "cannot delete while workspaces, managed resources, or unresolved operations may remain"}]
   def errors_for(:missing_tracker_kind), do: [%{path: "tracker.kind", message: "can't be blank"}]
@@ -232,8 +244,21 @@ defmodule SymphonyElixir.Lanes do
 
     with {:ok, profile} <- fetch_profile(profile_id),
          :ok <- validate_update(validate?, current, new_version?, profile, config, subdir, prompt, lane.id, check),
-         {:ok, updated} <- Repo.update(Lane.changeset(lane, Map.take(Map.put(attrs, "execution_profile_id", profile_id), @lane_fields))) do
-      if new_version?, do: add_version(updated, Workflow.encode_config(config), prompt, attrs["note"]), else: {:ok, updated}
+         {:ok, updated} <- Repo.update(Lane.changeset(lane, Map.take(Map.put(attrs, "execution_profile_id", profile_id), @lane_fields))),
+         {:ok, updated} <- maybe_add_version(updated, config, prompt, attrs["note"], new_version?) do
+      repair_profile(updated, profile)
+    end
+  end
+
+  defp maybe_add_version(lane, config, prompt, note, true), do: add_version(lane, Workflow.encode_config(config), prompt, note)
+  defp maybe_add_version(lane, _config, _prompt, _note, false), do: {:ok, lane}
+
+  defp repair_profile(lane, %Profile{repair_error: nil}), do: {:ok, lane}
+
+  defp repair_profile(lane, %Profile{} = profile) do
+    with {:ok, _profile} <- profile |> Ecto.Changeset.change(repair_error: nil) |> Repo.update() do
+      ids = profile |> ExecutionProfiles.linked_lanes() |> Enum.map(& &1.id)
+      {:ok, {:batch, lane, ids}}
     end
   end
 
@@ -334,9 +359,15 @@ defmodule SymphonyElixir.Lanes do
         LaneStore.mutate(nil, mutation, nil)
       else
         Repo.transaction(fn ->
-          case mutation.(fn _settings -> :ok end) do
-            {:ok, value} -> value
-            {:error, error} -> Repo.rollback(error)
+          case mutation.(&offline_identity_check(slug, &1)) do
+            {:ok, value} ->
+              case validate_offline_locations() do
+                :ok -> value
+                {:error, error} -> Repo.rollback(error)
+              end
+
+            {:error, error} ->
+              Repo.rollback(error)
           end
         end)
       end
@@ -387,6 +418,48 @@ defmodule SymphonyElixir.Lanes do
     if Enum.any?(ExecutionProfiles.list(), &(&1.name == candidate)), do: imported_profile_name(slug), else: candidate
   end
 
+  defp offline_identity_check(slug, new_settings) do
+    case get_by_slug(slug) do
+      nil ->
+        :ok
+
+      lane ->
+        with {:ok, %{settings: old_settings}} <- resolve_lane(lane) do
+          cond do
+            effective_identity(old_settings) == effective_identity(new_settings) -> :ok
+            not is_nil(EnvironmentConfig.identity(old_settings)) -> {:error, :environment_identity_in_use}
+            Workspace.location_inventory(old_settings) == :empty -> :ok
+            true -> {:error, :environment_identity_in_use}
+          end
+        end
+    end
+  end
+
+  defp validate_offline_locations do
+    with {:ok, lanes} <- resolve_offline_lanes(list()) do
+      case Enum.find_value(lanes, fn {left_id, left} ->
+             Enum.find_value(lanes, fn {right_id, right} ->
+               if left_id < right_id and LaneStore.locations_overlap?(left, right),
+                 do: {:workspace_identity_in_use, left_id, right_id}
+             end)
+           end) do
+        nil -> :ok
+        error -> {:error, error}
+      end
+    end
+  end
+
+  defp resolve_offline_lanes(lanes) do
+    Enum.reduce_while(lanes, {:ok, []}, fn lane, {:ok, resolved} ->
+      case resolve_lane(lane) do
+        {:ok, %{settings: settings}} -> {:cont, {:ok, [{lane.id, settings} | resolved]}}
+        {:error, error} -> {:halt, {:error, {:lane_invalid, lane.id, error}}}
+      end
+    end)
+  end
+
+  defp effective_identity(settings), do: EnvironmentConfig.identity(settings) || EnvironmentConfig.location_identity(settings)
+
   defp mutate(lane_id, fun, reason \\ nil) do
     LaneStore.mutate(lane_id, &transact_mutation(fun, &1), reason)
     |> case do
@@ -424,10 +497,22 @@ defmodule SymphonyElixir.Lanes do
     with {:ok, _} <- validate_candidate(profile, config, subdir, prompt, lane_id, check), do: :ok
   end
 
-  defp validate_candidate(profile, config, subdir, prompt, _lane_id, check) do
-    with {:ok, validated} <- Configuration.resolve(profile_attrs(profile), config, subdir, prompt),
+  defp validate_candidate(profile, config, subdir, prompt, lane_id, check) do
+    attrs = profile_attrs(profile)
+    cached_root = cached_root(lane_id, attrs, subdir)
+
+    with {:ok, validated} <- Configuration.resolve(attrs, config, subdir, prompt, cached_root),
          :ok <- check.(validated.settings) do
       {:ok, validated}
+    end
+  end
+
+  defp cached_root(lane_id, profile, subdir) do
+    source = Configuration.location_source(profile, subdir)
+
+    case LaneStore.lookup(lane_id) do
+      {:ok, %{location_source: ^source, settings: %Schema{workspace: %{root: root}}}} when not is_nil(source) -> root
+      _ -> nil
     end
   end
 

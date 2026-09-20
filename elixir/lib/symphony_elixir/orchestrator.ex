@@ -1321,6 +1321,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
            LaneContext.install(snapshot)
+           :ok = LaneStore.claim_dispatch(lane_id, dispatch_token)
 
            runner.(issue, recipient,
              attempt: attempt,

@@ -87,6 +87,7 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
   @moduledoc false
   use Ecto.Migration
 
+  alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.Workflow
@@ -159,7 +160,7 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
     with {:ok, workflow} <- Workflow.parse_parts(front_matter, prompt),
          {profile, lane_config} <- Configuration.split(workflow.config),
          profile <- Map.put_new(profile, "workspace_base", %Schema.Workspace{}.root),
-         {:ok, _} <- Configuration.resolve(profile, lane_config, ".", prompt) do
+         :ok <- validate_legacy_configuration(profile, lane_config, workflow.config, prompt) do
       {profile, nil}
     else
       {:error, reason} -> legacy_repair_profile(front_matter, prompt, reason)
@@ -168,6 +169,15 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
 
   defp legacy_profile(_front_matter, _prompt),
     do: {%{}, "legacy lane has no valid current version"}
+
+  defp validate_legacy_configuration(profile, lane_config, raw_config, prompt) do
+    if get_in(profile, ["worker", "ssh_hosts"]) in [nil, []] do
+      with {:ok, _} <- Configuration.resolve(profile, lane_config, ".", prompt), do: :ok
+    else
+      with {:ok, settings} <- Schema.parse(Map.delete(raw_config, "server"), errors: :list),
+           do: Config.validate_settings(settings)
+    end
+  end
 
   defp legacy_repair_profile(front_matter, prompt, reason) do
     case Workflow.parse_parts(front_matter, prompt) do

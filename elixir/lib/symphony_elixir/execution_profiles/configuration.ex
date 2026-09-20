@@ -28,10 +28,21 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
           {:ok, map()} | {:error, [map()]}
   def resolve(profile, lane_config, workspace_subdir, prompt)
       when is_map(profile) and is_map(lane_config) and is_binary(workspace_subdir) and is_binary(prompt) do
+    resolve(profile, lane_config, workspace_subdir, prompt, nil)
+  end
+
+  def resolve(_profile, _lane_config, _workspace_subdir, _prompt), do: {:error, [error("config", "must be an object")]}
+
+  @doc false
+  @spec resolve(map(), map(), String.t(), String.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, [map()]}
+  def resolve(profile, lane_config, workspace_subdir, prompt, cached_root)
+      when is_map(profile) and is_map(lane_config) and is_binary(workspace_subdir) and is_binary(prompt) and
+             (is_binary(cached_root) or is_nil(cached_root)) do
     with {:ok, worker} <- profile_worker(profile),
          :ok <- validate_lane_ownership(lane_config),
          {:ok, base_root} <- profile_workspace_base(profile),
-         {:ok, effective_root} <- effective_root(worker, base_root, workspace_subdir),
+         {:ok, effective_root} <- effective_root(worker, base_root, workspace_subdir, cached_root),
          effective_config <- compose(profile, worker, lane_config, effective_root),
          normalized_prompt <- prompt |> String.replace(~r/\R/u, "\n") |> String.trim(),
          workflow <- %{config: effective_config, prompt: normalized_prompt, prompt_template: normalized_prompt},
@@ -44,7 +55,7 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
     end
   end
 
-  def resolve(_profile, _lane_config, _workspace_subdir, _prompt), do: {:error, [error("config", "must be an object")]}
+  def resolve(_profile, _lane_config, _workspace_subdir, _prompt, _cached_root), do: {:error, [error("config", "must be an object")]}
 
   @spec validate_profile(map()) :: :ok | {:error, [map()]}
   def validate_profile(profile) when is_map(profile) do
@@ -55,6 +66,20 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   end
 
   def validate_profile(_profile), do: {:error, [error("profile", "must be an object")]}
+
+  @doc false
+  @spec location_source(map(), String.t()) :: {:ssh, term(), String.t(), [term()]} | nil
+  def location_source(profile, workspace_subdir) when is_map(profile) and is_binary(workspace_subdir) do
+    worker = Map.get(profile, "worker", Map.get(profile, :worker, %{}))
+    hosts = if is_map(worker), do: worker_hosts(worker), else: []
+
+    if is_list(hosts) and hosts != [] do
+      base = profile |> Map.get("workspace_base", Map.get(profile, :workspace_base)) |> resolve_workspace_base()
+      {:ssh, base, workspace_subdir, hosts |> Enum.uniq() |> Enum.sort()}
+    end
+  end
+
+  def location_source(_profile, _workspace_subdir), do: nil
 
   defp pop_if_present(map, key) do
     case Map.fetch(map, key) do
@@ -112,7 +137,9 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   defp workspace_root_error(%{"workspace" => _workspace}), do: error("config.workspace", "must be an object")
   defp workspace_root_error(_config), do: nil
 
-  defp effective_root(worker, base_root, workspace_subdir) do
+  defp effective_root(_worker, _base_root, _workspace_subdir, cached_root) when is_binary(cached_root) and cached_root != "", do: {:ok, cached_root}
+
+  defp effective_root(worker, base_root, workspace_subdir, nil) do
     base_root = resolve_workspace_base(base_root)
 
     cond do

@@ -338,7 +338,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
       {:ok,
        params
        |> Map.merge(%{"config" => config, "execution_profile_id" => profile_id, "workspace_subdir" => workspace_subdir(params)})
-       |> Map.drop(["_submitted_fields" | config_param_keys()])}
+       |> Map.drop(["_submitted_fields", "enabled" | config_param_keys()])}
     end
   end
 

@@ -56,6 +56,7 @@ defmodule SymphonyElixir.ExecutionProfiles do
           {:error, [%{path: "profile", message: "not found"}]}
 
         profile ->
+          attrs = if profile.repair_error, do: Map.put(attrs, "repair_error", nil), else: attrs
           full_attrs = profile_attrs(profile) |> Map.merge(attrs)
 
           with :ok <- validate(full_attrs),

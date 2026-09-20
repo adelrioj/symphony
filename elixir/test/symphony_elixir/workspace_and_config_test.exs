@@ -178,6 +178,37 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute File.exists?(Path.join(outside, "hook-ran"))
   end
 
+  test "static SSH safety rechecks canonical containment before create hooks and deletion" do
+    root = Path.join(System.tmp_dir!(), "symphony-ssh-safety-#{System.unique_integer([:positive])}")
+    outside = root <> "-outside"
+
+    on_exit(fn ->
+      File.rm_rf(root)
+      File.rm_rf(outside)
+    end)
+
+    File.mkdir_p!(root)
+    File.mkdir_p!(outside)
+    File.write!(Path.join(outside, "keep"), "safe")
+    File.ln_s!(outside, Path.join(root, "escape"))
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_before_run: "touch hook-ran",
+      hook_before_remove: "touch hook-ran"
+    )
+
+    context = ExecutionContext.ssh(root, managed_shell_target!(root))
+    escaped = Path.join(root, "escape")
+
+    assert {:error, _} = Workspace.create_for_issue("escape", context)
+    assert {:error, _} = Workspace.run_before_run_hook(escaped, "SSH-1", context)
+    assert {:error, _, _} = Workspace.remove(escaped, context)
+    assert {:error, _, _} = Workspace.remove(root, context)
+    assert File.read!(Path.join(outside, "keep")) == "safe"
+    refute File.exists?(Path.join(outside, "hook-ran"))
+  end
+
   test "before-remove hook can run without deleting retained managed data" do
     root = Path.join(System.tmp_dir!(), "symphony-managed-retain-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "retained")
@@ -2047,11 +2078,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       printf 'ARGV:%s\\n' "$*" >> "$trace_file"
 
       case "$*" in
-        *"realpath -m"*)
-          printf '%s\\t%s\\n' '/remote/home/.symphony-remote-workspaces' '/remote/home/.symphony-remote-workspaces'
-          ;;
         *"__SYMPHONY_WORKSPACE__"*)
           printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
+          ;;
+        *"realpath -m"*)
+          printf '%s\\t%s\\n' '/remote/home/.symphony-remote-workspaces' '/remote/home/.symphony-remote-workspaces'
           ;;
       esac
 

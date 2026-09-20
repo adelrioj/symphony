@@ -111,18 +111,17 @@ defmodule SymphonyElixir.RepoTest do
     assert [[6]] = Repo.query!("SELECT count(*) FROM execution_profiles").rows
     assert [] = Repo.query!("PRAGMA foreign_key_check").rows
 
-    assert {:error, [%{path: "profile", message: ssh_repair}]} = Lanes.resolve_lane(Repo.get!(Lane, 1))
-    assert ssh_repair =~ "remote_path_canonicalize_failed"
-    refute Repo.get!(Lane, 1).enabled
+    assert {:error, [%{path: "config", message: ssh_error}]} = Lanes.resolve_lane(Repo.get!(Lane, 1))
+    assert ssh_error =~ "remote_path_canonicalize_failed"
+    assert Repo.get!(Lane, 1).enabled
 
     assert {:ok, canonical_disabled_root} = SymphonyElixir.PathSafety.canonicalize(disabled_root)
     assert {:ok, %{settings: %{workspace: %{root: ^canonical_disabled_root}}}} = Lanes.resolve_lane(Repo.get!(Lane, 2))
 
-    assert [[^enabled_root, ssh_worker, ssh_profile_repair]] =
+    assert [[^enabled_root, ssh_worker, nil]] =
              Repo.query!("SELECT workspace_base, worker, repair_error FROM execution_profiles WHERE name = 'Legacy enabled'").rows
 
     assert Jason.decode!(ssh_worker) == %{"ssh_hosts" => ["worker.example"]}
-    assert ssh_profile_repair =~ "remote_path_canonicalize_failed"
 
     assert [["/home/worker/workspaces", managed_worker, nil]] =
              Repo.query!("SELECT workspace_base, worker, repair_error FROM execution_profiles WHERE name = 'Legacy managed'").rows

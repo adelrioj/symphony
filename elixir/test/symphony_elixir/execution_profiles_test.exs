@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.ExecutionProfilesTest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, TestSupport}
+  alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
+  alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, Repo, TestSupport}
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.Workflow
 
@@ -210,6 +211,30 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
     assert errors != []
   end
 
+  test "managed workspace overlaps use provider ownership scope instead of lane identity" do
+    worker = managed_worker()
+    {:ok, first_profile} = ExecutionProfiles.create(%{name: "Managed first", workspace_base: "/managed/root", worker: worker})
+    {:ok, second_profile} = ExecutionProfiles.create(%{name: "Managed second", workspace_base: "/managed/root/nested", worker: worker})
+
+    assert {:ok, _lane} =
+             Lanes.create(%{
+               slug: "managed-first",
+               execution_profile_id: first_profile.id,
+               workspace_subdir: ".",
+               config: %{"tracker" => %{"kind" => "memory"}}
+             })
+
+    assert {:error, errors} =
+             Lanes.create(%{
+               slug: "managed-second",
+               execution_profile_id: second_profile.id,
+               workspace_subdir: ".",
+               config: %{"tracker" => %{"kind" => "memory"}}
+             })
+
+    assert Enum.any?(errors, &String.contains?(&1.message, "conflicts"))
+  end
+
   @tag :tmp_dir
   test "SSH overlaps use shared targets and canonical nested roots", %{tmp_dir: root} do
     fake_ssh = Path.join(root, "ssh")
@@ -305,8 +330,58 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
     assert :ok = Lanes.delete(lane)
   end
 
+  test "managed lanes can be deleted after authoritative empty inventory release" do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Managed delete", workspace_base: "/managed/delete", worker: managed_worker()})
+    {:ok, lane} = Lanes.create(%{slug: "managed-delete", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, %{settings: settings}} = LaneStore.lookup(lane.id)
+
+    assert {:error, _errors} = Lanes.delete(lane)
+    identity = EnvironmentConfig.identity(settings)
+    assert {:ok, token} = LaneStore.protect_environment(lane.id, identity)
+    assert :ok = LaneStore.release_environment(lane.id, token, :empty_inventory)
+    assert {:ok, lane} = Lanes.update(lane, %{name: "Still released"})
+    assert :ok = Lanes.delete(lane)
+  end
+
   @tag :tmp_dir
-  test "dispatch reservations block location edits and release on owner death", %{tmp_dir: root} do
+  test "repair markers clear only after every linked lane validates", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Repair", workspace_base: root, worker: %{}})
+    {:ok, lane} = Lanes.create(%{slug: "repair-lane", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    version = Lanes.current_version(lane)
+    Repo.update!(Ecto.Changeset.change(profile, repair_error: "repair required"))
+    Repo.update!(Ecto.Changeset.change(version, front_matter: "tracker: ["))
+
+    assert {:error, _errors} = ExecutionProfiles.update(profile, %{description: "still invalid"})
+    assert ExecutionProfiles.get(profile.id).repair_error == "repair required"
+
+    assert {:ok, _lane} = Lanes.update(lane, %{config: %{"tracker" => %{"kind" => "memory"}}, prompt: "repaired"})
+    assert is_nil(ExecutionProfiles.get(profile.id).repair_error)
+    assert {:ok, %{error: nil}} = LaneStore.lookup(lane.id)
+  end
+
+  @tag :tmp_dir
+  test "non-location SSH edits reuse the published canonical root while the host is unavailable", %{tmp_dir: root} do
+    fake_ssh = Path.join(root, "ssh")
+    previous_path = System.get_env("PATH")
+
+    File.write!(fake_ssh, "#!/bin/sh\nprintf '/remote/base\\t/remote/base/lane\\n'\n")
+    File.chmod!(fake_ssh, 0o755)
+    System.put_env("PATH", root <> ":" <> (previous_path || ""))
+    on_exit(fn -> if previous_path, do: System.put_env("PATH", previous_path), else: System.delete_env("PATH") end)
+
+    {:ok, profile} = ExecutionProfiles.create(%{name: "SSH cached", workspace_base: "/remote/base", worker: %{"ssh_hosts" => ["host-a"]}})
+    {:ok, lane} = Lanes.create(%{slug: "lane", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    File.rm!(fake_ssh)
+
+    assert {:ok, updated} = ExecutionProfiles.update(profile, %{description: "host is down"})
+    assert updated.description == "host is down"
+    assert {:ok, renamed} = Lanes.update(lane, %{name: "Renamed"})
+    assert renamed.name == "Renamed"
+    assert {:error, _errors} = ExecutionProfiles.update(updated, %{workspace_base: "/remote/other"})
+  end
+
+  @tag :tmp_dir
+  test "dispatch reservations survive owner death until explicitly released", %{tmp_dir: root} do
     {:ok, profile} = ExecutionProfiles.create(%{name: "Reserved", workspace_base: Path.join(root, "one"), worker: %{}})
     {:ok, lane} = Lanes.create(%{slug: "reserved", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
     {:ok, lane} = Lanes.set_enabled(lane, true)
@@ -315,15 +390,28 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
     {owner, monitor} =
       spawn_monitor(fn ->
         {:ok, token, _entry} = LaneStore.reserve_dispatch(lane.id)
-        send(parent, {:reserved, token})
+
+        runner =
+          spawn(fn ->
+            :ok = LaneStore.claim_dispatch(lane.id, token)
+            send(parent, {:claimed, self()})
+            receive do: (:stop -> :ok)
+          end)
+
+        send(parent, {:reserved, token, runner})
         receive do: (:stop -> :ok)
       end)
 
-    assert_receive {:reserved, _token}
+    assert_receive {:reserved, token, runner}
+    assert_receive {:claimed, ^runner}
     assert {:error, _errors} = ExecutionProfiles.update(profile, %{workspace_base: Path.join(root, "two")})
     Process.exit(owner, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^owner, :killed}
 
+    assert {:error, _errors} = ExecutionProfiles.update(profile, %{workspace_base: Path.join(root, "two")})
+    Process.exit(runner, :kill)
+    assert {:error, _errors} = ExecutionProfiles.update(profile, %{workspace_base: Path.join(root, "two")})
+    assert :ok = LaneStore.release_dispatch(lane.id, token)
     assert {:ok, updated} = ExecutionProfiles.update(profile, %{workspace_base: Path.join(root, "two")})
     assert updated.workspace_base == Path.join(root, "two")
   end
@@ -351,5 +439,27 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
     assert first_entry.settings.worker.max_concurrent_agents_per_host == 5
     assert second_entry.settings.worker.max_concurrent_agents_per_host == 7
     assert Lanes.get!(second.id).execution_profile_id == other.id
+  end
+
+  defp managed_worker do
+    %{
+      "environment" => %{
+        "kind" => "google_workstations",
+        "deployment_id" => "shared-deployment",
+        "startup_timeout_ms" => 1_000,
+        "shutdown_timeout_ms" => 1_000,
+        "terminal_retention_ms" => 0,
+        "provider" => %{
+          "project" => "project",
+          "location" => "location",
+          "cluster" => "cluster",
+          "config" => "config",
+          "credential_configuration" => "credentials",
+          "impersonate_service_account" => "worker@example.com",
+          "ssh_user" => "worker",
+          "ssh_port" => 22
+        }
+      }
+    }
   end
 end

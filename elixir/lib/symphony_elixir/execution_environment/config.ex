@@ -108,7 +108,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
         end
 
       config ->
-        %{mode: :managed, root: config.workspace_root, targets: [{:managed, identity(settings)}]}
+        %{mode: :managed, root: config.workspace_root, targets: [{:managed, managed_target(config)}]}
     end
   end
 
@@ -139,6 +139,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
       _ -> raise ArgumentError, "invalid managed execution environment configuration"
     end
   end
+
+  defp managed_target(config), do: {config.kind, config.deployment_id, canonical(scope(config))}
 
   defp canonical_local_root(root) when is_binary(root) do
     case SymphonyElixir.PathSafety.canonicalize(root) do

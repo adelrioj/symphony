@@ -587,10 +587,11 @@ defmodule SymphonyElixir.Workspace do
   defp invalid_remote_path?(path) when is_binary(path), do: String.match?(path, ~r/[\x00-\x1f\x7f]/)
   defp invalid_remote_path?(_path), do: true
 
-  defp remote_workspace_guard(workspace, %ExecutionContext{mode: :managed} = context) do
+  defp remote_workspace_guard(workspace, %ExecutionContext{} = context) do
     invalid_path? = invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root)
+    identity_mismatch? = context.mode == :managed and workspace != context.workspace_path
 
-    if invalid_path? or workspace != context.workspace_path do
+    if invalid_path? or identity_mismatch? do
       "exit 64"
     else
       [
@@ -606,10 +607,6 @@ defmodule SymphonyElixir.Workspace do
       ]
       |> Enum.join("\n")
     end
-  end
-
-  defp remote_workspace_guard(workspace, %ExecutionContext{}) do
-    if invalid_remote_path?(workspace), do: "exit 64", else: "set -eu\n" <> remote_shell_assign("workspace", workspace)
   end
 
   defp validate_recorded_workspace_path(workspace) when is_binary(workspace) do

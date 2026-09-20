@@ -314,6 +314,42 @@ defmodule SymphonyElixir.LanesTest do
     assert [%{path: "front_matter"}] = Lanes.errors_for({:weird, 1})
   end
 
+  @tag :tmp_dir
+  test "offline import rejects overlapping roots and retained identity changes", %{tmp_dir: root} do
+    owned_root = Path.join(root, "owned")
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Offline owner", workspace_base: owned_root, worker: %{}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "offline-owner",
+        execution_profile_id: profile.id,
+        workspace_subdir: ".",
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
+    File.mkdir_p!(owned_root)
+    File.write!(Path.join(owned_root, "retained"), "keep")
+    :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, LaneStore)
+
+    on_exit(fn ->
+      if is_nil(Process.whereis(LaneStore)), do: Supervisor.restart_child(SymphonyElixir.Supervisor, LaneStore)
+    end)
+
+    overlap = Path.join(root, "overlap.md")
+    File.write!(overlap, Workflow.render(Workflow.encode_config(%{"workspace" => %{"root" => owned_root}, "tracker" => %{"kind" => "memory"}}), ""))
+    assert {:error, overlap_errors} = Lanes.import_file(overlap, slug: "offline-overlap")
+    assert Enum.any?(overlap_errors, &String.contains?(&1.message, "conflicts"))
+    assert is_nil(Lanes.get_by_slug("offline-overlap"))
+
+    moved = Path.join(root, "moved.md")
+    File.write!(moved, Workflow.render(Workflow.encode_config(%{"workspace" => %{"root" => Path.join(root, "moved")}, "tracker" => %{"kind" => "memory"}}), ""))
+    assert {:error, identity_errors} = Lanes.import_file(moved, slug: lane.slug)
+    assert Enum.any?(identity_errors, &String.contains?(&1.message, "guarded field"))
+    assert Lanes.get!(lane.id).execution_profile_id == profile.id
+
+    assert {:ok, _} = Supervisor.restart_child(SymphonyElixir.Supervisor, LaneStore)
+  end
+
   defp managed_front_matter(tmp_dir) do
     kubeconfig = Path.join(tmp_dir, "kubeconfig")
     File.write!(kubeconfig, "apiVersion: v1\nkind: Config\n")
