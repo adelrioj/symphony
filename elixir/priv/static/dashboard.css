@@ -134,6 +134,7 @@
 .field-error {
   margin: 0;
   font-size: 0.86rem;
+  overflow-wrap: anywhere;
 }
 
 .field-help {
