@@ -151,6 +151,27 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute File.exists?(Path.join(root, "NEW-1"))
   end
 
+  test "hooks receive the issue identifier without interpreting shell syntax or workspace names" do
+    root = Path.join(System.tmp_dir!(), "hook-identity-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_before_run: "printf '%s' \"$SYMPHONY_ISSUE_IDENTIFIER\" > hook-identity"
+    )
+
+    target = managed_shell_target!(root)
+    issue = %Issue{id: "stable", identifier: "QA-7'; touch injected; #"}
+    managed = %ExecutionContext{mode: :managed, workspace_root: root, workspace_path: Path.join(root, "persisted-key"), target: target}
+
+    for context <- [ExecutionContext.local(root), managed] do
+      assert {:ok, workspace} = Workspace.create_for_issue(issue, context)
+      assert :ok = Workspace.run_before_run_hook(workspace, issue, context)
+      assert File.read!(Path.join(workspace, "hook-identity")) == issue.identifier
+      refute File.exists?(Path.join(workspace, "injected"))
+    end
+  end
+
   test "managed remote safety rejects root equality and symlink escape before hooks or deletion" do
     root = Path.join(System.tmp_dir!(), "symphony-managed-safety-#{System.unique_integer([:positive])}")
     outside = root <> "-outside"

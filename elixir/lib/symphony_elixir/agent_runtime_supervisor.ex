@@ -43,7 +43,7 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
       # Resolves its own environment each pass and idles unless this lane runs on Kubernetes, so
       # it costs a sleeping process on lanes that do not.
       Supervisor.child_spec(
-        {SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler, [lane_id: lane_id, name: nil]},
+        {SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler, [lane_id: lane_id, name: nil, task_supervisor: task_supervisor_name]},
         id: SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler
       )
     ]

@@ -376,7 +376,7 @@ defmodule SymphonyElixir.Workspace do
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
 
     with :ok <- validate_workspace_path(workspace, context) do
-      run_command = fn -> System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true) end
+      run_command = fn -> System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true, env: [{"SYMPHONY_ISSUE_IDENTIFIER", issue_context.issue_identifier}]) end
       task = Task.async(fn -> execute_hook_task(run_command, on_hook, hook_name) end)
 
       case Task.yield(task, timeout_ms) do
@@ -396,7 +396,11 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
 
-    script = remote_workspace_guard(workspace, worker_host) <> "\ncd \"$workspace\"\n" <> command
+    script =
+      remote_workspace_guard(workspace, worker_host) <>
+        "\ncd \"$workspace\"\n" <>
+        remote_shell_assign("SYMPHONY_ISSUE_IDENTIFIER", issue_context.issue_identifier) <>
+        "\nexport SYMPHONY_ISSUE_IDENTIFIER\n" <> command
 
     case run_remote_command(worker_host, script, timeout_ms, hook_name, on_hook) do
       {:ok, cmd_result} ->
