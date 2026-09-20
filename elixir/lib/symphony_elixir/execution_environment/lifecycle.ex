@@ -9,6 +9,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
     defstruct [
       :record,
       :context,
+      :environment_config,
+      :lane_snapshot,
       :attempt_id,
       :operation_id,
       :purpose,
@@ -28,6 +30,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
     @type t :: %__MODULE__{
             record: Record.t(),
             context: SymphonyElixir.ExecutionContext.t() | nil,
+            environment_config: map() | nil,
+            lane_snapshot: SymphonyElixir.LaneStore.Entry.t() | nil,
             attempt_id: String.t(),
             operation_id: {String.t(), non_neg_integer()} | nil,
             purpose: :agent | :cleanup,

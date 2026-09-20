@@ -7,6 +7,7 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
   alias Plug.Conn
   alias SymphonyElixir.ExecutionProfiles
   alias SymphonyElixir.ExecutionProfiles.Profile
+  alias SymphonyElixirWeb.ConfigurationFields
 
   @profile_params ~w(name description workspace_base worker)
   @max_sqlite_id 9_223_372_036_854_775_807
@@ -83,7 +84,7 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
       name: profile.name,
       description: profile.description,
       workspace_base: profile.workspace_base,
-      worker: profile.worker,
+      worker: ConfigurationFields.safe_value(profile.worker),
       repair_error: profile.repair_error,
       linked_lane_ids: Enum.map(ExecutionProfiles.linked_lanes(profile), & &1.id),
       updated_at: profile.updated_at

@@ -92,8 +92,6 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.Workflow
 
-  @disable_ddl_transaction true
-
   @spec up() :: :ok
   def up do
     create table(:execution_profiles) do
@@ -111,6 +109,10 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
     flush()
 
     backfill_profiles()
+
+    execute("ALTER TABLE runs ADD COLUMN execution_profile_id INTEGER REFERENCES execution_profiles(id)")
+    execute("ALTER TABLE runs ADD COLUMN config_identity BLOB")
+    execute("UPDATE runs SET execution_profile_id = (SELECT execution_profile_id FROM lanes WHERE lanes.id = runs.lane_id)")
 
     # SQLite cannot express a NOT NULL column while adding it to populated tables.
     # The trigger keeps the required relationship enforced for direct SQL writers too.

@@ -209,6 +209,31 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute File.exists?(Path.join(outside, "hook-ran"))
   end
 
+  test "static SSH inventory treats a confirmed missing root as empty" do
+    root = Path.join(System.tmp_dir!(), "symphony-missing-ssh-root-#{System.unique_integer([:positive])}")
+    bin = Path.join(root <> "-bin", "ssh")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(root <> "-bin")
+    end)
+
+    File.mkdir_p!(Path.dirname(bin))
+
+    File.write!(bin, """
+    #!/bin/sh
+    for argument in "$@"; do command=$argument; done
+    exec /bin/sh -c "$command"
+    """)
+
+    File.chmod!(bin, 0o700)
+    System.put_env("PATH", Path.dirname(bin) <> ":" <> previous_path)
+
+    settings = %Schema{workspace: %Schema.Workspace{root: root}, worker: %Schema.Worker{ssh_hosts: ["fixture"]}}
+    assert Workspace.location_inventory(settings) == :empty
+  end
+
   test "before-remove hook can run without deleting retained managed data" do
     root = Path.join(System.tmp_dir!(), "symphony-managed-retain-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "retained")

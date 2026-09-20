@@ -23,7 +23,7 @@ defmodule SymphonyElixir.RunsTest do
 
   test "ordered writes commit an attempt, ledger and cached usage before publishing" do
     lane_id = LaneContext.current!()
-    {:ok, %{version_id: version_id}} = LaneStore.lookup(lane_id)
+    {:ok, %{version_id: version_id, profile_id: profile_id, config_identity: config_identity}} = LaneStore.lookup(lane_id)
     :ok = ObservabilityPubSub.subscribe_run("ordered")
 
     assert :ok = start_run("ordered")
@@ -33,6 +33,7 @@ defmodule SymphonyElixir.RunsTest do
 
     run = Runs.get_by_attempt("ordered")
     assert %Run{status: "done", lane_version_id: ^version_id, finished_at: %DateTime{}} = run
+    assert %Run{execution_profile_id: ^profile_id, config_identity: ^config_identity} = run
     assert %Run{issue_identifier: "RN-1", executor: "local", turns: 2} = run
     assert %Run{input_tokens: 10, output_tokens: 5, cached_tokens: 4} = run
 

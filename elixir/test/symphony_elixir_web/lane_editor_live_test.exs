@@ -39,6 +39,7 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
         "slug" => "features",
         "name" => "Features",
         "prompt" => "keep this prompt",
+        "tracker_kind" => "linear",
         "tracker_api_key" => "$LINEAR_API_KEY",
         "tracker_required_labels" => "ready",
         "advanced_json" => advanced
@@ -56,8 +57,10 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert has_element?(view, "#profile-select option[selected]", "Inline profile")
     assert has_element?(view, "#lane-prompt", "keep this prompt")
 
+    render_change(view, "validate", %{"lane" => %{"tracker_kind" => "memory"}})
+
     view
-    |> form("#lane-form", lane: %{slug: "features", name: "Features", prompt: "keep this prompt", tracker_api_key: "$LINEAR_API_KEY", advanced_json: advanced})
+    |> form("#lane-form", lane: %{slug: "features", name: "Features", prompt: "keep this prompt", tracker_kind: "memory", advanced_json: advanced})
     |> render_submit()
 
     assert_redirect(view, "/lanes/features")
@@ -78,6 +81,30 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert has_element?(view, "#lane-prompt", "draft survives")
     assert has_element?(view, "#lane-slug[value='cancelled']")
     refute Enum.any?(ExecutionProfiles.list(), &(&1.name == ""))
+  end
+
+  test "new lanes show schema defaults, structured adapter fields, and exact duration conversion", %{conn: conn} do
+    profile = new_profile!()
+    {:ok, view, html} = live(conn, "/lanes/new")
+    assert html =~ ~s(name="lane[polling_interval_ms]" value="30")
+    assert html =~ ~s(name="lane[codex_command]" value="codex app-server")
+    assert html =~ ~s(name="lane[observability_render_interval_ms]" value="0.016")
+
+    render_change(view, "validate", %{"lane" => %{"tracker_kind" => "github"}})
+    assert has_element?(view, "#github-repo")
+    assert has_element?(view, "#github-token")
+
+    render_change(view, "validate", %{"lane" => %{"slug" => "exact-duration", "name" => "Exact duration", "tracker_kind" => "memory", "polling_interval_ms" => "0"}})
+    assert has_element?(view, "#limits .field-error", "must be greater than 0")
+
+    view
+    |> form("#lane-form", lane: %{slug: "exact-duration", name: "Exact duration", execution_profile_id: profile.id, tracker_kind: "memory", polling_interval_ms: "0.017"})
+    |> render_submit()
+
+    lane = Lanes.get_by_slug("exact-duration")
+    assert lane
+    assert {:ok, workflow} = Workflow.parse_parts(Lanes.current_version(lane).front_matter, "")
+    assert get_in(workflow.config, ["polling", "interval_ms"]) == 17
   end
 
   test "unknown nested config and raw secret references survive an unrelated name edit", %{conn: conn} do

@@ -347,6 +347,18 @@ defmodule SymphonyElixir.Config.Schema do
 
   @typep validation_errors :: String.t() | [{String.t(), String.t()}]
 
+  @doc "Raw lane-owned defaults used by structured configuration editors."
+  @spec lane_defaults() :: map()
+  def lane_defaults do
+    {:ok, settings} = parse(%{"tracker" => %{"kind" => "memory"}})
+
+    settings
+    |> Map.take([:tracker, :polling, :agent, :codex, :claude, :hooks, :observability])
+    |> stringify_structs()
+    |> drop_nil_values()
+    |> update_in(["tracker"], &Map.delete(&1, "secret_environment_names"))
+  end
+
   @spec parse(map(), keyword()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, validation_errors()}}
   def parse(config, opts \\ []) when is_map(config) do
     attrs = normalize_keys(config)
@@ -565,6 +577,11 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_keys(value) when is_list(value), do: Enum.map(value, &normalize_keys/1)
   defp normalize_keys(value), do: value
+
+  defp stringify_structs(%{__struct__: _} = value), do: value |> Map.from_struct() |> stringify_structs()
+  defp stringify_structs(value) when is_map(value), do: Map.new(value, fn {key, item} -> {to_string(key), stringify_structs(item)} end)
+  defp stringify_structs(value) when is_list(value), do: Enum.map(value, &stringify_structs/1)
+  defp stringify_structs(value), do: value
 
   defp normalize_optional_map(nil), do: nil
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)

@@ -61,6 +61,20 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     assert %{"error" => %{"code" => "lane_not_found"}} = json_response(put(api_conn(), "/api/v1/lanes/missing", Jason.encode!(%{name: "wrong target"})), 404)
   end
 
+  test "lane responses redact literal tracker credentials and preserve references" do
+    attrs =
+      attrs("secret-safe-lane")
+      |> Map.put(:config, %{
+        "tracker" => %{"kind" => "memory", "api_key" => "literal-tracker-secret"},
+        "extension" => %{"token" => "$EXTENSION_TOKEN"}
+      })
+
+    created = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs)), 201)
+    assert created["config"]["tracker"]["api_key"] == "$REDACTED"
+    assert created["config"]["extension"]["token"] == "$EXTENSION_TOKEN"
+    refute Jason.encode!(json_response(get(api_conn(), "/api/v1/lanes"), 200)) =~ "literal-tracker-secret"
+  end
+
   test "invalid JSON field types and nonobject bodies are rejected without persisting changes" do
     assert %{"current_version_id" => version} = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs("typed-lane"))), 201)
 

@@ -6,9 +6,13 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias Phoenix.LiveView.JS
-  alias SymphonyElixir.{ExecutionProfiles, Lanes, Tracker, Workflow}
+  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.ExecutionProfiles
   alias SymphonyElixir.ExecutionProfiles.Configuration
+  alias SymphonyElixir.Lanes
   alias SymphonyElixir.Lanes.Lane
+  alias SymphonyElixir.Tracker
+  alias SymphonyElixir.Workflow
   alias SymphonyElixirWeb.{ConfigurationFields, ObservabilityPubSub}
 
   import ConfigurationFields, only: [profile_fields: 1]
@@ -24,11 +28,26 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {"tracker_active_states", ["tracker", "active_states"], :list},
     {"tracker_terminal_states", ["tracker", "terminal_states"], :list},
     {"tracker_provider_json", ["tracker", "provider"], :json},
-    {"polling_interval_ms", ["polling", "interval_ms"], :integer},
+    {"tracker_team_keys", ["tracker", "provider", "team_keys"], :list},
+    {"tracker_current_cycle", ["tracker", "provider", "current_cycle"], :boolean},
+    {"github_api_url", ["tracker", "provider", "api_url"], :text},
+    {"github_token", ["tracker", "provider", "token"], :secret},
+    {"github_repo", ["tracker", "provider", "repo"], :text},
+    {"gitlab_api_url", ["tracker", "provider", "api_url"], :text},
+    {"gitlab_api_key", ["tracker", "provider", "api_key"], :secret},
+    {"gitlab_project_path", ["tracker", "provider", "project_path"], :text},
+    {"jira_base_url", ["tracker", "provider", "base_url"], :text},
+    {"jira_email", ["tracker", "provider", "email"], :text},
+    {"jira_api_token", ["tracker", "provider", "api_token"], :secret},
+    {"jira_project_key", ["tracker", "provider", "project_key"], :text},
+    {"asana_endpoint", ["tracker", "provider", "endpoint"], :text},
+    {"asana_api_key", ["tracker", "provider", "api_key"], :secret},
+    {"asana_project_gid", ["tracker", "provider", "project_gid"], :text},
+    {"polling_interval_ms", ["polling", "interval_ms"], :duration},
     {"agent_max_concurrent_agents", ["agent", "max_concurrent_agents"], :integer},
     {"agent_max_turns", ["agent", "max_turns"], :integer},
     {"agent_max_turn_exhaustions", ["agent", "max_turn_exhaustions"], :integer},
-    {"agent_max_retry_backoff_ms", ["agent", "max_retry_backoff_ms"], :integer},
+    {"agent_max_retry_backoff_ms", ["agent", "max_retry_backoff_ms"], :duration},
     {"agent_max_concurrent_agents_by_state_json", ["agent", "max_concurrent_agents_by_state"], :json},
     {"agent_backend", ["agent", "backend"], :text},
     {"agent_backend_by_state_json", ["agent", "backend_by_state"], :json},
@@ -38,9 +57,9 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {"codex_approval_policy_json", ["codex", "approval_policy"], :json},
     {"codex_thread_sandbox", ["codex", "thread_sandbox"], :text},
     {"codex_turn_sandbox_policy_json", ["codex", "turn_sandbox_policy"], :json},
-    {"codex_turn_timeout_ms", ["codex", "turn_timeout_ms"], :integer},
-    {"codex_read_timeout_ms", ["codex", "read_timeout_ms"], :integer},
-    {"codex_stall_timeout_ms", ["codex", "stall_timeout_ms"], :integer},
+    {"codex_turn_timeout_ms", ["codex", "turn_timeout_ms"], :duration},
+    {"codex_read_timeout_ms", ["codex", "read_timeout_ms"], :duration},
+    {"codex_stall_timeout_ms", ["codex", "stall_timeout_ms"], :duration},
     {"claude_command", ["claude", "command"], :text},
     {"claude_args", ["claude", "args"], :list},
     {"claude_linear_mcp_command", ["claude", "linear_mcp_command"], :text},
@@ -51,11 +70,12 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {"hooks_before_run", ["hooks", "before_run"], :text},
     {"hooks_after_run", ["hooks", "after_run"], :text},
     {"hooks_before_remove", ["hooks", "before_remove"], :text},
-    {"hooks_timeout_ms", ["hooks", "timeout_ms"], :integer},
+    {"hooks_timeout_ms", ["hooks", "timeout_ms"], :duration},
     {"observability_dashboard_enabled", ["observability", "dashboard_enabled"], :boolean},
-    {"observability_refresh_ms", ["observability", "refresh_ms"], :integer},
-    {"observability_render_interval_ms", ["observability", "render_interval_ms"], :integer}
+    {"observability_refresh_ms", ["observability", "refresh_ms"], :duration},
+    {"observability_render_interval_ms", ["observability", "render_interval_ms"], :duration}
   ]
+  @tracker_provider_keys for {_field, ["tracker", "provider", key], _type} <- @config_fields, do: key
 
   @impl true
   def mount(%{"slug" => slug}, _session, socket) do
@@ -78,7 +98,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   def mount(_params, _session, socket) do
     profiles = ExecutionProfiles.list()
     profile = List.first(profiles)
-    config = %{"tracker" => %{"kind" => "memory"}}
+    config = Schema.lane_defaults()
     params = lane_params(nil, nil, config) |> Map.put("execution_profile_id", profile && profile.id)
 
     {:ok,
@@ -190,53 +210,119 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
         <fieldset class="form-section" id="work-selection">
           <legend>Work selection</legend>
           <label for="lane-name">Name</label><input id="lane-name" type="text" name="lane[name]" value={@params["name"]} autofocus={is_nil(@lane)} />
+          <.lane_field_errors errors={@errors} field="name" path="name" />
           <label for="lane-slug">Slug {if @lane, do: "(immutable after creation)", else: "(used as the default workspace subdirectory)"}</label><input id="lane-slug" type="text" name="lane[slug]" value={@params["slug"]} readonly={not is_nil(@lane)} />
+          <.lane_field_errors errors={@errors} field="slug" path="slug" />
           <label for="tracker-kind">Tracker adapter</label><select id="tracker-kind" name="lane[tracker_kind]"><option :for={kind <- Tracker.kinds()} value={kind} selected={@params["tracker_kind"] == kind}>{kind}</option></select>
-          <label for="tracker-endpoint">Tracker endpoint</label><input id="tracker-endpoint" type="text" name="lane[tracker_endpoint]" value={@params["tracker_endpoint"]} />
-          <label for="tracker-api-key">API key reference</label><input id="tracker-api-key" type="text" name="lane[tracker_api_key]" value={@params["tracker_api_key"]} autocomplete="off" />
-          <label for="tracker-project-slug">Project or repository scope</label><input id="tracker-project-slug" type="text" name="lane[tracker_project_slug]" value={@params["tracker_project_slug"]} />
-          <label for="tracker-assignee">Assignee</label><input id="tracker-assignee" type="text" name="lane[tracker_assignee]" value={@params["tracker_assignee"]} />
+          <.lane_field_errors errors={@errors} field="tracker_kind" path="tracker.kind" />
+
+          <div :if={@params["tracker_kind"] == "linear"} class="config-subsection">
+            <label for="tracker-endpoint">Linear endpoint</label><input id="tracker-endpoint" type="url" name="lane[tracker_endpoint]" value={@params["tracker_endpoint"]} />
+            <label for="tracker-api-key">API key reference</label><input id="tracker-api-key" type="text" name="lane[tracker_api_key]" value={@params["tracker_api_key"]} autocomplete="off" />
+            <label for="tracker-project-slug">Project slug</label><input id="tracker-project-slug" type="text" name="lane[tracker_project_slug]" value={@params["tracker_project_slug"]} />
+            <label for="tracker-assignee">Assignee reference</label><input id="tracker-assignee" type="text" name="lane[tracker_assignee]" value={@params["tracker_assignee"]} />
+            <label for="tracker-team-keys">Team keys (one per line)</label><textarea id="tracker-team-keys" name="lane[tracker_team_keys]" rows="3">{@params["tracker_team_keys"]}</textarea>
+            <input type="hidden" name="lane[tracker_current_cycle]" value="false" />
+            <label for="tracker-current-cycle"><input id="tracker-current-cycle" type="checkbox" name="lane[tracker_current_cycle]" value="true" checked={truthy?(@params["tracker_current_cycle"])} /> Current cycle only</label>
+          </div>
+
+          <div :if={@params["tracker_kind"] == "github"} class="config-subsection">
+            <label for="github-api-url">GitHub API URL</label><input id="github-api-url" type="url" name="lane[github_api_url]" value={@params["github_api_url"]} />
+            <label for="github-token">Token reference</label><input id="github-token" type="text" name="lane[github_token]" value={@params["github_token"]} autocomplete="off" />
+            <label for="github-repo">Repository (owner/name)</label><input id="github-repo" type="text" name="lane[github_repo]" value={@params["github_repo"]} />
+          </div>
+
+          <div :if={@params["tracker_kind"] == "gitlab"} class="config-subsection">
+            <label for="gitlab-api-url">GitLab API URL</label><input id="gitlab-api-url" type="url" name="lane[gitlab_api_url]" value={@params["gitlab_api_url"]} />
+            <label for="gitlab-api-key">API key reference</label><input id="gitlab-api-key" type="text" name="lane[gitlab_api_key]" value={@params["gitlab_api_key"]} autocomplete="off" />
+            <label for="gitlab-project-path">Project path</label><input id="gitlab-project-path" type="text" name="lane[gitlab_project_path]" value={@params["gitlab_project_path"]} />
+          </div>
+
+          <div :if={@params["tracker_kind"] == "jira"} class="config-subsection">
+            <label for="jira-base-url">Jira base URL</label><input id="jira-base-url" type="url" name="lane[jira_base_url]" value={@params["jira_base_url"]} />
+            <label for="jira-email">Account email</label><input id="jira-email" type="email" name="lane[jira_email]" value={@params["jira_email"]} />
+            <label for="jira-api-token">API token reference</label><input id="jira-api-token" type="text" name="lane[jira_api_token]" value={@params["jira_api_token"]} autocomplete="off" />
+            <label for="jira-project-key">Project key</label><input id="jira-project-key" type="text" name="lane[jira_project_key]" value={@params["jira_project_key"]} />
+          </div>
+
+          <div :if={@params["tracker_kind"] == "asana"} class="config-subsection">
+            <label for="asana-endpoint">Asana endpoint</label><input id="asana-endpoint" type="url" name="lane[asana_endpoint]" value={@params["asana_endpoint"]} />
+            <label for="asana-api-key">API key reference</label><input id="asana-api-key" type="text" name="lane[asana_api_key]" value={@params["asana_api_key"]} autocomplete="off" />
+            <label for="asana-project-gid">Project GID</label><input id="asana-project-gid" type="text" name="lane[asana_project_gid]" value={@params["asana_project_gid"]} />
+          </div>
+          <.lane_field_errors errors={@errors} field="tracker_provider" path="tracker.provider" />
           <label for="tracker-required-labels">Required labels (one per line)</label><textarea id="tracker-required-labels" name="lane[tracker_required_labels]" rows="3">{@params["tracker_required_labels"]}</textarea>
           <label for="tracker-any-labels">Any labels (one per line)</label><textarea id="tracker-any-labels" name="lane[tracker_any_labels]" rows="3">{@params["tracker_any_labels"]}</textarea>
           <label for="tracker-active-states">Active states (one per line)</label><textarea id="tracker-active-states" name="lane[tracker_active_states]" rows="3">{@params["tracker_active_states"]}</textarea>
           <label for="tracker-terminal-states">Terminal states (one per line)</label><textarea id="tracker-terminal-states" name="lane[tracker_terminal_states]" rows="3">{@params["tracker_terminal_states"]}</textarea>
-          <label for="tracker-provider">Adapter-specific tracker settings (JSON)</label><textarea id="tracker-provider" name="lane[tracker_provider_json]" rows="5" class="mono">{@params["tracker_provider_json"]}</textarea>
+          <details><summary>Uncommon adapter settings</summary><label for="tracker-provider">Additional tracker settings (JSON)</label><textarea id="tracker-provider" name="lane[tracker_provider_json]" rows="5" class="mono">{@params["tracker_provider_json"]}</textarea></details>
         </fieldset>
 
         <fieldset class="form-section" id="execution">
           <legend>Execution</legend>
           <label for="profile-select">Execution profile</label><select id="profile-select" name="lane[execution_profile_id]"><option value="">Choose a profile</option><option :for={profile <- @profiles} value={profile.id} selected={to_string(profile.id) == to_string(@params["execution_profile_id"])}>{profile.name}</option></select>
+          <.lane_field_errors errors={@errors} field="execution_profile_id" path="execution_profile_id" />
           <button type="button" class="subtle-button" phx-click="open_profile_create">Create profile inline</button>
           <p :if={selected_profile(@profiles, @params["execution_profile_id"])} class="field-help"><a class="issue-link" href={"/execution-profiles/#{selected_profile(@profiles, @params["execution_profile_id"]).id}"}>View selected profile</a> · {profile_summary(selected_profile(@profiles, @params["execution_profile_id"]))}</p>
           <p :if={selected_profile(@profiles, @params["execution_profile_id"])} class="field-help">Effective workspace: <span class="mono">{effective_workspace(selected_profile(@profiles, @params["execution_profile_id"]), @params["workspace_subdir"])}</span></p>
           <p :if={@profiles == []} class="empty-state">No execution profiles exist. Create one to continue.</p>
           <label for="lane-workspace-subdir">Advanced workspace subdirectory</label><input id="lane-workspace-subdir" type="text" name="lane[workspace_subdir]" value={@params["workspace_subdir"]} />
+          <.lane_field_errors errors={@errors} field="workspace_subdir" path="workspace_subdir" />
         </fieldset>
 
         <fieldset class="form-section" id="workflow">
           <legend>Workflow</legend>
           <label for="lane-prompt">Prompt</label><textarea id="lane-prompt" name="lane[prompt]" rows="8" phx-debounce="300">{@params["prompt"]}</textarea>
           <label for="agent-backend">Agent backend</label><select id="agent-backend" name="lane[agent_backend]"><option value="codex" selected={@params["agent_backend"] == "codex"}>Codex</option><option value="claude" selected={@params["agent_backend"] == "claude"}>Claude</option></select>
+          <label for="agent-backend-by-state">Backend overrides by state (JSON)</label><textarea id="agent-backend-by-state" name="lane[agent_backend_by_state_json]" rows="3" class="mono">{@params["agent_backend_by_state_json"]}</textarea>
+          <label for="agent-blocked-state">Blocked state</label><input id="agent-blocked-state" type="text" name="lane[agent_blocked_state]" value={@params["agent_blocked_state"]} />
+          <label for="agent-in-progress-state">In-progress state</label><input id="agent-in-progress-state" type="text" name="lane[agent_in_progress_state]" value={@params["agent_in_progress_state"]} />
+
+          <div :if={@params["agent_backend"] == "codex"} class="config-subsection">
+            <h3>Codex settings</h3>
+            <label for="codex-command">Command</label><input id="codex-command" type="text" name="lane[codex_command]" value={@params["codex_command"]} />
+            <label for="codex-approval-policy">Approval policy (JSON)</label><textarea id="codex-approval-policy" name="lane[codex_approval_policy_json]" rows="5" class="mono">{@params["codex_approval_policy_json"]}</textarea>
+            <label for="codex-thread-sandbox">Thread sandbox</label><input id="codex-thread-sandbox" type="text" name="lane[codex_thread_sandbox]" value={@params["codex_thread_sandbox"]} />
+            <label for="codex-turn-sandbox-policy">Turn sandbox policy (JSON)</label><textarea id="codex-turn-sandbox-policy" name="lane[codex_turn_sandbox_policy_json]" rows="5" class="mono">{@params["codex_turn_sandbox_policy_json"]}</textarea>
+            <label for="codex-turn-timeout">Turn timeout (seconds)</label><input id="codex-turn-timeout" type="text" inputmode="decimal" name="lane[codex_turn_timeout_ms]" value={@params["codex_turn_timeout_ms"]} />
+            <label for="codex-read-timeout">Read timeout (seconds)</label><input id="codex-read-timeout" type="text" inputmode="decimal" name="lane[codex_read_timeout_ms]" value={@params["codex_read_timeout_ms"]} />
+            <label for="codex-stall-timeout">Stall timeout (seconds)</label><input id="codex-stall-timeout" type="text" inputmode="decimal" name="lane[codex_stall_timeout_ms]" value={@params["codex_stall_timeout_ms"]} />
+            <.lane_prefix_errors errors={@errors} prefix="codex." />
+          </div>
+
+          <div :if={@params["agent_backend"] == "claude"} class="config-subsection">
+            <h3>Claude settings</h3>
+            <label for="claude-command">Command</label><input id="claude-command" type="text" name="lane[claude_command]" value={@params["claude_command"]} />
+            <label for="claude-args">Arguments (one per line)</label><textarea id="claude-args" name="lane[claude_args]" rows="3">{@params["claude_args"]}</textarea>
+            <label for="claude-linear-mcp-command">Linear MCP command</label><input id="claude-linear-mcp-command" type="text" name="lane[claude_linear_mcp_command]" value={@params["claude_linear_mcp_command"]} />
+            <label for="claude-linear-mcp-args">Linear MCP arguments (one per line)</label><textarea id="claude-linear-mcp-args" name="lane[claude_linear_mcp_args]" rows="3">{@params["claude_linear_mcp_args"]}</textarea>
+            <label for="claude-allowed-tools">Allowed tools (one per line)</label><textarea id="claude-allowed-tools" name="lane[claude_allowed_tools]" rows="3">{@params["claude_allowed_tools"]}</textarea>
+            <label for="claude-extra-mcp">Additional MCP servers (JSON)</label><textarea id="claude-extra-mcp" name="lane[claude_extra_mcp_servers_json]" rows="5" class="mono">{@params["claude_extra_mcp_servers_json"]}</textarea>
+            <.lane_prefix_errors errors={@errors} prefix="claude." />
+          </div>
           <label for="hooks-after-create">After-create setup hook</label><textarea id="hooks-after-create" name="lane[hooks_after_create]" rows="2">{@params["hooks_after_create"]}</textarea>
           <label for="hooks-before-run">Before-run hook</label><textarea id="hooks-before-run" name="lane[hooks_before_run]" rows="2">{@params["hooks_before_run"]}</textarea>
           <label for="hooks-after-run">After-run hook</label><textarea id="hooks-after-run" name="lane[hooks_after_run]" rows="2">{@params["hooks_after_run"]}</textarea>
           <label for="hooks-before-remove">Before-remove hook</label><textarea id="hooks-before-remove" name="lane[hooks_before_remove]" rows="2">{@params["hooks_before_remove"]}</textarea>
-          <label for="hooks-timeout-ms">Hook timeout (ms)</label><input id="hooks-timeout-ms" type="number" name="lane[hooks_timeout_ms]" value={@params["hooks_timeout_ms"]} />
-          <label for="backend-settings">Backend settings, permissions and state overrides (JSON)</label><textarea id="backend-settings" name="lane[backend_settings_json]" rows="12" class="mono">{@params["backend_settings_json"]}</textarea>
+          <label for="hooks-timeout-ms">Hook timeout (seconds)</label><input id="hooks-timeout-ms" type="text" inputmode="decimal" name="lane[hooks_timeout_ms]" value={@params["hooks_timeout_ms"]} />
+          <.lane_field_errors errors={@errors} field="hooks_timeout_ms" path="hooks.timeout_ms" />
         </fieldset>
 
         <fieldset class="form-section" id="limits">
           <legend>Limits</legend>
-          <label for="polling-interval-ms">Polling interval (ms)</label><input id="polling-interval-ms" type="number" name="lane[polling_interval_ms]" value={@params["polling_interval_ms"]} />
+          <label for="polling-interval-ms">Polling interval (seconds)</label><input id="polling-interval-ms" type="text" inputmode="decimal" name="lane[polling_interval_ms]" value={@params["polling_interval_ms"]} />
+          <.lane_field_errors errors={@errors} field="polling_interval_ms" path="polling.interval_ms" />
           <label for="max-concurrent-agents">Concurrent agents</label><input id="max-concurrent-agents" type="number" name="lane[agent_max_concurrent_agents]" value={@params["agent_max_concurrent_agents"]} />
           <label for="max-turns">Maximum turns</label><input id="max-turns" type="number" name="lane[agent_max_turns]" value={@params["agent_max_turns"]} />
           <label for="max-turn-exhaustions">Maximum turn exhaustions</label><input id="max-turn-exhaustions" type="number" name="lane[agent_max_turn_exhaustions]" value={@params["agent_max_turn_exhaustions"]} />
-          <label for="retry-backoff-ms">Retry backoff (ms)</label><input id="retry-backoff-ms" type="number" name="lane[agent_max_retry_backoff_ms]" value={@params["agent_max_retry_backoff_ms"]} />
+          <label for="retry-backoff-ms">Retry backoff (seconds)</label><input id="retry-backoff-ms" type="text" inputmode="decimal" name="lane[agent_max_retry_backoff_ms]" value={@params["agent_max_retry_backoff_ms"]} />
           <label for="state-limits">Per-state concurrency limits (JSON)</label><textarea id="state-limits" name="lane[agent_max_concurrent_agents_by_state_json]" rows="4" class="mono">{@params["agent_max_concurrent_agents_by_state_json"]}</textarea>
+          <.lane_prefix_errors errors={@errors} prefix="agent." />
           <input type="hidden" name="lane[observability_dashboard_enabled]" value="false" />
           <label for="observability-dashboard-enabled"><input id="observability-dashboard-enabled" type="checkbox" name="lane[observability_dashboard_enabled]" value="true" checked={truthy?(@params["observability_dashboard_enabled"])} /> Dashboard enabled</label>
-          <label for="observability-refresh-ms">Observability refresh (ms)</label><input id="observability-refresh-ms" type="number" name="lane[observability_refresh_ms]" value={@params["observability_refresh_ms"]} />
-          <label for="observability-render-interval-ms">Render interval (ms)</label><input id="observability-render-interval-ms" type="number" name="lane[observability_render_interval_ms]" value={@params["observability_render_interval_ms"]} />
+          <label for="observability-refresh-ms">Observability refresh (seconds)</label><input id="observability-refresh-ms" type="text" inputmode="decimal" name="lane[observability_refresh_ms]" value={@params["observability_refresh_ms"]} />
+          <label for="observability-render-interval-ms">Render interval (seconds)</label><input id="observability-render-interval-ms" type="text" inputmode="decimal" name="lane[observability_render_interval_ms]" value={@params["observability_render_interval_ms"]} />
+          <.lane_prefix_errors errors={@errors} prefix="observability." />
         </fieldset>
 
         <fieldset class="form-section" id="advanced-configuration">
@@ -343,9 +429,9 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   end
 
   defp config_from_params(params, original_config) do
-    with {:ok, config} <- decode_json(params["advanced_json"], "advanced", original_config),
-         {:ok, backend} <- decode_json(params["backend_settings_json"], "backend_settings", Map.take(original_config, ["codex", "claude", "agent"])),
-         {config, errors} <- patch_config(Map.merge(config, backend), params, original_config) do
+    with {:ok, advanced} <- decode_json(params["advanced_json"], "advanced", advanced_config(original_config)),
+         base = deep_merge(known_config(original_config), advanced),
+         {config, errors} <- patch_config(base, params, original_config) do
       if errors == [], do: {:ok, config}, else: {:error, errors}
     end
   end
@@ -371,6 +457,8 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     end
   end
 
+  defp parse_value(value, :secret, field, original), do: parse_value(value, :text, field, original)
+
   defp parse_value(value, :list, _field, original) when value == "$REDACTED", do: {:ok, original}
   defp parse_value(value, :list, _field, _original) when is_binary(value), do: {:ok, String.split(value, ~r/[\r\n]+/, trim: true)}
   defp parse_value(value, :integer, _field, original) when value == "$REDACTED", do: {:ok, original}
@@ -384,6 +472,10 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     end
   end
 
+  defp parse_value(value, :duration, _field, original) when value == "$REDACTED", do: {:ok, original}
+  defp parse_value(value, :duration, _field, _original) when value in [nil, ""], do: {:ok, nil}
+  defp parse_value(value, :duration, field, _original), do: ConfigurationFields.parse_duration(value, config_path(field))
+
   defp parse_value(value, :boolean, _field, _original) when value in [true, "true", "on"], do: {:ok, true}
   defp parse_value(value, :boolean, _field, _original) when value in [false, "false", ""], do: {:ok, false}
   defp parse_value(_value, :boolean, field, _original), do: {:error, %{path: field, message: "must be a boolean"}}
@@ -393,7 +485,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
   defp decode_json(value, field, original) when is_binary(value) do
     case Jason.decode(value) do
-      {:ok, value} when field not in ["advanced", "backend_settings"] -> {:ok, restore_redacted(value, original)}
+      {:ok, value} when field != "advanced" -> {:ok, restore_redacted(value, original)}
       {:ok, map} when is_map(map) -> {:ok, restore_redacted(map, original)}
       {:ok, _} -> {:error, [%{path: field, message: "must be a JSON object"}]}
       {:error, reason} -> {:error, [%{path: field, message: "invalid JSON: #{Exception.message(reason)}"}]}
@@ -429,16 +521,31 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
       "workspace_subdir" => (lane && lane.workspace_subdir) || (lane && lane.slug) || "",
       "prompt" => (version && version.prompt) || "",
       "note" => "",
-      "advanced_json" => ConfigurationFields.safe_json(config),
-      "backend_settings_json" => backend_settings(config)
+      "advanced_json" => config |> advanced_config() |> ConfigurationFields.safe_json()
     }
 
     Enum.reduce(@config_fields, params, fn {field, path, type}, acc -> Map.put(acc, field, field_value(config, path, type)) end)
   end
 
   defp field_value(config, path, :list), do: config |> get_in(path) |> List.wrap() |> Enum.join("\n")
+
+  defp field_value(config, ["tracker", "provider"], :json) do
+    config
+    |> get_in(["tracker", "provider"])
+    |> then(&Map.drop(&1 || %{}, @tracker_provider_keys))
+    |> ConfigurationFields.safe_json()
+  end
+
   defp field_value(config, path, :json), do: ConfigurationFields.safe_json(get_in(config, path) || %{})
   defp field_value(config, path, :boolean), do: get_in(config, path) in [true, "true"]
+  defp field_value(config, path, :duration), do: ConfigurationFields.duration_input(get_in(config, path))
+
+  defp field_value(config, path, :secret) do
+    case get_in(config, path) do
+      value when is_binary(value) -> if(String.starts_with?(value, "$"), do: value, else: "$REDACTED")
+      _ -> ""
+    end
+  end
 
   defp field_value(config, ["tracker", "api_key"], :text) do
     case get_in(config, ["tracker", "api_key"]) do
@@ -448,7 +555,6 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   end
 
   defp field_value(config, path, _type), do: value_string(get_in(config, path))
-  defp backend_settings(config), do: config |> Map.take(["codex", "claude", "agent"]) |> ConfigurationFields.safe_json()
   defp lane_config(nil), do: %{}
 
   defp lane_config(version) do
@@ -510,7 +616,49 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   defp value_string(nil), do: ""
   defp value_string(value), do: to_string(value)
   defp truthy?(value), do: value in [true, "true", "on"]
-  defp config_param_keys, do: Enum.map(@config_fields, &elem(&1, 0)) ++ ["advanced_json", "backend_settings_json"]
+  defp config_param_keys, do: Enum.map(@config_fields, &elem(&1, 0)) ++ ["advanced_json"]
+
+  defp config_path(field) do
+    case Enum.find(@config_fields, &(elem(&1, 0) == field)) do
+      {_field, path, _type} -> Enum.join(path, ".")
+      nil -> field
+    end
+  end
+
+  defp known_config(config) do
+    Enum.reduce(@config_fields, %{}, fn {_field, path, _type}, known ->
+      case get_in(config, path) do
+        nil -> known
+        value -> put_or_delete(known, path, value)
+      end
+    end)
+  end
+
+  defp advanced_config(config), do: Enum.reduce(@config_fields, config, fn {_field, path, _type}, advanced -> delete_path(advanced, path) end)
+
+  defp deep_merge(left, right) when is_map(left) and is_map(right) do
+    Map.merge(left, right, fn _key, left_value, right_value ->
+      if is_map(left_value) and is_map(right_value), do: deep_merge(left_value, right_value), else: right_value
+    end)
+  end
+
+  defp lane_field_errors(assigns) do
+    matching_errors = Enum.filter(assigns.errors, &(&1.path in [assigns.field, assigns.path, "config." <> assigns.path]))
+    assigns = assign(assigns, :matching_errors, matching_errors)
+
+    ~H"""
+    <p :for={error <- @matching_errors} class="field-error" role="alert">{error.message}</p>
+    """
+  end
+
+  defp lane_prefix_errors(assigns) do
+    matching_errors = Enum.filter(assigns.errors, &(String.starts_with?(&1.path, assigns.prefix) or String.starts_with?(&1.path, "config." <> assigns.prefix)))
+    assigns = assign(assigns, :matching_errors, matching_errors)
+
+    ~H"""
+    <p :for={error <- @matching_errors} class="field-error" role="alert">{error.path}: {error.message}</p>
+    """
+  end
 
   defp workspace_subdir(params), do: if(params["workspace_subdir"] in [nil, ""], do: params["slug"] || "", else: params["workspace_subdir"])
 end

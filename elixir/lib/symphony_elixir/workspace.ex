@@ -78,7 +78,16 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp remote_inventory(host, root) do
-    command = remote_shell_assign("workspace_root", root) <> "\n" <> "find \"$workspace_root\" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null"
+    command =
+      [
+        remote_shell_assign("workspace_root", root),
+        "if [ -d \"$workspace_root\" ]; then find \"$workspace_root\" -mindepth 1 -maxdepth 1 -print -quit; exit $?; fi",
+        "if [ -e \"$workspace_root\" ] || [ -L \"$workspace_root\" ]; then exit 1; fi",
+        "ancestor=$workspace_root",
+        "while [ ! -e \"$ancestor\" ] && [ ! -L \"$ancestor\" ] && [ \"$ancestor\" != / ]; do ancestor=${ancestor%/*}; [ -n \"$ancestor\" ] || ancestor=/; done",
+        "[ -d \"$ancestor\" ] && [ -x \"$ancestor\" ]"
+      ]
+      |> Enum.join("\n")
 
     task = Task.async(fn -> SSH.run(host, command, stderr_to_stdout: true) end)
 

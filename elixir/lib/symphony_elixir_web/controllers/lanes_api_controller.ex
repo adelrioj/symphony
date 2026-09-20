@@ -7,6 +7,7 @@ defmodule SymphonyElixirWeb.LanesApiController do
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.{Lanes, LaneStore, LaneSupervisor, Workflow}
   alias SymphonyElixir.Lanes.Lane
+  alias SymphonyElixirWeb.ConfigurationFields
 
   @lane_params ~w(slug name enabled execution_profile_id workspace_subdir config prompt note front_matter executor)
 
@@ -107,7 +108,7 @@ defmodule SymphonyElixirWeb.LanesApiController do
       execution_profile_id: lane.execution_profile_id,
       execution_profile_name: entry.profile_name,
       workspace_subdir: lane.workspace_subdir,
-      config: config,
+      config: ConfigurationFields.safe_value(config),
       current_version_id: lane.current_version_id,
       running: LaneSupervisor.running?(lane.id),
       updated_at: lane.updated_at,

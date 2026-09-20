@@ -82,6 +82,45 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     assert_receive {:agent_started, "second", _, _}, 1_000
   end
 
+  test "managed preparation and stop retain their reserved configuration snapshot" do
+    issues([issue("first", 1)])
+    {owner, tasks} = scheduler()
+    discover([])
+    {old_config, entry, prepare} = operation(:prepare)
+    old_identity = entry.lane_snapshot.config_identity
+    dispatch_token = :sys.get_state(owner).dispatch_tokens["first"]
+    assert Map.has_key?(:sys.get_state(LaneStore).reservations, dispatch_token)
+
+    lane_id = LaneContext.current!()
+    {:ok, current} = LaneStore.lookup(lane_id)
+
+    settings =
+      current.settings
+      |> put_in([Access.key!(:worker), Access.key!(:environment), Access.key!(:startup_timeout_ms)], 20_000)
+      |> put_in([Access.key!(:worker), Access.key!(:environment), Access.key!(:shutdown_timeout_ms)], 30_000)
+
+    assert :ok = LaneStore.put_entry(%{current | settings: settings, config_identity: :crypto.hash(:sha256, "updated")})
+    send(owner, {:lane_updated, lane_id})
+    assert {:ok, %{config_identity: new_identity}} = LaneStore.lookup(lane_id)
+    refute new_identity == old_identity
+    Orchestrator.snapshot(owner, 1_000)
+
+    state = :sys.get_state(owner)
+    assert Map.has_key?(:sys.get_state(LaneStore).reservations, dispatch_token)
+    assert state.environment_entries["first"].lane_snapshot.config_identity == old_identity
+    assert is_nil(state.environment_entries["first"].completion)
+    assert {:ok, _} = LaneStore.protect_environment(lane_id, state.environment_identity, state.environment_guard)
+
+    ready(old_config, entry, prepare, owner, tasks)
+    assert_receive {:agent_started, "first", runner, _}, 1_000
+    assert :sys.get_state(owner).running["first"].lane_snapshot.config_identity == old_identity
+
+    send(runner, :finish_agent)
+    {stop_config, _stopping, _stop} = operation(:stop)
+    assert stop_config.startup_timeout_ms == 10_000
+    assert stop_config.shutdown_timeout_ms == 10_000
+  end
+
   test "failed stop and lifecycle task DOWN never free capacity" do
     issues([issue("first", 1), issue("second", 2)])
     {owner, tasks} = scheduler()

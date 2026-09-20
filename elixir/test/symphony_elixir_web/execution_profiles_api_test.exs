@@ -50,6 +50,22 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
     assert ExecutionProfiles.get(profile["id"]).workspace_base == profile["workspace_base"]
   end
 
+  test "literal worker credentials are redacted while references remain intact" do
+    attrs = %{
+      name: "Secret-safe profile",
+      workspace_base: "/tmp/secret-safe-profile",
+      worker: %{api_key: "literal-worker-secret", nested: %{credential: "$WORKER_CREDENTIAL"}}
+    }
+
+    created = json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(attrs)), 201)
+    assert created["worker"]["api_key"] == "$REDACTED"
+    assert created["worker"]["nested"]["credential"] == "$WORKER_CREDENTIAL"
+    assert ExecutionProfiles.get(created["id"]).worker["api_key"] == "literal-worker-secret"
+
+    listed = json_response(get(api_conn(), "/api/v1/execution-profiles"), 200)
+    refute Jason.encode!(listed) =~ "literal-worker-secret"
+  end
+
   test "duplicate names and invalid profile maps return field errors" do
     assert json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "Duplicate"})), 201)
     errors = json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "Duplicate"})), 422)["errors"]

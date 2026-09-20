@@ -135,6 +135,9 @@ defmodule SymphonyElixir.RepoTest do
              JOIN run_events ON run_events.run_id = runs.id WHERE lane_versions.id = 1
              """).rows
 
+    assert [[profile_id]] = Repo.query!("SELECT execution_profile_id FROM runs WHERE attempt_id = 'migration-attempt'").rows
+    assert is_integer(profile_id)
+
     assert [["."], ["."], ["."], ["."], ["."], ["."]] = Repo.query!("SELECT workspace_subdir FROM lanes ORDER BY id").rows
     assert [[repair_error]] = Repo.query!("SELECT repair_error FROM execution_profiles WHERE name = 'Legacy malformed'").rows
     assert repair_error =~ "repair"
