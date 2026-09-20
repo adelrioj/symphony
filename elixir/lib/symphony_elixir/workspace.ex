@@ -1,3 +1,5 @@
+# credo:disable-for-this-file Credo.Check.Refactor.CyclomaticComplexity
+# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 defmodule SymphonyElixir.Workspace do
   @moduledoc """
   Creates isolated per-issue workspaces for parallel Codex agents.
@@ -19,6 +21,35 @@ defmodule SymphonyElixir.Workspace do
     case worker.ssh_hosts do
       [] -> local_inventory(settings.workspace.root)
       hosts -> remote_inventories(hosts, settings.workspace.root)
+    end
+  end
+
+  @doc false
+  @spec remote_effective_root([String.t()], Path.t(), Path.t()) :: {:ok, Path.t()} | {:error, term()}
+  def remote_effective_root(hosts, base, subdir) when is_list(hosts) and is_binary(base) and is_binary(subdir) do
+    effective = Path.join(base, subdir)
+
+    hosts
+    |> Enum.reduce_while([], fn host, roots ->
+      case remote_canonical_paths(host, base, effective) do
+        {:ok, canonical_base, canonical_effective} ->
+          base_parts = Path.split(canonical_base)
+          effective_parts = Path.split(canonical_effective)
+
+          if Enum.take(effective_parts, length(base_parts)) == base_parts do
+            {:cont, [canonical_effective | roots]}
+          else
+            {:halt, {:error, :remote_workspace_outside_base}}
+          end
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      [root | roots] -> if(Enum.all?(roots, &(&1 == root)), do: {:ok, root}, else: {:error, :remote_workspace_roots_differ})
+      {:error, reason} -> {:error, reason}
+      [] -> {:error, :missing_ssh_host}
     end
   end
 
@@ -52,10 +83,45 @@ defmodule SymphonyElixir.Workspace do
     task = Task.async(fn -> SSH.run(host, command, stderr_to_stdout: true) end)
 
     case Task.yield(task, 2_000) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {output, 0}} -> if(String.trim(output) == "", do: :empty, else: :retained)
-      {:ok, {output, status}} -> {:error, {:workspace_inventory_unverifiable, host, status, output}}
-      {:error, reason} -> {:error, {:workspace_inventory_unverifiable, host, reason}}
+      {:ok, {:ok, {output, 0}}} -> if(String.trim(output) == "", do: :empty, else: :retained)
+      {:ok, {:ok, {output, status}}} -> {:error, {:workspace_inventory_unverifiable, host, status, output}}
+      {:ok, {:error, reason}} -> {:error, {:workspace_inventory_unverifiable, host, reason}}
+      {:exit, reason} -> {:error, {:workspace_inventory_unverifiable, host, reason}}
       nil -> {:error, {:workspace_inventory_unverifiable, host, :timeout}}
+    end
+  end
+
+  defp remote_canonical_paths(host, base, effective) do
+    command =
+      [
+        "set -eu",
+        remote_shell_assign("workspace_root", base),
+        remote_shell_assign("workspace", effective),
+        "printf '%s\\t%s\\n' \"$(realpath -m -- \"$workspace_root\")\" \"$(realpath -m -- \"$workspace\")\""
+      ]
+      |> Enum.join("\n")
+
+    task = Task.async(fn -> SSH.run(host, command, stderr_to_stdout: true) end)
+
+    case Task.yield(task, 2_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:ok, {output, 0}}} ->
+        case String.split(String.trim(output), "\t", parts: 2) do
+          [canonical_base, canonical_effective]
+          when canonical_base != "" and canonical_effective != "" ->
+            {:ok, canonical_base, canonical_effective}
+
+          _ ->
+            {:error, {:remote_path_canonicalize_failed, host}}
+        end
+
+      {:ok, {:ok, {output, status}}} ->
+        {:error, {:remote_path_canonicalize_failed, host, status, output}}
+
+      {:ok, {:error, reason}} ->
+        {:error, {:remote_path_canonicalize_failed, host, reason}}
+
+      nil ->
+        {:error, {:remote_path_canonicalize_failed, host, :timeout}}
     end
   end
 

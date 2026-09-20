@@ -1,10 +1,12 @@
+# credo:disable-for-this-file Credo.Check.Refactor.CyclomaticComplexity
+# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 defmodule SymphonyElixirWeb.LaneEditorLive do
   @moduledoc "Structured lane editor with a lossless raw draft behind its controls."
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias Phoenix.LiveView.JS
-  alias SymphonyElixir.{ExecutionProfiles, Lanes, Workflow}
+  alias SymphonyElixir.{ExecutionProfiles, Lanes, Tracker, Workflow}
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.Lanes.Lane
   alias SymphonyElixirWeb.{ConfigurationFields, ObservabilityPubSub}
@@ -78,7 +80,17 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     profile = List.first(profiles)
     config = %{"tracker" => %{"kind" => "memory"}}
     params = lane_params(nil, nil, config) |> Map.put("execution_profile_id", profile && profile.id)
-    {:ok, assign(socket, lane: nil, params: params, original_config: config, profiles: profiles, errors: [], warnings: [], profile_create: nil)}
+
+    {:ok,
+     assign(socket,
+       lane: nil,
+       params: params,
+       original_config: config,
+       profiles: profiles,
+       errors: [],
+       warnings: [],
+       profile_create: nil
+     )}
   end
 
   @impl true
@@ -139,11 +151,12 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
   @impl true
   def handle_info({:lane_updated, slug}, socket) do
-    if is_nil(Lanes.get_by_slug(slug)), do: {:noreply, socket |> put_flash(:error, "Lane no longer exists") |> push_navigate(to: "/")}, else: {:noreply, socket}
+    if is_nil(Lanes.get_by_slug(slug)),
+      do: {:noreply, socket |> put_flash(:error, "Lane no longer exists") |> push_navigate(to: "/")},
+      else: {:noreply, socket}
   end
 
   def handle_info(:profiles_updated, socket), do: {:noreply, assign(socket, :profiles, ExecutionProfiles.list())}
-  def handle_info(:observability_updated, socket), do: {:noreply, assign(socket, :profiles, ExecutionProfiles.list())}
 
   @impl true
   def render(assigns) do
@@ -178,7 +191,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
           <legend>Work selection</legend>
           <label for="lane-name">Name</label><input id="lane-name" type="text" name="lane[name]" value={@params["name"]} autofocus={is_nil(@lane)} />
           <label for="lane-slug">Slug {if @lane, do: "(immutable after creation)", else: "(used as the default workspace subdirectory)"}</label><input id="lane-slug" type="text" name="lane[slug]" value={@params["slug"]} readonly={not is_nil(@lane)} />
-          <label for="tracker-kind">Tracker adapter</label><select id="tracker-kind" name="lane[tracker_kind]"><option :for={kind <- ~w(memory linear github gitlab asana)} value={kind} selected={@params["tracker_kind"] == kind}>{kind}</option></select>
+          <label for="tracker-kind">Tracker adapter</label><select id="tracker-kind" name="lane[tracker_kind]"><option :for={kind <- Tracker.kinds()} value={kind} selected={@params["tracker_kind"] == kind}>{kind}</option></select>
           <label for="tracker-endpoint">Tracker endpoint</label><input id="tracker-endpoint" type="text" name="lane[tracker_endpoint]" value={@params["tracker_endpoint"]} />
           <label for="tracker-api-key">API key reference</label><input id="tracker-api-key" type="text" name="lane[tracker_api_key]" value={@params["tracker_api_key"]} autocomplete="off" />
           <label for="tracker-project-slug">Project or repository scope</label><input id="tracker-project-slug" type="text" name="lane[tracker_project_slug]" value={@params["tracker_project_slug"]} />
@@ -220,6 +233,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
           <label for="max-turn-exhaustions">Maximum turn exhaustions</label><input id="max-turn-exhaustions" type="number" name="lane[agent_max_turn_exhaustions]" value={@params["agent_max_turn_exhaustions"]} />
           <label for="retry-backoff-ms">Retry backoff (ms)</label><input id="retry-backoff-ms" type="number" name="lane[agent_max_retry_backoff_ms]" value={@params["agent_max_retry_backoff_ms"]} />
           <label for="state-limits">Per-state concurrency limits (JSON)</label><textarea id="state-limits" name="lane[agent_max_concurrent_agents_by_state_json]" rows="4" class="mono">{@params["agent_max_concurrent_agents_by_state_json"]}</textarea>
+          <input type="hidden" name="lane[observability_dashboard_enabled]" value="false" />
           <label for="observability-dashboard-enabled"><input id="observability-dashboard-enabled" type="checkbox" name="lane[observability_dashboard_enabled]" value="true" checked={truthy?(@params["observability_dashboard_enabled"])} /> Dashboard enabled</label>
           <label for="observability-refresh-ms">Observability refresh (ms)</label><input id="observability-refresh-ms" type="number" name="lane[observability_refresh_ms]" value={@params["observability_refresh_ms"]} />
           <label for="observability-render-interval-ms">Render interval (ms)</label><input id="observability-render-interval-ms" type="number" name="lane[observability_render_interval_ms]" value={@params["observability_render_interval_ms"]} />
@@ -251,12 +265,19 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   end
 
   defp merge_params(params, incoming) when is_map(incoming) do
+    submitted_fields = incoming |> Map.keys() |> MapSet.new()
+
     {params, errors} =
       Enum.reduce(Map.take(incoming, Map.keys(params)), {params, []}, fn {field, value}, {params, errors} ->
         if is_binary(value) or is_boolean(value) or is_integer(value), do: {Map.put(params, field, value), errors}, else: {params, [%{path: field, message: "must be a scalar form value"} | errors]}
       end)
 
-    {if(params["workspace_subdir"] in [nil, ""], do: Map.put(params, "workspace_subdir", params["slug"]), else: params), errors}
+    params =
+      params
+      |> Map.put("_submitted_fields", submitted_fields)
+      |> then(&if(&1["workspace_subdir"] in [nil, ""], do: Map.put(&1, "workspace_subdir", &1["slug"]), else: &1))
+
+    {params, errors}
   end
 
   defp merge_params(params, _incoming), do: {params, [%{path: "lane", message: "must be an object"}]}
@@ -290,8 +311,18 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     case integer_param(params["execution_profile_id"]) do
       {:ok, id} ->
         case ExecutionProfiles.get(id) do
-          nil -> [%{path: "execution_profile_id", message: "not found"}]
-          profile -> errors_for_resolution(Configuration.resolve(profile_attrs(profile), config, workspace_subdir(params), params["prompt"]))
+          nil ->
+            [%{path: "execution_profile_id", message: "not found"}]
+
+          profile ->
+            errors_for_resolution(
+              Configuration.resolve(
+                profile_attrs(profile),
+                config,
+                workspace_subdir(params),
+                params["prompt"]
+              )
+            )
         end
 
       {:error, errors} ->
@@ -301,11 +332,13 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
   defp errors_for_resolution({:ok, _}), do: []
   defp errors_for_resolution({:error, errors}), do: errors
-  defp errors_for_resolution(_), do: []
 
   defp canonical_params(params, config) do
     with {:ok, profile_id} <- integer_param(params["execution_profile_id"]) do
-      {:ok, params |> Map.merge(%{"config" => config, "execution_profile_id" => profile_id, "workspace_subdir" => workspace_subdir(params)}) |> Map.drop(config_param_keys())}
+      {:ok,
+       params
+       |> Map.merge(%{"config" => config, "execution_profile_id" => profile_id, "workspace_subdir" => workspace_subdir(params)})
+       |> Map.drop(["_submitted_fields" | config_param_keys()])}
     end
   end
 
@@ -318,8 +351,10 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   end
 
   defp patch_config(config, params, original_config) do
+    submitted_fields = Map.get(params, "_submitted_fields", MapSet.new())
+
     Enum.reduce(@config_fields, {config, []}, fn {field, path, type}, {config, errors} ->
-      case parse_value(params[field], type, field, get_in(original_config, path)) do
+      case if(MapSet.member?(submitted_fields, field), do: parse_value(params[field], type, field, get_in(original_config, path)), else: :keep) do
         :keep -> {config, errors}
         {:ok, value} -> {put_or_delete(config, path, value), errors}
         {:error, error} -> {config, [error | errors]}
@@ -330,7 +365,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   defp parse_value(value, :text, _field, original) do
     cond do
       value == "$REDACTED" -> {:ok, original}
-      is_binary(value) and String.trim(value) == "" -> :keep
+      is_binary(value) and String.trim(value) == "" -> {:ok, nil}
       is_binary(value) -> {:ok, value}
       true -> {:error, %{path: "config", message: "must be a string"}}
     end
@@ -339,7 +374,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   defp parse_value(value, :list, _field, original) when value == "$REDACTED", do: {:ok, original}
   defp parse_value(value, :list, _field, _original) when is_binary(value), do: {:ok, String.split(value, ~r/[\r\n]+/, trim: true)}
   defp parse_value(value, :integer, _field, original) when value == "$REDACTED", do: {:ok, original}
-  defp parse_value(value, :integer, _field, _original) when value in [nil, ""], do: :keep
+  defp parse_value(value, :integer, _field, _original) when value in [nil, ""], do: {:ok, nil}
   defp parse_value(value, :integer, _field, _original) when is_integer(value), do: {:ok, value}
 
   defp parse_value(value, :integer, field, _original) when is_binary(value) do

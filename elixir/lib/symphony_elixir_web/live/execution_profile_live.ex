@@ -18,7 +18,6 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
 
   @impl true
   def handle_info(:profiles_updated, socket), do: refresh(socket)
-  def handle_info(:observability_updated, socket), do: refresh(socket)
 
   @impl true
   def handle_event("prepare_delete", _params, socket), do: {:noreply, assign(socket, :confirm_delete, true)}
@@ -110,7 +109,13 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
 
   defp assign_profile(socket, profile) do
     lanes = ExecutionProfiles.linked_lanes(profile)
-    assign(socket, profile: profile, lanes: lanes, affected_count: length(lanes), aggregate_capacity: aggregate_capacity(lanes))
+
+    assign(socket,
+      profile: profile,
+      lanes: lanes,
+      affected_count: length(lanes),
+      aggregate_capacity: aggregate_capacity(lanes)
+    )
   end
 
   defp aggregate_capacity(lanes) do
@@ -134,8 +139,13 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
 
   defp environment_detail(worker) do
     case Map.get(worker || %{}, "environment") do
-      %{"kind" => kind, "deployment_id" => deployment} -> "#{kind} deployment #{deployment}"
-      _ -> if Map.get(worker || %{}, "ssh_hosts", []) == [], do: "Local machine", else: "SSH: #{Enum.join(Map.get(worker, "ssh_hosts", []), ", ")}"
+      %{"kind" => kind, "deployment_id" => deployment} ->
+        "#{kind} deployment #{deployment}"
+
+      _ ->
+        if Map.get(worker || %{}, "ssh_hosts", []) == [],
+          do: "Local machine",
+          else: "SSH: #{Enum.join(Map.get(worker, "ssh_hosts", []), ", ")}"
     end
   end
 
@@ -144,7 +154,9 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
 
     if is_map(provider) and
          Enum.any?(provider, fn {key, value} ->
-           String.contains?(to_string(key), "credential") or String.contains?(to_string(key), "token") or String.contains?(to_string(key), "secret") or
+           String.contains?(to_string(key), "credential") or
+             String.contains?(to_string(key), "token") or
+             String.contains?(to_string(key), "secret") or
              (is_binary(value) and String.starts_with?(value, "$"))
          end), do: "References configured", else: "None shown"
   end

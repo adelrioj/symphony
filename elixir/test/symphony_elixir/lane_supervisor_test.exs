@@ -155,7 +155,15 @@ defmodule SymphonyElixir.LaneSupervisorTest do
     finish_preflight(prompt_worker, {:error, :replacement_tracker_unavailable})
     refute Lanes.get!(lane.id).enabled
     refute LaneSupervisor.running?(lane.id)
-    assert {:ok, %{version_id: version_id, name: "Renamed while checking", prompt: "Saved while checking", error: error}} = LaneStore.lookup(lane.id)
+
+    assert {:ok,
+            %{
+              version_id: version_id,
+              name: "Renamed while checking",
+              workflow: %{prompt: "Saved while checking"},
+              error: error
+            }} = LaneStore.lookup(lane.id)
+
     assert version_id == current.current_version_id
     assert error =~ "replacement_tracker_unavailable"
   end
@@ -381,7 +389,7 @@ defmodule SymphonyElixir.LaneSupervisorTest do
     end
   end
 
-  test "metadata and prompt saves preserve adoption of a late runtime registered during restoration" do
+  test "metadata and prompt saves during restoration preserve the recovered runtime" do
     {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "visible-late-start", front_matter: @linear})
     {:ok, barrier_lane} = TestSupport.create_lane_from_front_matter(%{slug: "restore-barrier", front_matter: @memory})
     supervisor = Process.whereis(LaneSupervisor)
@@ -418,23 +426,23 @@ defmodule SymphonyElixir.LaneSupervisorTest do
       Process.exit(old_store, :kill)
       assert_receive {:DOWN, ^old_monitor, :process, ^old_store, :killed}, 1_000
       assert_receive {:restoring_remaining_lane, replacement_store}, 1_000
-      assert {:ok, %{enabled: true}} = LaneStore.lookup(lane.id)
+      assert :error = LaneStore.lookup(lane.id)
       refute LaneSupervisor.running?(lane.id)
 
       :ok = :sys.resume(supervisor)
       :sys.get_state(supervisor)
-      runtime = LaneRegistry.whereis(lane.id, :runtime)
-      assert is_pid(runtime)
       send(replacement_store, :finish_recovery)
       :sys.get_state(replacement_store)
       assert Process.whereis(LaneStore) == replacement_store
+      assert {:ok, %{enabled: true}} = LaneStore.lookup(lane.id)
 
       assert_receive {:preflight, recovery_worker}, 1_000
       assert {:ok, _} = Lanes.update(lane, %{name: "Renamed during adoption", prompt: "Saved during adoption"})
       assert_receive {:preflight, replacement_worker}, 1_000
       finish_preflight(recovery_worker, success())
       finish_preflight(replacement_worker, success())
-      assert LaneRegistry.whereis(lane.id, :runtime) == runtime
+      eventually(fn -> is_pid(LaneRegistry.whereis(lane.id, :runtime)) end)
+      runtime = LaneRegistry.whereis(lane.id, :runtime)
       assert %{} = Orchestrator.snapshot(LaneRegistry.whereis(lane.id, :orchestrator), 1_000)
 
       monitor = Process.monitor(runtime)

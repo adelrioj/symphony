@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.ExecutionProfilesTest do
   use ExUnit.Case, async: false
 
+  alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, TestSupport}
   alias SymphonyElixir.ExecutionProfiles.Configuration
-  alias SymphonyElixir.{ExecutionProfiles, LaneStore, Lanes, TestSupport}
   alias SymphonyElixir.Workflow
 
   setup do
@@ -23,9 +23,14 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
     {:ok, before_invalid_first} = LaneStore.lookup(first.id)
     {:ok, before_invalid_second} = LaneStore.lookup(second.id)
 
-    assert {:error, errors} = ExecutionProfiles.update(updated, %{worker: %{"max_concurrent_agents_per_host" => -1}})
+    conflict_root = Path.join(root, "conflict")
+    {:ok, blocker_profile} = ExecutionProfiles.create(%{name: "Blocker", workspace_base: Path.join(conflict_root, "first"), worker: %{}})
+    {:ok, _blocker} = Lanes.create(%{slug: "blocker", execution_profile_id: blocker_profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+
+    assert {:error, errors} = ExecutionProfiles.update(updated, %{workspace_base: conflict_root})
     assert errors != []
     assert ExecutionProfiles.get(profile.id).worker == updated.worker
+    assert ExecutionProfiles.get(profile.id).workspace_base == root
     assert {:ok, ^before_invalid_first} = LaneStore.lookup(first.id)
     assert {:ok, ^before_invalid_second} = LaneStore.lookup(second.id)
   end
@@ -81,16 +86,52 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
     assert value.workflow.prompt == "work"
   end
 
-  test "remote workspace roots are not canonicalized on the daemon host" do
+  @tag :tmp_dir
+  test "relative local workspace bases resolve against the data root", %{tmp_dir: root} do
+    previous = Application.get_env(:symphony_elixir, :data_root)
+    Application.put_env(:symphony_elixir, :data_root, root)
+    on_exit(fn -> Application.put_env(:symphony_elixir, :data_root, previous) end)
+
+    assert {:ok, value} =
+             Configuration.resolve(
+               %{"workspace_base" => "relative", "worker" => %{}},
+               %{"tracker" => %{"kind" => "memory"}},
+               ".",
+               "work"
+             )
+
+    assert value.settings.workspace.root == Path.join(root, "relative")
+  end
+
+  @tag :tmp_dir
+  test "cyclic local symlinks fail without hanging", %{tmp_dir: root} do
+    loop = Path.join(root, "loop")
+    :ok = File.ln_s("loop", loop)
+
+    task =
+      Task.async(fn ->
+        Configuration.resolve(
+          %{"workspace_base" => loop, "worker" => %{}},
+          %{"tracker" => %{"kind" => "memory"}},
+          ".",
+          "work"
+        )
+      end)
+
+    assert {:error, errors} = Task.await(task, 1_000)
+    assert Enum.any?(errors, &(&1.path == "workspace_subdir"))
+  end
+
+  test "remote workspace roots fail closed when the target cannot canonicalize them" do
     profile = %{
       "workspace_base" => "/remote/does-not-exist",
       "worker" => %{"ssh_hosts" => ["worker.example"]}
     }
 
-    assert {:ok, value} =
+    assert {:error, errors} =
              Configuration.resolve(profile, %{"tracker" => %{"kind" => "memory"}}, "lane", "work")
 
-    assert value.settings.workspace.root == "/remote/does-not-exist/lane"
+    assert Enum.any?(errors, &(&1.path == "config"))
   end
 
   @tag :tmp_dir
@@ -167,6 +208,124 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
              Lanes.create(%{slug: "second", execution_profile_id: second_profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
 
     assert errors != []
+  end
+
+  @tag :tmp_dir
+  test "SSH overlaps use shared targets and canonical nested roots", %{tmp_dir: root} do
+    fake_ssh = Path.join(root, "ssh")
+    previous_path = System.get_env("PATH")
+
+    File.write!(fake_ssh, """
+    #!/bin/sh
+    case "$*" in
+      *"find "*) exit 0 ;;
+      *"/remote/root/nested"*) root=/remote/root/nested ;;
+      *"/remote/disjoint"*) root=/remote/disjoint ;;
+      *) root=/remote/root ;;
+    esac
+    printf '%s\t%s\n' "$root" "$root"
+    """)
+
+    File.chmod!(fake_ssh, 0o755)
+    System.put_env("PATH", root <> ":" <> (previous_path || ""))
+    on_exit(fn -> if previous_path, do: System.put_env("PATH", previous_path), else: System.delete_env("PATH") end)
+
+    {:ok, first_profile} =
+      ExecutionProfiles.create(%{
+        name: "SSH first",
+        workspace_base: "/remote/root",
+        worker: %{"ssh_hosts" => ["host-a", "host-b"]}
+      })
+
+    {:ok, first} =
+      Lanes.create(%{
+        slug: "ssh-first",
+        execution_profile_id: first_profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
+    {:ok, nested_profile} =
+      ExecutionProfiles.create(%{
+        name: "SSH nested",
+        workspace_base: "/remote/root/nested",
+        worker: %{"ssh_hosts" => ["host-b", "host-c"]}
+      })
+
+    assert {:error, _} =
+             Lanes.create(%{
+               slug: "ssh-nested",
+               execution_profile_id: nested_profile.id,
+               config: %{"tracker" => %{"kind" => "memory"}}
+             })
+
+    {:ok, disjoint_host_profile} =
+      ExecutionProfiles.create(%{
+        name: "SSH disjoint host",
+        workspace_base: "/remote/root",
+        worker: %{"ssh_hosts" => ["host-c"]}
+      })
+
+    assert {:ok, _} =
+             Lanes.create(%{
+               slug: "ssh-disjoint-host",
+               execution_profile_id: disjoint_host_profile.id,
+               config: %{"tracker" => %{"kind" => "memory"}}
+             })
+
+    {:ok, disjoint_root_profile} =
+      ExecutionProfiles.create(%{
+        name: "SSH disjoint root",
+        workspace_base: "/remote/disjoint",
+        worker: %{"ssh_hosts" => ["host-b"]}
+      })
+
+    assert {:ok, _} =
+             Lanes.create(%{
+               slug: "ssh-disjoint-root",
+               execution_profile_id: disjoint_root_profile.id,
+               config: %{"tracker" => %{"kind" => "memory"}}
+             })
+
+    assert :ok = Lanes.delete(first)
+  end
+
+  @tag :tmp_dir
+  test "deletion refuses retained local workspaces", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Delete guard", workspace_base: root, worker: %{}})
+    {:ok, lane} = Lanes.create(%{slug: "delete-guard", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, entry} = LaneStore.lookup(lane.id)
+    File.mkdir_p!(entry.settings.workspace.root)
+    File.write!(Path.join(entry.settings.workspace.root, "retained"), "owned")
+
+    assert {:error, errors} = Lanes.delete(lane)
+    assert Enum.any?(errors, &(&1.path == "lane"))
+    assert Lanes.get(lane.id)
+
+    File.rm_rf!(entry.settings.workspace.root)
+    assert :ok = Lanes.delete(lane)
+  end
+
+  @tag :tmp_dir
+  test "dispatch reservations block location edits and release on owner death", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Reserved", workspace_base: Path.join(root, "one"), worker: %{}})
+    {:ok, lane} = Lanes.create(%{slug: "reserved", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, lane} = Lanes.set_enabled(lane, true)
+    parent = self()
+
+    {owner, monitor} =
+      spawn_monitor(fn ->
+        {:ok, token, _entry} = LaneStore.reserve_dispatch(lane.id)
+        send(parent, {:reserved, token})
+        receive do: (:stop -> :ok)
+      end)
+
+    assert_receive {:reserved, _token}
+    assert {:error, _errors} = ExecutionProfiles.update(profile, %{workspace_base: Path.join(root, "two")})
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^owner, :killed}
+
+    assert {:ok, updated} = ExecutionProfiles.update(profile, %{workspace_base: Path.join(root, "two")})
+    assert updated.workspace_base == Path.join(root, "two")
   end
 
   @tag :tmp_dir

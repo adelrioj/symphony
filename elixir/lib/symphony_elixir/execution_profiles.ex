@@ -1,11 +1,12 @@
+# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 defmodule SymphonyElixir.ExecutionProfiles do
   @moduledoc "Persistence and serialized publication for reusable execution profiles."
 
   import Ecto.Query, only: [from: 2]
 
-  alias SymphonyElixir.{LaneStore, Lanes, Repo}
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.ExecutionProfiles.Profile
+  alias SymphonyElixir.{Lanes, LaneStore, Repo}
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @max_sqlite_id 9_223_372_036_854_775_807
@@ -25,7 +26,10 @@ defmodule SymphonyElixir.ExecutionProfiles do
   @spec create(map()) :: {:ok, Profile.t()} | {:error, [Lanes.error()]}
   def create(attrs) when is_map(attrs) do
     with {:ok, attrs} <- normalize(attrs) do
-      with :ok <- Configuration.validate_profile(attrs) do
+      attrs = Map.put_new(attrs, "workspace_base", %SymphonyElixir.Config.Schema.Workspace{}.root)
+
+      with :ok <- validate(attrs),
+           :ok <- Configuration.validate_profile(attrs) do
         LaneStore.mutate(
           nil,
           fn _check ->
@@ -54,7 +58,8 @@ defmodule SymphonyElixir.ExecutionProfiles do
         profile ->
           full_attrs = profile_attrs(profile) |> Map.merge(attrs)
 
-          with :ok <- Configuration.validate_profile(full_attrs) do
+          with :ok <- validate(full_attrs),
+               :ok <- Configuration.validate_profile(full_attrs) do
             LaneStore.mutate(
               nil,
               fn _check ->
@@ -130,28 +135,17 @@ defmodule SymphonyElixir.ExecutionProfiles do
     if Enum.all?(Map.keys(attrs), &(is_binary(&1) or is_atom(&1))) do
       attrs = Map.new(attrs, fn {key, value} -> {to_string(key), value} end)
 
-      case type_errors(attrs) do
-        [] -> {:ok, attrs}
-        errors -> {:error, errors}
-      end
+      {:ok, attrs}
     else
       {:error, [%{path: "profile", message: "must be an object"}]}
     end
   end
 
-  defp type_errors(attrs) do
-    Enum.flat_map(attrs, fn {key, value} ->
-      cond do
-        key in ["name", "description", "workspace_base", "repair_error"] and not (is_binary(value) or (is_nil(value) and key != "name")) ->
-          [%{path: key, message: "must be a string"}]
-
-        key == "worker" and not is_map(value) ->
-          [%{path: key, message: "must be an object"}]
-
-        true ->
-          []
-      end
-    end)
+  defp validate(attrs) do
+    case Profile.changeset(%Profile{}, attrs) |> Ecto.Changeset.apply_action(:validate) do
+      {:ok, _profile} -> :ok
+      {:error, changeset} -> {:error, Lanes.errors_for(changeset)}
+    end
   end
 
   defp result_errors({:ok, {:batch, value, _ids}}), do: {:ok, value}

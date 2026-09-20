@@ -14,7 +14,6 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLive do
 
   @impl true
   def handle_info(:profiles_updated, socket), do: {:noreply, assign(socket, :profiles, ExecutionProfiles.list())}
-  def handle_info(:observability_updated, socket), do: {:noreply, assign(socket, :profiles, ExecutionProfiles.list())}
 
   @impl true
   def render(assigns) do

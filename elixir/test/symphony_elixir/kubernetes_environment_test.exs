@@ -545,7 +545,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, unmanaged)
 
     # A lane that does run on Kubernetes resolves its own provider and reconciles against it.
-    {:ok, managed} = TestSupport.create_lane_from_front_matter(%{slug: "reconciler-managed", front_matter: kubernetes_front_matter(), prompt: "P"})
+    {:ok, managed} =
+      TestSupport.create_lane_from_front_matter(%{
+        slug: "reconciler-managed",
+        front_matter: kubernetes_front_matter(),
+        prompt: "P"
+      })
+
     {:ok, on_k8s} = DeclarationReconciler.init(Keyword.merge(opts, lane_id: managed.id, interval_ms: 60_000))
     assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, on_k8s)
 

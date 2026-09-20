@@ -175,7 +175,8 @@ defmodule SymphonyElixir.Codex.AppServer do
         String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
           {:ok, canonical_workspace}
 
-        String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) ->
+        String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) or
+            canonical_parent_within?(expanded_workspace, canonical_root) ->
           {:error, {:invalid_workspace_cwd, :symlink_escape, expanded_workspace, canonical_root}}
 
         true ->
@@ -202,6 +203,13 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       true ->
         {:ok, workspace}
+    end
+  end
+
+  defp canonical_parent_within?(workspace, root) do
+    case PathSafety.canonicalize(Path.dirname(workspace)) do
+      {:ok, parent} -> parent == root or String.starts_with?(parent, root <> "/")
+      _ -> false
     end
   end
 

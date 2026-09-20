@@ -127,27 +127,6 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
     BEGIN SELECT RAISE(ABORT, 'lanes.execution_profile_id is required'); END
     """)
 
-    execute("""
-    CREATE TRIGGER lanes_execution_profile_exists_insert
-    BEFORE INSERT ON lanes
-    FOR EACH ROW WHEN NOT EXISTS (SELECT 1 FROM execution_profiles WHERE id = NEW.execution_profile_id)
-    BEGIN SELECT RAISE(ABORT, 'lanes.execution_profile_id does not reference a profile'); END
-    """)
-
-    execute("""
-    CREATE TRIGGER lanes_execution_profile_exists_update
-    BEFORE UPDATE OF execution_profile_id ON lanes
-    FOR EACH ROW WHEN NOT EXISTS (SELECT 1 FROM execution_profiles WHERE id = NEW.execution_profile_id)
-    BEGIN SELECT RAISE(ABORT, 'lanes.execution_profile_id does not reference a profile'); END
-    """)
-
-    execute("""
-    CREATE TRIGGER execution_profiles_referenced_delete
-    BEFORE DELETE ON execution_profiles
-    FOR EACH ROW WHEN EXISTS (SELECT 1 FROM lanes WHERE execution_profile_id = OLD.id)
-    BEGIN SELECT RAISE(ABORT, 'execution profile is still referenced'); END
-    """)
-
     execute("PRAGMA foreign_key_check")
     :ok
   end
@@ -169,6 +148,10 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
       name = legacy_name(slug, lane_id)
       profile_id = insert_profile(name, profile, repair_error)
       repo().query!("UPDATE lanes SET execution_profile_id = ?, workspace_subdir = '.' WHERE id = ?", [profile_id, lane_id])
+
+      if repair_error do
+        repo().query!("UPDATE lanes SET enabled = 0 WHERE id = ?", [lane_id])
+      end
     end)
   end
 
@@ -180,7 +163,6 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
       {profile, nil}
     else
       {:error, reason} -> legacy_repair_profile(front_matter, prompt, reason)
-      reason -> {%{}, "legacy configuration requires repair: #{inspect(reason)}"}
     end
   end
 

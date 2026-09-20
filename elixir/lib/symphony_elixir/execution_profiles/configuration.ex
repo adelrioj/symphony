@@ -4,7 +4,6 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.PathSafety
-  alias SymphonyElixir.Workflow
 
   @spec split(map()) :: {map(), map()}
   def split(config) when is_map(config) do
@@ -34,7 +33,8 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
          {:ok, base_root} <- profile_workspace_base(profile),
          {:ok, effective_root} <- effective_root(worker, base_root, workspace_subdir),
          effective_config <- compose(profile, worker, lane_config, effective_root),
-         {:ok, workflow} <- Workflow.parse_parts(Workflow.encode_config(effective_config), prompt),
+         normalized_prompt <- prompt |> String.replace(~r/\R/u, "\n") |> String.trim(),
+         workflow <- %{config: effective_config, prompt: normalized_prompt, prompt_template: normalized_prompt},
          {:ok, settings} <- Schema.parse(Map.delete(workflow.config, "server"), errors: :list),
          :ok <- Config.validate_settings(settings) do
       {:ok, %{settings: settings, workflow: workflow, warnings: warnings(workflow.config)}}
@@ -48,10 +48,8 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
 
   @spec validate_profile(map()) :: :ok | {:error, [map()]}
   def validate_profile(profile) when is_map(profile) do
-    with {:ok, _worker} <- profile_worker(profile),
-         {:ok, _root} <- profile_workspace_base(profile) do
-      :ok
-    else
+    case profile_worker(profile) do
+      {:ok, _worker} -> :ok
       {:error, errors} when is_list(errors) -> {:error, normalize_profile_errors(errors)}
     end
   end
@@ -115,10 +113,9 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   defp workspace_root_error(_config), do: nil
 
   defp effective_root(worker, base_root, workspace_subdir) do
-    cond do
-      workspace_subdir == "." ->
-        {:ok, base_root}
+    base_root = resolve_workspace_base(base_root)
 
+    cond do
       absolute_path?(workspace_subdir) ->
         {:error, [error("workspace_subdir", "must be relative")]}
 
@@ -128,11 +125,15 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
       Enum.any?(Path.split(workspace_subdir), &(&1 == "..")) ->
         {:error, [error("workspace_subdir", "must not contain .. segments")]}
 
-      remote_worker?(worker) ->
-        {:ok, Path.join(base_root, workspace_subdir)}
+      static_ssh_worker?(worker) ->
+        SymphonyElixir.Workspace.remote_effective_root(worker_hosts(worker), base_root, workspace_subdir)
+
+      managed_worker?(worker) ->
+        {:ok, if(workspace_subdir == ".", do: base_root, else: Path.join(base_root, workspace_subdir))}
 
       true ->
-        with {:ok, canonical_base} <- PathSafety.canonicalize(base_root),
+        with expanded_base <- Path.expand(base_root, Config.data_root()),
+             {:ok, canonical_base} <- PathSafety.canonicalize(expanded_base),
              effective_path <- Path.join(canonical_base, workspace_subdir),
              {:ok, canonical_effective} <- PathSafety.canonicalize(effective_path),
              {:ok, true} <- PathSafety.contained?(canonical_effective, canonical_base) do
@@ -144,11 +145,23 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
     end
   end
 
-  defp remote_worker?(worker) do
-    hosts = Map.get(worker, "ssh_hosts", Map.get(worker, :ssh_hosts, []))
-    environment = Map.get(worker, "environment", Map.get(worker, :environment))
-    (is_list(hosts) and hosts != []) or is_map(environment)
+  defp resolve_workspace_base("$" <> env_name = value) do
+    if String.match?(env_name, ~r/^[A-Za-z_][A-Za-z0-9_]*$/) do
+      case System.get_env(env_name) do
+        nil -> %Schema.Workspace{}.root
+        "" -> %Schema.Workspace{}.root
+        path -> path
+      end
+    else
+      value
+    end
   end
+
+  defp resolve_workspace_base(value), do: value
+
+  defp worker_hosts(worker), do: Map.get(worker, "ssh_hosts", Map.get(worker, :ssh_hosts, []))
+  defp static_ssh_worker?(worker), do: worker_hosts(worker) != []
+  defp managed_worker?(worker), do: is_map(Map.get(worker, "environment", Map.get(worker, :environment)))
 
   defp absolute_path?(path), do: :filename.pathtype(String.to_charlist(path)) == :absolute
 

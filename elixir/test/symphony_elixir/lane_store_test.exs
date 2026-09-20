@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.LaneStoreTest do
   use ExUnit.Case
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.{ExecutionProfiles, LaneRegistry, Lanes, LaneStore, Repo, TestSupport, Workflow}
+  alias SymphonyElixir.{ExecutionProfiles, LaneRegistry, Lanes, LaneStore, LaneSupervisor, Repo, TestSupport, Workflow}
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.Lanes.Lane
   alias SymphonyElixir.LaneStore.Entry
@@ -38,7 +38,7 @@ defmodule SymphonyElixir.LaneStoreTest do
     assert [^entry] = LaneStore.list()
     assert {:ok, ^entry} = LaneStore.by_slug("workflow")
     assert :error = LaneStore.by_slug("missing")
-    assert Workflow.render(entry.front_matter, entry.prompt) == @workflow
+    assert entry.workflow.config["tracker"]["kind"] == "memory"
     {:ok, token} = LaneStore.protect_environment(0, nil)
     assert :ok = LaneStore.release_environment(0, token, :empty_inventory)
   end
@@ -148,6 +148,26 @@ defmodule SymphonyElixir.LaneStoreTest do
     assert :error = LaneStore.lookup(lane.id)
   end
 
+  test "startup disables persisted overlapping lanes before starting runtimes" do
+    {:ok, first} = create_lane(%{slug: "startup-first", enabled: true, front_matter: "tracker:\n  kind: memory"})
+    {:ok, second} = create_lane(%{slug: "startup-second", enabled: true, front_matter: "tracker:\n  kind: memory"})
+    first_profile = ExecutionProfiles.get(first.execution_profile_id)
+    second_profile = ExecutionProfiles.get(second.execution_profile_id)
+    Repo.update!(Ecto.Changeset.change(second_profile, workspace_base: first_profile.workspace_base))
+    Repo.update!(Ecto.Changeset.change(second, workspace_subdir: first.workspace_subdir))
+
+    replace_store([])
+
+    assert {:ok, %Entry{enabled: false, error: first_error}} = LaneStore.lookup(first.id)
+    assert {:ok, %Entry{enabled: false, error: second_error}} = LaneStore.lookup(second.id)
+    assert first_error =~ "conflicts"
+    assert second_error =~ "conflicts"
+    refute Lanes.get!(first.id).enabled
+    refute Lanes.get!(second.id).enabled
+    refute LaneSupervisor.running?(first.id)
+    refute LaneSupervisor.running?(second.id)
+  end
+
   test "scheduler reads stay available while a DB write is blocked" do
     {:ok, lane} = create_lane(%{slug: "readers", front_matter: "tracker:\n  kind: memory", prompt: "before"})
     parent = self()
@@ -202,7 +222,7 @@ defmodule SymphonyElixir.LaneStoreTest do
     {:ok, profile} =
       ExecutionProfiles.create(%{
         name: "Test #{Map.fetch!(attrs, :slug)} #{System.unique_integer([:positive])}",
-        workspace_base: profile_attrs["workspace_base"] || Path.join(System.tmp_dir!(), "symphony_workspaces"),
+        workspace_base: profile_attrs["workspace_base"] || Path.join(System.tmp_dir!(), "symphony-workspaces-#{System.unique_integer([:positive])}"),
         worker: profile_attrs["worker"] || %{}
       })
 

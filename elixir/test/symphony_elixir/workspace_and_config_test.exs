@@ -1439,7 +1439,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.api_key == nil
     assert config.tracker.project_slug == nil
     assert config.tracker.required_labels == []
-    assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
+
+    assert {:ok, default_workspace_root} =
+             SymphonyElixir.PathSafety.canonicalize(Path.join(System.tmp_dir!(), "symphony_workspaces"))
+
+    assert config.workspace.root == default_workspace_root
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
     assert config.codex.command == "codex app-server"
@@ -1478,17 +1482,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().codex.command ==
              "codex --config 'model=\"gpt-5.5\"' app-server"
 
-    explicit_root =
+    explicit_root = config.workspace.root
+
+    explicit_workspace =
       Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-explicit-sandbox-root-#{System.unique_integer([:positive])}"
+        explicit_root,
+        "MT-EXPLICIT-#{System.unique_integer([:positive])}"
       )
 
-    explicit_workspace = Path.join(explicit_root, "MT-EXPLICIT")
     explicit_cache = Path.join(explicit_workspace, "cache")
     File.mkdir_p!(explicit_cache)
 
-    on_exit(fn -> File.rm_rf(explicit_root) end)
+    on_exit(fn -> File.rm_rf(explicit_workspace) end)
 
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: explicit_root,
@@ -1601,7 +1606,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.api_key == api_key
     assert config.tracker.provider["api_key"] == "$#{api_key_env_var}"
     assert config.tracker.secret_environment_names == ["LINEAR_API_KEY", api_key_env_var]
-    assert config.workspace.root == Path.expand(workspace_root)
+    assert {:ok, canonical_workspace_root} = SymphonyElixir.PathSafety.canonicalize(workspace_root)
+    assert config.workspace.root == canonical_workspace_root
     assert config.codex.command == "#{codex_bin} app-server"
   end
 
@@ -1702,7 +1708,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     config = Config.settings!()
     assert config.tracker.api_key == "env:#{api_key_env_var}"
-    assert config.workspace.root == "env:#{workspace_env_var}"
+
+    assert {:ok, canonical_legacy_root} =
+             SymphonyElixir.PathSafety.canonicalize(Path.join(Config.data_root(), "env:#{workspace_env_var}"))
+
+    assert config.workspace.root == canonical_legacy_root
   end
 
   test "config supports per-state max concurrent agent overrides" do
@@ -2037,6 +2047,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       printf 'ARGV:%s\\n' "$*" >> "$trace_file"
 
       case "$*" in
+        *"realpath -m"*)
+          printf '%s\\t%s\\n' '/remote/home/.symphony-remote-workspaces' '/remote/home/.symphony-remote-workspaces'
+          ;;
         *"__SYMPHONY_WORKSPACE__"*)
           printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
           ;;
@@ -2056,7 +2069,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       )
 
       assert Config.settings!().worker.ssh_hosts == ["worker-01:2200"]
-      assert Config.settings!().workspace.root == workspace_root
+      assert Config.settings!().workspace.root == "/remote/home/.symphony-remote-workspaces"
       context = SymphonyElixir.ExecutionContext.ssh(workspace_root, "worker-01:2200")
       assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WS", context)
       assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WS", context)
@@ -2064,7 +2077,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", context)
 
       trace = File.read!(trace_file)
-      assert trace =~ "-p 2200 worker-01 bash -lc"
+      assert trace =~ "-p 2200 worker-01 bash --noprofile --norc -c"
       assert trace =~ "__SYMPHONY_WORKSPACE__"
       assert trace =~ "~/.symphony-remote-workspaces/MT-SSH-WS"
       assert trace =~ "${workspace#\\~/}"

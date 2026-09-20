@@ -399,13 +399,17 @@ defmodule SymphonyElixir.CoreTest do
       File.rm_rf(test_root)
     end)
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "memory",
-      workspace_root: test_root,
-      poll_interval_ms: 10,
-      hook_before_run: "mkfifo \"#{hook_fifo}\"; : > \"#{hook_marker}\"; read _ < \"#{hook_fifo}\"",
-      hook_timeout_ms: 60_000
-    )
+    assert :ok =
+             write_workflow_file!(Workflow.workflow_file_path(),
+               tracker_kind: "memory",
+               workspace_root: test_root,
+               poll_interval_ms: 10,
+               hook_before_run: "mkfifo \"#{hook_fifo}\"; : > \"#{hook_marker}\"; read _ < \"#{hook_fifo}\"",
+               hook_timeout_ms: 60_000
+             )
+
+    {:ok, entry} = LaneContext.capture()
+    :ok = LaneStore.put_entry(%{entry | enabled: true})
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
@@ -701,13 +705,14 @@ defmodule SymphonyElixir.CoreTest do
     issue_identifier = "MT-557"
 
     try do
-      write_workflow_file!(Workflow.workflow_file_path(),
-        tracker_kind: "memory",
-        workspace_root: test_root,
-        tracker_active_states: ["Todo", "In Progress", "In Review"],
-        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
-        poll_interval_ms: 30_000
-      )
+      assert :ok =
+               write_workflow_file!(Workflow.workflow_file_path(),
+                 tracker_kind: "memory",
+                 workspace_root: test_root,
+                 tracker_active_states: ["Todo", "In Progress", "In Review"],
+                 tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+                 poll_interval_ms: 30_000
+               )
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
@@ -970,16 +975,21 @@ defmodule SymphonyElixir.CoreTest do
     issue_id = "retry-refreshed-issue"
 
     try do
-      write_workflow_file!(Workflow.workflow_file_path(),
-        tracker_kind: "memory",
-        workspace_root: test_root,
-        hook_before_run: "exit 1"
-      )
+      assert :ok =
+               write_workflow_file!(Workflow.workflow_file_path(),
+                 tracker_kind: "memory",
+                 workspace_root: test_root,
+                 hook_before_run: "exit 1"
+               )
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
       {:ok, task_supervisor} = Task.Supervisor.start_link()
+      lane_id = LaneContext.current!()
+      {:ok, entry} = LaneStore.lookup(lane_id)
+      :ok = LaneStore.put_entry(%{entry | enabled: true})
 
       state = %Orchestrator.State{
+        lane_id: lane_id,
         task_supervisor: task_supervisor,
         claimed: MapSet.new([issue_id]),
         retry_attempts: %{}
@@ -1363,10 +1373,7 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "select_worker_host_for_test skips full ssh hosts under the shared per-host cap" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      worker_ssh_hosts: ["worker-a", "worker-b"],
-      worker_max_concurrent_agents_per_host: 1
-    )
+    configure_ssh_hosts(["worker-a", "worker-b"], 1)
 
     state = %Orchestrator.State{
       running: %{
@@ -1378,10 +1385,7 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "select_worker_host_for_test returns no_worker_capacity when every ssh host is full" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      worker_ssh_hosts: ["worker-a", "worker-b"],
-      worker_max_concurrent_agents_per_host: 1
-    )
+    configure_ssh_hosts(["worker-a", "worker-b"], 1)
 
     state = %Orchestrator.State{
       running: %{
@@ -1394,10 +1398,7 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "select_worker_host_for_test keeps the preferred ssh host when it still has capacity" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      worker_ssh_hosts: ["worker-a", "worker-b"],
-      worker_max_concurrent_agents_per_host: 2
-    )
+    configure_ssh_hosts(["worker-a", "worker-b"], 2)
 
     state = %Orchestrator.State{
       running: %{
@@ -1407,6 +1408,17 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
+  end
+
+  defp configure_ssh_hosts(hosts, max_per_host) do
+    {:ok, entry} = LaneContext.capture()
+
+    settings = %{
+      entry.settings
+      | worker: %{entry.settings.worker | ssh_hosts: hosts, max_concurrent_agents_per_host: max_per_host}
+    }
+
+    LaneContext.install(%{entry | settings: settings})
   end
 
   defp start_orchestrator!(name) do
@@ -1979,8 +1991,8 @@ defmodule SymphonyElixir.CoreTest do
       end
 
       trace = File.read!(trace_file)
-      assert trace =~ "worker-a bash -lc"
-      refute trace =~ "worker-b bash -lc"
+      assert trace =~ "worker-a bash --noprofile --norc -c"
+      refute trace =~ "worker-b bash --noprofile --norc -c"
     after
       File.rm_rf(test_root)
     end

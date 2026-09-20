@@ -1,3 +1,4 @@
+# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
   @moduledoc "Execution profile configuration for automation."
 

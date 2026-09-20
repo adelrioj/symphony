@@ -223,7 +223,7 @@ Parsed workflow version, imported from `WORKFLOW.md` or saved through the lane c
 - `prompt_template` (string)
   - Markdown body after front matter, trimmed.
 
-- `front_matter` and `prompt` (raw strings retained separately for editing/export)
+- `front_matter` and `prompt` (canonical persisted lane configuration and normalized prompt strings)
 - `lane_id` and immutable `version_id`
 
 #### 4.1.3 Service Config (Typed View)
@@ -362,10 +362,11 @@ The command spelling is illustrative; implementations MAY expose equivalent host
 - Relative local `workspace.root` resolves against the installation data root, not the import directory.
 - Unreadable import files retain the loader error class `missing_workflow_file`; parsing retains
   `workflow_parse_error` and `workflow_front_matter_not_a_map`.
-- Raw YAML and prompt strings are retained for editing/export. Canonical nonempty LF-delimited
-  front matter with a newline after the closing delimiter round-trips byte-for-byte. Arbitrary
-  envelopes (including CRLF delimiters, empty YAML blocks, or a closing delimiter at EOF) may
-  normalize on export; exact byte identity for every accepted file is not guaranteed.
+- Import/export preserves configuration and prompt semantics, not source bytes. Import parses YAML,
+  stores canonical lane-owned JSON plus a normalized prompt, and splits profile-owned values into a
+  generated profile. Export recomposes current values, so comments, key formatting, delimiter style,
+  and prompt whitespace may normalize. Raw byte-roundtrip guarantees apply only to the standalone
+  workflow split/render helpers for their documented canonical envelopes.
 
 ### 5.2 File Format
 
@@ -2658,7 +2659,7 @@ Use the same validation profiles as Section 17:
 - DB-backed lanes with explicit workflow import/export and immutable validated versions
 - Mutable execution profiles with atomic propagation, profile-owned worker/workspace infrastructure,
   and immutable attempt snapshots
-- `WORKFLOW.md` loader with raw YAML/prompt preservation and canonical export semantics
+- `WORKFLOW.md` loader with semantic configuration/prompt preservation and canonical export semantics
 - Typed config layer with defaults and `$` resolution
 - Live lane-save/activation publication, managed identity guards and stale-preflight generation fencing
 - Per-lane polling orchestrators with isolated coupled workers and single-authority mutable state

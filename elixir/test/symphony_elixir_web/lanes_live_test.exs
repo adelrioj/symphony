@@ -36,7 +36,7 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
       Lanes.create(%{
         slug: "qa",
         execution_profile_id: new_profile!().id,
-        config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 60000}, "codex" => %{"command" => "/bin/false"}},
+        config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 60_000}, "codex" => %{"command" => "/bin/false"}},
         prompt: "q"
       })
 
@@ -72,7 +72,7 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
   end
 
   test "an unresponsive lane keeps its error and controls visible until snapshot counts recover", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "slow-snapshot", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 60000}}})
+    {:ok, lane} = Lanes.create(%{slug: "slow-snapshot", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 60_000}}})
     {:ok, lane} = Lanes.set_enabled(lane, true)
     wait_until(fn -> LaneSupervisor.running?(lane.id) end)
     {:ok, view, _html} = live(conn, "/")

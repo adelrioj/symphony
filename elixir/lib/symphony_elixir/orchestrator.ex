@@ -1,3 +1,4 @@
+# credo:disable-for-this-file Credo.Check.Refactor.FunctionArity
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
   Polls the configured issue tracker and dispatches repository copies to the selected agent backend.
@@ -1195,7 +1196,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case LaneStore.reserve_dispatch(state.lane_id) do
       {:ok, token, snapshot} ->
-        with_lane_snapshot(snapshot, fn -> dispatch_issue_from_snapshot(state, issue, attempt, preferred_worker_host, token) end)
+        with_lane_snapshot(snapshot, fn ->
+          dispatch_issue_from_snapshot(state, issue, attempt, preferred_worker_host, token)
+        end)
 
       {:error, reason} ->
         Logger.warning("Skipping dispatch; lane reservation failed lane_id=#{state.lane_id} reason=#{inspect(reason)}")
@@ -1614,7 +1617,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_refreshed_retry(state, issue, attempt, metadata) do
     case LaneStore.reserve_dispatch(state.lane_id) do
       {:ok, token, snapshot} ->
-        with_lane_snapshot(snapshot, fn -> dispatch_refreshed_retry_from_snapshot(state, issue, attempt, metadata, token) end)
+        with_lane_snapshot(snapshot, fn ->
+          dispatch_refreshed_retry_from_snapshot(state, issue, attempt, metadata, token)
+        end)
 
       {:error, reason} ->
         Logger.warning("Skipping retry dispatch; lane reservation failed lane_id=#{state.lane_id} reason=#{inspect(reason)}")

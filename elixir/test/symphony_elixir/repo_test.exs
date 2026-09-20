@@ -95,14 +95,39 @@ defmodule SymphonyElixir.RepoTest do
     Repo.query!("UPDATE lanes SET current_version_id = 4 WHERE id = 4")
     Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (5, 'missing-version', 'Missing', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
 
+    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (6, 'managed', 'Managed', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+
+    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (6, 6, ?, 'managed', CURRENT_TIMESTAMP)", [
+      "workspace:\n  root: /home/worker/workspaces\nworker:\n  environment:\n    kind: google_workstations\n    deployment_id: migration\n    startup_timeout_ms: 1000\n    shutdown_timeout_ms: 1000\n    terminal_retention_ms: 0\n    provider:\n      project: p\n      location: l\n      cluster: c\n      config: cfg\n      credential_configuration: deploy\n      impersonate_service_account: sa@example.com\n      ssh_user: worker\ntracker:\n  kind: memory"
+    ])
+
+    Repo.query!("UPDATE lanes SET current_version_id = 6 WHERE id = 6")
+
     Repo.query!("INSERT INTO runs (id, lane_id, lane_version_id, issue_id, issue_identifier, attempt_id, started_at) VALUES (1, 1, 1, 'issue-1', 'TEST-1', 'migration-attempt', CURRENT_TIMESTAMP)")
     Repo.query!("INSERT INTO run_events (run_id, at, kind, payload) VALUES (1, CURRENT_TIMESTAMP, 'started', '{\"kept\":true}')")
 
     :ok = Repo.migrate()
 
-    assert [[5]] = Repo.query!("SELECT count(*) FROM execution_profiles").rows
+    assert [[6]] = Repo.query!("SELECT count(*) FROM execution_profiles").rows
     assert [] = Repo.query!("PRAGMA foreign_key_check").rows
-    assert {:ok, %{settings: %{workspace: %{root: ^enabled_root}}}} = Lanes.resolve_lane(Repo.get!(Lane, 1))
+
+    assert {:error, [%{path: "profile", message: ssh_repair}]} = Lanes.resolve_lane(Repo.get!(Lane, 1))
+    assert ssh_repair =~ "remote_path_canonicalize_failed"
+    refute Repo.get!(Lane, 1).enabled
+
+    assert {:ok, canonical_disabled_root} = SymphonyElixir.PathSafety.canonicalize(disabled_root)
+    assert {:ok, %{settings: %{workspace: %{root: ^canonical_disabled_root}}}} = Lanes.resolve_lane(Repo.get!(Lane, 2))
+
+    assert [[^enabled_root, ssh_worker, ssh_profile_repair]] =
+             Repo.query!("SELECT workspace_base, worker, repair_error FROM execution_profiles WHERE name = 'Legacy enabled'").rows
+
+    assert Jason.decode!(ssh_worker) == %{"ssh_hosts" => ["worker.example"]}
+    assert ssh_profile_repair =~ "remote_path_canonicalize_failed"
+
+    assert [["/home/worker/workspaces", managed_worker, nil]] =
+             Repo.query!("SELECT workspace_base, worker, repair_error FROM execution_profiles WHERE name = 'Legacy managed'").rows
+
+    assert get_in(Jason.decode!(managed_worker), ["environment", "provider", "credential_configuration"]) == "deploy"
 
     assert [["run it", "migration-attempt", "started", "{\"kept\":true}"]] =
              Repo.query!("""
@@ -111,9 +136,11 @@ defmodule SymphonyElixir.RepoTest do
              JOIN run_events ON run_events.run_id = runs.id WHERE lane_versions.id = 1
              """).rows
 
-    assert [["."], ["."], ["."], ["."], ["."]] = Repo.query!("SELECT workspace_subdir FROM lanes ORDER BY id").rows
+    assert [["."], ["."], ["."], ["."], ["."], ["."]] = Repo.query!("SELECT workspace_subdir FROM lanes ORDER BY id").rows
     assert [[repair_error]] = Repo.query!("SELECT repair_error FROM execution_profiles WHERE name = 'Legacy malformed'").rows
     assert repair_error =~ "repair"
+    refute Repo.get!(Lane, 4).enabled
+    refute Repo.get!(Lane, 5).enabled
     assert Repo.get!(Lane, 3).deleted_at
   end
 

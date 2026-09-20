@@ -1,8 +1,9 @@
 # Symphony deployment
 
-One container, one client installation, many lanes. Each lane has its own tracker scope,
-workspace root, agent settings, hooks, prompt, and scheduler; all lanes share the installation's
-SQLite database and operator credential. Everything here is yours — copy this directory into
+One container, one client installation, many lanes. Each lane has its own tracker scope, agent
+settings, hooks, prompt, limits, and scheduler. Execution profiles own reusable worker settings,
+credential references, and workspace bases; lanes select a profile plus a workspace subdirectory.
+All lanes share the installation's SQLite database and operator credential. Everything here is yours — copy this directory into
 your own private repo. Lanes are not security boundaries between clients.
 
 ## Prerequisites
@@ -62,9 +63,9 @@ your own private repo. Lanes are not security boundaries between clients.
      silently never matched, with the same idle-container symptom as a wrong slug. Configured
      `required_labels` / `any_labels` are checked by exactly the same rule, and likewise only when
      `team_keys` is set.
-   - Keep the first lane's `workspace.root` under `/workspaces` (the persistent volume). For
-     multiple lanes use separate roots, such as `/workspaces/features` and `/workspaces/bugs`,
-     to avoid sharing per-issue clones.
+   - Keep the imported `workspace.root` under `/workspaces` (the persistent volume). Import creates
+     a dedicated execution profile whose workspace base is that root. Structured lane creation
+     selects a profile and adds a lane-owned subdirectory; effective roots must not overlap.
    - `server:` in imported YAML is ignored with a warning. Compose supplies installation-level
      `serve --host 0.0.0.0 --port 4000`; no workflow file controls the HTTP listener.
 
@@ -118,10 +119,13 @@ curl --fail-with-body -X PUT http://localhost:4000/api/v1/lanes/main \
   --data @payload.json
 ```
 
-`front_matter` is a raw YAML string without the `---` delimiters; `prompt` is the Markdown body
-string. A save containing either creates an immutable workflow version; omitted fields retain
-their current values. For example, `{"prompt":"Work on the assigned issue.","note":"Revise prompt"}`
-changes only the prompt. Metadata-only saves, including `{"enabled":true}`, do not create a version.
+The live lane API accepts `execution_profile_id`, `workspace_subdir`, lane-owned `config`, `prompt`,
+and optional metadata such as `name`, `enabled`, and `note`. It rejects the removed `front_matter`
+and `executor` fields; `worker`, `workspace.root`, and `workspace_base` belong to the execution
+profile API at `/api/v1/execution-profiles`. A save containing `config` or `prompt` creates an
+immutable lane version; omitted fields retain their current values. For example,
+`{"prompt":"Work on the assigned issue.","note":"Revise prompt"}` changes only the prompt.
+Metadata-only saves, including `{"enabled":true}`, do not create a version.
 Invalid saves return HTTP 422 with field-path errors and are not stored; the form shows those
 errors inline. Version history and rollback are available at `/lanes/main/versions`.
 

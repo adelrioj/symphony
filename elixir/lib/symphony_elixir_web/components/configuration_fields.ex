@@ -13,7 +13,7 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
       {%{"name" => name, "description" => description, "workspace_base" => workspace_base, "worker" => worker}, name_errors}
     else
       {:error, errors} ->
-        {%{"name" => params["name"], "description" => params["description"], "workspace_base" => params["workspace_base"], "worker" => original}, errors}
+        {%{"name" => params["name"], "description" => params["description"], "workspace_base" => params["workspace_base"], "worker" => original}, List.wrap(errors)}
     end
   end
 
@@ -102,7 +102,14 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
     if remainder == 0 do
       Integer.to_string(whole)
     else
-      fraction = milliseconds |> rem(1_000) |> abs() |> Integer.to_string() |> String.pad_leading(3, "0") |> String.trim_trailing("0")
+      fraction =
+        milliseconds
+        |> rem(1_000)
+        |> abs()
+        |> Integer.to_string()
+        |> String.pad_leading(3, "0")
+        |> String.trim_trailing("0")
+
       "#{whole}.#{fraction}"
     end
   end
@@ -222,7 +229,11 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
 
   defp redact_secrets(map) when is_map(map) do
     Map.new(map, fn {key, value} ->
-      value = if secret_key?(key) and is_binary(value) and not String.starts_with?(value, "$"), do: "$REDACTED", else: redact_secrets(value)
+      value =
+        if secret_key?(key) and is_binary(value) and not String.starts_with?(value, "$"),
+          do: "$REDACTED",
+          else: redact_secrets(value)
+
       {key, value}
     end)
   end

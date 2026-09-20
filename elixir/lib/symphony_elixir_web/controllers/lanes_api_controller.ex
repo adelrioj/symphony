@@ -4,8 +4,8 @@ defmodule SymphonyElixirWeb.LanesApiController do
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
-  alias SymphonyElixir.{Lanes, LaneStore, LaneSupervisor, Workflow}
   alias SymphonyElixir.ExecutionProfiles.Configuration
+  alias SymphonyElixir.{Lanes, LaneStore, LaneSupervisor, Workflow}
   alias SymphonyElixir.Lanes.Lane
 
   @lane_params ~w(slug name enabled execution_profile_id workspace_subdir config prompt note front_matter executor)
@@ -61,6 +61,7 @@ defmodule SymphonyElixirWeb.LanesApiController do
       case Lanes.delete(lane) do
         :ok -> send_resp(conn, 204, "")
         {:error, :lane_active} -> conn |> put_status(409) |> json(%{error: %{code: "lane_active", message: "Disable the lane and wait for its agents to stop before deleting it"}})
+        {:error, errors} -> errors_response(conn, errors)
       end
     end)
   end

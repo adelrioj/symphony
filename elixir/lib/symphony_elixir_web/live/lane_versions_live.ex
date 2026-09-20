@@ -3,8 +3,8 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.Lanes
   alias SymphonyElixir.ExecutionProfiles
+  alias SymphonyElixir.Lanes
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @impl true

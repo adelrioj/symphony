@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.RunsTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{LaneContext, LaneStore, Repo, Runs, TestSupport}
+  alias SymphonyElixir.{ExecutionProfiles.Configuration, LaneContext, LaneStore, Repo, Runs, TestSupport}
   alias SymphonyElixir.Runs.{Event, Run}
   alias SymphonyElixirWeb.ObservabilityPubSub
 
@@ -107,7 +107,15 @@ defmodule SymphonyElixir.RunsTest do
   test "lane finalization preserves successful attempts and distinguishes disable from crash" do
     lane_id = LaneContext.current!()
     {:ok, entry} = LaneStore.lookup(lane_id)
-    {:ok, other_lane} = TestSupport.create_lane_from_front_matter(%{slug: "other-history", front_matter: entry.front_matter, prompt: entry.prompt})
+    {_profile, config} = Configuration.split(entry.workflow.config)
+
+    {:ok, other_lane} =
+      TestSupport.create_lane_from_front_matter(%{
+        slug: "other-history",
+        front_matter: SymphonyElixir.Workflow.encode_config(config),
+        prompt: entry.workflow.prompt
+      })
+
     start_run("other-lane", %{lane_id: other_lane.id})
     start_run("done")
     Runs.finished("done", "done")

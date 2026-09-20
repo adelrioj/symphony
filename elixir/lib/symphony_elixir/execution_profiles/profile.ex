@@ -20,7 +20,7 @@ defmodule SymphonyElixir.ExecutionProfiles.Profile do
   def changeset(profile, attrs) do
     profile
     |> cast(attrs, [:name, :description, :workspace_base, :worker, :repair_error])
-    |> validate_required([:name])
+    |> validate_required([:name, :workspace_base])
     |> validate_change(:name, fn :name, name ->
       if String.trim(name) == "", do: [name: "must not be blank"], else: []
     end)

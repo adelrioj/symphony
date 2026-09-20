@@ -226,10 +226,12 @@ restart; use the UI/API instead.
 For import, UI creation, and API create/update, lane slugs must match `^[a-z][a-z0-9-]{1,40}$`.
 The exact slug `new` is reserved for the creation page at `/lanes/new`; use an ordinary slug such as
 `main` or `new-work`. A rejected slug produces a field error without saving a lane or version.
-Export writes the current workflow to stdout. Canonical nonempty LF-delimited front matter with a
-newline after its closing delimiter round-trips exactly; arbitrary delimiter/newline envelopes
-normalize. Raw YAML and prompt text, including leading blank lines, remain preserved interchange
-content; the live lane editor uses structured controls and an advanced object section.
+Export writes the current workflow to stdout. Persistence is semantic, not byte-preserving: import
+parses YAML, stores canonical JSON lane configuration and a normalized prompt, and export recomposes
+the current profile and lane values. Comments, YAML formatting, delimiter style, and surrounding
+prompt whitespace may change. The standalone `Workflow.split/1` and `render/2` helpers still exactly
+round-trip their documented canonical raw-string cases. The live lane editor uses structured controls
+and an advanced object section.
 
 `WORKFLOW.md` uses YAML front matter plus a Markdown prompt. `server.port` and `server.host`
 are retained but ignored with a warning on import/save; listener settings belong to `serve`.

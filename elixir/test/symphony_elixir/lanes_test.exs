@@ -120,7 +120,6 @@ defmodule SymphonyElixir.LanesTest do
     assert {:error, [%{path: "lane"}]} = Lanes.update(lane, nil)
     assert {:error, [%{path: "lane"}]} = Lanes.update(lane, %{42 => "not a field"})
     assert {:error, [%{path: "version"}]} = Lanes.activate_version(lane, %{})
-    assert {:error, [%{path: "front_matter"}, %{path: "prompt"}]} = Lanes.validate_version(nil, nil, nil)
     assert [%LaneVersion{prompt: "original"}] = Lanes.versions(lane)
     assert Lanes.get!(lane.id).current_version_id == lane.current_version_id
   end
@@ -219,7 +218,9 @@ defmodule SymphonyElixir.LanesTest do
     assert {:ok, %{name: "must stick"}} = LaneStore.lookup(lane.id)
     assert [%LaneVersion{id: version_id}] = Lanes.versions(lane)
     assert version_id == published.version_id
-    assert {:ok, validated} = Lanes.validate_version(nil, managed_config, "")
+    assert {:ok, workflow} = Workflow.parse_parts(managed_config, "")
+    {profile, config} = Configuration.split(workflow.config)
+    assert {:ok, validated} = Configuration.resolve(profile, config, ".", "")
     assert :ok = LaneStore.put_entry(%{published | settings: validated.settings})
   end
 
@@ -266,13 +267,37 @@ defmodule SymphonyElixir.LanesTest do
       assert [%LaneVersion{note: "again"}, %LaneVersion{}] = Lanes.versions(updated)
     end
 
+    existing = Lanes.get_by_slug("features")
     profile_count = length(ExecutionProfiles.list())
+    version_count = length(Lanes.versions(existing))
+    current_version_id = existing.current_version_id
+    profile_id = existing.execution_profile_id
+    {:ok, published} = LaneStore.lookup(existing.id)
     failed = Path.join(tmp_dir, "failed.md")
     File.write!(failed, "---\ntracker:\n  kind: memory\npolling:\n  interval_ms: nope\n---\n")
-    assert {:error, _} = Lanes.import_file(failed, slug: "failed")
+    assert {:error, _} = Lanes.import_file(failed, slug: "features")
     assert length(ExecutionProfiles.list()) == profile_count
+    unchanged = Lanes.get!(existing.id)
+    assert unchanged.execution_profile_id == profile_id
+    assert unchanged.current_version_id == current_version_id
+    assert length(Lanes.versions(unchanged)) == version_count
+    assert {:ok, ^published} = LaneStore.lookup(existing.id)
 
-    assert {:ok, validated} = Lanes.validate_version(nil, @front_matter <> "\nserver: invalid-but-ignored", "")
+    assert {:ok, workflow} = Workflow.parse_parts(@front_matter <> "\nserver: invalid-but-ignored", "")
+    {profile, config} = Configuration.split(workflow.config)
+
+    assert {:ok, validated} =
+             Configuration.resolve(
+               Map.put_new(
+                 profile,
+                 "workspace_base",
+                 %SymphonyElixir.Config.Schema.Workspace{}.root
+               ),
+               config,
+               ".",
+               ""
+             )
+
     assert Enum.any?(validated.warnings, &String.contains?(&1, "ignored"))
     assert is_nil(validated.settings.server.port)
     assert {:error, [%{path: "file"}]} = Lanes.import_file("/nope/WORKFLOW.md", slug: "missing")
@@ -296,7 +321,13 @@ defmodule SymphonyElixir.LanesTest do
   end
 
   defp profile_id do
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Test profile #{System.unique_integer([:positive])}", workspace_base: Path.join(System.tmp_dir!(), "symphony_workspaces"), worker: %{}})
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Test profile #{System.unique_integer([:positive])}",
+        workspace_base: Path.join(System.tmp_dir!(), "symphony-workspaces-#{System.unique_integer([:positive])}"),
+        worker: %{}
+      })
+
     profile.id
   end
 
@@ -309,7 +340,7 @@ defmodule SymphonyElixir.LanesTest do
     {:ok, profile} =
       ExecutionProfiles.create(%{
         name: "Test #{Map.fetch!(attrs, :slug)} #{System.unique_integer([:positive])}",
-        workspace_base: profile_attrs["workspace_base"] || Path.join(System.tmp_dir!(), "symphony_workspaces"),
+        workspace_base: profile_attrs["workspace_base"] || Path.join(System.tmp_dir!(), "symphony-workspaces-#{System.unique_integer([:positive])}"),
         worker: profile_attrs["worker"] || %{}
       })
 

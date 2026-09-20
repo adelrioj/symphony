@@ -383,7 +383,8 @@ defmodule SymphonyElixir.MultiLaneTest do
 
     assert_receive {:retry_started, opts, "Original retry prompt"}, 5_000
     assert opts[:backend_module] == SymphonyElixir.Agent.Codex
-    assert opts[:execution_context].workspace_root == root
+    assert {:ok, canonical_root} = SymphonyElixir.PathSafety.canonicalize(root)
+    assert opts[:execution_context].workspace_root == canonical_root
     state = Task.await(dispatch, 5_000)
     assert Map.has_key?(state.running, "retry")
     assert Runs.get_by_attempt(opts[:attempt_id]).lane_version_id == original.version_id
@@ -477,9 +478,9 @@ defmodule SymphonyElixir.MultiLaneTest do
     {profile_attrs, config} = Configuration.split(workflow.config)
     profile = ExecutionProfiles.get(lane.execution_profile_id)
 
-    with {:ok, _profile} <- update_profile(profile, profile_attrs),
-         {:ok, updated} <- Lanes.update(lane, %{config: config, prompt: workflow.prompt}) do
-      {:ok, updated}
+    case update_profile(profile, profile_attrs) do
+      {:ok, _profile} -> Lanes.update(lane, %{config: config, prompt: workflow.prompt})
+      error -> error
     end
   end
 

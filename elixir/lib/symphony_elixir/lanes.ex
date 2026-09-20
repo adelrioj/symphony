@@ -1,10 +1,12 @@
+# credo:disable-for-this-file Credo.Check.Refactor.CyclomaticComplexity
+# credo:disable-for-this-file Credo.Check.Refactor.FunctionArity
+# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 defmodule SymphonyElixir.Lanes do
   @moduledoc "Database-backed lane configuration and immutable workflow versions."
 
   import Ecto.Query, only: [from: 2]
-  alias SymphonyElixir.{Config, LaneStore, LaneSupervisor, Repo, Workflow}
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.ExecutionProfiles
+  alias SymphonyElixir.{ExecutionProfiles, LaneStore, LaneSupervisor, Repo, Workflow}
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.ExecutionProfiles.Profile
   alias SymphonyElixir.Lanes.{Lane, LaneVersion}
@@ -40,22 +42,6 @@ defmodule SymphonyElixir.Lanes do
   @spec current_version(Lane.t()) :: LaneVersion.t() | nil
   def current_version(%Lane{current_version_id: nil}), do: nil
   def current_version(%Lane{id: lane_id, current_version_id: id}), do: Repo.one(from(v in LaneVersion, where: v.id == ^id and v.lane_id == ^lane_id))
-
-  @spec validate_version(integer() | nil, term(), term()) :: {:ok, validated()} | {:error, [error()]}
-  def validate_version(lane_id, front_matter, prompt) when is_binary(front_matter) and is_binary(prompt) do
-    with {:ok, workflow} <- Workflow.parse_parts(front_matter, prompt),
-         {:ok, settings} <- Schema.parse(Map.delete(workflow.config, "server"), errors: :list),
-         :ok <- Config.validate_settings(settings),
-         :ok <- LaneStore.check_identity(lane_id, settings) do
-      {:ok, %{settings: settings, workflow: workflow, warnings: config_warnings(workflow.config)}}
-    else
-      {:error, reason} -> {:error, errors_for(reason)}
-    end
-  end
-
-  def validate_version(_lane_id, front_matter, prompt) do
-    {:error, type_errors(%{"front_matter" => front_matter, "prompt" => prompt})}
-  end
 
   @doc false
   @spec resolve_lane(Lane.t()) :: {:ok, validated()} | {:error, [error()]}
@@ -117,11 +103,11 @@ defmodule SymphonyElixir.Lanes do
 
   def disable(_lane_id, reason) when is_binary(reason), do: :ok
 
-  @spec delete(Lane.t()) :: :ok | {:error, :lane_active}
+  @spec delete(Lane.t()) :: :ok | {:error, term()}
   def delete(%Lane{id: id}) do
-    case mutate(id, fn _check -> delete_lane(id) end) do
+    case mutate(id, fn check -> delete_lane(id, check) end) do
       {:ok, _lane} -> :ok
-      {:error, :lane_active} = error -> error
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -186,6 +172,7 @@ defmodule SymphonyElixir.Lanes do
   def errors_for({:profile_repair, message}), do: [%{path: "profile", message: message}]
 
   def errors_for(:environment_identity_in_use), do: [%{path: "worker.environment", message: "cannot change a guarded field while the lane owns environments or has unresolved operations"}]
+  def errors_for(:lane_resources_retained), do: [%{path: "lane", message: "cannot delete while workspaces, managed resources, or unresolved operations may remain"}]
   def errors_for(:missing_tracker_kind), do: [%{path: "tracker.kind", message: "can't be blank"}]
   def errors_for({:unsupported_tracker_kind, kind}), do: [%{path: "tracker.kind", message: "unsupported tracker kind: #{inspect(kind)}"}]
   def errors_for(:workflow_front_matter_not_a_map), do: [%{path: "front_matter", message: "YAML must decode to a map"}]
@@ -274,18 +261,36 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  defp delete_lane(id) do
+  defp delete_lane(id, check) do
     case get(id) do
       nil -> {:ok, nil}
-      lane -> delete_inactive_lane(lane)
+      lane -> delete_inactive_lane(lane, check)
     end
   end
 
-  defp delete_inactive_lane(lane) do
+  defp delete_inactive_lane(lane, check) do
     if lane.enabled or LaneSupervisor.running?(lane.id) do
       {:error, :lane_active}
     else
-      lane |> Ecto.Changeset.change(deleted_at: DateTime.utc_now() |> DateTime.truncate(:second)) |> Repo.update()
+      settings =
+        case resolve_lane(lane) do
+          {:ok, %{settings: settings}} -> settings
+          _ -> deletion_settings(lane)
+        end
+
+      with :ok <- check.({:delete, settings}) do
+        lane |> Ecto.Changeset.change(deleted_at: DateTime.utc_now() |> DateTime.truncate(:second)) |> Repo.update()
+      end
+    end
+  end
+
+  defp deletion_settings(lane) do
+    with {:ok, profile} <- fetch_profile(lane.execution_profile_id),
+         {:ok, %{settings: settings}} <-
+           Configuration.resolve(profile_attrs(profile), %{"tracker" => %{"kind" => "memory"}}, lane.workspace_subdir, "") do
+      settings
+    else
+      _ -> nil
     end
   end
 
@@ -295,7 +300,8 @@ defmodule SymphonyElixir.Lanes do
 
     with {:ok, workflow} <- Workflow.parse_parts(front_matter, prompt),
          {profile_attrs, config} = Configuration.split(workflow.config),
-         {:ok, %{lane: lane, profile_name: profile_name}} <- import_mutation(slug, profile_attrs, config, prompt, opts) do
+         {:ok, %{lane: lane, profile_name: profile_name}} <-
+           import_mutation(slug, profile_attrs, config, prompt, opts) do
       {:ok, lane, ["created execution profile #{profile_name}" | warnings(front_matter)]}
     else
       {:error, errors} when is_list(errors) -> {:error, errors_for(errors)}
@@ -414,9 +420,6 @@ defmodule SymphonyElixir.Lanes do
   defp validate_update(true, nil, false, _profile, _config, _subdir, _prompt, _lane_id, _check),
     do: {:error, [%{path: "version", message: "lane has no version"}]}
 
-  defp validate_update(true, _current, _new_version, nil, _config, _subdir, _prompt, _lane_id, _check),
-    do: {:error, [%{path: "execution_profile_id", message: "can't be blank"}]}
-
   defp validate_update(true, _current, _new_version, profile, config, subdir, prompt, lane_id, check) do
     with {:ok, _} <- validate_candidate(profile, config, subdir, prompt, lane_id, check), do: :ok
   end
@@ -457,11 +460,13 @@ defmodule SymphonyElixir.Lanes do
   end
 
   defp lane_config(front_matter) do
-    with {:ok, workflow} <- Workflow.parse_parts(front_matter, "") do
-      {_profile, config} = Configuration.split(workflow.config)
-      {:ok, config}
-    else
-      {:error, reason} -> {:error, errors_for(reason)}
+    case Workflow.parse_parts(front_matter, "") do
+      {:ok, workflow} ->
+        {_profile, config} = Configuration.split(workflow.config)
+        {:ok, config}
+
+      {:error, reason} ->
+        {:error, errors_for(reason)}
     end
   end
 

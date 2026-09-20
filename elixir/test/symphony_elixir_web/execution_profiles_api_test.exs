@@ -22,17 +22,32 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
   end
 
   test "create, read and update preserve raw worker references" do
+    previous_secret = System.get_env("WORKER_API_KEY")
+    System.put_env("WORKER_API_KEY", "distinct-worker-test-secret")
+    on_exit(fn -> SymphonyElixir.TestSupport.restore_env("WORKER_API_KEY", previous_secret) end)
+
     attrs = %{name: "API profile", workspace_base: "/tmp/api-profile", worker: %{ssh_hosts: ["worker-1"], api_key: "$WORKER_API_KEY"}}
     profile = json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(attrs)), 201)
 
     assert profile["name"] == "API profile"
     assert profile["worker"]["api_key"] == "$WORKER_API_KEY"
-    refute Jason.encode!(profile) =~ System.get_env("WORKER_API_KEY", "not-a-real-test-secret")
-    assert json_response(get(api_conn(), "/api/v1/execution-profiles/#{profile["id"]}"), 200)["id"] == profile["id"]
+    refute Jason.encode!(profile) =~ "distinct-worker-test-secret"
+    shown = json_response(get(api_conn(), "/api/v1/execution-profiles/#{profile["id"]}"), 200)
+    listed = json_response(get(api_conn(), "/api/v1/execution-profiles"), 200)
+    assert shown["id"] == profile["id"]
+    refute Jason.encode!([shown, listed]) =~ "distinct-worker-test-secret"
 
     updated = json_response(put(api_conn(), "/api/v1/execution-profiles/#{profile["id"]}", Jason.encode!(%{description: "Updated"})), 200)
     assert updated["description"] == "Updated"
     assert updated["worker"] == profile["worker"]
+    refute Jason.encode!(updated) =~ "distinct-worker-test-secret"
+  end
+
+  test "create materializes the default workspace base" do
+    profile = json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "Default root"})), 201)
+    assert is_binary(profile["workspace_base"])
+    assert profile["workspace_base"] != ""
+    assert ExecutionProfiles.get(profile["id"]).workspace_base == profile["workspace_base"]
   end
 
   test "duplicate names and invalid profile maps return field errors" do

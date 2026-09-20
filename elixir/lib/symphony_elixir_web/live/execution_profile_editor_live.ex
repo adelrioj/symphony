@@ -3,10 +3,10 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixir.ExecutionProfiles
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.ExecutionProfiles.Profile
-  alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
   alias SymphonyElixirWeb.{ConfigurationFields, ObservabilityPubSub}
 
   import ConfigurationFields, only: [profile_fields: 1]
@@ -28,7 +28,6 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
 
   @impl true
   def handle_info(:profiles_updated, socket), do: refresh_profile(socket)
-  def handle_info(:observability_updated, socket), do: refresh_profile(socket)
 
   @impl true
   def handle_event(event, %{"profile" => incoming}, socket) when event in ["validate", "save"] do
@@ -39,8 +38,16 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
     result = if event == "save" and errors == [], do: save(socket.assigns.profile, attrs), else: {:error, errors}
 
     case result do
-      {:ok, profile} -> {:noreply, push_navigate(socket, to: "/execution-profiles/#{profile.id}")}
-      {:error, save_errors} -> {:noreply, assign(socket, params: params, errors: save_errors, lanes: linked_lanes(socket.assigns.profile))}
+      {:ok, profile} ->
+        {:noreply, push_navigate(socket, to: "/execution-profiles/#{profile.id}")}
+
+      {:error, save_errors} ->
+        {:noreply,
+         assign(socket,
+           params: params,
+           errors: save_errors,
+           lanes: linked_lanes(socket.assigns.profile)
+         )}
     end
   end
 
