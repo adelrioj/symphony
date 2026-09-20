@@ -107,6 +107,9 @@ defmodule SymphonyElixir.Workflow do
     parse_parts(front_matter, prompt)
   end
 
+  @spec encode_config(map()) :: String.t()
+  def encode_config(config) when is_map(config), do: Jason.encode!(config, pretty: true)
+
   @spec parse_parts(String.t(), String.t()) :: {:ok, loaded_workflow()} | {:error, term()}
   def parse_parts(front_matter, prompt) when is_binary(front_matter) and is_binary(prompt) do
     case front_matter_yaml_to_map(String.replace(front_matter, ~r/\R/u, "\n")) do

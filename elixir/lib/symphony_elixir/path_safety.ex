@@ -15,6 +15,17 @@ defmodule SymphonyElixir.PathSafety do
     end
   end
 
+  @spec contained?(Path.t(), Path.t()) :: {:ok, boolean()} | {:error, term()}
+  def contained?(path, root) when is_binary(path) and is_binary(root) do
+    with {:ok, canonical_path} <- canonicalize(path),
+         {:ok, canonical_root} <- canonicalize(root) do
+      path_parts = Path.split(canonical_path)
+      root_parts = Path.split(canonical_root)
+
+      {:ok, Enum.take(path_parts, length(root_parts)) == root_parts}
+    end
+  end
+
   defp split_absolute_path(path) when is_binary(path) do
     [root | segments] = Path.split(path)
     {root, segments}

@@ -2076,4 +2076,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.rm_rf(test_root)
     end
   end
+
+  test "path containment compares canonical path components" do
+    root = Path.join(System.tmp_dir!(), "symphony-path-containment-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(root, "nested"))
+    on_exit(fn -> File.rm_rf(root) end)
+
+    assert {:ok, true} = SymphonyElixir.PathSafety.contained?(Path.join(root, "nested"), root)
+    assert {:ok, false} = SymphonyElixir.PathSafety.contained?(root <> "-sibling", root)
+  end
 end
