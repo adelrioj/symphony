@@ -1036,8 +1036,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   defp release_failed_stage({:ok, _} = connection, _stage), do: connection
 
   defp release_failed_stage(error, stage) do
-    Operations.release_staged_paths(stage)
-    error
+    case Operations.release_staged_paths(stage) do
+      :ok -> error
+      {:error, _} -> {:error, {:unknown, :local_cleanup_unconfirmed}}
+    end
   end
 
   defp connect_staged(config, record, gcloud, ssh, directory, supervisor, authority, opts) do
@@ -1063,11 +1065,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   end
 
   defp establish_tunnel(config, port, ssh, directory, supervisor, authority, opts) do
-    timeout = max(Client.remaining(opts), 1)
-
     result =
       with {:ok, local_port} <- tunnel_ready(port, opts, ""),
-           {:ok, socket} <- :gen_tcp.connect({127, 0, 0, 1}, local_port, [:binary, active: false], timeout) do
+           remaining when remaining > 0 <- Client.remaining(opts),
+           {:ok, socket} <- :gen_tcp.connect({127, 0, 0, 1}, local_port, [:binary, active: false], remaining) do
         :gen_tcp.close(socket)
         known_hosts = Path.join(directory, "known_hosts")
 
@@ -1102,7 +1103,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
           "127.0.0.1"
         ]
 
-        with {:ok, %{status: 0}} <- Command.run(ssh, prefix ++ ["true"], Keyword.put(opts, :timeout_ms, max(Client.remaining(opts), 1))),
+        with :ok <- await_ssh(ssh, prefix ++ ["true"], opts),
              {:ok, stat} <- File.stat(known_hosts),
              true <- stat.size > 0,
              :ok <- File.chmod(known_hosts, 0o600) do
@@ -1114,6 +1115,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
           Operations.open_connection(supervisor, authority, target, ports: [port], private_paths: [directory], staged_paths: Keyword.fetch!(opts, :staged_paths))
         else
+          {:error, {:unknown, _}} = error -> error
           _ -> {:error, {:unknown, :workstations_ssh_not_ready}}
         end
       else
@@ -1123,6 +1125,44 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     result
   rescue
     _ -> {:error, {:unknown, :workstations_tunnel_failed}}
+  end
+
+  defp await_ssh(ssh, args, opts, failure \\ {:error, {:unknown, {:workstations_ssh_not_ready, :deadline, nil}}}) do
+    case Client.remaining(opts) do
+      0 ->
+        failure
+
+      remaining ->
+        case Command.run(ssh, args, Keyword.put(opts, :timeout_ms, remaining)) do
+          {:ok, %{status: 0}} ->
+            :ok
+
+          {:ok, %{status: status, output: output}} ->
+            if status == 255 and ssh_starting?(output) do
+              Process.sleep(min(Keyword.get(opts, :poll_interval_ms, 250), Client.remaining(opts)))
+              await_ssh(ssh, args, opts, {:error, {:unknown, {:workstations_ssh_not_ready, :transport, status}}})
+            else
+              {:error, {:unknown, {:workstations_ssh_not_ready, :exit, status}}}
+            end
+
+          {:error, {:unknown, {reason, _output}}} when reason in [:timeout, :output_limit] ->
+            {:error, {:unknown, {:workstations_ssh_not_ready, reason, nil}}}
+
+          {:error, {:unknown, reason}} when is_atom(reason) ->
+            {:error, {:unknown, {:workstations_ssh_not_ready, reason, nil}}}
+
+          _ ->
+            {:error, {:unknown, {:workstations_ssh_not_ready, :command_failed, nil}}}
+        end
+    end
+  end
+
+  defp ssh_starting?(output) do
+    # Retry only known pre-handshake diagnostics; mixed or unfamiliar output fails closed.
+    Regex.match?(
+      ~r/\A(?:(?:kex_exchange_identification: (?:read: Connection reset by peer|Connection closed by remote host)|Connection (?:reset|closed) by (?:127\.0\.0\.1|UNKNOWN) port \d+|ssh: connect to host 127\.0\.0\.1 port \d+: (?:Connection refused|Connection timed out))\r?\n?)+\z/,
+      output
+    )
   end
 
   defp private_directory_path do

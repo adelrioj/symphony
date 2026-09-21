@@ -337,6 +337,114 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     refute Enum.any?(File.ls!(root), &String.starts_with?(&1, ".symphony-readiness."))
   end
 
+  test "readiness accepts daemon storage that the non-root SSH user cannot write" do
+    supervisor = start_supervised!(Task.Supervisor)
+    root = temporary_path("daemon-storage-readiness")
+    workspace = Path.join(root, "workspaces")
+    docker_root = Path.join(root, ".docker_data")
+    shell_env = Path.join(root, "worker-environment")
+    File.mkdir_p!(workspace)
+    File.mkdir_p!(docker_root)
+    File.chmod!(docker_root, 0o555)
+    on_exit(fn -> File.chmod(docker_root, 0o755) end)
+
+    File.write!(shell_env, """
+    [ "$EUID" -ne 0 ] || { printf 'readiness regression must run as non-root\\n' >&2; exit 1; }
+    [ -d "$SYMPHONY_DOCKER_ROOT" ] && [ ! -w "$SYMPHONY_DOCKER_ROOT" ] || exit 1
+    findmnt() { printf '%s\\n' "$SYMPHONY_PERSISTENT_ROOT"; }
+    realpath() {
+      if [ "$1" = --version ]; then printf 'GNU coreutils\\n'; else printf '%s/.symphony-realpath-probe\\n' "$SYMPHONY_WORKSPACE_ROOT"; fi
+    }
+    test() {
+      if [ "$#" -eq 2 ] && [ "$1" = -S ] && [ "$2" = /var/run/docker.sock ]; then return 0; fi
+      builtin test "$@"
+    }
+    docker() {
+      [ "$*" = "--host unix:///var/run/docker.sock info --format {{.DockerRootDir}}" ] || return 1
+      printf '%s\\n' "$SYMPHONY_DOCKER_ROOT"
+    }
+    """)
+
+    target = %Target{
+      executable: "/bin/sh",
+      prefix: ["-c", "eval \"$1\"", "fake-ssh"],
+      label: "worker",
+      env: [
+        {"BASH_ENV", shell_env},
+        {"DOCKER_HOST", "unix:///var/run/docker.sock"},
+        {"SYMPHONY_PERSISTENT_ROOT", root},
+        {"SYMPHONY_WORKSPACE_ROOT", workspace},
+        {"SYMPHONY_DOCKER_ROOT", docker_root}
+      ]
+    }
+
+    {config, entry} = preparation(workspace)
+    request = prepare_request(supervisor, target, self())
+
+    assert {:ok, context} =
+             Operations.run(Provider, config, entry, :prepare, task_supervisor: supervisor, authority: self(), agent_executable: "sh", request_fun: request)
+
+    assert :ok = Operations.close_connection(context.connection)
+    assert Bitwise.band(File.stat!(docker_root).mode, 0o777) == 0o555
+    refute Enum.any?(File.ls!(workspace), &String.starts_with?(&1, ".symphony-readiness."))
+  end
+
+  for failure <- [:status, :exception, :exit] do
+    test "readiness #{failure} preserves failed connection cleanup" do
+      supervisor = start_supervised!(Task.Supervisor)
+      path = temporary_path("readiness-cleanup-failure")
+      File.mkdir_p!(path)
+      File.write!(Path.join(path, "private"), "owned")
+      File.chmod!(path, 0o555)
+      on_exit(fn -> File.chmod(path, 0o700) end)
+      target = %Target{executable: "/bin/sh", prefix: [], label: "worker"}
+      {config, entry} = preparation("/state/workspaces")
+      normal = prepare_request(supervisor, target, self())
+
+      request = fn
+        :connect, _, opts ->
+          Operations.open_connection(supervisor, opts[:authority], target, private_paths: [path])
+
+        operation, record, opts ->
+          normal.(operation, record, opts)
+      end
+
+      command = fn _, _, _ ->
+        case unquote(failure) do
+          :status -> {:ok, %{output: "", status: 1}}
+          :exception -> raise "readiness failure"
+          :exit -> exit(:readiness_failure)
+        end
+      end
+
+      assert {:error, {:unknown, :local_cleanup_unconfirmed}, _} =
+               Operations.run(Provider, config, entry, :prepare,
+                 task_supervisor: supervisor,
+                 authority: self(),
+                 agent_executable: "sh",
+                 request_fun: request,
+                 command_fun: command
+               )
+    end
+  end
+
+  test "readiness preserves command cleanup uncertainty" do
+    supervisor = start_supervised!(Task.Supervisor)
+    target = %Target{executable: "/bin/sh", prefix: [], label: "worker"}
+    {config, entry} = preparation("/state/workspaces")
+    request = prepare_request(supervisor, target, self())
+    command = fn _, _, _ -> {:error, {:unknown, :local_cleanup_unconfirmed}} end
+
+    assert {:error, {:unknown, :local_cleanup_unconfirmed}, _} =
+             Operations.run(Provider, config, entry, :prepare,
+               task_supervisor: supervisor,
+               authority: self(),
+               agent_executable: "sh",
+               request_fun: request,
+               command_fun: command
+             )
+  end
+
   test "successful readiness captures context while transport timeout closes only the local lease" do
     supervisor = start_supervised!(Task.Supervisor)
     target = %Target{executable: "/usr/bin/ssh", prefix: ["worker"], label: "worker"}

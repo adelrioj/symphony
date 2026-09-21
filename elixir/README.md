@@ -478,9 +478,16 @@ executables if routing to both backends, Docker/Compose, Testcontainers prerequi
 dependencies. Remote Claude also needs its configured Symphony MCP executable. Preserve the repo's
 unchanged setup/test commands. Readiness checks the selected backend, authenticated SSH, a mounted
 writable workspace, actual GNU `realpath -m --` behavior (including nonexistent path components),
-and a usable local Unix Docker endpoint with writable Docker data. Cleanup preparation does not
-require an agent executable. These probes are not independent proof of persistence or daemon
-isolation: qualify those properties in the infrastructure/image.
+and a usable local Unix Docker endpoint whose data directory is on a non-root mount. The SSH user
+does not need direct write access to Docker's internal storage. Qualify actual daemon writes,
+persistence, and isolation in the infrastructure/image. Cleanup preparation does not require an
+agent executable.
+
+Workstations can report `RUNNING` before SSH is ready. The connection waits for known pre-handshake
+transport failures within the original startup deadline. Authentication, host-key, and other
+permanent failures do not retry. Host trust remains pinned across attempts. The controller requires
+an external `kill` executable to terminate owned processes; a shell builtin is insufficient.
+Unconfirmed local cleanup returns `local_cleanup_unconfirmed`, not an ordinary readiness failure.
 
 Local macOS development tests that exercise managed path safety also need GNU coreutils `realpath`
 on `PATH` (for example, the coreutils `gnubin` directory ahead of the system tools). A BSD utility or
