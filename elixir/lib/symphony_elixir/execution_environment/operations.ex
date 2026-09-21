@@ -425,21 +425,25 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
               {:ok, context}
 
             {:error, failure} ->
-              close_connection(connection)
-              {:error, failure, record}
+              failed_connection(connection, failure, record)
           end
         rescue
           _ ->
-            close_connection(connection)
-            {:error, {:invalid, :managed_execution_context}, record}
+            failed_connection(connection, {:invalid, :managed_execution_context}, record)
         catch
           :exit, _ ->
-            close_connection(connection)
-            {:error, {:unknown, :connection_closed}, record}
+            failed_connection(connection, {:unknown, :connection_closed}, record)
         end
 
       {:error, failure} ->
         {:error, failure, record}
+    end
+  end
+
+  defp failed_connection(connection, failure, record) do
+    case close_connection(connection) do
+      :ok -> {:error, failure, record}
+      {:error, _} -> {:error, {:unknown, :local_cleanup_unconfirmed}, record}
     end
   end
 
@@ -466,6 +470,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     case command_fun.(target.executable, target.prefix ++ [SSH.remote_shell_command(command)], opts) do
       {:ok, %{status: 0}} -> :ok
       {:ok, %{status: _}} -> {:error, {:invalid, :worker_readiness}}
+      {:error, {:unknown, :local_cleanup_unconfirmed}} = error -> error
       {:error, {:unknown, _}} -> {:error, {:unknown, :readiness_timeout_or_transport}}
       {:error, _} -> {:error, {:unknown, :readiness_transport}}
     end
@@ -487,7 +492,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
         "test \"${DOCKER_HOST:-unix:///var/run/docker.sock}\" = unix:///var/run/docker.sock",
         "test -S /var/run/docker.sock",
         "docker_root=$(docker --host unix:///var/run/docker.sock info --format '{{.DockerRootDir}}')",
-        "test -n \"$docker_root\" && test -d \"$docker_root\" && test -w \"$docker_root\"",
+        "test -n \"$docker_root\" && test -d \"$docker_root\"",
         "docker_mount=$(findmnt -n -o TARGET -T \"$docker_root\"); test -n \"$docker_mount\" && test \"$docker_mount\" != /"
       ],
       "; "

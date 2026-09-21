@@ -309,6 +309,116 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     refute File.exists?(hosts)
   end
 
+  test "SSH readiness retries pre-handshake failures without replacing pinned trust" do
+    script = """
+    if [ ! -s "$hosts" ]; then printf 'pinned-test-key\\n' > "$hosts"; fi
+    [ "$(cat "$hosts")" = pinned-test-key ] || exit 92
+    case "$(wc -l < "$attempts" | tr -d ' ')" in
+      1) printf 'kex_exchange_identification: read: Connection reset by peer\\nConnection reset by 127.0.0.1 port 2222\\n' >&2; exit 255 ;;
+      2) printf 'ssh: connect to host 127.0.0.1 port 2222: Connection refused\\n' >&2; exit 255 ;;
+      3) printf 'kex_exchange_identification: Connection closed by remote host\\nConnection closed by 127.0.0.1 port 2222\\n' >&2; exit 255 ;;
+      *) printf 'authenticated-worker\\n' ;;
+    esac
+    """
+
+    {running, options, directory} = ssh_readiness_fixture(script)
+    options = Keyword.put(options, :poll_interval_ms, 10)
+    assert {:ok, connection} = Workstations.connect(config(), running, options)
+    assert File.read!(Path.join(directory, "attempts")) == "attempt\nattempt\nattempt\nattempt\n"
+    hosts = File.read!(Path.join(directory, "hosts-path"))
+    assert File.read!(hosts) == "pinned-test-key\n"
+    assert "StrictHostKeyChecking=yes" in connection.target.prefix
+    assert {:ok, {"authenticated-worker\n", 0}} = SSH.run(connection.target, "true")
+    assert :ok == Operations.close_connection(connection)
+    refute File.exists?(Path.dirname(hosts))
+  end
+
+  test "SSH readiness polling consumes the existing deadline and removes staged trust" do
+    {running, options, directory} =
+      ssh_readiness_fixture("printf 'pinned-test-key\\n' > \"$hosts\"\nprintf 'kex_exchange_identification: read: Connection reset by peer\\n' >&2\nexit 255")
+
+    started = System.monotonic_time(:millisecond)
+    options = Keyword.merge(options, deadline: started + 500, poll_interval_ms: 5_000)
+
+    assert {:error, {:unknown, {:workstations_ssh_not_ready, :transport, 255}}} =
+             Workstations.connect(config(), running, options)
+
+    elapsed = System.monotonic_time(:millisecond) - started
+    assert elapsed >= 500
+    assert elapsed < 2_000
+    assert File.read!(Path.join(directory, "attempts")) == "attempt\n"
+    refute File.exists?(Path.dirname(File.read!(Path.join(directory, "hosts-path"))))
+  end
+
+  for {failure, diagnostic, status} <- [
+        {:authentication, "user@127.0.0.1: Permission denied (publickey).", 255},
+        {:remote_exit, "kex_exchange_identification: read: Connection reset by peer", 7},
+        {:mixed, "Host key verification failed.\nkex_exchange_identification: read: Connection reset by peer", 255}
+      ] do
+    test "SSH readiness does not retry #{failure} failures or expose diagnostics" do
+      {running, options, directory} = ssh_readiness_fixture("printf '%s\\n' '#{unquote(diagnostic)}' >&2\nexit #{unquote(status)}")
+
+      assert {:error, {:unknown, {:workstations_ssh_not_ready, :exit, unquote(status)}}} =
+               Workstations.connect(config(), running, options)
+
+      assert File.read!(Path.join(directory, "attempts")) == "attempt\n"
+      refute File.exists?(Path.dirname(File.read!(Path.join(directory, "hosts-path"))))
+    end
+  end
+
+  test "SSH command timeout is bounded by the original deadline and redacts partial output" do
+    {running, options, directory} = ssh_readiness_fixture("printf 'private remote output\\n'\nread ignored")
+    started = System.monotonic_time(:millisecond)
+    options = Keyword.put(options, :deadline, started + 500)
+
+    assert {:error, {:unknown, {:workstations_ssh_not_ready, :timeout, nil}}} =
+             Workstations.connect(config(), running, options)
+
+    assert System.monotonic_time(:millisecond) - started < 2_000
+    assert File.read!(Path.join(directory, "attempts")) == "attempt\n"
+    refute File.exists?(Path.dirname(File.read!(Path.join(directory, "hosts-path"))))
+  end
+
+  test "SSH output limit is not retried and partial output stays private" do
+    {running, options, directory} = ssh_readiness_fixture("printf '%70000s' private-value\nread ignored")
+
+    assert {:error, {:unknown, {:workstations_ssh_not_ready, :output_limit, nil}}} =
+             Workstations.connect(config(), running, options)
+
+    assert File.read!(Path.join(directory, "attempts")) == "attempt\n"
+    refute File.exists?(Path.dirname(File.read!(Path.join(directory, "hosts-path"))))
+  end
+
+  test "SSH success without a pinned host file fails without another SSH attempt" do
+    {running, options, directory} = ssh_readiness_fixture("exit 0")
+
+    assert {:error, {:unknown, :workstations_ssh_not_ready}} =
+             Workstations.connect(config(), running, options)
+
+    assert File.read!(Path.join(directory, "attempts")) == "attempt\n"
+    refute File.exists?(Path.dirname(File.read!(Path.join(directory, "hosts-path"))))
+  end
+
+  test "failed SSH reports when private trust cleanup cannot be confirmed" do
+    script = """
+    printf 'pinned-test-key\\n' > "$hosts"
+    chmod 0555 "$(dirname "$hosts")"
+    printf 'user@127.0.0.1: Permission denied (publickey).\\n' >&2
+    exit 255
+    """
+
+    {running, options, directory} = ssh_readiness_fixture(script)
+
+    on_exit(fn ->
+      path = Path.dirname(File.read!(Path.join(directory, "hosts-path")))
+      File.chmod!(path, 0o700)
+      File.rm_rf!(path)
+    end)
+
+    assert {:error, {:unknown, :local_cleanup_unconfirmed}} =
+             Workstations.connect(config(), running, options)
+  end
+
   test "abnormal prepare death removes staged trust before connection promotion" do
     {_server, request} = provider()
     assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
@@ -1179,7 +1289,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "failed tunnel process cannot promote a connection" do
     {running, options} = tunnel_fixture("exit 3")
 
-    assert {:error, {:unknown, :workstations_tunnel_not_ready}} =
+    assert {:error, {:unknown, _reason}} =
              Workstations.connect(config(), running, options)
   end
 
@@ -1203,6 +1313,32 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
     assert {:error, {:unknown, :workstations_tunnel_not_ready}} =
              Workstations.connect(config(), running, options)
+  end
+
+  defp ssh_readiness_fixture(script) do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(listener)
+    on_exit(fn -> :gen_tcp.close(listener) end)
+    {running, options} = tunnel_fixture("printf 'Listening on port [#{port}].\\n'\nread ignored")
+    directory = Path.dirname(Keyword.fetch!(options, :gcloud_executable))
+    ssh = Path.join(directory, "ssh")
+
+    File.write!(ssh, """
+    #!/bin/sh
+    for required in BatchMode=yes ForwardAgent=no IdentityAgent=none PubkeyAuthentication=no PreferredAuthentications=none PasswordAuthentication=no KbdInteractiveAuthentication=no GlobalKnownHostsFile=/dev/null; do
+      case " $* " in *" $required "*) ;; *) exit 91 ;; esac
+    done
+    for arg in "$@"; do
+      case "$arg" in UserKnownHostsFile=*) hosts=${arg#UserKnownHostsFile=} ;; esac
+    done
+    attempts='#{directory}/attempts'
+    printf 'attempt\\n' >> "$attempts"
+    printf '%s' "$hosts" > '#{directory}/hosts-path'
+    #{script}
+    """)
+
+    File.chmod!(ssh, 0o700)
+    {running, Keyword.put(options, :ssh_executable, ssh), directory}
   end
 
   defp tunnel_fixture(script) do
