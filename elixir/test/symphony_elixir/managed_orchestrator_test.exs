@@ -60,6 +60,16 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     :ok
   end
 
+  @tag :remediation
+  test "remediation: terminal reconciliation releases the launched reservation after authoritative cleanup" do
+    assert_reconciliation_releases_location("Done")
+  end
+
+  @tag :remediation
+  test "remediation: nonactive reconciliation releases the launched reservation after authoritative cleanup" do
+    assert_reconciliation_releases_location("In Review")
+  end
+
   test "capacity stays occupied until actual controlled stop completes" do
     issues([issue("first", 1), issue("second", 2)])
     {owner, tasks} = scheduler()
@@ -895,6 +905,52 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
 
     wait_state(owner, &Map.has_key?(&1.retry_attempts, "first"))
     refute Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
+  end
+
+  defp assert_reconciliation_releases_location(next_state) do
+    assert :ok =
+             write_managed_workflow(
+               tracker_active_states: ["In Progress"],
+               worker_environment: Map.put(environment(), "terminal_retention_ms", 0),
+               poll_interval_ms: 60_000
+             )
+
+    profile = LaneContext.current!() |> Lanes.get() |> Map.fetch!(:execution_profile_id) |> ExecutionProfiles.get()
+    moved_base = "/home/user/moved-workspaces"
+    issues([issue("first", 1)])
+    {owner, tasks} = scheduler()
+    discover([])
+    {config, entry, prepare} = operation(:prepare)
+    ready(config, entry, prepare, owner, tasks)
+    assert_receive {:agent_started, "first", runner, _}, 1_000
+    runner_monitor = Process.monitor(runner)
+
+    :ok = set_issue_state("first", next_state)
+    poll(owner)
+    {_, stopping, stop} = operation(:stop)
+    assert_receive {:DOWN, ^runner_monitor, :process, ^runner, _}, 1_000
+    assert {:error, _} = ExecutionProfiles.update(profile, %{workspace_base: moved_base})
+    stopped(stop, stopping)
+
+    if next_state != "Done" do
+      wait_state(owner, &(&1.environment_entries["first"].phase == :stopped))
+      assert {:error, _} = ExecutionProfiles.update(profile, %{workspace_base: moved_base})
+      :ok = set_issue_state("first", "Done")
+      poll(owner)
+      {_, metadata, task} = operation(:metadata)
+      send(task, {:complete_operation, {:ok, struct!(metadata.record, metadata.metadata_intent)}})
+    end
+
+    {_, destroying, destroy} = operation(:destroy)
+    assert {:error, _} = ExecutionProfiles.update(profile, %{workspace_base: moved_base})
+    send(destroy, {:complete_operation, {:ok, %{destroying.record | absent?: true, pending: []}}})
+    discover([])
+    wait_state(owner, &(&1.environment_discovery == :ready and is_nil(&1.environment_guard)))
+
+    assert {:ok, updated} = ExecutionProfiles.update(profile, %{workspace_base: moved_base})
+    assert updated.workspace_base == moved_base
+    refute MapSet.member?(:sys.get_state(owner).claimed, "first")
+    refute Map.has_key?(:sys.get_state(owner).retry_attempts, "first")
   end
 
   defp wait_state(owner, predicate), do: wait_state(owner, predicate, System.monotonic_time(:millisecond) + 1_000)

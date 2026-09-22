@@ -8,12 +8,16 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket), do: :ok = ObservabilityPubSub.subscribe_profiles()
-    {:ok, assign(socket, :profiles, ExecutionProfiles.list())}
+    if connected?(socket) do
+      :ok = ObservabilityPubSub.subscribe_profiles()
+      :ok = ObservabilityPubSub.subscribe()
+    end
+
+    {:ok, assign_profiles(socket)}
   end
 
   @impl true
-  def handle_info(:profiles_updated, socket), do: {:noreply, assign(socket, :profiles, ExecutionProfiles.list())}
+  def handle_info(message, socket) when message in [:profiles_updated, :observability_updated], do: {:noreply, assign_profiles(socket)}
 
   @impl true
   def render(assigns) do
@@ -47,7 +51,7 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLive do
                 </td>
                 <td class="mono">{profile.workspace_base || "default"}</td>
                 <td>{worker_label(profile.worker)}</td>
-                <td class="numeric">{length(ExecutionProfiles.linked_lanes(profile))}</td>
+                <td class="numeric">{@linked_counts[profile.id]}</td>
               </tr>
             </tbody>
           </table>
@@ -57,13 +61,17 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLive do
     """
   end
 
-  defp worker_label(worker) when is_map(worker) do
+  defp assign_profiles(socket) do
+    profiles = ExecutionProfiles.list()
+    linked_counts = Map.new(profiles, &{&1.id, length(ExecutionProfiles.linked_lanes(&1))})
+    assign(socket, profiles: profiles, linked_counts: linked_counts)
+  end
+
+  defp worker_label(worker) do
     cond do
-      is_map(Map.get(worker, "environment")) -> "Existing managed environment"
+      Map.has_key?(worker, "environment") -> "Existing managed environment"
       Map.get(worker, "ssh_hosts", []) != [] -> "Static SSH"
       true -> "Local"
     end
   end
-
-  defp worker_label(_worker), do: "Unknown"
 end

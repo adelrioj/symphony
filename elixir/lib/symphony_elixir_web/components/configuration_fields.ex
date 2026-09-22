@@ -1,7 +1,7 @@
 defmodule SymphonyElixirWeb.ConfigurationFields do
   @moduledoc "Reusable structured execution-profile fields and lossless scalar conversion."
 
-  use Phoenix.Component
+  import Phoenix.Component, only: [sigil_H: 2]
 
   alias SymphonyElixir.ExecutionProfiles.Configuration
 
@@ -88,14 +88,15 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
   @spec worker_mode(map()) :: String.t()
   def worker_mode(worker) when is_map(worker) do
     cond do
-      is_map(worker_value(worker, "environment")) -> "managed"
+      Map.has_key?(worker, "environment") or Map.has_key?(worker, :environment) -> "managed"
       worker_value(worker, "ssh_hosts") in [nil, []] -> "local"
       true -> "ssh"
     end
   end
 
-  @spec duration_input(integer() | nil) :: String.t()
+  @spec duration_input(term()) :: String.t()
   def duration_input(nil), do: ""
+  def duration_input(milliseconds) when is_integer(milliseconds) and milliseconds < 0, do: "-" <> duration_input(-milliseconds)
 
   def duration_input(milliseconds) when is_integer(milliseconds) do
     whole = div(milliseconds, 1_000)
@@ -107,7 +108,6 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
       fraction =
         milliseconds
         |> rem(1_000)
-        |> abs()
         |> Integer.to_string()
         |> String.pad_leading(3, "0")
         |> String.trim_trailing("0")
@@ -115,6 +115,15 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
       "#{whole}.#{fraction}"
     end
   end
+
+  def duration_input(milliseconds) when is_binary(milliseconds) do
+    case Ecto.Type.cast(:integer, milliseconds) do
+      {:ok, value} -> duration_input(value)
+      :error -> milliseconds
+    end
+  end
+
+  def duration_input(value), do: safe_json(value)
 
   @spec parse_duration(term(), String.t()) :: {:ok, non_neg_integer()} | {:error, map()}
   def parse_duration(value, path) when is_binary(value) do
@@ -170,7 +179,7 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
            {:ok, retention} <- parse_duration(params["terminal_retention"], "worker.environment.terminal_retention_ms"),
            {:ok, kind} <- required_text(params["environment_kind"], "worker.environment.kind"),
            {:ok, deployment} <- required_text(params["deployment_id"], "worker.environment.deployment_id") do
-        environment = Map.get(original, "environment", %{})
+        environment = original_environment(original)
 
         {:ok,
          Map.merge(environment, %{
@@ -186,18 +195,21 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
   end
 
   defp decode_provider(value, original) do
-    original_provider = get_in(original, ["environment", "provider"]) || %{}
+    original_provider = Map.get(original_environment(original), "provider", %{})
 
     case Jason.decode(value || "") do
-      {:ok, provider} when is_map(provider) -> {:ok, restore_redacted(provider, original_provider)}
+      {:ok, provider} when is_map(provider) -> Configuration.restore_redacted(provider, original_provider, "worker.environment.provider")
       {:ok, _} -> {:error, [%{path: "worker.environment.provider", message: "must be a JSON object"}]}
       {:error, reason} -> {:error, [%{path: "worker.environment.provider", message: "invalid JSON: #{Exception.message(reason)}"}]}
     end
   end
 
-  defp restore_redacted(value, original) when value == "$REDACTED", do: original
-  defp restore_redacted(map, original) when is_map(map), do: Map.new(map, fn {key, child} -> {key, restore_redacted(child, Map.get(original || %{}, key))} end)
-  defp restore_redacted(value, _original), do: value
+  defp original_environment(original) do
+    case Map.get(original, "environment") do
+      environment when is_map(environment) -> environment
+      _ -> %{}
+    end
+  end
 
   defp required_text(value, path) when is_binary(value) do
     if String.trim(value) == "", do: {:error, %{path: path, message: "must not be blank"}}, else: {:ok, String.trim(value)}

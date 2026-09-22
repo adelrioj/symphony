@@ -1,5 +1,3 @@
-# credo:disable-for-this-file Credo.Check.Refactor.CyclomaticComplexity
-# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 defmodule SymphonyElixir.LaneStore do
   @moduledoc "Runtime lane authority: lock-free ETS reads, serialized writes and environment ownership, and fenced runtime lifecycle."
   use GenServer
@@ -129,22 +127,16 @@ defmodule SymphonyElixir.LaneStore do
   @spec remove(lane_id()) :: :ok
   def remove(lane_id), do: GenServer.call(__MODULE__, {:remove, lane_id}, :infinity)
 
-  @doc "Executes a DB mutation and publishes it under the same authority as guard acquisition. The callback receives an identity checker and must return a committed transaction result."
+  @doc """
+  Executes a DB mutation and publishes it under the same authority as guard acquisition.
+  The callback receives an identity checker. A `{:delete_profile, id}` target also protects
+  captured dispatch references and flushes queued run references before opening the transaction.
+  """
   @spec mutate(lane_id() | nil, ((Schema.t() -> :ok | {:error, term()}) -> term()), String.t() | nil) :: term()
   def mutate(lane_id, fun, reason) do
     case Process.whereis(__MODULE__) do
-      nil -> :global.trans({__MODULE__, self()}, fn -> fun.(&allow_identity/1) end)
+      nil -> :global.trans({__MODULE__, self()}, fn -> mutate_offline(lane_id, fun) end)
       pid -> GenServer.call(pid, {:mutate, lane_id, fun, reason}, :infinity)
-    end
-  end
-
-  @spec check_identity(lane_id() | nil, Schema.t()) :: :ok | {:error, :environment_identity_in_use}
-  def check_identity(nil, _settings), do: :ok
-
-  def check_identity(lane_id, settings) do
-    case Process.whereis(__MODULE__) do
-      nil -> :ok
-      pid -> GenServer.call(pid, {:check_identity, lane_id, effective_identity(settings), settings})
     end
   end
 
@@ -204,6 +196,15 @@ defmodule SymphonyElixir.LaneStore do
   end
 
   @impl true
+  def handle_call({:mutate, {:delete_profile, id}, fun, reason}, from, state) do
+    if Enum.any?(state.reservations, fn {_token, reservation} -> reservation.profile_id == id end) do
+      {:reply, {:error, [%{path: "dispatches", message: "profile is still referenced by preparing or active attempts"}]}, state}
+    else
+      flush_run_references()
+      handle_call({:mutate, nil, fun, reason}, from, state)
+    end
+  end
+
   def handle_call({:mutate, lane_id, fun, reason}, _from, state) do
     result = Repo.transaction(fn -> prepare_mutation(lane_id, fun, state) end)
     publish_mutation(result, reason, state)
@@ -221,7 +222,8 @@ defmodule SymphonyElixir.LaneStore do
       {:ok, %Entry{enabled: true, error: nil, settings: %Schema{}} = entry} ->
         token = make_ref()
         monitor = Process.monitor(owner)
-        reservation = %{lane_id: id, owner: owner, monitor: monitor, identity: effective_identity(entry.settings)}
+        identity = effective_identity(entry.settings)
+        reservation = %{lane_id: id, profile_id: entry.profile_id, owner: owner, monitor: monitor, identity: identity}
 
         state = %{state | reservations: Map.put(state.reservations, token, reservation), reservation_monitors: Map.put(state.reservation_monitors, monitor, token)}
         {:reply, {:ok, token, entry}, state}
@@ -273,8 +275,6 @@ defmodule SymphonyElixir.LaneStore do
     {:reply, :ok, state}
   end
 
-  def handle_call({:check_identity, id, identity, settings}, _from, state), do: {:reply, identity_check(state, id, identity, settings), state}
-
   def handle_call({:protect_environment, id, identity, token}, _from, state) do
     case Map.get(state.guards, id) do
       %{identity: ^identity, token: ^token} -> {:reply, {:ok, token}, state}
@@ -287,18 +287,12 @@ defmodule SymphonyElixir.LaneStore do
       token = make_ref()
       {:reply, {:ok, token}, put_in(state.guards[id], %{identity: nil, token: token})}
     else
-      current =
-        case settings(id) do
-          {:ok, settings} ->
-            if is_nil(EnvironmentConfig.identity(settings)), do: nil, else: effective_identity(settings)
-
-          _ ->
-            :unavailable
-        end
+      current = current_environment_identity(id)
 
       if current == identity and identity_check(state, id, identity) == :ok do
         token = make_ref()
-        {:reply, {:ok, token}, put_in(state.guards[id], %{identity: identity, token: token})}
+        guard = state.guards |> Map.fetch!(id) |> Map.merge(%{identity: identity, token: token}) |> Map.delete(:released?)
+        {:reply, {:ok, token}, put_in(state.guards[id], guard)}
       else
         {:reply, {:error, :environment_identity_in_use}, state}
       end
@@ -366,6 +360,18 @@ defmodule SymphonyElixir.LaneStore do
   defp allow_identity({:delete, settings}), do: removable_location?(settings, false)
   defp allow_identity(_settings), do: :ok
 
+  defp mutate_offline({:delete_profile, _id}, fun) do
+    flush_run_references()
+    fun.(&allow_identity/1)
+  end
+
+  defp mutate_offline(_lane_id, fun), do: fun.(&allow_identity/1)
+
+  defp flush_run_references do
+    if Process.whereis(Runs.Writer), do: Runs.flush()
+    :ok
+  end
+
   defp restore_lanes(lanes, state) do
     # A previous authority's runtimes hold stale environment tokens. Restart them
     # together rather than letting those tokens outlive their owner.
@@ -386,7 +392,8 @@ defmodule SymphonyElixir.LaneStore do
         end
       end)
 
-    conflicts = overlapping_lanes(entries)
+    state = Enum.reduce(entries, state, &ensure_guard(&2, &1))
+    conflicts = entries |> ownership_entries(state) |> overlapping_lanes()
 
     entries
     |> Enum.map(fn entry ->
@@ -419,7 +426,7 @@ defmodule SymphonyElixir.LaneStore do
 
   defp prepare_publication({:batch, value, ids}, _lane_id, state) when is_list(ids) do
     entries = Enum.map(ids, &prepare_entry!(&1, state, false))
-    validate_location_ownership!(entries)
+    validate_location_ownership!(entries, state)
     {:mutation, value, entries, ids}
   end
 
@@ -427,11 +434,13 @@ defmodule SymphonyElixir.LaneStore do
     id = if lane, do: lane.id, else: lane_id
     ids = if is_nil(id), do: [], else: [id]
     entries = Enum.map(ids, &prepare_entry!(&1, state, true))
-    validate_location_ownership!(entries)
+    validate_location_ownership!(entries, state)
     {:mutation, lane, entries, ids}
   end
 
-  defp validate_location_ownership!(prepared) do
+  defp validate_location_ownership!([], _state), do: :ok
+
+  defp validate_location_ownership!(prepared, state) do
     current = Map.new(list(), &{&1.lane_id, &1})
 
     current =
@@ -440,31 +449,57 @@ defmodule SymphonyElixir.LaneStore do
         %{id: id, entry: entry}, acc -> Map.put(acc, id, entry)
       end)
 
-    entries = Map.values(current)
+    entries = current |> Map.values() |> ownership_entries(state)
+    candidate_ids = MapSet.new(prepared, & &1.id)
 
-    case Enum.find_value(entries, fn left ->
-           Enum.find_value(entries, fn right ->
-             if left.lane_id < right.lane_id and locations_overlap?(left.settings, right.settings),
-               do: {:workspace_identity_in_use, left.lane_id, right.lane_id}
-           end)
-         end) do
+    conflict =
+      Enum.find_value(entries, fn entry ->
+        if MapSet.member?(candidate_ids, entry.lane_id), do: location_conflict(entry, entries)
+      end)
+
+    case conflict do
       nil -> :ok
       reason -> Repo.rollback(reason)
     end
   end
 
+  defp ownership_entries(entries, state) do
+    Enum.map(entries, fn
+      %Entry{settings: %Schema{}} = entry ->
+        entry
+
+      entry ->
+        guard = Map.get_lazy(state.guards, entry.lane_id, fn -> reconstructed_guard(entry.lane_id) end)
+        %{entry | settings: guard.settings}
+    end)
+  end
+
+  defp location_conflict(left, entries) do
+    Enum.find_value(entries, fn right ->
+      if conflicting_locations?(left, right) or conflicting_locations?(right, left),
+        do: {:workspace_identity_in_use, left.lane_id, right.lane_id}
+    end)
+  end
+
+  defp conflicting_locations?(left, right) do
+    left.lane_id < right.lane_id and
+      (is_nil(left.settings) or is_nil(right.settings) or locations_overlap?(left.settings, right.settings))
+  end
+
   defp overlapping_lanes(entries) do
     Enum.reduce(entries, %{}, fn left, conflicts ->
-      Enum.reduce(entries, conflicts, fn right, conflicts ->
-        if left.lane_id < right.lane_id and locations_overlap?(left.settings, right.settings) do
-          conflicts
-          |> Map.update(left.lane_id, [right.lane_id], &[right.lane_id | &1])
-          |> Map.update(right.lane_id, [left.lane_id], &[left.lane_id | &1])
-        else
-          conflicts
-        end
-      end)
+      Enum.reduce(entries, conflicts, &add_location_conflict(left, &1, &2))
     end)
+  end
+
+  defp add_location_conflict(left, right, conflicts) do
+    if conflicting_locations?(left, right) do
+      conflicts
+      |> Map.update(left.lane_id, [right.lane_id], &[right.lane_id | &1])
+      |> Map.update(right.lane_id, [left.lane_id], &[left.lane_id | &1])
+    else
+      conflicts
+    end
   end
 
   @doc false
@@ -476,17 +511,13 @@ defmodule SymphonyElixir.LaneStore do
     targets_overlap?(left.targets, right.targets) and roots_overlap?(left.root, right.root)
   end
 
-  def locations_overlap?(_, _), do: false
-
   defp targets_overlap?(left, right), do: Enum.any?(left, &(&1 in right))
 
-  defp roots_overlap?(left, right) when is_binary(left) and is_binary(right) do
+  defp roots_overlap?(left, right) do
     left_parts = Path.split(left)
     right_parts = Path.split(right)
     prefix?(left_parts, right_parts) or prefix?(right_parts, left_parts)
   end
-
-  defp roots_overlap?(_, _), do: false
 
   defp prefix?(parts, prefix), do: Enum.take(parts, length(prefix)) == prefix
 
@@ -494,38 +525,23 @@ defmodule SymphonyElixir.LaneStore do
     lane = Lanes.get_any(id)
     previous = previous_entry(id)
 
-    case lane do
-      nil ->
-        %{id: id, lane: nil, previous: previous, entry: nil}
+    %{id: id, lane: lane, previous: previous, entry: prepare_lane_entry!(lane, previous, state, allow_invalid)}
+  end
 
-      %{deleted_at: nil} ->
-        case build_entry(lane, previous) do
-          {:ok, entry} ->
-            if identity_allowed?(state, entry),
-              do: %{id: id, lane: lane, previous: previous, entry: entry},
-              else: Repo.rollback(:environment_identity_in_use)
+  defp prepare_lane_entry!(nil, _previous, _state, _allow_invalid), do: nil
+  defp prepare_lane_entry!(%{deleted_at: deleted_at}, _previous, _state, true) when not is_nil(deleted_at), do: nil
 
-          {:error, error} when allow_invalid and not lane.enabled ->
-            %{id: id, lane: lane, previous: previous, entry: invalid_entry(lane, previous, error)}
+  defp prepare_lane_entry!(lane, previous, state, allow_invalid) do
+    case build_entry(lane, previous) do
+      {:ok, entry} ->
+        unless identity_allowed?(state, entry), do: Repo.rollback(:environment_identity_in_use)
+        if is_nil(lane.deleted_at), do: entry
 
-          {:error, error} ->
-            Repo.rollback({:lane_invalid, id, error})
-        end
+      {:error, error} when allow_invalid and not lane.enabled ->
+        invalid_entry(lane, previous, error)
 
-      lane ->
-        if allow_invalid do
-          %{id: id, lane: lane, previous: previous, entry: nil}
-        else
-          case build_entry(lane, previous) do
-            {:ok, entry} ->
-              if identity_allowed?(state, entry),
-                do: %{id: id, lane: lane, previous: previous, entry: nil},
-                else: Repo.rollback(:environment_identity_in_use)
-
-            {:error, error} ->
-              Repo.rollback({:lane_invalid, id, error})
-          end
-        end
+      {:error, error} ->
+        Repo.rollback({:lane_invalid, lane.id, error})
     end
   end
 
@@ -550,18 +566,7 @@ defmodule SymphonyElixir.LaneStore do
 
     state =
       Enum.zip(prepared, entries)
-      |> Enum.reduce(state, fn
-        {%{previous: _previous}, nil}, acc ->
-          acc
-
-        {%{previous: previous}, entry}, acc ->
-          acc
-          |> ensure_guard(entry)
-          |> then(fn acc ->
-            if entry.enabled, do: acc, else: forget_monitors(acc, entry.lane_id)
-          end)
-          |> then(&apply_runtime(previous, entry, &1))
-      end)
+      |> Enum.reduce(state, &reconcile_publication/2)
 
     removed = Enum.filter(prepared, &is_nil(&1.entry))
     state = Enum.reduce(removed, state, fn %{id: id}, acc -> remove_lane(id, acc) end)
@@ -569,6 +574,14 @@ defmodule SymphonyElixir.LaneStore do
   end
 
   defp publish_mutation({:error, error}, _reason, state), do: {:reply, {:error, error}, state}
+
+  defp reconcile_publication({_prepared, nil}, state), do: state
+
+  defp reconcile_publication({%{previous: previous}, entry}, state) do
+    state = ensure_guard(state, entry)
+    state = if entry.enabled, do: state, else: forget_monitors(state, entry.lane_id)
+    apply_runtime(previous, entry, state)
+  end
 
   defp maybe_reason(nil, _reason), do: nil
   defp maybe_reason(entry, nil), do: entry
@@ -715,41 +728,27 @@ defmodule SymphonyElixir.LaneStore do
     %{base | error: Lanes.format_errors(error)}
   end
 
-  defp profile_name(lane) do
-    case lane.execution_profile do
-      %SymphonyElixir.ExecutionProfiles.Profile{name: name} ->
-        name
-
-      _ ->
-        case SymphonyElixir.ExecutionProfiles.get(lane.execution_profile_id) do
-          %{name: name} -> name
-          _ -> nil
-        end
-    end
-  end
+  defp profile_name(lane), do: SymphonyElixir.ExecutionProfiles.get(lane.execution_profile_id).name
 
   defp profile_workspace_base(lane) do
-    profile =
-      case lane.execution_profile do
-        %SymphonyElixir.ExecutionProfiles.Profile{} = profile -> profile
-        _ -> SymphonyElixir.ExecutionProfiles.get(lane.execution_profile_id)
-      end
+    lane.execution_profile_id
+    |> SymphonyElixir.ExecutionProfiles.get()
+    |> canonical_profile_base()
+  end
 
-    case profile do
-      %SymphonyElixir.ExecutionProfiles.Profile{worker: worker} = profile ->
-        base = Configuration.workspace_base(Map.from_struct(profile))
+  defp canonical_profile_base(profile) do
+    base = Configuration.workspace_base(Map.from_struct(profile))
+    worker = profile.worker
 
-        if is_binary(base) and worker["ssh_hosts"] in [nil, []] and not is_map(worker["environment"]) do
-          case PathSafety.canonicalize(Path.expand(base, Config.data_root())) do
-            {:ok, canonical} -> canonical
-            _ -> base
-          end
-        else
-          base
-        end
+    if is_binary(base) and is_map(worker) and worker["ssh_hosts"] in [nil, []] and not is_map(worker["environment"]),
+      do: canonical_local_base(base),
+      else: base
+  end
 
-      _ ->
-        nil
+  defp canonical_local_base(base) do
+    case PathSafety.canonicalize(Path.expand(base, Config.data_root())) do
+      {:ok, canonical} -> canonical
+      _ -> base
     end
   end
 
@@ -762,9 +761,6 @@ defmodule SymphonyElixir.LaneStore do
 
   defp apply_runtime(previous, entry, state) do
     cond do
-      is_binary(entry.error) ->
-        state
-
       # A late start from an old authority must be adopted during restoration or enable.
       runtime_start_required?(previous, entry.lane_id, state.pending_preflights) ->
         LaneSupervisor.start_lane(entry)
@@ -901,29 +897,38 @@ defmodule SymphonyElixir.LaneStore do
         :ok
 
       true ->
-        case Map.get(state.guards, id) do
-          nil -> :ok
-          %{released?: true} -> :ok
-          %{identity: ^identity} -> :ok
-          %{identity: old_identity} -> allow_identity_change(state, id, old_identity, settings)
-        end
+        guard_identity_check(state, id, identity, settings)
+    end
+  end
+
+  defp current_environment_identity(id) do
+    case settings(id) do
+      {:ok, settings} ->
+        if is_nil(EnvironmentConfig.identity(settings)), do: nil, else: effective_identity(settings)
+
+      _ ->
+        :unavailable
+    end
+  end
+
+  defp guard_identity_check(state, id, identity, settings) do
+    case Map.get(state.guards, id) do
+      nil -> :ok
+      %{released?: true} -> :ok
+      %{identity: ^identity} -> :ok
+      %{identity: old_identity} -> allow_identity_change(state, id, old_identity, settings)
     end
   end
 
   defp identity_allowed?(_state, %Entry{settings: nil}), do: true
   defp identity_allowed?(state, entry), do: identity_check(state, entry.lane_id, effective_identity(entry.settings), entry.settings) == :ok
 
-  defp allow_identity_change(_state, id, old_identity, new_settings) do
-    case previous_entry(id) do
-      %Entry{settings: %Schema{} = settings} ->
-        if managed_identity?(settings) do
-          {:error, :environment_identity_in_use}
-        else
-          case Workspace.location_inventory(settings) do
-            :empty -> :ok
-            _ -> {:error, :environment_identity_in_use}
-          end
-        end
+  defp allow_identity_change(state, id, old_identity, new_settings) do
+    case Map.get(state.guards, id) do
+      %{settings: %Schema{} = settings} ->
+        if not managed_identity?(settings) and Workspace.location_inventory(settings) == :empty,
+          do: :ok,
+          else: {:error, :environment_identity_in_use}
 
       _ ->
         if old_identity == nil and is_struct(new_settings, Schema),
@@ -957,13 +962,10 @@ defmodule SymphonyElixir.LaneStore do
   defp released_environment?(state, id), do: match?(%{released?: true}, Map.get(state.guards, id))
 
   defp location_source(lane) do
-    profile =
-      case lane.execution_profile do
-        %SymphonyElixir.ExecutionProfiles.Profile{} = profile -> profile
-        _ -> SymphonyElixir.ExecutionProfiles.get(lane.execution_profile_id)
-      end
-
-    if profile, do: Configuration.location_source(Map.from_struct(profile), lane.workspace_subdir)
+    lane.execution_profile_id
+    |> SymphonyElixir.ExecutionProfiles.get()
+    |> Map.from_struct()
+    |> Configuration.location_source(lane.workspace_subdir)
   end
 
   defp managed_identity?(settings), do: not is_nil(EnvironmentConfig.identity(settings))
@@ -980,12 +982,27 @@ defmodule SymphonyElixir.LaneStore do
     identity = effective_identity(settings)
 
     case Map.get(state.guards, id) do
-      %{identity: ^identity} -> state
-      _ -> put_in(state.guards[id], %{identity: identity, token: make_ref()})
+      %{identity: ^identity} = guard -> put_in(state.guards[id], Map.put(guard, :settings, settings))
+      _ -> put_in(state.guards[id], %{identity: identity, settings: settings, token: make_ref()})
     end
   end
 
-  defp ensure_guard(state, _entry), do: state
+  defp ensure_guard(state, %Entry{lane_id: id}) do
+    if Map.has_key?(state.guards, id) do
+      state
+    else
+      put_in(state.guards[id], reconstructed_guard(id))
+    end
+  end
+
+  defp reconstructed_guard(id) do
+    with %{} = lane <- Lanes.get(id),
+         {:ok, settings} <- Lanes.ownership_settings(lane) do
+      %{identity: effective_identity(settings), settings: settings, token: make_ref()}
+    else
+      _ -> %{identity: :unknown, settings: nil, token: make_ref()}
+    end
+  end
 
   defp publish(entry) do
     :ets.insert(@table, {entry.lane_id, entry})

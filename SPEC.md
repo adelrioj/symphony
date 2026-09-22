@@ -645,18 +645,42 @@ An execution profile is mutable shared infrastructure selected by one or more la
 - A lane owns tracker selection, prompt, hooks, backend, limits, observability, and
   `workspace_subdir`; its `execution_profile_id` selects the profile used to compose effective
   settings.
+- Structured editors MUST preserve omitted values and meaningful explicit empty values on
+  unrelated edits. Displaying an effective default MUST NOT persist it unless it is changed.
+  Malformed adapter provider data MUST remain available for explicit repair without being
+  silently replaced on an unrelated save.
+  Controls MUST display schema-accepted scalar values in their documented units and use effective
+  defaults for null values without rewriting the stored representation on unrelated edits.
+  Backend-specific edits MUST survive conditional controls disappearing before submission.
+  The selected tracker's controls MUST take precedence over hidden aliases of shared provider fields.
 - A profile edit validates every linked lane, including disabled lanes and soft-deleted references,
   then publishes all valid effective entries atomically. Future dispatches use the new settings;
   active attempts, retries already captured, and cleanup helpers retain their dispatch snapshot.
+  Asynchronous cleanup operations MUST install the retained context before selecting hooks
+  or hook timeouts; a temporary context in their caller is insufficient.
 - Profiles do not form a global scheduling pool. Each lane keeps its own scheduler and concurrency
   limits; a shared SSH host is subject only to the configured per-host limit semantics.
 - New lanes are disabled and slugs are immutable. Changing a workspace/target identity is rejected
   while a dispatch reservation, active attempt, retained workspace/resource, or unverifiable remote
   inventory still owns the old identity. Repair or supported cleanup must clear ownership first.
-- Deleting a profile is refused while any lane reference remains, including soft-deleted history.
+- Invalid or quarantined lanes retain verifiable execution ownership. Startup and live mutations
+  MUST include that ownership when rejecting overlapping locations; unknown ownership MUST NOT
+  imply free space. Repairing unrelated operational settings in place does not release ownership.
+  Known legacy overlap groups MUST be repairable independently, and an unlinked profile claims
+  no workspace. Changed locations MUST still be checked against all retained ownership.
+  Offline imports MUST likewise validate the edited lane while retaining independently verifiable
+  ownership for other lanes whose operational configuration is invalid.
+- Deleting a profile is refused while any lane reference (including soft-deleted lanes), captured
+  preparing/active dispatch reference, or retained run reference remains. Queued run-reference
+  writes MUST be processed before deletion checks persisted references. Historical attempts keep
+  their original profile.
   Profile saves never provision infrastructure, create revisions, or provide profile-history rollback.
 - Persisted configuration and exports retain `$VAR`/secret-reference syntax. Resolved credentials
   MUST NOT appear in database attributes, API responses, UI summaries, exports, or errors.
+- Credential redaction applies through nested arrays and maps, including descendants of sensitive
+  keys. Only complete environment-variable references are exempt; dollar-prefixed literal secrets
+  and multiline values MUST be masked. Unparseable historical front matter MUST remain preserved
+  in storage but MUST NOT be rendered as raw source when its credentials cannot be structurally redacted.
 
 ### 5.5 Workflow Validation and Error Surface
 

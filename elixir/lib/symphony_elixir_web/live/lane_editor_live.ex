@@ -1,5 +1,3 @@
-# credo:disable-for-this-file Credo.Check.Refactor.CyclomaticComplexity
-# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 defmodule SymphonyElixirWeb.LaneEditorLive do
   @moduledoc "Structured lane editor with a lossless raw draft behind its controls."
 
@@ -19,15 +17,15 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
   @config_fields [
     {"tracker_kind", ["tracker", "kind"], :text},
-    {"tracker_endpoint", ["tracker", "endpoint"], :text},
-    {"tracker_api_key", ["tracker", "api_key"], :text},
-    {"tracker_project_slug", ["tracker", "project_slug"], :text},
-    {"tracker_assignee", ["tracker", "assignee"], :text},
     {"tracker_required_labels", ["tracker", "required_labels"], :list},
     {"tracker_any_labels", ["tracker", "any_labels"], :list},
     {"tracker_active_states", ["tracker", "active_states"], :list},
     {"tracker_terminal_states", ["tracker", "terminal_states"], :list},
     {"tracker_provider_json", ["tracker", "provider"], :json},
+    {"tracker_endpoint", ["tracker", "provider", "endpoint"], :text},
+    {"tracker_api_key", ["tracker", "provider", "api_key"], :secret},
+    {"tracker_project_slug", ["tracker", "provider", "project_slug"], :text},
+    {"tracker_assignee", ["tracker", "provider", "assignee"], :text},
     {"tracker_team_keys", ["tracker", "provider", "team_keys"], :list},
     {"tracker_current_cycle", ["tracker", "provider", "current_cycle"], :boolean},
     {"github_api_url", ["tracker", "provider", "api_url"], :text},
@@ -75,7 +73,8 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {"observability_refresh_ms", ["observability", "refresh_ms"], :duration},
     {"observability_render_interval_ms", ["observability", "render_interval_ms"], :duration}
   ]
-  @tracker_provider_keys for {_field, ["tracker", "provider", key], _type} <- @config_fields, do: key
+  @tracker_provider_fields for {field, ["tracker", "provider", key], _type} <- @config_fields, do: {field, key}
+  @linear_legacy_keys ~w(endpoint api_key project_slug assignee)
 
   @impl true
   def mount(%{"slug" => slug}, _session, socket) do
@@ -96,9 +95,10 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   end
 
   def mount(_params, _session, socket) do
+    if connected?(socket), do: :ok = ObservabilityPubSub.subscribe_profiles()
     profiles = ExecutionProfiles.list()
     profile = List.first(profiles)
-    config = Schema.lane_defaults()
+    config = Schema.lane_defaults() |> canonical_linear_provider()
     params = lane_params(nil, nil, config) |> Map.put("execution_profile_id", profile && profile.id)
 
     {:ok,
@@ -106,6 +106,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
        lane: nil,
        params: params,
        original_config: config,
+       original_params: params,
        profiles: profiles,
        errors: [],
        warnings: [],
@@ -117,19 +118,10 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   def handle_event(event, payload, socket) when event in ["validate", "save"] do
     incoming = if is_map(payload), do: Map.get(payload, "lane")
     {params, input_errors} = merge_params(socket.assigns.params, incoming)
-    {config_result, validation_errors, warnings} = validate(socket.assigns.lane, params, socket.assigns.original_config)
+    {config_result, validation_errors, warnings} = validate(socket.assigns.lane, params, socket.assigns.original_config, socket.assigns.original_params)
     errors = input_errors ++ validation_errors
 
-    result =
-      if event == "save" and errors == [] do
-        with {:ok, config} <- config_result,
-             {:ok, attrs} <- canonical_params(params, config),
-             attrs <- if(socket.assigns.lane, do: Map.delete(attrs, "slug"), else: attrs) do
-          save_lane(socket.assigns.lane, attrs)
-        end
-      else
-        {:error, errors}
-      end
+    result = submit_lane(event, socket.assigns.lane, params, config_result, errors)
 
     case result do
       {:ok, lane} -> {:noreply, push_navigate(socket, to: "/lanes/#{lane.slug}")}
@@ -140,7 +132,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   def handle_event("open_profile_create", _payload, socket), do: {:noreply, assign(socket, :profile_create, profile_create_assigns())}
   def handle_event("cancel_profile_create", _payload, socket), do: {:noreply, assign(socket, :profile_create, nil)}
 
-  def handle_event(event, %{"profile" => incoming}, socket) when event in ["validate_profile_create", "create_profile"] do
+  def handle_event(event, %{"profile" => incoming}, socket) when event in ["validate_profile_create", "create_profile"] and is_map(incoming) do
     panel = socket.assigns.profile_create || profile_create_assigns()
     params = Map.merge(panel.params, Map.take(incoming, Map.keys(panel.params)))
     {attrs, errors} = ConfigurationFields.profile_attributes(params, panel.original_worker)
@@ -213,7 +205,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
           <.lane_field_errors errors={@errors} field="name" path="name" />
           <label for="lane-slug">Slug {if @lane, do: "(immutable after creation)", else: "(used as the default workspace subdirectory)"}</label><input id="lane-slug" type="text" name="lane[slug]" value={@params["slug"]} readonly={not is_nil(@lane)} />
           <.lane_field_errors errors={@errors} field="slug" path="slug" />
-          <label for="tracker-kind">Tracker adapter</label><select id="tracker-kind" name="lane[tracker_kind]"><option :for={kind <- Tracker.kinds()} value={kind} selected={@params["tracker_kind"] == kind}>{kind}</option></select>
+          <label for="tracker-kind">Tracker adapter</label><select id="tracker-kind" name="lane[tracker_kind]"><option :if={@params["tracker_kind"] in [nil, ""]} value="">Choose an adapter</option><option :for={kind <- Tracker.kinds()} value={kind} selected={@params["tracker_kind"] == kind}>{kind}</option></select>
           <.lane_field_errors errors={@errors} field="tracker_kind" path="tracker.kind" />
 
           <div :if={@params["tracker_kind"] == "linear"} class="config-subsection">
@@ -338,8 +330,27 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     """
   end
 
+  defp submit_lane("save", lane, params, {:ok, config}, []) do
+    with {:ok, attrs} <- canonical_params(params, config) do
+      attrs = if lane, do: Map.delete(attrs, "slug"), else: attrs
+      save_lane(lane, attrs)
+    end
+  end
+
+  defp submit_lane(_event, _lane, _params, _config_result, errors), do: {:error, errors}
+
   defp assign_editor(socket, lane, params, config),
-    do: assign(socket, lane: lane, params: params, original_config: config, profiles: ExecutionProfiles.list(), errors: [], warnings: config_warnings(config), profile_create: nil)
+    do:
+      assign(socket,
+        lane: lane,
+        params: params,
+        original_config: config,
+        original_params: params,
+        profiles: ExecutionProfiles.list(),
+        errors: validate_against_profile(lane, params, config),
+        warnings: config_warnings(config),
+        profile_create: nil
+      )
 
   defp save_lane(nil, params), do: Lanes.create(params)
 
@@ -351,12 +362,10 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   end
 
   defp merge_params(params, incoming) when is_map(incoming) do
-    submitted_fields = incoming |> Map.keys() |> MapSet.new()
+    submitted_fields = MapSet.union(Map.get(params, "_submitted_fields", MapSet.new()), MapSet.new(Map.keys(incoming)))
 
     {params, errors} =
-      Enum.reduce(Map.take(incoming, Map.keys(params)), {params, []}, fn {field, value}, {params, errors} ->
-        if is_binary(value) or is_boolean(value) or is_integer(value), do: {Map.put(params, field, value), errors}, else: {params, [%{path: field, message: "must be a scalar form value"} | errors]}
-      end)
+      Enum.reduce(Map.take(incoming, Map.keys(params)), {params, []}, &merge_param/2)
 
     params = Map.put(params, "_submitted_fields", submitted_fields)
 
@@ -365,15 +374,20 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
   defp merge_params(params, _incoming), do: {params, [%{path: "lane", message: "must be an object"}]}
 
-  defp validate(lane, params, original_config) do
-    config_result = config_from_params(params, original_config)
+  defp merge_param({field, value}, {params, errors}) when is_binary(value) or is_boolean(value) or is_integer(value),
+    do: {Map.put(params, field, value), errors}
+
+  defp merge_param({field, _value}, {params, errors}), do: {params, [%{path: field, message: "must be a scalar form value"} | errors]}
+
+  defp validate(lane, params, original_config, original_params) do
+    config_result = config_from_params(params, original_config, original_params)
     params = Map.put(params, "workspace_subdir", workspace_subdir(params))
 
     lane_errors =
       (lane || %Lane{})
       |> Lane.changeset(Map.take(params, ~w(slug name enabled execution_profile_id workspace_subdir)))
-      |> Ecto.Changeset.traverse_errors(fn {message, opts} -> Enum.reduce(opts, message, fn {key, value}, acc -> String.replace(acc, "%{#{key}}", to_string(value)) end) end)
-      |> Enum.flat_map(fn {field, messages} -> Enum.map(messages, &%{path: to_string(field), message: &1}) end)
+      |> Ecto.Changeset.traverse_errors(&changeset_message/1)
+      |> Enum.flat_map(&changeset_field_errors/1)
 
     errors =
       case config_result do
@@ -390,30 +404,23 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {config_result, errors, warnings}
   end
 
+  defp changeset_message({message, opts}), do: Enum.reduce(opts, message, fn {key, value}, acc -> String.replace(acc, "%{#{key}}", to_string(value)) end)
+  defp changeset_field_errors({field, messages}), do: Enum.map(messages, &%{path: to_string(field), message: &1})
+
   defp validate_against_profile(lane, params, config) do
     case integer_param(params["execution_profile_id"]) do
-      {:ok, id} ->
-        case ExecutionProfiles.get(id) do
-          nil ->
-            [%{path: "execution_profile_id", message: "not found"}]
-
-          profile ->
-            subdir = workspace_subdir(params)
-
-            errors_for_resolution(
-              Configuration.resolve(
-                profile_attrs(profile),
-                config,
-                subdir,
-                params["prompt"],
-                Lanes.cached_root(lane && lane.id, profile_attrs(profile), subdir)
-              )
-            )
-        end
-
-      {:error, errors} ->
-        errors
+      {:ok, id} -> validate_profile_config(ExecutionProfiles.get(id), lane, params, config)
+      {:error, errors} -> errors
     end
+  end
+
+  defp validate_profile_config(nil, _lane, _params, _config), do: [%{path: "execution_profile_id", message: "not found"}]
+
+  defp validate_profile_config(profile, lane, params, config) do
+    subdir = workspace_subdir(params)
+    attrs = profile_attrs(profile)
+
+    errors_for_resolution(Configuration.resolve(attrs, config, subdir, params["prompt"], Lanes.cached_root(lane && lane.id, attrs, subdir)))
   end
 
   defp errors_for_resolution({:ok, _}), do: []
@@ -428,30 +435,50 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     end
   end
 
-  defp config_from_params(params, original_config) do
+  defp config_from_params(params, original_config, original_params) do
     with {:ok, advanced} <- decode_json(params["advanced_json"], "advanced", advanced_config(original_config)),
          base = deep_merge(known_config(original_config), advanced),
-         {config, errors} <- patch_config(base, params, original_config) do
-      if errors == [], do: {:ok, config}, else: {:error, errors}
+         {config, errors} <- patch_config(base, params, original_config, original_params) do
+      if errors == [], do: {:ok, canonical_linear_provider(config)}, else: {:error, errors}
     end
   end
 
-  defp patch_config(config, params, original_config) do
+  defp patch_config(config, params, original_config, original_params) do
     submitted_fields = Map.get(params, "_submitted_fields", MapSet.new())
+    provider_prefix = if params["tracker_kind"] == "linear", do: "tracker_", else: "#{params["tracker_kind"]}_"
 
-    Enum.reduce(@config_fields, {config, []}, fn {field, path, type}, {config, errors} ->
-      case if(MapSet.member?(submitted_fields, field), do: parse_value(params[field], type, field, get_in(original_config, path)), else: :keep) do
-        :keep -> {config, errors}
-        {:ok, value} -> {put_or_delete(config, path, value), errors}
-        {:error, error} -> {config, [error | errors]}
+    Enum.reduce(@config_fields, {config, []}, fn {field, path, type} = definition, acc ->
+      original = config_value(original_config, path)
+      unchanged? = same_control_value?(params[field], original_params[field], type)
+
+      if active_config_field?(definition, provider_prefix) and MapSet.member?(submitted_fields, field) and not (is_nil(original) and unchanged?) do
+        patch_field(acc, path, retained_or_parsed_value(unchanged?, params[field], type, field, original))
+      else
+        acc
       end
     end)
   end
 
-  defp parse_value(value, :text, _field, original) do
+  defp active_config_field?({field, ["tracker", "provider", _key], _type}, provider_prefix),
+    do: String.starts_with?(field, provider_prefix)
+
+  defp active_config_field?(_definition, _provider_prefix), do: true
+
+  defp same_control_value?(value, original, :boolean) when value in [true, "true", "on", false, "false", ""],
+    do: truthy?(value) == truthy?(original)
+
+  defp same_control_value?(value, original, _type), do: value == original
+
+  defp retained_or_parsed_value(true, _value, _type, _field, original), do: {:ok, original}
+  defp retained_or_parsed_value(false, value, type, field, original), do: parse_value(value, type, field, original)
+
+  defp patch_field({config, errors}, path, {:ok, value}), do: {put_or_delete(config, path, value), errors}
+  defp patch_field({config, errors}, _path, {:error, field_errors}), do: {config, errors ++ List.wrap(field_errors)}
+
+  defp parse_value(value, :text, field, original) do
     cond do
       value == "$REDACTED" -> {:ok, original}
-      is_binary(value) and String.trim(value) == "" -> {:ok, nil}
+      is_binary(value) and String.trim(value) == "" -> {:ok, blank_text(field, original)}
       is_binary(value) -> {:ok, value}
       true -> {:error, %{path: "config", message: "must be a string"}}
     end
@@ -460,7 +487,9 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   defp parse_value(value, :secret, field, original), do: parse_value(value, :text, field, original)
 
   defp parse_value(value, :list, _field, original) when value == "$REDACTED", do: {:ok, original}
+  defp parse_value("", :list, _field, nil), do: {:ok, nil}
   defp parse_value(value, :list, _field, _original) when is_binary(value), do: {:ok, String.split(value, ~r/[\r\n]+/, trim: true)}
+  defp parse_value(_value, :list, field, _original), do: {:error, %{path: field, message: "must be a string"}}
   defp parse_value(value, :integer, _field, original) when value == "$REDACTED", do: {:ok, original}
   defp parse_value(value, :integer, _field, _original) when value in [nil, ""], do: {:ok, nil}
   defp parse_value(value, :integer, _field, _original) when is_integer(value), do: {:ok, value}
@@ -472,6 +501,8 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     end
   end
 
+  defp parse_value(_value, :integer, field, _original), do: {:error, %{path: field, message: "must be an integer"}}
+
   defp parse_value(value, :duration, _field, original) when value == "$REDACTED", do: {:ok, original}
   defp parse_value(value, :duration, _field, _original) when value in [nil, ""], do: {:ok, nil}
   defp parse_value(value, :duration, field, _original), do: ConfigurationFields.parse_duration(value, config_path(field))
@@ -481,24 +512,33 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   defp parse_value(_value, :boolean, field, _original), do: {:error, %{path: field, message: "must be a boolean"}}
   defp parse_value(value, :json, field, original), do: decode_json(value, field, original)
 
-  defp decode_json(value, _field, _original) when is_map(value), do: {:ok, value}
+  defp blank_text("agent_in_progress_state", _original), do: ""
+  defp blank_text(_field, _original), do: nil
 
   defp decode_json(value, field, original) when is_binary(value) do
     case Jason.decode(value) do
-      {:ok, value} when field != "advanced" -> {:ok, restore_redacted(value, original)}
-      {:ok, map} when is_map(map) -> {:ok, restore_redacted(map, original)}
+      {:ok, value} when field != "advanced" -> Configuration.restore_redacted(value, original, field)
+      {:ok, map} when is_map(map) -> Configuration.restore_redacted(map, original, field)
       {:ok, _} -> {:error, [%{path: field, message: "must be a JSON object"}]}
       {:error, reason} -> {:error, [%{path: field, message: "invalid JSON: #{Exception.message(reason)}"}]}
     end
   end
 
   defp decode_json(_value, field, _original), do: {:error, [%{path: field, message: "must be a JSON object"}]}
-  defp restore_redacted(value, original) when value == "$REDACTED", do: original
-  defp restore_redacted(map, original) when is_map(map), do: Map.new(map, fn {key, child} -> {key, restore_redacted(child, Map.get(original || %{}, key))} end)
-  defp restore_redacted(value, _original), do: value
-  defp put_or_delete(config, path, value) when value in [nil, "", []], do: delete_path(config, path)
+  defp put_or_delete(config, path, nil), do: delete_path(config, path)
   defp put_or_delete(config, [key], value), do: Map.put(config, key, value)
-  defp put_or_delete(config, [key | rest], value), do: Map.put(config, key, put_or_delete(Map.get(config, key) || %{}, rest, value))
+
+  defp put_or_delete(config, [key | rest], value) do
+    case Map.get(config, key) do
+      child when is_map(child) or is_nil(child) ->
+        Map.put(config, key, put_or_delete(child || %{}, rest, value))
+
+      _ ->
+        # Preserve malformed parents so schema validation requires their explicit repair.
+        config
+    end
+  end
+
   defp delete_path(config, [key]), do: Map.delete(config, key)
 
   defp delete_path(config, [key | rest]) do
@@ -513,59 +553,83 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   end
 
   defp lane_params(lane, version, config) do
+    lane = lane || %{slug: nil, name: "", enabled: false, execution_profile_id: nil, workspace_subdir: ""}
+
     params = %{
-      "slug" => lane && lane.slug,
-      "name" => (lane && lane.name) || "",
-      "enabled" => (lane && lane.enabled) || false,
-      "execution_profile_id" => lane && lane.execution_profile_id,
-      "workspace_subdir" => (lane && lane.workspace_subdir) || (lane && lane.slug) || "",
+      "slug" => lane.slug,
+      "name" => lane.name || "",
+      "enabled" => lane.enabled || false,
+      "execution_profile_id" => lane.execution_profile_id,
+      "workspace_subdir" => lane.workspace_subdir || lane.slug || "",
       "prompt" => (version && version.prompt) || "",
       "note" => "",
       "advanced_json" => config |> advanced_config() |> ConfigurationFields.safe_json()
     }
 
-    Enum.reduce(@config_fields, params, fn {field, path, type}, acc -> Map.put(acc, field, field_value(config, path, type)) end)
+    # Memory is the new-lane template choice, not a default for a missing required tracker kind.
+    display_defaults = put_in(Schema.lane_defaults(), ["tracker", "kind"], nil)
+    display_config = display_defaults |> merge_display_defaults(config) |> canonical_linear_provider()
+
+    Enum.reduce(@config_fields, params, fn {field, path, type}, acc -> Map.put(acc, field, field_value(display_config, path, type)) end)
   end
 
-  defp field_value(config, path, :list), do: config |> get_in(path) |> List.wrap() |> Enum.join("\n")
+  defp field_value(config, path, :list), do: config |> config_value(path) |> List.wrap() |> Enum.join("\n")
 
   defp field_value(config, ["tracker", "provider"], :json) do
-    config
-    |> get_in(["tracker", "provider"])
-    |> then(&Map.drop(&1 || %{}, @tracker_provider_keys))
-    |> ConfigurationFields.safe_json()
+    value =
+      case config_value(config, ["tracker", "provider"]) do
+        provider when is_map(provider) -> Map.drop(provider, tracker_provider_keys(config))
+        malformed -> malformed
+      end
+
+    ConfigurationFields.safe_json(value)
   end
 
-  defp field_value(config, path, :json), do: ConfigurationFields.safe_json(get_in(config, path) || %{})
-  defp field_value(config, path, :boolean), do: get_in(config, path) in [true, "true"]
-  defp field_value(config, path, :duration), do: ConfigurationFields.duration_input(get_in(config, path))
+  defp field_value(config, path, :json), do: ConfigurationFields.safe_json(config_value(config, path) || %{})
+  defp field_value(config, path, :boolean), do: Ecto.Type.cast(:boolean, config_value(config, path)) == {:ok, true}
+  defp field_value(config, path, :duration), do: ConfigurationFields.duration_input(config_value(config, path))
 
   defp field_value(config, path, :secret) do
-    case get_in(config, path) do
-      value when is_binary(value) -> if(String.starts_with?(value, "$"), do: value, else: "$REDACTED")
+    case config_value(config, path) do
+      value when is_binary(value) -> Configuration.redact_secret(value)
       _ -> ""
     end
   end
 
-  defp field_value(config, ["tracker", "api_key"], :text) do
-    case get_in(config, ["tracker", "api_key"]) do
-      value when is_binary(value) -> if(String.starts_with?(value, "$"), do: value, else: "$REDACTED")
-      _ -> ""
-    end
-  end
-
-  defp field_value(config, path, _type), do: value_string(get_in(config, path))
+  defp field_value(config, path, _type), do: value_string(config_value(config, path))
   defp lane_config(nil), do: %{}
 
   defp lane_config(version) do
     case Workflow.parse_parts(version.front_matter, "") do
       {:ok, %{config: raw}} ->
         {_profile, config} = Configuration.split(raw)
-        config
+        canonical_linear_provider(config)
 
       _ ->
         %{}
     end
+  end
+
+  defp canonical_linear_provider(%{"tracker" => %{"kind" => "linear"} = tracker} = config) do
+    case Map.get(tracker, "provider") do
+      provider when is_map(provider) or is_nil(provider) ->
+        provider = Map.merge(Map.take(tracker, @linear_legacy_keys), provider || %{}, &canonical_provider_value/3)
+        Map.put(config, "tracker", tracker |> Map.drop(@linear_legacy_keys) |> Map.put("provider", provider))
+
+      _ ->
+        config
+    end
+  end
+
+  defp canonical_linear_provider(config), do: config
+
+  defp canonical_provider_value(_key, legacy, nil), do: legacy
+  defp canonical_provider_value(_key, _legacy, canonical), do: canonical
+
+  defp tracker_provider_keys(config) do
+    kind = config_value(config, ["tracker", "kind"])
+    prefix = if kind == "linear", do: "tracker_", else: "#{kind}_"
+    for {field, key} <- @tracker_provider_fields, String.starts_with?(field, prefix), do: key
   end
 
   defp profile_create_assigns do
@@ -598,8 +662,6 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   defp selected_profile(profiles, id), do: Enum.find(profiles, &(&1.id == id or to_string(&1.id) == to_string(id)))
   defp profile_summary(profile), do: "#{profile.name} · #{worker_label(profile.worker)}"
   defp worker_label(worker) when is_map(worker), do: if(is_map(worker["environment"]), do: "managed", else: if(worker["ssh_hosts"] in [nil, []], do: "local", else: "static SSH"))
-  defp worker_label(_), do: "unknown"
-  defp effective_workspace(nil, _subdir), do: "unavailable"
   defp effective_workspace(profile, subdir), do: Path.join(profile.workspace_base || "", subdir || "")
   defp integer_param(value) when is_integer(value) and value > 0, do: {:ok, value}
 
@@ -612,22 +674,23 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
   defp integer_param(_), do: {:error, [%{path: "execution_profile_id", message: "must be an integer"}]}
   defp config_warnings(config) when is_map(config), do: if(Map.has_key?(config, "server"), do: ["server is configured per installation and is preserved only in advanced configuration"], else: [])
-  defp config_warnings(_), do: []
   defp value_string(nil), do: ""
   defp value_string(value), do: to_string(value)
   defp truthy?(value), do: value in [true, "true", "on"]
   defp config_param_keys, do: Enum.map(@config_fields, &elem(&1, 0)) ++ ["advanced_json"]
 
   defp config_path(field) do
-    case Enum.find(@config_fields, &(elem(&1, 0) == field)) do
-      {_field, path, _type} -> Enum.join(path, ".")
-      nil -> field
-    end
+    {_field, path, _type} = Enum.find(@config_fields, &(elem(&1, 0) == field))
+    Enum.join(path, ".")
   end
+
+  defp config_value(config, []), do: config
+  defp config_value(config, [key | rest]) when is_map(config), do: config_value(Map.get(config, key), rest)
+  defp config_value(_config, _path), do: nil
 
   defp known_config(config) do
     Enum.reduce(@config_fields, %{}, fn {_field, path, _type}, known ->
-      case get_in(config, path) do
+      case config_value(config, path) do
         nil -> known
         value -> put_or_delete(known, path, value)
       end
@@ -641,6 +704,14 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
       if is_map(left_value) and is_map(right_value), do: deep_merge(left_value, right_value), else: right_value
     end)
   end
+
+  defp merge_display_defaults(defaults, config), do: Map.merge(defaults, config, &display_default/3)
+  defp display_default(_key, default, nil), do: default
+
+  defp display_default(_key, default, value) when is_map(default) and is_map(value),
+    do: merge_display_defaults(default, value)
+
+  defp display_default(_key, _default, value), do: value
 
   defp lane_field_errors(assigns) do
     matching_errors = Enum.filter(assigns.errors, &(&1.path in [assigns.field, assigns.path, "config." <> assigns.path]))

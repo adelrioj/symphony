@@ -1,4 +1,3 @@
-# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
   @moduledoc "Execution profile configuration for automation."
 
@@ -21,35 +20,25 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
 
   @spec create(Conn.t(), map()) :: Conn.t()
   def create(conn, _params) do
-    with_attributes(conn, fn attrs ->
-      case restore_worker(attrs, %{}) do
-        {:ok, attrs} ->
-          case ExecutionProfiles.create(attrs) do
-            {:ok, profile} -> conn |> put_status(201) |> json(profile_json(profile))
-            {:error, errors} -> errors_response(conn, errors)
-          end
-
-        {:error, errors} ->
-          errors_response(conn, errors)
-      end
-    end)
+    with {:ok, attrs} <- attributes(conn),
+         {:ok, attrs} <- restore_worker(attrs, %{}),
+         {:ok, profile} <- ExecutionProfiles.create(attrs) do
+      conn |> put_status(201) |> json(profile_json(profile))
+    else
+      {:error, errors} -> errors_response(conn, errors)
+    end
   end
 
   @spec update(Conn.t(), map()) :: Conn.t()
   def update(conn, _params) do
     with_profile(conn, fn profile ->
-      with_attributes(conn, fn attrs ->
-        case restore_worker(attrs, profile.worker) do
-          {:ok, attrs} ->
-            case ExecutionProfiles.update(profile, attrs) do
-              {:ok, updated} -> json(conn, profile_json(updated))
-              {:error, errors} -> errors_response(conn, errors)
-            end
-
-          {:error, errors} ->
-            errors_response(conn, errors)
-        end
-      end)
+      with {:ok, attrs} <- attributes(conn),
+           {:ok, attrs} <- restore_worker(attrs, profile.worker),
+           {:ok, updated} <- ExecutionProfiles.update(profile, attrs) do
+        json(conn, profile_json(updated))
+      else
+        {:error, errors} -> errors_response(conn, errors)
+      end
     end)
   end
 
@@ -76,10 +65,10 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
     end
   end
 
-  defp with_attributes(conn, fun) do
+  defp attributes(conn) do
     case conn.body_params do
       %{"_json" => _} ->
-        errors_response(conn, [%{path: "body", message: "must be a JSON object"}])
+        {:error, [%{path: "body", message: "must be a JSON object"}]}
 
       %{} = attrs ->
         forbidden =
@@ -87,7 +76,7 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
           |> Enum.filter(&Map.has_key?(attrs, &1))
           |> Enum.map(&%{path: &1, message: "is not a profile attribute"})
 
-        if forbidden == [], do: fun.(Map.take(attrs, @profile_params)), else: errors_response(conn, forbidden)
+        if forbidden == [], do: {:ok, Map.take(attrs, @profile_params)}, else: {:error, forbidden}
     end
   end
 
@@ -119,12 +108,10 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
 
   defp errors_response(conn, errors), do: conn |> put_status(422) |> json(%{errors: errors})
 
-  defp parse_id(value) when is_binary(value) do
+  defp parse_id(value) do
     case Integer.parse(value) do
       {id, ""} when id > 0 and id <= @max_sqlite_id -> {:ok, id}
       _ -> :error
     end
   end
-
-  defp parse_id(_value), do: :error
 end

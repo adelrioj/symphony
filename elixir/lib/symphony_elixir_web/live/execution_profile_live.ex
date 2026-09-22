@@ -4,11 +4,15 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias SymphonyElixir.{ExecutionProfiles, LaneStore}
+  alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
-    if connected?(socket), do: :ok = ObservabilityPubSub.subscribe_profiles()
+    if connected?(socket) do
+      :ok = ObservabilityPubSub.subscribe_profiles()
+      :ok = ObservabilityPubSub.subscribe()
+    end
 
     case parse_id(id) |> then(&ExecutionProfiles.get/1) do
       nil -> {:ok, socket |> put_flash(:error, "Execution profile not found") |> push_navigate(to: "/execution-profiles")}
@@ -18,6 +22,7 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
 
   @impl true
   def handle_info(:profiles_updated, socket), do: refresh(socket)
+  def handle_info(:observability_updated, socket), do: refresh(socket)
 
   @impl true
   def handle_event("prepare_delete", _params, socket), do: {:noreply, assign(socket, :confirm_delete, true)}
@@ -49,11 +54,9 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
         </div>
       </header>
 
-      <ul :if={@errors != []} id="profile-errors" class="error-summary" role="alert">
-        <li :for={error <- @errors}>
-          <a :if={lane_id(error.path) && linked_lane(@lanes, lane_id(error.path)) != nil} href={"/lanes/#{linked_lane(@lanes, lane_id(error.path)).slug}"}>{error.path}</a>
-          <span :if={is_nil(lane_id(error.path)) or is_nil(linked_lane(@lanes, lane_id(error.path)))}>{error.path}</span>:
-          {error.message}
+      <ul :if={@errors ++ @configuration_errors != []} id="profile-errors" class="error-summary" role="alert">
+        <li :for={error <- @errors ++ @configuration_errors}>
+          <span>{error.path}</span>: {error.message}
         </li>
       </ul>
 
@@ -110,9 +113,16 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
   defp assign_profile(socket, profile) do
     lanes = ExecutionProfiles.linked_lanes(profile)
 
+    errors =
+      case Configuration.validate_profile(%{"worker" => profile.worker}) do
+        :ok -> if(profile.repair_error, do: [%{path: "profile", message: "Needs repair before use; correct the linked lane configuration."}], else: [])
+        {:error, errors} -> errors
+      end
+
     assign(socket,
       profile: profile,
       lanes: lanes,
+      configuration_errors: errors,
       affected_count: length(lanes),
       aggregate_capacity: aggregate_capacity(lanes)
     )
@@ -129,28 +139,35 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
 
   defp worker_label(worker) when is_map(worker) do
     cond do
-      is_map(Map.get(worker, "environment")) -> "Managed"
+      Map.has_key?(worker, "environment") -> "Managed"
       Map.get(worker, "ssh_hosts", []) != [] -> "Static SSH"
       true -> "Local"
     end
   end
 
-  defp worker_label(_worker), do: "Unknown"
-
   defp environment_detail(worker) do
-    case Map.get(worker || %{}, "environment") do
-      %{"kind" => kind, "deployment_id" => deployment} ->
-        "#{kind} deployment #{deployment}"
+    case Configuration.validate_profile(%{"worker" => worker}) do
+      {:error, _errors} ->
+        "Invalid worker settings; edit this profile to repair them."
 
-      _ ->
-        if Map.get(worker || %{}, "ssh_hosts", []) == [],
-          do: "Local machine",
-          else: "SSH: #{Enum.join(Map.get(worker, "ssh_hosts", []), ", ")}"
+      :ok ->
+        valid_environment_detail(worker)
+    end
+  end
+
+  defp valid_environment_detail(worker) do
+    case worker["environment"] do
+      %{"kind" => kind, "deployment_id" => deployment} -> "#{kind} deployment #{deployment}"
+      _ -> if worker["ssh_hosts"] in [nil, []], do: "Local machine", else: "SSH: #{Enum.join(worker["ssh_hosts"], ", ")}"
     end
   end
 
   defp credential_summary(worker) do
-    provider = get_in(worker || %{}, ["environment", "provider"])
+    provider =
+      case worker["environment"] do
+        %{"provider" => provider} -> provider
+        _ -> nil
+      end
 
     if is_map(provider) and
          Enum.any?(provider, fn {key, value} ->
@@ -167,9 +184,4 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
       _ -> 0
     end
   end
-
-  defp parse_id(_id), do: 0
-  defp lane_id("lanes." <> rest), do: rest |> String.split(".") |> List.first() |> parse_id()
-  defp lane_id(_path), do: nil
-  defp linked_lane(lanes, id), do: Enum.find(lanes, &(&1.id == id))
 end

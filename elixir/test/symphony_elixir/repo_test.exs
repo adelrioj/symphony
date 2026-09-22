@@ -158,6 +158,68 @@ defmodule SymphonyElixir.RepoTest do
     assert Repo.get!(Lane, 3).deleted_at
   end
 
+  for {kind, infrastructure} <- [
+        {"scalar worker", "worker: broken"},
+        {"list worker", "worker: [broken]"},
+        {"list workspace root", "workspace:\n  root: [/tmp/legacy]"}
+      ] do
+    @tag :remediation
+    test "remediation: profile migration quarantines #{kind} without losing history" do
+      isolated_repo()
+      :ok = legacy_migrate()
+      front_matter = "tracker:\n  kind: memory\n" <> unquote(infrastructure)
+      previous_front_matter = "tracker:\n  kind: memory"
+
+      Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (1, 'repair', 'Repair', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+
+      Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, ?, 'previous prompt', CURRENT_TIMESTAMP)", [
+        previous_front_matter
+      ])
+
+      Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (2, 1, ?, 'current prompt', CURRENT_TIMESTAMP)", [
+        front_matter
+      ])
+
+      Repo.query!("UPDATE lanes SET current_version_id = 2 WHERE id = 1")
+
+      Repo.query!("""
+      INSERT INTO runs (id, lane_id, lane_version_id, issue_id, issue_identifier, attempt_id, status, started_at, finished_at)
+      VALUES (1, 1, 1, 'repair-issue', 'REPAIR-1', 'repair-attempt', 'done', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      """)
+
+      Repo.query!("INSERT INTO run_events (run_id, at, kind, payload) VALUES (1, CURRENT_TIMESTAMP, 'turn_finished', '{\"kept\":true}')")
+
+      assert :ok = Repo.migrate()
+      assert :ok = Repo.migrate()
+
+      lane = Repo.get!(Lane, 1)
+      refute lane.enabled
+      assert lane.current_version_id == 2
+      profile = Repo.get!(SymphonyElixir.ExecutionProfiles.Profile, lane.execution_profile_id)
+      assert is_binary(profile.repair_error)
+      assert profile.repair_error != ""
+      assert is_map(profile.worker)
+      assert is_nil(profile.workspace_base) or is_binary(profile.workspace_base)
+      assert {:error, [_ | _]} = Lanes.resolve_lane(lane)
+
+      assert Enum.map(Lanes.versions(lane), &{&1.id, &1.front_matter, &1.prompt}) == [
+               {2, front_matter, "current prompt"},
+               {1, previous_front_matter, "previous prompt"}
+             ]
+
+      profile_id = profile.id
+
+      assert [[1, 1, ^profile_id, "repair-attempt", "done", "turn_finished", "{\"kept\":true}"]] =
+               Repo.query!("""
+               SELECT runs.lane_id, runs.lane_version_id, runs.execution_profile_id, runs.attempt_id,
+                      runs.status, run_events.kind, run_events.payload
+               FROM runs JOIN run_events ON run_events.run_id = runs.id
+               """).rows
+
+      assert [] = Repo.query!("PRAGMA foreign_key_check").rows
+    end
+  end
+
   test "foreign keys protect history while run deletion cascades to events" do
     isolated_repo()
     :ok = Repo.migrate()

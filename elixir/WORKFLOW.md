@@ -6,6 +6,11 @@
 # installation and there is no runtime watched-file configuration.
 # Shared profile edits apply to future runs on every linked lane. Active attempts and cleanup keep
 # their dispatch snapshot. Profile history and infrastructure provisioning are not provided.
+# Use complete $VAR credential references; dollar-prefixed literals and multiline secrets are masked.
+# Browser/API/export redaction covers nested maps/arrays. Malformed historical YAML stays in storage
+# but is not rendered as credential-safe source.
+# Structured editors display effective defaults without persisting unchanged omitted settings.
+# Explicit disabling values (for example an empty in-progress state) survive unrelated edits.
 # server: is ignored; use serve --port/--host. Use the same --data-root for import and serve.
 tracker:
   kind: linear

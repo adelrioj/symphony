@@ -234,6 +234,42 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Workspace.location_inventory(settings) == :empty
   end
 
+  @tag :remediation
+  @tag :tmp_dir
+  test "remediation: a retained SSH root replaced by a stable symlink cannot be inventoried as empty", %{tmp_dir: fixture} do
+    root = Path.join(fixture, "lane")
+    moved_root = Path.join(fixture, "lane-real")
+    bin = Path.join(fixture, "bin/ssh")
+    previous_path = System.get_env("PATH")
+    on_exit(fn -> restore_env("PATH", previous_path) end)
+    File.mkdir_p!(Path.dirname(bin))
+
+    File.write!(bin, """
+    #!/bin/sh
+    for argument in "$@"; do command=$argument; done
+    exec /bin/sh -c "$command"
+    """)
+
+    File.chmod!(bin, 0o700)
+    System.put_env("PATH", Path.dirname(bin) <> ":" <> previous_path)
+    File.mkdir_p!(Path.join(root, "checkout"))
+    File.write!(Path.join(root, "checkout/work"), "keep")
+    settings = %Schema{workspace: %Schema.Workspace{root: root}, worker: %Schema.Worker{ssh_hosts: ["fixture"]}}
+    assert Workspace.location_inventory(settings) == :retained
+
+    File.rename!(root, moved_root)
+    File.ln_s!(moved_root, root)
+
+    result = Workspace.location_inventory(settings)
+    assert result == :retained or match?({:error, _}, result)
+    assert File.read!(Path.join(moved_root, "checkout/work")) == "keep"
+
+    File.rm!(root)
+    File.rename!(moved_root, root)
+    File.rm_rf!(Path.join(root, "checkout"))
+    assert Workspace.location_inventory(settings) == :empty
+  end
+
   test "before-remove hook can run without deleting retained managed data" do
     root = Path.join(System.tmp_dir!(), "symphony-managed-retain-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "retained")

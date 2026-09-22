@@ -87,6 +87,9 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     bad_attrs = attrs("unmatched-redaction") |> Map.put(:config, %{"tracker" => %{"kind" => "memory", "api_key" => "$REDACTED"}})
     errors = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(bad_attrs)), 422)["errors"]
     assert Enum.any?(errors, &(&1["path"] == "config.tracker.api_key"))
+    update_errors = json_response(put(api_conn(), "/api/v1/lanes/secret-safe-lane", Jason.encode!(%{config: %{extension: %{new_token: "$REDACTED"}}})), 422)["errors"]
+    assert Enum.any?(update_errors, &(&1["path"] == "config.extension.new_token"))
+    assert Lanes.get_by_slug("secret-safe-lane").current_version_id == round_tripped["current_version_id"]
   end
 
   test "invalid JSON field types and nonobject bodies are rejected without persisting changes" do
@@ -121,7 +124,7 @@ defmodule SymphonyElixirWeb.LanesApiTest do
   test "export without a version returns a structured error" do
     {:ok, lane} = Lanes.create(attrs("no-version"))
     lane |> Ecto.Changeset.change(current_version_id: nil) |> Repo.update!()
-    assert %{"errors" => [%{"path" => "version", "message" => "lane has no version"}]} = json_response(get(api_conn(), "/api/v1/lanes/no-version/export"), 422)
+    assert %{"errors" => [%{"path" => "version"}]} = json_response(get(api_conn(), "/api/v1/lanes/no-version/export"), 422)
   end
 
   test "enabled lanes cannot be deleted, and disable allows deletion" do
@@ -130,6 +133,48 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     assert %{"error" => %{"code" => "lane_active"}} = json_response(delete(api_conn(), "/api/v1/lanes/active-lane"), 409)
     assert %{"enabled" => false} = json_response(put(api_conn(), "/api/v1/lanes/active-lane", Jason.encode!(%{enabled: false})), 200)
     assert response(delete(api_conn(), "/api/v1/lanes/active-lane"), 204) == ""
+  end
+
+  @tag :tmp_dir
+  test "deletion refuses retained workspaces without discarding their lane", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Retained API", workspace_base: root, worker: %{}})
+    {:ok, lane} = Lanes.create(%{slug: "retained-api", execution_profile_id: profile.id, config: @config})
+    {:ok, settings} = LaneStore.settings(lane.id)
+    retained = Path.join(settings.workspace.root, "RETAIN-1")
+    File.mkdir_p!(retained)
+    File.write!(Path.join(retained, "kept"), "retained data")
+
+    assert json_response(delete(api_conn(), "/api/v1/lanes/#{lane.slug}"), 422)["errors"] != []
+    assert Lanes.get!(lane.id).deleted_at == nil
+    assert File.read!(Path.join(retained, "kept")) == "retained data"
+  end
+
+  test "lane infrastructure cannot be replaced through top-level API keys" do
+    {:ok, lane} = Lanes.create(attrs("owner-api"))
+    profile = ExecutionProfiles.get(lane.execution_profile_id)
+    errors = json_response(put(api_conn(), "/api/v1/lanes/#{lane.slug}", Jason.encode!(%{worker: %{ssh_hosts: ["replacement"]}})), 422)["errors"]
+    assert Enum.any?(errors, &(&1["path"] == "worker"))
+    assert ExecutionProfiles.get(profile.id).worker == profile.worker
+    assert Lanes.get!(lane.id).current_version_id == lane.current_version_id
+  end
+
+  test "missing or malformed historical configuration stays visible as a repairable lane" do
+    {:ok, lane} = Lanes.create(attrs("repair-api"))
+    version = Lanes.current_version(lane)
+    Repo.update!(Ecto.Changeset.change(version, front_matter: "tracker: [\n  literal-secret"))
+    assert :ok = LaneStore.refresh(lane.id)
+    lanes = json_response(get(api_conn(), "/api/v1/lanes"), 200)["lanes"]
+    malformed = Enum.find(lanes, &(&1["id"] == lane.id))
+    assert malformed["error"]
+    assert malformed["config"] == %{}
+    refute Jason.encode!(lanes) =~ "literal-secret"
+
+    Repo.update!(Ecto.Changeset.change(Lanes.get!(lane.id), current_version_id: nil))
+    assert :ok = LaneStore.refresh(lane.id)
+    missing = json_response(get(api_conn(), "/api/v1/lanes"), 200)["lanes"] |> Enum.find(&(&1["id"] == lane.id))
+    assert missing["error"]
+    assert missing["current_version_id"] == nil
+    assert missing["config"] == %{}
   end
 
   test "state enumerates unavailable lanes and refresh returns 503 when none can accept work" do

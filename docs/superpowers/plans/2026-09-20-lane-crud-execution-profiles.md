@@ -368,3 +368,168 @@ Concrete remaining fixture/caller inventory: `test/support/kubernetes_candidate_
 Route and asset evidence: profile API routes must precede the existing issue-identifier/wildcard fallbacks in `router.ex`; retain bearer authentication, cookie CSRF protection and positive bounded path-ID parsing. `StaticAssets` embeds `dashboard.css` at compilation, so the browser verification must run rebuilt code. Existing global PubSub is sufficient for profile lists/details if used consistently; introduce no redundant notification bus.
 
 Execution is owned by the enclosing ship-it conductor through `plan-to-dex`. Do not execute this plan during the writing-plans step and do not re-interview the user.
+
+## Review remediation — continuation after `942d694`
+
+The user authorized fixing the final report-only findings. The original implementation
+checkboxes are historical, not evidence that these newly reported cases pass.
+
+### Remediation ownership and execution
+
+The conductor owns integration, all validation commands, documentation, and publication.
+Concurrent workers first write regression cases only; the conductor runs them against
+the unchanged implementation before authorizing fixes. Workers never run formatters,
+linters, builds, tests, or commits while siblings edit. Independent file ownership:
+
+| Slice | Production ownership | Regression ownership | Findings |
+|---|---|---|---|
+| Persistence | `repo/migrations.ex`, `execution_profiles.ex`, `execution_profiles/profile.ex` | `repo_test.exs`, `execution_profiles_test.exs` | ARCH-1, ARCH-2 |
+| Ownership | `lane_store.ex`, `workspace.ex`, `lanes.ex` | `lane_store_test.exs`, `workspace_and_config_test.exs`, `lanes_test.exs` | SEC-05, SEC-06 |
+| Runtime | `orchestrator.ex` and its lifecycle consumers if required | `managed_orchestrator_test.exs`, `orchestrator_test.exs` | ARCH-5, SEC-01 |
+| Editor | `lane_editor_live.ex`, `execution_profile_editor_live.ex`, `components/configuration_fields.ex` | editor/profile LiveView tests | ARCH-3, ARCH-4, ARCH-6, ARCH-7, SEC-02 |
+| Projection (conductor) | `execution_profiles/configuration.ex`, `lane_versions_live.ex` | profile API/history tests | SEC-03, SEC-04 |
+
+All production paths above are under `elixir/lib/symphony_elixir` or
+`elixir/lib/symphony_elixir_web`; tests are under the matching `elixir/test` namespace.
+No shared-file mutation without explicit ownership transfer.
+
+### Required corrections and regression contracts
+
+- [x] Migration: seed valid YAML containing non-map `worker` and non-string roots;
+  migration must preserve history, persist schema-loadable repair entries, and keep
+  affected lanes disabled rather than raise or invent runnable infrastructure.
+- [x] Profile deletion: create a historical run on A, relink its lane to B, and delete A.
+  Historical references remain intact; return a field error instead of crashing the
+  authority. A profile still referenced by a run is not unreferenced.
+- [x] Lane editor: name-only saves preserve `agent.in_progress_state: ""`,
+  `claude.allowed_tools: []`, canonical Linear provider references and unknown keys.
+  Invalid named JSON yields flat field errors with the draft retained. Ordinary empty
+  hook clearing remains supported; omission and meaningful empty values are distinct.
+- [x] Profile editor: global notifications refresh impact information without replacing
+  dirty form input. Concurrent deletion is handled explicitly rather than silently saving.
+- [x] Both editors use the existing common restoration contract:
+  `Configuration.restore_redacted(value, original, path) :: {:ok, value} | {:error, errors}`.
+  Nested array credentials survive unrelated edits; forged placeholders return errors.
+- [x] Managed reconciliation: carry the dispatched reservation through stop completion
+  and release it after authoritative cleanup, including terminal/routing `:release`.
+- [x] Startup cleanup: obtain root and base from one current entry when no attempt
+  snapshot is installed. Never substitute a profile-backed effective root for its base.
+- [x] SSH inventory: a symlinked retained directory cannot return `:empty`; either
+  safely inspect the canonical target or fail closed. Tests execute the inventory command
+  on controlled filesystem fixtures rather than matching command source strings.
+- [x] Invalid startup repair: reconstruct old location ownership independently of
+  tracker credentials; repairing authentication cannot bypass inventory when relinking.
+- [x] History: unparseable front matter is not safe to disclose. Preserve original
+  bytes in storage; show a repair error and safe prompt/metadata without raw invalid YAML.
+  Test block-scalar and multiline credential cases at the rendered boundary.
+- [x] Redaction: sensitive map/list ancestors retain sensitivity throughout descendants.
+  Preserve valid `$VAR` references and shape; API read/modify/write preserves originals.
+
+Browser verification found two additional acceptance gaps:
+
+- [x] Sparse lane edits: submitting a name-only change must not materialize absent
+  settings with different defaults (notably `observability.dashboard_enabled: false`).
+  Display effective defaults, retain raw omission for unchanged controls, and allow
+  intentional changes away from a default. Regression failed before the source fix.
+- [x] Mobile detail/history pages: a table's 720px minimum must scroll within its card,
+  not expand the dashboard's grid track. At a 390px viewport, constrain the track and
+  wrap long headings; verify the actual profile and version pages after service rebuild.
+
+Coverage inspection considered generic offline lane-update ownership, but caller tracing
+found no production offline update surface: the CLI uses `Lanes.import_file/2` and its
+existing ownership checks; generic update/delete callers are daemon UI/API routes.
+No new standalone domain mutation policy is introduced by this remediation.
+
+### Fresh review corrections
+
+The independent correctness, completeness and security passes found these additional
+reachable boundaries. Keep genuinely unknown execution ownership fail-closed.
+
+- [x] Reconstruct known infrastructure ownership for migration-marked repair lanes
+  independently of invalid lane-owned settings; repair after fresh authority startup
+  must succeed without moving resources or enabling the lane.
+- [x] Retain the persisted tracker kind when reconstructing managed ownership;
+  unchanged offline imports and credential repairs must preserve managed identity.
+- [x] Include invalid lanes' retained ownership in startup and live cross-lane overlap
+  checks, preventing another lane from claiming or cleaning up their workspaces.
+- [x] Normalize an accepted nullable Linear provider before canonical form projection;
+  an unrelated save retains the effective legacy credentials and scope.
+- [x] Render malformed nested profile fields as visible repair errors, not mount-time
+  exceptions or implicitly valid defaults; keep original historical bytes unchanged.
+- [x] Refresh profile impact, membership and capacity after real lane mutations while
+  preserving dirty profile drafts.
+- [x] Preserve only complete environment references in secret-safe projections;
+  dollar-prefixed literals and multiline suffixes are masked, including ordinary
+  structured secret controls, and read/modify/write restores original bytes.
+
+### Second fresh-review corrections
+
+- [x] Preserve legacy Linear fallbacks when individual canonical provider values are null,
+  while keeping non-null canonical values authoritative.
+- [x] Keep malformed scalar provider drafts editable with field errors; unrelated saves and
+  named-child edits cannot silently replace the malformed parent. Explicit JSON repair saves
+  a new disabled version without changing historical bytes.
+- [x] Check live mutation candidates and offline import targets against all retained ownership
+  without rejecting unrelated pre-existing overlap pairs. Unlinked profiles make no location claim.
+- [x] Install retained snapshots inside asynchronous managed operation tasks, preserving the
+  original cleanup hook and timeout after the scheduler restores its own context.
+
+The four-file consumer matrix first failed seven regressions against the prior source,
+then passed all 142 tests after the fixes. An additional nullable GitHub provider repair
+regression proves named controls can populate an absent provider without a separate JSON edit.
+Installed Chrome reproduced the lost credential and HTTP500 before the fixes, then verified
+canonical name-only preservation and explicit malformed-provider repair with retained history.
+
+### Final scalar and repair-boundary corrections
+
+- [x] Project schema-accepted millisecond strings consistently in both editors; preserve malformed
+  values and negative signs for explicit repair rather than crashing or silently changing units.
+- [x] Display schema-cast booleans and null defaults without changing their stored representation
+  during an unrelated edit; explicit disabling still persists false.
+- [x] Retain edited backend fields after switching backend removes their controls from the form.
+- [x] Validate an offline import target fully while reconstructing unrelated known ownership,
+  allowing independent operational repairs without treating unknown ownership as free space.
+
+Seven regression cases failed before these fixes. The corrected five-file consumer matrix passed
+128 tests. Installed Chrome verified quoted lane/profile durations, raw name-only preservation,
+nullable checkbox disabling, hidden Codex drafts with a Claude default and Codex state override,
+and explicit malformed-duration repair. No external provider was contacted or enabled.
+
+### Acceptance-review integration corrections
+
+- [x] Apply only the selected adapter's named provider aliases while retaining distinct backend
+  drafts. The GitLab-to-GitHub regression failed before the fix, then all 42 editor tests passed;
+  installed Chrome confirmed the saved GitHub endpoint and masked credential on reopening.
+- [x] Retain captured profile references before run creation and flush queued history writes
+  under the mutation authority before opening the deletion transaction. Both preparation-time
+  and suspended-writer regressions failed before the fix; the combined lifecycle/editor matrix
+  passed 178 tests after the fix.
+
+Additional consumer transitions cover explicit integer limits, disabling the in-progress state,
+off/on checkbox changes and credential-reference retention without weakening coverage policy.
+
+### Integration, quality and publication
+
+- [x] Remove feature-introduced file-level Credo suppressions through scoped
+  simplification, not replacement exceptions. Existing unrelated policy stays unchanged.
+- [x] Use coverage output to find real untested decisions. Add consumer-observable
+  regressions or remove dead branches; do not assert plumbing, fake coverage, expand
+  ignore lists, or lower either existing threshold.
+- [x] Run focused regression matrix, actual browser smoke, project formatter, and
+  unchanged `make all`. Update spec/operational documentation only for changed contracts.
+- [x] Fresh correctness/completeness/security reviews; final scoped acceptance reports
+  have no remaining findings after independently re-reading the corrections.
+- [ ] Publish the verified branch and create a draft PR using the existing account and remote.
+  The run's final report records the publication retry and any external permission blocker;
+  account, remote and protocol changes are not a workaround.
+
+Final unchanged `make all` passed: 1,361 tests, zero failures and 14 skips in each coverage run,
+100.00% ordinary coverage, 96.64% review coverage, clean specs/Credo/build/format, and zero
+Dialyzer errors. The isolated profile lifecycle file also passed all 28 tests, including both
+online and offline queued-history deletion paths. External-provider dispatch and real SSH
+remain unexercised; browser scope and independent review limitations are recorded separately.
+
+Rulings: preserve historical profile identity by rejecting deletion while runs reference
+it (cost: profiles cannot be removed before supported history disposal); hide unparsable
+raw history rather than claim regex redaction is safe (cost: raw recovery requires direct
+authorized storage access). Both prioritize data preservation and confidentiality.

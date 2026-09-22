@@ -333,6 +333,7 @@ pre,
 
 .dashboard-shell {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
 }
 
@@ -373,6 +374,7 @@ pre,
   font-size: clamp(2rem, 4vw, 3.3rem);
   line-height: 0.98;
   letter-spacing: -0.04em;
+  overflow-wrap: anywhere;
 }
 
 .hero-copy {

@@ -68,7 +68,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
     assert_redirect(view, "/")
   end
 
-  test "history inspection shows lane-owned content and preserves malformed source", %{conn: conn} do
+  test "history inspection shows lane-owned content without literal credentials", %{conn: conn} do
     {:ok, lane} =
       Lanes.create(%{
         slug: "inspect-history",
@@ -81,16 +81,30 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
     assert has_element?(view, "#version-#{lane.current_version_id} details", "historical prompt")
     assert has_element?(view, "#version-#{lane.current_version_id} details", "$REDACTED")
     refute render(view) =~ "literal-secret"
+  end
 
+  @tag :remediation
+  test "invalid historical source stays stored without disclosing multiline credentials", %{conn: conn} do
+    {:ok, lane} = Lanes.create(%{slug: "unsafe-history", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}, prompt: "repair prompt"})
     version = Lanes.current_version(lane)
-    Repo.update!(Ecto.Changeset.change(version, front_matter: "tracker:\n  api_key: malformed-literal-secret\n  values: [\noriginal malformed source", prompt: "repair me"))
-    send(view.pid, {:lane_updated, lane.slug})
+    {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/versions")
 
-    assert has_element?(view, "#version-#{version.id} .field-error", "Invalid historical front matter")
-    assert has_element?(view, "#version-#{version.id} details", "original malformed source")
-    assert has_element?(view, "#version-#{version.id} details", "repair me")
-    assert has_element?(view, "#version-#{version.id} details", "$REDACTED")
-    refute render(view) =~ "malformed-literal-secret"
+    for source <- [
+          "tracker:\n  api_key: |\n    block-secret\n  broken: [",
+          "tracker:\n  api_key: \"first-line\n    quoted-secret\"\n  broken: [",
+          "tracker:\n  api_key: $REFERENCE\n    continuation-secret\n  broken: ["
+        ] do
+      Repo.update!(Ecto.Changeset.change(version, front_matter: source))
+      send(view.pid, {:lane_updated, lane.slug})
+      html = render(view)
+
+      assert has_element?(view, "#version-#{version.id} .field-error")
+      assert has_element?(view, "#version-#{version.id} details", "repair prompt")
+      refute html =~ "block-secret"
+      refute html =~ "quoted-secret"
+      refute html =~ "continuation-secret"
+      assert Repo.get!(SymphonyElixir.Lanes.LaneVersion, version.id).front_matter == source
+    end
   end
 
   test "an unknown slug goes back to the lanes page", %{conn: conn} do

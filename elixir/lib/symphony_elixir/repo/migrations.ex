@@ -162,6 +162,7 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
     with {:ok, workflow} <- Workflow.parse_parts(front_matter, prompt),
          {profile, lane_config} <- Configuration.split(workflow.config),
          profile <- Map.put_new(profile, "workspace_base", %Schema.Workspace{}.root),
+         :ok <- Configuration.validate_profile(profile),
          :ok <- validate_legacy_configuration(profile, lane_config, workflow.config, prompt) do
       {profile, nil}
     else
@@ -185,11 +186,21 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
     case Workflow.parse_parts(front_matter, prompt) do
       {:ok, workflow} ->
         {profile, _lane_config} = Configuration.split(workflow.config)
-        {Map.put_new(profile, "workspace_base", %Schema.Workspace{}.root), "legacy configuration requires repair: #{inspect(reason)}"}
+        {repair_profile_attributes(profile), "legacy configuration requires repair: #{inspect(reason)}"}
 
       {:error, _} ->
         {%{}, "legacy configuration requires repair: #{inspect(reason)}"}
     end
+  end
+
+  defp repair_profile_attributes(profile) do
+    base = Map.get(profile, "workspace_base", %Schema.Workspace{}.root)
+    worker = Map.get(profile, "worker", %{})
+
+    %{
+      "workspace_base" => if(is_binary(base), do: base),
+      "worker" => if(is_map(worker), do: worker, else: %{})
+    }
   end
 
   defp insert_profile(name, profile, repair_error) do

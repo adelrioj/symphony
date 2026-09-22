@@ -1327,6 +1327,84 @@ defmodule SymphonyElixir.EnvironmentOperationsHookTest do
     assert File.read!(Path.join(entry.record.workspace_path, "retained")) == "disk"
   end
 
+  test "async cleanup runs the retained hook after its caller restores a lane with the hook cleared" do
+    supervisor = start_supervised!(Task.Supervisor)
+    {root, entry} = hook_entry()
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_remove: "printf archived > marker")
+    {:ok, snapshot} = LaneContext.capture()
+    entry = %{entry | lane_snapshot: snapshot}
+    parent = self()
+
+    operation_fun = fn adapter, config, retained, operation, opts ->
+      send(parent, {:cleanup_waiting, self()})
+
+      receive do
+        :run_cleanup -> Operations.run(adapter, config, retained, operation, opts)
+      end
+    end
+
+    LaneContext.install(snapshot)
+    assert {:ok, task} = Operations.start(supervisor, nil, %{}, entry, :cleanup_hook, operation_fun: operation_fun)
+    assert_receive {:cleanup_waiting, worker}
+    LaneContext.put(snapshot.lane_id)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_remove: nil)
+    send(worker, :run_cleanup)
+
+    assert {nil, {:ok, _}} = Task.await(task)
+    assert File.read(Path.join(entry.record.workspace_path, "marker")) == {:ok, "archived"}
+    assert File.read!(Path.join(entry.record.workspace_path, "retained")) == "disk"
+  end
+
+  test "async managed cleanup uses its retained timeout after a newer timeout is published" do
+    supervisor = start_supervised!(Task.Supervisor)
+    {root, entry} = hook_entry()
+    realpath = System.find_executable("grealpath") || System.find_executable("realpath") || flunk("managed workspace fixtures require realpath supporting -m")
+    bin = Path.join(root, "fixture-bin")
+    File.mkdir_p!(bin)
+    File.ln_s!(realpath, Path.join(bin, "realpath"))
+    bash_env = Path.join(root, "fixture-bash-env")
+    escaped_bin = "'" <> String.replace(bin, "'", "'\"'\"'") <> "'"
+    File.write!(bash_env, "export PATH=#{escaped_bin}:\"$PATH\"\n")
+    target = %Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture", env: [{"BASH_ENV", bash_env}]}
+    gate = Path.join(root, "release")
+    pidfile = Path.join(root, "remote.pid")
+    assert {_, 0} = System.cmd("mkfifo", [gate])
+
+    on_exit(fn ->
+      if File.exists?(pidfile) do
+        System.cmd("kill", ["-KILL", String.trim(File.read!(pidfile))], stderr_to_stdout: true)
+      end
+    end)
+
+    hook = "trap '' HUP; printf '%s' \"$$\" > '#{pidfile}'; printf archived > marker; IFS= read -r token < '#{gate}'"
+    workflow_path = Workflow.workflow_file_path()
+    write_workflow_file!(workflow_path, workspace_root: root, hook_before_remove: hook, hook_timeout_ms: 1_000)
+    {:ok, snapshot} = LaneContext.capture()
+    context = %{entry.context | mode: :managed, target: target, workspace_path: entry.record.workspace_path}
+    entry = %{entry | context: context, lane_snapshot: snapshot}
+    parent = self()
+
+    operation_fun = fn adapter, config, retained, operation, opts ->
+      send(parent, {:cleanup_waiting, self()})
+
+      receive do
+        :run_cleanup -> Operations.run(adapter, config, retained, operation, opts)
+      end
+    end
+
+    LaneContext.install(snapshot)
+    assert {:ok, task} = Operations.start(supervisor, nil, %{}, entry, :cleanup_hook, operation_fun: operation_fun)
+    assert_receive {:cleanup_waiting, worker}
+    LaneContext.put(snapshot.lane_id)
+    write_workflow_file!(workflow_path, workspace_root: root, hook_before_remove: hook, hook_timeout_ms: 2_000)
+    send(worker, :run_cleanup)
+
+    assert {nil, {:error, {:managed_execution_unknown, {:remote_command_timeout, "before_remove", 1_000}}, latest}} = Task.await(task)
+    assert File.read(Path.join(latest.workspace_path, "marker")) == {:ok, "archived"}
+    assert File.read!(Path.join(latest.workspace_path, "retained")) == "disk"
+    assert Lifecycle.occupied?(Lifecycle.new(latest, "a", :cleanup))
+  end
+
   test "ambiguous cleanup transport preserves the record and does not prove stop" do
     {root, entry} = hook_entry()
     opts = [workspace_root: root, hook_before_remove: "printf unsafe > marker", hook_timeout_ms: 10]

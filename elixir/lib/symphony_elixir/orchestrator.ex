@@ -1388,7 +1388,6 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           state
           | running: running,
-            dispatch_tokens: Map.delete(state.dispatch_tokens, issue.id),
             claimed: MapSet.put(state.claimed, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id)
         }
@@ -1583,20 +1582,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_issue_workspace(_issue_or_identifier, _worker_host), do: :ok
 
-  defp static_execution_context(nil) do
-    root = Config.local_workspace_root()
-    ExecutionContext.local(root, snapshot_workspace_base(root))
-  end
-
   defp static_execution_context(host) do
-    root = Config.settings!().workspace.root
-    ExecutionContext.ssh(root, host, snapshot_workspace_base(root))
-  end
+    {:ok, snapshot} = LaneContext.capture()
+    root = snapshot.settings.workspace.root
 
-  defp snapshot_workspace_base(fallback) do
-    case LaneContext.snapshot() do
-      {:ok, %{workspace_base: base}} when is_binary(base) and base != "" -> base
-      _ -> fallback
+    if is_nil(host) do
+      ExecutionContext.local(Path.expand(root, Config.data_root()), snapshot.workspace_base)
+    else
+      ExecutionContext.ssh(root, host, snapshot.workspace_base)
     end
   end
 

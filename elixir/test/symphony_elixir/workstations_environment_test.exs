@@ -331,16 +331,17 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
     File.write!(
       ssh,
-      "#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in\nUserKnownHostsFile=*) hosts=${arg#UserKnownHostsFile=} ;;\nesac\ndone\nprintf 'pinned-test-key\\n' > \"$hosts\"\nprintf '%s' \"$hosts\" > '#{marker}'\nread ignored\n"
+      "#!/bin/sh\nset -eu\nfor arg in \"$@\"; do\ncase \"$arg\" in\nUserKnownHostsFile=*) hosts=${arg#UserKnownHostsFile=} ;;\nesac\ndone\nprintf 'pinned-test-key\\n' > \"$hosts\"\nprintf '%s\\n' \"$hosts\" > '#{marker}.tmp'\n/bin/mv '#{marker}.tmp' '#{marker}'\nread ignored\n"
     )
 
     File.chmod!(gcloud, 0o700)
     File.chmod!(ssh, 0o700)
     supervisor = start_supervised!(Task.Supervisor)
     options = tunnel_options(request, gcloud, ssh, supervisor)
+    deadline = System.monotonic_time(:millisecond) + Keyword.fetch!(options, :timeout_ms)
+    options = Keyword.put(options, :deadline, deadline)
     task = Task.Supervisor.async_nolink(supervisor, fn -> Workstations.connect(config(), running, options) end)
-    eventually(fn -> File.exists?(marker) end)
-    hosts = File.read!(marker)
+    hosts = await_staged_trust(task, marker, deadline)
     assert File.exists?(hosts)
     Process.exit(task.pid, :kill)
     assert_receive {:DOWN, ref, :process, _, :killed}
@@ -1238,6 +1239,35 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     Agent.update(server, fn state ->
       update_in(state, [:workstation, "annotations", "symphony.dev/record"], fn value -> value |> Jason.decode!() |> change.() |> Jason.encode!() end)
     end)
+  end
+
+  defp await_staged_trust(task, marker, deadline) do
+    case File.read(marker) do
+      {:ok, path} ->
+        String.trim_trailing(path, "\n")
+
+      {:error, :enoent} ->
+        wait_for_staged_trust(task, marker, deadline)
+
+      {:error, reason} ->
+        flunk("could not read staged trust handoff: #{inspect(reason)}")
+    end
+  end
+
+  defp wait_for_staged_trust(task, marker, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+    assert remaining > 0, "SSH fixture did not publish staged trust within the connection deadline"
+    ref = task.ref
+
+    receive do
+      {^ref, result} ->
+        flunk("connection returned before the staged trust handoff: #{inspect(result)}")
+
+      {:DOWN, ^ref, :process, _, reason} ->
+        flunk("connection died before the staged trust handoff: #{inspect(reason)}")
+    after
+      min(remaining, 10) -> await_staged_trust(task, marker, deadline)
+    end
   end
 
   defp eventually(predicate, attempts \\ 200) do

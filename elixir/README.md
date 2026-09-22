@@ -274,6 +274,8 @@ Notes:
   `tracker.provider`; the current Linear adapter still accepts the older flat `endpoint`,
   `api_key`, `project_slug`, and `assignee` aliases for compatibility. `team_keys` and
   `current_cycle` have no flat aliases and are read only from `tracker.provider`.
+  Non-null canonical values take precedence; a null canonical value retains its legacy fallback,
+  including when the structured editor saves an unrelated change.
 - `tracker.required_labels` is optional. When set, an issue must have every
   configured label to dispatch or continue running.
 - `tracker.any_labels` is optional. When set, an issue must have at least one
@@ -336,7 +338,8 @@ codex:
 ```
 
 - Invalid imports/saves return field-path errors without inserting a version. An invalid stored lane
-  at boot is disabled with an operator-visible error rather than preventing other lanes from running.
+  at boot is disabled with an operator-visible error. Other lanes may run only when their execution
+  ownership is provably disjoint; an unknown identity is not treated as free workspace.
 - Tracker preflight runs before runtime start and after tracker edits. Pending checks are tied to the
   current publication generation; newer edits replace pending checks and stale results cannot start
   or disable the lane. A current failure disables only that lane.
@@ -345,6 +348,21 @@ codex:
   rejected. Identity changes fail closed while active, reserved, or retained work remains. An
   unavailable SSH/managed inventory is not proof that a target is free; repair or supported cleanup
   must clear ownership before retrying.
+- Repairing invalid operational settings in place preserves verifiable ownership and leaves the lane
+  disabled until explicitly enabled. Malformed migrated profile fields and lane adapter providers
+  remain visible as errors; unrelated edits do not silently replace them with runnable defaults.
+  Correct malformed lane provider JSON under **Uncommon adapter settings** before saving.
+- Known legacy overlap groups can be repaired independently after old-location inventory is empty.
+  An unlinked profile claims no workspace; linking or moving a lane still checks every retained owner.
+  Offline import also permits repairing one invalid lane while another retains a known, disjoint
+  identity; unverifiable ownership remains blocked.
+- Duration controls display seconds, including quoted millisecond values accepted by the schema.
+  Unrelated edits preserve raw scalar values, and nullable checkboxes display their effective default.
+  Backend-specific edits remain in the draft when switching backend hides their controls.
+  When switching trackers, the selected adapter's controls take precedence over old hidden aliases.
+- Profile deletion is rejected while lanes, preparing/active dispatch captures or retained runs
+  reference it. Queued history writes are flushed before checking run references, so relinking
+  to an equivalent profile cannot erase an attempt's original profile identity.
 
 ### Managed ticket environments
 
@@ -1146,17 +1164,21 @@ Lane create/update accepts `slug`, `name`, `enabled`, `execution_profile_id`, `w
 `config`, `prompt`, and `note`. `config` is the lane-owned JSON object; `worker`, `workspace`,
 and `workspace_base` are rejected because they belong to the selected execution profile. Slugs
 match `^[a-z][a-z0-9-]{1,40}$` and are immutable after creation. New lanes default disabled.
-Omitted values retain their current values; invalid input returns
+Omitted values retain their current values. Editors display effective defaults without writing
+unchanged omitted settings, and retain meaningful explicit empty values on unrelated edits.
+Invalid input returns
 `422 {"errors":[{"path":"polling.interval_ms","message":"..."}]}`. Lane responses include
 profile ID/name, workspace subdirectory and lane config. Soft deletion retains history and reserves
 the slug; disable and wait for runtime shutdown first.
 
 Profile create/update accepts `name`, `description`, `workspace_base`, and raw `worker`. Responses
 include linked lane IDs and preserve `$VAR` credential references without returning resolved secrets.
-Deletion is rejected while any lane, including soft-deleted history, still references the profile.
+Deletion is rejected while any lane (including soft-deleted lanes) or retained run still references
+the profile. Relinking a lane does not discard the original profile reference from its historical runs.
 Profile edits validate every linked lane and publish future dispatch settings atomically. The profile
-detail shows linked-lane/shared-host impact for capacity planning, but does not create a global pool;
-it does not provision infrastructure or create profile history.
+detail shows linked-lane/shared-host impact for capacity planning and refreshes after lane creation,
+relinking, renaming or limit changes. Unsaved profile drafts survive these updates. Profiles do not
+create a global pool, provision infrastructure or create profile history.
 
 ### Durable history and retention
 
@@ -1171,6 +1193,13 @@ death finishes them as failed. Runtime crashes are isolated by lane; five abnorm
 60 seconds disable the lane with a visible error. Event retention starts one minute after boot and
 runs daily, deleting events older than `--events-retention-days` while preserving run summaries and
 workflow versions. Live views subscribe to lane/run updates.
+
+Version inspection shows lane-owned configuration and prompts with credential redaction. Redaction
+preserves complete `$VAR_NAME` references and follows sensitive values through nested maps and
+arrays. Dollar-prefixed literals such as `$private-token` and multiline values are masked. When historical
+front matter cannot be parsed, the UI shows a repair error and prompt, not the unsafe raw source.
+The original version bytes remain in SQLite for authorized recovery; saving a repaired configuration
+creates a replacement version instead of rewriting history.
 
 ## Project Layout
 

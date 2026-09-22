@@ -78,7 +78,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
                   <% else %>
                     <button type="button" class="subtle-button" phx-click="activate" phx-value-id={row.version.id}>Make current</button>
                   <% end %>
-                  <details class="version-inspection"><summary>Inspect</summary><p :if={row.invalid?} class="field-error">Invalid historical front matter; repair by saving a replacement version.</p><pre class="mono">{row.content}</pre></details>
+                  <details class="version-inspection"><summary>Inspect</summary><p :if={row.invalid?} class="field-error">Invalid historical front matter is retained in storage but hidden because its credentials cannot be safely redacted. Repair by saving a replacement version.</p><pre class="mono">{row.content}</pre></details>
                 </td>
               </tr>
             </tbody>
@@ -98,13 +98,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
         %{version: version, invalid?: false, content: Workflow.render(Workflow.encode_config(Configuration.redact_secrets(config)), workflow.prompt)}
 
       {:error, _reason} ->
-        %{version: version, invalid?: true, content: Workflow.render(redact_invalid_source(version.front_matter), version.prompt)}
+        %{version: version, invalid?: true, content: version.prompt}
     end
-  end
-
-  defp redact_invalid_source(source) do
-    Regex.replace(~r/^(\s*[^#\n]*(?:api.?key|token|secret|password|credential)[^:\n]*:\s*)(.*)$/mi, source, fn line, prefix, value ->
-      if String.starts_with?(String.trim(value), "$"), do: line, else: prefix <> "$REDACTED"
-    end)
   end
 end

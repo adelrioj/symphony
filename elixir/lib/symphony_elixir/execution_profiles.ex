@@ -1,4 +1,3 @@
-# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 defmodule SymphonyElixir.ExecutionProfiles do
   @moduledoc "Persistence and serialized publication for reusable execution profiles."
 
@@ -7,6 +6,7 @@ defmodule SymphonyElixir.ExecutionProfiles do
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.ExecutionProfiles.Profile
   alias SymphonyElixir.{Lanes, LaneStore, Repo}
+  alias SymphonyElixir.Runs.Run
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @max_sqlite_id 9_223_372_036_854_775_807
@@ -25,24 +25,13 @@ defmodule SymphonyElixir.ExecutionProfiles do
 
   @spec create(map()) :: {:ok, Profile.t()} | {:error, [Lanes.error()]}
   def create(attrs) when is_map(attrs) do
-    with {:ok, attrs} <- normalize(attrs) do
-      attrs = Map.put_new(attrs, "workspace_base", %SymphonyElixir.Config.Schema.Workspace{}.root)
-
-      with :ok <- validate(attrs),
-           :ok <- Configuration.validate_profile(attrs) do
-        LaneStore.mutate(
-          nil,
-          fn _check ->
-            case Repo.insert(Profile.changeset(%Profile{}, attrs)) do
-              {:ok, profile} -> {:ok, {:batch, profile, []}}
-              {:error, changeset} -> {:error, Lanes.errors_for(changeset)}
-            end
-          end,
-          nil
-        )
-        |> result_errors()
-        |> broadcast_result()
-      end
+    with {:ok, attrs} <- normalize(attrs),
+         attrs <- Map.put_new(attrs, "workspace_base", %SymphonyElixir.Config.Schema.Workspace{}.root),
+         :ok <- validate(attrs),
+         :ok <- Configuration.validate_profile(attrs) do
+      LaneStore.mutate(nil, fn _check -> insert_profile(attrs) end, nil)
+      |> result_errors()
+      |> broadcast_result()
     end
   end
 
@@ -50,37 +39,15 @@ defmodule SymphonyElixir.ExecutionProfiles do
 
   @spec update(Profile.t(), map()) :: {:ok, Profile.t()} | {:error, [Lanes.error()]}
   def update(%Profile{id: id}, attrs) when is_map(attrs) do
-    with {:ok, attrs} <- normalize(attrs) do
-      case Repo.get(Profile, id) do
-        nil ->
-          {:error, [%{path: "profile", message: "not found"}]}
-
-        profile ->
-          attrs = if profile.repair_error, do: Map.put(attrs, "repair_error", nil), else: attrs
-          full_attrs = profile_attrs(profile) |> Map.merge(attrs)
-
-          with :ok <- validate(full_attrs),
-               :ok <- Configuration.validate_profile(full_attrs) do
-            LaneStore.mutate(
-              nil,
-              fn _check ->
-                case Repo.get(Profile, id) do
-                  nil ->
-                    {:error, [%{path: "profile", message: "not found"}]}
-
-                  profile ->
-                    case Repo.update(Profile.changeset(profile, attrs)) do
-                      {:ok, updated} -> {:ok, {:batch, updated, linked_lane_ids(updated)}}
-                      {:error, changeset} -> {:error, Lanes.errors_for(changeset)}
-                    end
-                end
-              end,
-              nil
-            )
-            |> result_errors()
-            |> broadcast_result()
-          end
-      end
+    with {:ok, attrs} <- normalize(attrs),
+         {:ok, profile} <- fetch_profile(id),
+         attrs <- if(profile.repair_error, do: Map.put(attrs, "repair_error", nil), else: attrs),
+         full_attrs <- profile_attrs(profile) |> Map.merge(attrs),
+         :ok <- validate(full_attrs),
+         :ok <- Configuration.validate_profile(full_attrs) do
+      LaneStore.mutate(nil, fn _check -> update_profile(id, attrs) end, nil)
+      |> result_errors()
+      |> broadcast_result()
     end
   end
 
@@ -88,36 +55,53 @@ defmodule SymphonyElixir.ExecutionProfiles do
 
   @spec delete(Profile.t()) :: :ok | {:error, [Lanes.error()]}
   def delete(%Profile{id: id}) do
-    LaneStore.mutate(
-      nil,
-      fn _check ->
-        case Repo.get(Profile, id) do
-          nil ->
-            {:ok, {:batch, :ok, []}}
-
-          profile ->
-            if linked_lane_ids(profile) == [] do
-              case Repo.delete(profile) do
-                {:ok, _} -> {:ok, {:batch, :ok, []}}
-                {:error, changeset} -> {:error, Lanes.errors_for(changeset)}
-              end
-            else
-              {:error, [%{path: "lanes", message: "profile is still referenced by lanes"}]}
-            end
-        end
-      end,
-      nil
-    )
+    LaneStore.mutate({:delete_profile, id}, fn _check -> delete_profile(Repo.get(Profile, id)) end, nil)
     |> case do
       {:ok, :ok} ->
         ObservabilityPubSub.broadcast_profiles()
         :ok
 
-      {:error, errors} when is_list(errors) ->
-        {:error, errors}
-
       {:error, reason} ->
         {:error, Lanes.errors_for(reason)}
+    end
+  end
+
+  defp fetch_profile(id) do
+    case Repo.get(Profile, id) do
+      nil -> {:error, [%{path: "profile", message: "not found"}]}
+      profile -> {:ok, profile}
+    end
+  end
+
+  defp insert_profile(attrs) do
+    case Repo.insert(Profile.changeset(%Profile{}, attrs)) do
+      {:ok, profile} -> {:ok, {:batch, profile, []}}
+      {:error, changeset} -> {:error, Lanes.errors_for(changeset)}
+    end
+  end
+
+  defp update_profile(id, attrs) do
+    with {:ok, profile} <- fetch_profile(id) do
+      case Repo.update(Profile.changeset(profile, attrs)) do
+        {:ok, updated} -> {:ok, {:batch, updated, linked_lane_ids(updated)}}
+        {:error, changeset} -> {:error, Lanes.errors_for(changeset)}
+      end
+    end
+  end
+
+  defp delete_profile(nil), do: {:ok, {:batch, :ok, []}}
+
+  defp delete_profile(%Profile{id: id} = profile) do
+    cond do
+      Repo.exists?(from(l in Lanes.Lane, where: l.execution_profile_id == ^id)) ->
+        {:error, [%{path: "lanes", message: "profile is still referenced by lanes"}]}
+
+      Repo.exists?(from(r in Run, where: r.execution_profile_id == ^id)) ->
+        {:error, [%{path: "runs", message: "profile is still referenced by run history"}]}
+
+      true ->
+        Repo.delete!(profile)
+        {:ok, {:batch, :ok, []}}
     end
   end
 

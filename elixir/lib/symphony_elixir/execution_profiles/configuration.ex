@@ -28,19 +28,23 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   end
 
   @spec redact_secrets(term()) :: term()
-  def redact_secrets(map) when is_map(map) do
-    Map.new(map, fn {key, value} ->
-      value =
-        if secret_key?(key) and is_binary(value) and not String.starts_with?(value, "$"),
-          do: @redacted,
-          else: redact_secrets(value)
+  def redact_secrets(value), do: redact_value(value, false)
 
-      {key, value}
-    end)
+  @spec redact_secret(term()) :: term()
+  def redact_secret(value), do: redact_value(value, true)
+
+  defp redact_value(map, sensitive?) when is_map(map) do
+    Map.new(map, fn {key, value} -> {key, redact_value(value, sensitive? or secret_key?(key))} end)
   end
 
-  def redact_secrets(list) when is_list(list), do: Enum.map(list, &redact_secrets/1)
-  def redact_secrets(value), do: value
+  defp redact_value(list, sensitive?) when is_list(list), do: Enum.map(list, &redact_value(&1, sensitive?))
+
+  defp redact_value("$" <> reference = value, true) do
+    if Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*\z/, reference), do: value, else: @redacted
+  end
+
+  defp redact_value(_value, true), do: @redacted
+  defp redact_value(value, false), do: value
 
   @spec restore_redacted(term(), term(), String.t()) :: {:ok, term()} | {:error, [map()]}
   def restore_redacted(value, original, path) when is_binary(path), do: restore_redacted_value(value, original, path)
@@ -99,8 +103,6 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
       {:ssh, base, workspace_subdir, hosts |> Enum.uniq() |> Enum.sort()}
     end
   end
-
-  def location_source(_profile, _workspace_subdir), do: nil
 
   @doc false
   @spec workspace_base(map()) :: String.t() | nil
@@ -253,10 +255,7 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   defp error(path, message), do: %{path: path, message: message}
 
   defp normalize_profile_errors(errors) do
-    Enum.map(errors, fn
-      %{path: "profile." <> path} = error -> %{error | path: path}
-      error -> error
-    end)
+    Enum.map(errors, fn %{path: "profile." <> path} = error -> %{error | path: path} end)
   end
 
   defp restore_redacted_value(@redacted, original, _path) when original not in [@missing, @redacted], do: {:ok, original}

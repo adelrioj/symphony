@@ -1,5 +1,3 @@
-# credo:disable-for-this-file Credo.Check.Refactor.CyclomaticComplexity
-# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 defmodule SymphonyElixir.Workspace do
   @moduledoc """
   Creates isolated per-issue workspaces for parallel Codex agents.
@@ -31,16 +29,9 @@ defmodule SymphonyElixir.Workspace do
 
     hosts
     |> Enum.reduce_while([], fn host, roots ->
-      case remote_canonical_paths(host, base, effective) do
-        {:ok, canonical_base, canonical_effective} ->
-          base_parts = Path.split(canonical_base)
-          effective_parts = Path.split(canonical_effective)
-
-          if Enum.take(effective_parts, length(base_parts)) == base_parts do
-            {:cont, [canonical_effective | roots]}
-          else
-            {:halt, {:error, :remote_workspace_outside_base}}
-          end
+      case contained_remote_root(host, base, effective) do
+        {:ok, canonical_effective} ->
+          {:cont, [canonical_effective | roots]}
 
         {:error, reason} ->
           {:halt, {:error, reason}}
@@ -50,6 +41,17 @@ defmodule SymphonyElixir.Workspace do
       [root | roots] -> if(Enum.all?(roots, &(&1 == root)), do: {:ok, root}, else: {:error, :remote_workspace_roots_differ})
       {:error, reason} -> {:error, reason}
       [] -> {:error, :missing_ssh_host}
+    end
+  end
+
+  defp contained_remote_root(host, base, effective) do
+    with {:ok, canonical_base, canonical_effective} <- remote_canonical_paths(host, base, effective) do
+      base_parts = Path.split(canonical_base)
+      effective_parts = Path.split(canonical_effective)
+
+      if Enum.take(effective_parts, length(base_parts)) == base_parts,
+        do: {:ok, canonical_effective},
+        else: {:error, :remote_workspace_outside_base}
     end
   end
 
@@ -81,7 +83,8 @@ defmodule SymphonyElixir.Workspace do
     command =
       [
         remote_shell_assign("workspace_root", root),
-        "if [ -d \"$workspace_root\" ]; then find \"$workspace_root\" -mindepth 1 -maxdepth 1 -print -quit; exit $?; fi",
+        "if [ -L \"$workspace_root\" ]; then exit 1; fi",
+        "if [ -d \"$workspace_root\" ]; then find \"$workspace_root\" -mindepth 1 -maxdepth 1 -exec printf retained ';' -quit; exit $?; fi",
         "if [ -e \"$workspace_root\" ] || [ -L \"$workspace_root\" ]; then exit 1; fi",
         "ancestor=$workspace_root",
         "while [ ! -e \"$ancestor\" ] && [ ! -L \"$ancestor\" ] && [ \"$ancestor\" != / ]; do ancestor=${ancestor%/*}; [ -n \"$ancestor\" ] || ancestor=/; done",
@@ -145,24 +148,28 @@ defmodule SymphonyElixir.Workspace do
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host) do
-        case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, on_hook) do
-          :ok ->
-            {:ok, workspace}
-
-          {:error, {:managed_execution_unknown, _detail}} = error ->
-            error
-
-          {:error, _reason} = error ->
-            case cleanup_failed_new_workspace(workspace, created?, worker_host) do
-              {:error, {:managed_execution_unknown, _detail}} = unknown -> unknown
-              _ -> error
-            end
-        end
+        finish_workspace_creation(workspace, issue_context, created?, worker_host, on_hook)
       end
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
         Logger.error("Workspace creation failed #{issue_log_context(issue_context)} worker_host=#{worker_host_for_log(worker_host)} error=#{Exception.message(error)}")
         {:error, error}
+    end
+  end
+
+  defp finish_workspace_creation(workspace, issue_context, created?, worker_host, on_hook) do
+    case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, on_hook) do
+      :ok ->
+        {:ok, workspace}
+
+      {:error, {:managed_execution_unknown, _detail}} = error ->
+        error
+
+      {:error, _reason} = error ->
+        case cleanup_failed_new_workspace(workspace, created?, worker_host) do
+          {:error, {:managed_execution_unknown, _detail}} = unknown -> unknown
+          _ -> error
+        end
     end
   end
 

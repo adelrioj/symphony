@@ -2,7 +2,7 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
-  alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, Repo, TestSupport}
+  alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, Repo, Runs, TestSupport}
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.Workflow
 
@@ -417,6 +417,52 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
   end
 
   @tag :tmp_dir
+  test "a preparing dispatch retains its profile after an equivalent-infrastructure relink", %{tmp_dir: root} do
+    {:ok, captured} = ExecutionProfiles.create(%{name: "Captured", workspace_base: root, worker: %{}})
+    {:ok, replacement} = ExecutionProfiles.create(%{name: "Replacement", workspace_base: root, worker: %{}})
+    {:ok, lane} = Lanes.create(%{slug: "preparing", execution_profile_id: captured.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, lane} = Lanes.set_enabled(lane, true)
+    {:ok, token, _snapshot} = LaneStore.reserve_dispatch(lane.id)
+
+    assert {:ok, _relinked} = Lanes.update(lane, %{execution_profile_id: replacement.id})
+    assert {:error, _errors} = ExecutionProfiles.delete(captured)
+    assert ExecutionProfiles.get(captured.id)
+    assert :ok = LaneStore.release_dispatch(lane.id, token)
+    assert :ok = ExecutionProfiles.delete(captured)
+    assert is_nil(ExecutionProfiles.get(captured.id))
+    assert Lanes.get!(lane.id).execution_profile_id == replacement.id
+  end
+
+  for mode <- [:online, :offline] do
+    @tag :tmp_dir
+    test "#{mode} profile deletion waits for queued history after a dispatch releases its reservation", %{tmp_dir: root} do
+      {:ok, captured} = ExecutionProfiles.create(%{name: "Queued history", workspace_base: root, worker: %{}})
+      {:ok, replacement} = ExecutionProfiles.create(%{name: "Replacement", workspace_base: root, worker: %{}})
+      {:ok, lane} = Lanes.create(%{slug: "queued-history", execution_profile_id: captured.id, config: %{"tracker" => %{"kind" => "memory"}}})
+      {:ok, lane} = Lanes.set_enabled(lane, true)
+      {:ok, token, _snapshot} = LaneStore.reserve_dispatch(lane.id)
+      issue = %SymphonyElixir.Tracker.Issue{id: "queued-issue", identifier: "QUEUED-1", state: "Todo"}
+      Runs.flush()
+      :sys.suspend(SymphonyElixir.Runs.Writer)
+
+      try do
+        :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "queued-profile-attempt"})
+        assert {:ok, _relinked} = Lanes.update(lane, %{execution_profile_id: replacement.id})
+        assert :ok = LaneStore.release_dispatch(lane.id, token)
+        if unquote(mode) == :offline, do: Supervisor.terminate_child(SymphonyElixir.Supervisor, LaneStore)
+        deletion = Task.async(fn -> ExecutionProfiles.delete(captured) end)
+        assert Task.yield(deletion, 25) == nil
+        :sys.resume(SymphonyElixir.Runs.Writer)
+        assert {:error, [%{path: "runs"}]} = Task.await(deletion)
+        assert Runs.get_by_attempt("queued-profile-attempt").execution_profile_id == captured.id
+        assert ExecutionProfiles.get(captured.id)
+      after
+        :sys.resume(SymphonyElixir.Runs.Writer)
+      end
+    end
+  end
+
+  @tag :tmp_dir
   test "concurrent profile edits, relinking and deletion leave complete results", %{tmp_dir: root} do
     {:ok, profile} = ExecutionProfiles.create(%{name: "Concurrent", workspace_base: root, worker: %{"max_concurrent_agents_per_host" => 2}})
     {:ok, other} = ExecutionProfiles.create(%{name: "Other", workspace_base: Path.join(root, "other"), worker: %{"max_concurrent_agents_per_host" => 7}})
@@ -439,6 +485,78 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
     assert first_entry.settings.worker.max_concurrent_agents_per_host == 5
     assert second_entry.settings.worker.max_concurrent_agents_per_host == 7
     assert Lanes.get!(second.id).execution_profile_id == other.id
+  end
+
+  @tag :tmp_dir
+  @tag :remediation
+  test "remediation: historical runs prevent profile deletion after safe lane relinking", %{tmp_dir: root} do
+    {:ok, original} = ExecutionProfiles.create(%{name: "Historical", workspace_base: Path.join(root, "original"), worker: %{}})
+    {:ok, replacement} = ExecutionProfiles.create(%{name: "Replacement", workspace_base: Path.join(root, "replacement"), worker: %{}})
+    {:ok, lane} = Lanes.create(%{slug: "historical-profile", execution_profile_id: original.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    issue = %SymphonyElixir.Tracker.Issue{id: "historical-issue", identifier: "HIST-1", state: "Todo"}
+
+    assert :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "historical-profile-attempt"})
+    assert :ok = Runs.event("historical-profile-attempt", %{event: :turn_completed, message: "retained"}, %{input_tokens: 7}, 1)
+    assert :ok = Runs.finished("historical-profile-attempt", "done")
+    run = Runs.get_by_attempt("historical-profile-attempt")
+    assert run.execution_profile_id == original.id
+    assert run.status == "done"
+    events = Runs.events(run.id)
+    assert Enum.any?(events, &(&1.kind == "turn_finished"))
+
+    assert {:ok, relinked} = Lanes.update(lane, %{execution_profile_id: replacement.id})
+    assert relinked.execution_profile_id == replacement.id
+    assert ExecutionProfiles.linked_lanes(original) == []
+    authority = Process.whereis(LaneStore)
+    assert is_pid(authority)
+
+    assert {:error, errors} = ExecutionProfiles.delete(original)
+    assert Enum.any?(errors, &(&1.path == "runs" and is_binary(&1.message)))
+    assert ExecutionProfiles.get(original.id) == original
+    assert Runs.get_by_attempt("historical-profile-attempt") == run
+    assert Runs.events(run.id) == events
+    assert Process.whereis(LaneStore) == authority
+
+    assert {:ok, updated} = ExecutionProfiles.update(replacement, %{description: "authority remains usable"})
+    assert updated.description == "authority remains usable"
+    assert {:ok, %{profile_id: profile_id}} = LaneStore.lookup(lane.id)
+    assert profile_id == replacement.id
+  end
+
+  @tag :tmp_dir
+  @tag :remediation
+  test "remediation: malformed profile attributes leave persisted configuration untouched", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Preserved", workspace_base: root, worker: %{}})
+    profiles = ExecutionProfiles.list()
+
+    assert {:error, [%{path: "profile"}]} = ExecutionProfiles.create(name: "Not an object")
+    assert {:error, [%{path: "profile"}]} = ExecutionProfiles.update(profile, name: "Not an object")
+    assert {:error, [%{path: "profile"}]} = ExecutionProfiles.update(profile, %{1 => "invalid key"})
+    assert ExecutionProfiles.list() == profiles
+    assert ExecutionProfiles.get(profile.id) == profile
+  end
+
+  @tag :tmp_dir
+  @tag :remediation
+  test "remediation: profile lookup rejects unparsed and oversized identifiers", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Identifier boundary", workspace_base: root, worker: %{}})
+
+    assert ExecutionProfiles.get(Integer.to_string(profile.id)) == nil
+    assert ExecutionProfiles.get(9_223_372_036_854_775_808) == nil
+    assert ExecutionProfiles.get(profile.id) == profile
+  end
+
+  @tag :tmp_dir
+  @tag :remediation
+  test "remediation: deleted profiles cannot be resurrected by stale edits or repeated deletion", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Deleted", workspace_base: root, worker: %{}})
+
+    assert :ok = ExecutionProfiles.delete(profile)
+    assert ExecutionProfiles.get(profile.id) == nil
+    assert {:error, [%{path: "profile"}]} = ExecutionProfiles.update(profile, %{description: "stale draft"})
+    assert :ok = ExecutionProfiles.delete(profile)
+    assert ExecutionProfiles.get(profile.id) == nil
+    refute Enum.any?(ExecutionProfiles.list(), &(&1.id == profile.id))
   end
 
   defp managed_worker do
