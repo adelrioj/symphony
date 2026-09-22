@@ -18,7 +18,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | {:error, term()} | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
-    with {:ok, context} <- execution_context(Config.settings!(), opts) do
+    with {:ok, context} <- execution_context(Config.settings!(), opts),
+         :ok <- credential_admission(context) do
       opts = Keyword.put_new_lazy(opts, :attempt_id, &new_attempt_id/0)
       Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(context.worker_host)}")
 
@@ -46,6 +47,13 @@ defmodule SymphonyElixir.AgentRunner do
       {nil, _} -> {:error, :execution_context_required}
     end
   end
+
+  defp credential_admission(%ExecutionContext{mode: :managed, environment: %{record: record} = environment}) do
+    credentials = SymphonyElixir.ExecutionEnvironment.Credentials
+    enabled = credentials.enabled?(Map.get(environment, :config, %{}))
+    if credentials.ready?(record) and (not enabled or credentials.tracked?(record)), do: :ok, else: {:error, :credential_outcome_unknown}
+  end
+  defp credential_admission(_context), do: :ok
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host.worker_host)}")

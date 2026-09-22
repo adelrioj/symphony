@@ -20,6 +20,14 @@ Local workspaces and static SSH workers are supported. Managed cloud environment
 not production-qualified; production Kubernetes allocation is blocked.
 See [managed environments and limitations](docs/managed-environments.md).
 
+Features Workstations can optionally coordinate one personal Codex login through
+generation-checked cloud ownership and sealed worker checkpoints. Physical stop alone
+does not release that credential or authorize disk deletion. The option is disabled
+when omitted; it does not change Bugs, QA, static workers, or Claude authentication.
+See [personal Codex credentials](elixir/README.md#personal-codex-credentials) for the
+explicit configuration and recovery-required outcomes. No production enablement or
+credential/model qualification is implied.
+
 ## Install
 
 **Docker is the primary deployment path.** The supplied image uses Codex; the template uses Linear.

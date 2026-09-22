@@ -11,7 +11,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
   import Ecto.Changeset
 
   @primary_key false
-  @fields [:kind, :deployment_id, :provider, :startup_timeout_ms, :shutdown_timeout_ms, :terminal_retention_ms]
+  @required_fields [:kind, :deployment_id, :provider, :startup_timeout_ms, :shutdown_timeout_ms, :terminal_retention_ms]
+  @fields @required_fields ++ [:codex_credentials]
   @workstations_scope ["project", "location", "cluster"]
   @kubernetes_scope ["kubeconfig", "context", "namespace"]
   @workstations_identity @workstations_scope ++ ["config", "credential_configuration", "impersonate_service_account", "ssh_user"]
@@ -24,6 +25,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
     field(:startup_timeout_ms, :integer)
     field(:shutdown_timeout_ms, :integer)
     field(:terminal_retention_ms, :integer, default: 0)
+    field(:codex_credentials, :map, redact: true)
   end
 
   @type t :: %__MODULE__{
@@ -32,7 +34,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
           provider: map(),
           startup_timeout_ms: pos_integer(),
           shutdown_timeout_ms: pos_integer(),
-          terminal_retention_ms: non_neg_integer()
+          terminal_retention_ms: non_neg_integer(),
+          codex_credentials: map() | nil
         }
 
   @spec parse(term()) :: {:ok, t()} | {:error, {:invalid_environment_config, map()}}
@@ -56,7 +59,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
   def changeset(schema, config) do
     schema
     |> cast(normalize_keys(config), @fields, empty_values: [])
-    |> validate_required(@fields)
+    |> validate_required(@required_fields)
     |> validate_inclusion(:kind, ["google_workstations", "kubernetes"])
     |> validate_change(:deployment_id, fn :deployment_id, deployment_id ->
       if String.trim(deployment_id) == "", do: [deployment_id: "must not be blank"], else: []
@@ -67,6 +70,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
     |> validate_change(:provider, fn :provider, provider ->
       if string_keys?(provider), do: [], else: [provider: "must contain string keys"]
     end)
+    |> validate_codex_credentials()
   end
 
   @spec runtime(map()) :: map() | nil
@@ -86,7 +90,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
       config ->
         keys = if config.kind == "google_workstations", do: @workstations_identity, else: @kubernetes_identity
 
-        {config.kind, config.deployment_id, config.tracker_kind, config.workspace_root, canonical(Map.take(config.provider, keys))}
+        identity = {config.kind, config.deployment_id, config.tracker_kind, config.workspace_root, canonical(Map.take(config.provider, keys))}
+        if(is_nil(config.codex_credentials), do: identity, else: {identity, canonical(config.codex_credentials)})
         |> :erlang.term_to_binary()
         |> then(&:crypto.hash(:sha256, &1))
     end
@@ -110,6 +115,28 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
       _ -> raise ArgumentError, "invalid managed execution environment configuration"
     end
   end
+
+  defp validate_codex_credentials(changeset) do
+    case get_field(changeset, :codex_credentials) do
+      nil -> changeset
+      references ->
+        valid = get_field(changeset, :kind) == "google_workstations" and valid_codex_references?(references)
+        if valid, do: changeset, else: add_error(changeset, :codex_credentials, "must contain exact Workstations credential references")
+    end
+  end
+
+  defp valid_codex_references?(references) when is_map(references) do
+    keys = ~w(credential_id secret control_bucket control_object)
+    MapSet.new(Map.keys(references)) == MapSet.new(keys) and
+      Enum.all?(keys, &(is_binary(references[&1]) and String.trim(references[&1]) != "")) and
+      Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/, references["credential_id"]) and
+      Regex.match?(~r{\Aprojects/[1-9][0-9]*/secrets/[A-Za-z0-9_-]+\z}, references["secret"]) and
+      Regex.match?(~r/\A[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]\z/, references["control_bucket"]) and
+      not String.contains?(references["control_object"], ["?", "#", "\\", "\n", "\r"]) and
+      Enum.all?(String.split(references["control_object"], "/"), &(&1 not in ["", ".", ".."]))
+  end
+
+  defp valid_codex_references?(_references), do: false
 
   defp value(map, key) when is_map(map), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
   defp value(_map, _key), do: nil

@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   @moduledoc "Pure lifecycle transitions; only qualified provider evidence releases execution capacity."
-  alias SymphonyElixir.ExecutionEnvironment.Record
+  alias SymphonyElixir.ExecutionEnvironment.{Credentials, Record}
 
   defmodule Entry do
     @moduledoc false
@@ -77,7 +77,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   end
 
   def step(%Entry{phase: :preparing, operation_id: nil, operation_seq: seq, record: %Record{phase: :running}} = entry, :launch, _now) when seq > 0 do
-    {%{entry | phase: :running}, [{:launch_agent, entry.attempt_id}]}
+    if Credentials.ready?(entry.record), do: {%{entry | phase: :running}, [{:launch_agent, entry.attempt_id}]}, else: {entry, []}
   end
 
   def step(%Entry{phase: :running, attempt_id: id} = entry, {:agent_exited, id, completion}, _now) do
@@ -93,7 +93,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   def step(%Entry{phase: phase, operation_id: id} = entry, {:stopped, id, %Record{} = record}, _now) when phase in [:stopping, :unknown] and not is_nil(id) do
     record = invalidate_start_proof(record)
 
-    if quiescent?(record) and not unresolved?(record) do
+    if quiescent?(record) and not unresolved?(record) and Credentials.resolved?(record) do
       {%{entry | record: record, phase: :stopped, context: nil, operation_id: nil}, [{:release, entry.completion}]}
     else
       {%{entry | record: record, phase: :unknown}, []}
@@ -106,11 +106,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   end
 
   def step(%Entry{phase: :stopped} = entry, :destroy, _now) do
-    if quiescent?(entry.record) and not unresolved?(entry.record), do: operation(entry, :destroy, :deleting), else: {entry, []}
+    if quiescent?(entry.record) and not unresolved?(entry.record) and Credentials.resolved?(entry.record), do: operation(entry, :destroy, :deleting), else: {entry, []}
   end
 
   def step(%Entry{phase: phase, operation_id: id} = entry, {:destroyed, id, %Record{absent?: true} = record}, _now) when phase in [:deleting, :unknown] and not is_nil(id) do
-    if unresolved?(record) do
+    if unresolved?(record) or not Credentials.resolved?(record) do
       {entry, []}
     else
       {%{entry | record: record, phase: :absent, context: nil, operation_id: nil}, [:forget]}
@@ -123,11 +123,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   def occupied?(%Entry{phase: :absent}), do: false
 
   def occupied?(%Entry{phase: phase, record: record}) when phase in [:stopped, :deleting] do
-    not quiescent?(record) or unresolved_start?(record)
+    not quiescent?(record) or unresolved_start?(record) or not Credentials.resolved?(record)
   end
 
   def occupied?(%Entry{phase: :unknown, record: %Record{desired: :absent} = record}) do
-    not quiescent?(record) or unresolved_start?(record)
+    not quiescent?(record) or unresolved_start?(record) or not Credentials.resolved?(record)
   end
 
   def occupied?(%Entry{}), do: true

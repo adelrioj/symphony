@@ -269,6 +269,20 @@ defmodule SymphonyElixir.AgentRunnerTest do
     refute_received {:agent_turns_exhausted, _, _, _}
   end
 
+  test "managed recovery credentials cannot reach workspace hooks or either agent backend" do
+    root = hook_workspace_root!()
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: root, hook_before_run: "printf unsafe > admission-ran")
+    record = %SymphonyElixir.ExecutionEnvironment.Record{
+      key: "se-ticket", deployment_id: "deployment", tracker_kind: "memory", issue_id: "ticket", kind: "google_workstations",
+      scope: %{}, workspace_path: Path.join(root, "ticket"), template_identity: "fixture",
+      metadata: %{"codex_credentials" => %{"mode" => "recover", "stage" => "bound"}}
+    }
+    context = %{managed_hook_context!(root) | environment: %{record: record}}
+    assert {:error, :credential_outcome_unknown} =
+      AgentRunner.run(build_issue([]), self(), execution_context: context, backend_module: SymphonyElixir.AgentRunnerStubBackend)
+    refute File.exists?(Path.join(context.workspace_path, "admission-ran"))
+  end
+
   test "managed exceptional cleanup reports after-run failure without replacing the backend exception" do
     root = hook_workspace_root!()
     context = managed_hook_context!(root)

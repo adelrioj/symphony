@@ -13,6 +13,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.ExecutionEnvironment
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
+  alias SymphonyElixir.ExecutionEnvironment.Credentials
   alias SymphonyElixir.ExecutionEnvironment.Lifecycle
   alias SymphonyElixir.ExecutionEnvironment.Lifecycle.Entry
   alias SymphonyElixir.ExecutionEnvironment.Operations
@@ -2073,10 +2074,38 @@ defmodule SymphonyElixir.Orchestrator do
       %Entry{operation_id: id} = entry when id == job.operation_id ->
         apply_environment_result(state, entry, job.operation, result)
 
+      current when job.operation == :prepare ->
+        account_late_prepare(state, current, job, result)
+
       _ ->
         close_stale_prepared(result, state)
         state
     end
+  end
+
+  defp account_late_prepare(state, current, job, {:ok, %ExecutionContext{environment: %{record: record}} = context}) do
+    if record.issue_id == job.issue_id and valid_inventory_record?(record, state.environment_config) do
+      entry = current || Lifecycle.new(record, attempt_id(), :cleanup)
+      entry = %{entry | record: record, context: context, phase: :unknown, completion: entry.completion || :release}
+      state |> put_environment(entry) |> environment_step(record.issue_id, {:reconcile, :stop})
+    else
+      close_stale_prepared({:ok, context}, state)
+      refresh_environment_inventory(state, true)
+    end
+  end
+
+  defp account_late_prepare(state, current, job, {:error, _failure, %Record{} = record}) do
+    if record.issue_id == job.issue_id and valid_inventory_record?(record, state.environment_config) do
+      entry = current || Lifecycle.new(record, attempt_id(), :cleanup)
+      state |> put_environment(%{entry | record: record, phase: :unknown}) |> environment_step(record.issue_id, {:reconcile, :stop})
+    else
+      refresh_environment_inventory(state, true)
+    end
+  end
+
+  defp account_late_prepare(state, _current, _job, result) do
+    close_stale_prepared(result, state)
+    refresh_environment_inventory(state, true)
   end
 
   defp apply_discovery_result(state, {:ok, records}) when is_list(records) do
@@ -2125,8 +2154,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp valid_inventory_record?(_record, _config), do: false
 
-  defp qualified_stopped_record?(%Record{phase: :stopped, proof: {:quiescent, evidence}, pending: pending}) when is_map(evidence) and map_size(evidence) > 0 do
-    not Enum.any?(pending, &(&1.outcome in [:pending, :unknown]))
+  defp qualified_stopped_record?(%Record{phase: :stopped, proof: {:quiescent, evidence}, pending: pending} = record) when is_map(evidence) and map_size(evidence) > 0 do
+    not Enum.any?(pending, &(&1.outcome in [:pending, :unknown])) and Credentials.resolved?(record)
   end
 
   defp qualified_stopped_record?(_record), do: false
@@ -2206,6 +2235,7 @@ defmodule SymphonyElixir.Orchestrator do
       cond do
         not is_nil(entry.completion) -> managed_stop(state, entry.record.issue_id, entry.completion)
         entry.purpose == :cleanup -> revalidate_cleanup_prepared(state, entry.record.issue_id)
+        not Credentials.ready?(record) -> managed_stop(state, entry.record.issue_id, :release)
         true -> revalidate_prepared_environment(state, entry.record.issue_id)
       end
     else
@@ -2267,7 +2297,20 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp apply_environment_result(state, entry, operation, {:error, failure, %Record{} = record}) do
+  defp apply_environment_result(state, entry, :prepare, {:error, {:retryable, :credential_busy} = failure, %Record{} = record}) do
+    if Credentials.unallocated?(record) do
+      put_environment(state, %{entry | record: record, phase: :reserved, operation_id: nil, last_error: {:prepare, failure}})
+    else
+      fail_environment_result(state, entry, :prepare, failure, record)
+    end
+  end
+
+  defp apply_environment_result(state, entry, operation, {:error, failure, %Record{} = record}),
+    do: fail_environment_result(state, entry, operation, failure, record)
+
+  defp apply_environment_result(state, entry, operation, _result), do: apply_environment_result(state, entry, operation, {:error, {:unknown, :invalid_result}, entry.record})
+
+  defp fail_environment_result(state, entry, operation, failure, record) do
     entry = failed_environment_entry(state, entry, operation)
 
     state = put_environment(state, entry)
@@ -2280,7 +2323,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp apply_environment_result(state, entry, operation, _result), do: apply_environment_result(state, entry, operation, {:error, {:unknown, :invalid_result}, entry.record})
 
   defp cleanup_retry_after_metadata(%{terminal_observed_at: nil}, _retry_at), do: nil
   defp cleanup_retry_after_metadata(_intent, retry_at), do: retry_at
@@ -2363,7 +2405,10 @@ defmodule SymphonyElixir.Orchestrator do
     state = put_environment(state, entry)
 
     cond do
-      entry.phase == :stopped and not environment_job?(state, id) ->
+      unallocated_credential_wait?(entry) and not environment_job?(state, id) ->
+        discard_credential_wait(state, id)
+
+      entry.phase == :stopped and Credentials.resolved?(entry.record) and not environment_job?(state, id) ->
         finish_environment_stop(state, entry, completion)
 
       entry.phase in [:stopping, :deleting] ->
@@ -2508,8 +2553,27 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_busy_environment(state, _entry, _issue), do: state
 
+  defp unallocated_credential_wait?(entry) do
+    entry.phase == :reserved and entry.last_error == {:prepare, {:retryable, :credential_busy}} and Credentials.unallocated?(entry.record)
+  end
+
+  defp discard_credential_wait(state, id) do
+    %{do_release_issue_claim(state, id) | environment_entries: Map.delete(state.environment_entries, id)}
+  end
+
   defp eligible_environment_issue?(nil), do: false
   defp eligible_environment_issue?(issue), do: candidate_issue?(issue, active_state_set(), terminal_state_set())
+
+  defp reconcile_idle_environment(state, %Entry{phase: :reserved, last_error: {:prepare, {:retryable, :credential_busy}}} = entry, issue) do
+    cond do
+      not unallocated_credential_wait?(entry) ->
+        environment_step(state, entry.record.issue_id, {:reconcile, :stop})
+      not is_nil(entry.completion) or not eligible_environment_issue?(issue) ->
+        discard_credential_wait(state, entry.record.issue_id)
+      true ->
+        state |> put_environment(%{entry | last_error: nil}) |> environment_step(entry.record.issue_id, :prepare)
+    end
+  end
 
   defp reconcile_idle_environment(state, %Entry{phase: :unknown} = entry, _issue) do
     environment_step(state, entry.record.issue_id, {:reconcile, :inspect})
@@ -2650,6 +2714,7 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_path: record.workspace_path,
       provider_resource_id: safe_resource_id(record.provider_ref),
       terminal_observed_at: record.terminal_observed_at,
+      credential: Credentials.status(record),
       unresolved: safe_environment_failure(entry)
     }
   end
@@ -2663,7 +2728,7 @@ defmodule SymphonyElixir.Orchestrator do
     operations = [:discover, :prepare, :stop, :destroy, :inspect, :metadata, :cleanup_hook]
     operation = if operation in operations, do: operation, else: :reconcile
     category = if category in [:invalid, :denied, :retryable, :unknown], do: category, else: :unknown
-    codes = [:task_down, :invalid_result, :prepared_identity, :kubernetes_controller_cleanup_ordering_unproven]
+    codes = [:task_down, :invalid_result, :prepared_identity, :kubernetes_controller_cleanup_ordering_unproven, :credential_outcome_unknown, :credential_busy, :codex_profile]
     code = if code in codes, do: code, else: :environment_operation_unresolved
     %{operation: operation, category: category, code: code}
   end
