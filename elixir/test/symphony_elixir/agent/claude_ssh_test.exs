@@ -157,6 +157,8 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       "ssh_port" => 2222
     }
 
+    reset_lanes!()
+
     :ok =
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
@@ -191,6 +193,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
   defp write_fake_ssh!(test_root, trace_file) do
     fake_bin_dir = Path.join(test_root, "bin")
     fake_ssh = Path.join(fake_bin_dir, "ssh")
+    fake_realpath = Path.join(fake_bin_dir, "realpath")
 
     File.mkdir_p!(fake_bin_dir)
 
@@ -205,6 +208,13 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     """)
 
     File.chmod!(fake_ssh, 0o755)
+
+    File.write!(
+      fake_realpath,
+      "#!/bin/sh\n[ \"$1\" = -m ] && shift\n[ \"$1\" = -- ] && shift\nexec python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' \"$1\"\n"
+    )
+
+    File.chmod!(fake_realpath, 0o755)
     System.put_env("PATH", fake_bin_dir <> ":" <> (System.get_env("PATH") || ""))
   end
 

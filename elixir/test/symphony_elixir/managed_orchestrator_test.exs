@@ -42,19 +42,32 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   end
 
   setup do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "memory",
-      tracker_active_states: ["In Progress"],
-      workspace_root: "/home/user/workspaces",
-      worker_environment: environment(),
-      max_concurrent_agents: 1,
-      poll_interval_ms: 60_000
-    )
+    reset_lanes!()
+
+    assert :ok =
+             write_workflow_file!(Workflow.workflow_file_path(),
+               tracker_kind: "memory",
+               tracker_active_states: ["In Progress"],
+               workspace_root: "/home/user/workspaces",
+               worker_environment: environment(),
+               max_concurrent_agents: 1,
+               poll_interval_ms: 60_000
+             )
 
     inventory = start_supervised!({MemoryInventory, self()})
     Process.put({__MODULE__, :inventory}, inventory)
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, inventory)
     :ok
+  end
+
+  @tag :remediation
+  test "remediation: terminal reconciliation releases the launched reservation after authoritative cleanup" do
+    assert_reconciliation_releases_location("Done")
+  end
+
+  @tag :remediation
+  test "remediation: nonactive reconciliation releases the launched reservation after authoritative cleanup" do
+    assert_reconciliation_releases_location("In Review")
   end
 
   test "capacity stays occupied until actual controlled stop completes" do
@@ -77,6 +90,45 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     assert second.record.issue_id == "second"
     ready(config, second, prepare, owner, tasks)
     assert_receive {:agent_started, "second", _, _}, 1_000
+  end
+
+  test "managed preparation and stop retain their reserved configuration snapshot" do
+    issues([issue("first", 1)])
+    {owner, tasks} = scheduler()
+    discover([])
+    {old_config, entry, prepare} = operation(:prepare)
+    old_identity = entry.lane_snapshot.config_identity
+    dispatch_token = :sys.get_state(owner).dispatch_tokens["first"]
+    assert Map.has_key?(:sys.get_state(LaneStore).reservations, dispatch_token)
+
+    lane_id = LaneContext.current!()
+    {:ok, current} = LaneStore.lookup(lane_id)
+
+    settings =
+      current.settings
+      |> put_in([Access.key!(:worker), Access.key!(:environment), Access.key!(:startup_timeout_ms)], 20_000)
+      |> put_in([Access.key!(:worker), Access.key!(:environment), Access.key!(:shutdown_timeout_ms)], 30_000)
+
+    assert :ok = LaneStore.put_entry(%{current | settings: settings, config_identity: :crypto.hash(:sha256, "updated")})
+    send(owner, {:lane_updated, lane_id})
+    assert {:ok, %{config_identity: new_identity}} = LaneStore.lookup(lane_id)
+    refute new_identity == old_identity
+    Orchestrator.snapshot(owner, 1_000)
+
+    state = :sys.get_state(owner)
+    assert Map.has_key?(:sys.get_state(LaneStore).reservations, dispatch_token)
+    assert state.environment_entries["first"].lane_snapshot.config_identity == old_identity
+    assert is_nil(state.environment_entries["first"].completion)
+    assert {:ok, _} = LaneStore.protect_environment(lane_id, state.environment_identity, state.environment_guard)
+
+    ready(old_config, entry, prepare, owner, tasks)
+    assert_receive {:agent_started, "first", runner, _}, 1_000
+    assert :sys.get_state(owner).running["first"].lane_snapshot.config_identity == old_identity
+
+    send(runner, :finish_agent)
+    {stop_config, _stopping, _stop} = operation(:stop)
+    assert stop_config.startup_timeout_ms == 10_000
+    assert stop_config.shutdown_timeout_ms == 10_000
   end
 
   test "failed stop and lifecycle task DOWN never free capacity" do
@@ -154,14 +206,15 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   end
 
   test "stopped terminal cleanup runs hook then durable marker then stop before destruction" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "memory",
-      tracker_active_states: ["In Progress"],
-      workspace_root: "/home/user/workspaces",
-      worker_environment: environment(),
-      max_concurrent_agents: 1,
-      hook_before_remove: "echo cleanup"
-    )
+    assert :ok =
+             write_workflow_file!(Workflow.workflow_file_path(),
+               tracker_kind: "memory",
+               tracker_active_states: ["In Progress"],
+               workspace_root: "/home/user/workspaces",
+               worker_environment: environment(),
+               max_concurrent_agents: 1,
+               hook_before_remove: "echo cleanup"
+             )
 
     issues([%{issue("first", 1) | state: "Done"}])
     {owner, tasks} = scheduler()
@@ -340,8 +393,9 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     {_, stopping, stop} = operation(:stop)
     refute_receive {:agent_started, _, _, _}, 0
     stopped(stop, stopping)
-    {_, next, _} = operation(:prepare)
-    assert next.backend_module == SymphonyElixir.Agent.Claude
+    wait_state(owner, &(map_size(&1.environment_jobs) == 0))
+    assert Config.settings!().agent.backend == "claude"
+    refute_receive {:agent_started, _, _, _}, 0
   end
 
   test "routine inventory preserves an exact healthy current attempt" do
@@ -482,17 +536,23 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     wait_state(owner, &(&1.environment_discovery == :ready and is_nil(&1.environment_guard)))
     new_environment = Map.put(environment(), "deployment_id", "next-deployment")
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "memory",
-      tracker_active_states: ["In Progress"],
-      workspace_root: "/home/user/workspaces",
-      worker_environment: new_environment,
-      max_concurrent_agents: 1
-    )
+    assert :ok =
+             write_workflow_file!(Workflow.workflow_file_path(),
+               tracker_kind: "memory",
+               tracker_active_states: ["In Progress"],
+               workspace_root: "/home/user/workspaces",
+               worker_environment: new_environment,
+               max_concurrent_agents: 1
+             )
 
+    {:ok, updated_entry} = LaneStore.lookup(LaneContext.current!())
+    :ok = LaneStore.put_entry(%{updated_entry | enabled: true})
+    poll(owner)
+    wait_state(owner, &(&1.environment_config.deployment_id == "next-deployment" and &1.environment_discovery == :pending))
+    discover([])
+    wait_state(owner, &(&1.environment_discovery == :ready))
     issues([issue("first", 1)])
     poll(owner)
-    discover([])
     {config, entry, prepare} = operation(:prepare)
     assert entry.record.deployment_id == "next-deployment"
     assert is_reference(:sys.get_state(owner).environment_guard)
@@ -847,6 +907,52 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     refute Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
   end
 
+  defp assert_reconciliation_releases_location(next_state) do
+    assert :ok =
+             write_managed_workflow(
+               tracker_active_states: ["In Progress"],
+               worker_environment: Map.put(environment(), "terminal_retention_ms", 0),
+               poll_interval_ms: 60_000
+             )
+
+    profile = LaneContext.current!() |> Lanes.get() |> Map.fetch!(:execution_profile_id) |> ExecutionProfiles.get()
+    moved_base = "/home/user/moved-workspaces"
+    issues([issue("first", 1)])
+    {owner, tasks} = scheduler()
+    discover([])
+    {config, entry, prepare} = operation(:prepare)
+    ready(config, entry, prepare, owner, tasks)
+    assert_receive {:agent_started, "first", runner, _}, 1_000
+    runner_monitor = Process.monitor(runner)
+
+    :ok = set_issue_state("first", next_state)
+    poll(owner)
+    {_, stopping, stop} = operation(:stop)
+    assert_receive {:DOWN, ^runner_monitor, :process, ^runner, _}, 1_000
+    assert {:error, _} = ExecutionProfiles.update(profile, %{workspace_base: moved_base})
+    stopped(stop, stopping)
+
+    if next_state != "Done" do
+      wait_state(owner, &(&1.environment_entries["first"].phase == :stopped))
+      assert {:error, _} = ExecutionProfiles.update(profile, %{workspace_base: moved_base})
+      :ok = set_issue_state("first", "Done")
+      poll(owner)
+      {_, metadata, task} = operation(:metadata)
+      send(task, {:complete_operation, {:ok, struct!(metadata.record, metadata.metadata_intent)}})
+    end
+
+    {_, destroying, destroy} = operation(:destroy)
+    assert {:error, _} = ExecutionProfiles.update(profile, %{workspace_base: moved_base})
+    send(destroy, {:complete_operation, {:ok, %{destroying.record | absent?: true, pending: []}}})
+    discover([])
+    wait_state(owner, &(&1.environment_discovery == :ready and is_nil(&1.environment_guard)))
+
+    assert {:ok, updated} = ExecutionProfiles.update(profile, %{workspace_base: moved_base})
+    assert updated.workspace_base == moved_base
+    refute MapSet.member?(:sys.get_state(owner).claimed, "first")
+    refute Map.has_key?(:sys.get_state(owner).retry_attempts, "first")
+  end
+
   defp wait_state(owner, predicate), do: wait_state(owner, predicate, System.monotonic_time(:millisecond) + 1_000)
 
   defp wait_state(owner, predicate, deadline) do
@@ -877,6 +983,8 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   defp scheduler(mode \\ :isolated) do
     parent = self()
     lane_id = LaneContext.current!()
+    {:ok, entry} = LaneStore.lookup(lane_id)
+    :ok = LaneStore.put_entry(%{entry | enabled: true})
     tasks = if mode == :registered, do: LaneRegistry.via(lane_id, :tasks), else: start_supervised!({Task.Supervisor, []}, id: make_ref())
 
     operation_fun = fn _adapter, config, entry, operation, opts ->
@@ -1006,8 +1114,10 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   defp issue(id, priority), do: %Issue{id: id, identifier: "TEST-#{id}", title: id, state: "In Progress", priority: priority, dispatchable: true}
 
   defp record(id) do
+    key = ExecutionEnvironment.resource_key("deployment", "memory", id)
+
     %Record{
-      key: ExecutionEnvironment.resource_key("deployment", "memory", id),
+      key: key,
       deployment_id: "deployment",
       tracker_kind: "memory",
       issue_id: id,
@@ -1015,7 +1125,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
       issue_state: "In Progress",
       kind: "google_workstations",
       scope: %{"project" => "p", "location" => "l", "cluster" => "c"},
-      workspace_path: "/home/user/workspaces/#{id}",
+      workspace_path: "/home/user/workspaces/#{key}",
       template_identity: "fixture-template",
       attempt_id: "previous-attempt"
     }

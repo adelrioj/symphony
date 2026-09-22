@@ -7,7 +7,8 @@
 
 Symphony picks up issues from your tracker and runs coding agents in isolated workspaces.
 One self-hosted Elixir/OTP service manages independently configured **lanes**, each with
-its own tracker scope, agent settings, and workflow, through an authenticated dashboard.
+its own tracker scope, workflow and limits. Reusable execution profiles own worker settings,
+credential references and workspace bases, so one profile can serve several lanes.
 
 **Trackers:** Linear, GitHub Issues, GitLab, Jira Cloud, Asana. **Agents:** Codex, Claude Code.
 
@@ -40,7 +41,14 @@ and a Linear API key. Agents run unattended: use a trusted environment and scope
    ```
 
 Open <http://localhost:4000>, sign in with the operator token, and enable `main`.
-New lanes start disabled. Edit running lanes in the UI, not the imported file.
+New lanes start disabled. Use the structured lane editor and `/execution-profiles` for live
+changes; the imported file is flattened interchange only, not a watched runtime configuration.
+Editors preserve omitted settings and explicit disabling values during unrelated changes.
+Profile edits apply to future runs on every linked lane. Active attempts retain their dispatch
+snapshot, and workspace/target identity changes are rejected while retained work is still owned.
+Invalid lanes retain workspace ownership; failed credential validation does not free their resources.
+Version inspection redacts credentials, including nested values. Invalid historical configuration
+remains in storage for recovery but is hidden from the browser rather than exposed unsafely.
 
 [Full deployment guide](deploy/client-template/README.md) ·
 [Run from source](elixir/README.md#run) ·

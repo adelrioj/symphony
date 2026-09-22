@@ -1,6 +1,45 @@
 defmodule SymphonyElixir.OrchestratorTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.ExecutionEnvironment.Command
+
+  @tag :remediation
+  @tag :tmp_dir
+  test "remediation: SSH startup cleanup cannot delete through a stable root symlink outside its profile", %{tmp_dir: root} do
+    bin = Path.join(root, "fixture-bin")
+    File.mkdir_p!(bin)
+    realpath = System.find_executable("grealpath") || System.find_executable("realpath") || flunk("SSH fixtures require realpath supporting -m")
+    File.ln_s!(realpath, Path.join(bin, "realpath"))
+    File.ln_s!("/bin/bash", Path.join(bin, "bash"))
+    ssh = Path.join(bin, "ssh")
+
+    File.write!(ssh, """
+    #!/bin/sh
+    for argument in "$@"; do command=$argument; done
+    exec /bin/sh -c "$command"
+    """)
+
+    File.chmod!(ssh, 0o700)
+    previous_path = System.get_env("PATH")
+    System.put_env("PATH", bin <> ":/usr/bin:/bin")
+    on_exit(fn -> restore_env("PATH", previous_path) end)
+
+    # Establish the local transport and GNU realpath prerequisite before the
+    # production two-second SSH deadline, without retrying any lane operation.
+    fixture =
+      Command.run(
+        ssh,
+        ["controlled-fixture", SymphonyElixir.SSH.remote_shell_command("realpath -m -- / /symphony-fixture-missing/..")],
+        timeout_ms: 5_000,
+        task_supervisor: SymphonyElixir.TaskSupervisor
+      )
+
+    assert fixture == {:ok, %{output: "/\n/\n", status: 0}},
+           "controlled SSH fixture requires a ready shell and realpath -m: #{inspect(fixture)}"
+
+    assert_startup_cleanup_retains_base(root)
+  end
+
   test "an issue whose state maps to an unknown backend is logged and not claimed" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -360,6 +399,48 @@ defmodule SymphonyElixir.OrchestratorTest do
     {issue, pid}
   end
 
+  defp assert_startup_cleanup_retains_base(root) do
+    base = Path.join(root, "profile-base")
+    File.mkdir_p!(base)
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Startup containment", workspace_base: base, worker: %{"ssh_hosts" => ["controlled-fixture"]}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "startup-containment",
+        execution_profile_id: profile.id,
+        workspace_subdir: "lane",
+        config: %{"tracker" => %{"kind" => "memory", "terminal_states" => ["Done"]}, "polling" => %{"interval_ms" => 60_000}}
+      })
+
+    LaneContext.put(lane.id)
+    {:ok, entry} = LaneStore.lookup(lane.id)
+    workspace_root = entry.settings.workspace.root
+    terminal = %Issue{id: "terminal-cleanup", identifier: "CLEANUP-1", title: "Finished", state: "Done", dispatchable: true}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [terminal])
+    terminal_workspace = Path.join(workspace_root, terminal.identifier)
+    File.mkdir_p!(terminal_workspace)
+    File.write!(Path.join(terminal_workspace, "remove-me"), "terminal workspace")
+
+    safe_name = Module.concat(__MODULE__, :"SafeStartup#{System.unique_integer([:positive])}")
+    {:ok, safe_owner} = start_test_orchestrator(name: safe_name)
+    assert %{running: []} = Orchestrator.snapshot(safe_owner, 1_000)
+    refute File.exists?(terminal_workspace)
+    stop_supervised!(Module.concat(safe_name, RuntimeSupervisor))
+
+    outside = Path.join(root, "outside-profile")
+    outside_workspace = Path.join(outside, terminal.identifier)
+    File.mkdir_p!(outside_workspace)
+    marker = Path.join(outside_workspace, "keep")
+    File.write!(marker, "outside data")
+    File.rm_rf!(workspace_root)
+    File.ln_s!(outside, workspace_root)
+
+    escaped_name = Module.concat(__MODULE__, :"EscapedStartup#{System.unique_integer([:positive])}")
+    {:ok, escaped_owner} = start_test_orchestrator(name: escaped_name)
+    assert %{running: []} = Orchestrator.snapshot(escaped_owner, 1_000)
+    assert File.read!(marker) == "outside data"
+  end
+
   defp wait_for_state(pid, predicate, timeout_ms \\ 1_000) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_state(pid, predicate, deadline)
@@ -404,6 +485,7 @@ defmodule SymphonyElixir.OrchestratorTest do
     active_states = Keyword.get(opts, :active_states, ["Implemented"])
     backend_by_state = Keyword.get(opts, :backend_by_state, ~s({"implemented": "claude"}))
     in_progress_state = Keyword.get(opts, :in_progress_state, "In Progress")
+    File.rm_rf!(Config.local_workspace_root())
 
     File.write!(Workflow.workflow_file_path(), """
     ---

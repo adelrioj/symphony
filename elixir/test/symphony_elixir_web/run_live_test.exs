@@ -4,7 +4,7 @@ defmodule SymphonyElixirWeb.RunLiveTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.{LaneContext, Lanes, Repo, Runs}
+  alias SymphonyElixir.{LaneContext, Lanes, Repo, Runs, TestSupport}
   alias SymphonyElixir.Runs.Event
   alias SymphonyElixirWeb.ObservabilityPubSub
 
@@ -121,7 +121,7 @@ defmodule SymphonyElixirWeb.RunLiveTest do
   end
 
   test "retained history remains readable after its lane is removed", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "historical", front_matter: "tracker:\n  kind: memory"})
+    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "historical", front_matter: "tracker:\n  kind: memory"})
     issue = %Issue{id: "old", identifier: "OLD-1", title: "Old", state: "Done"}
     :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "old-run"})
     :ok = Runs.finished("old-run", "done")

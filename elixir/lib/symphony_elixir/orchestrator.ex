@@ -1,3 +1,4 @@
+# credo:disable-for-this-file Credo.Check.Refactor.FunctionArity
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
   Polls the configured issue tracker and dispatches repository copies to the selected agent backend.
@@ -64,6 +65,7 @@ defmodule SymphonyElixir.Orchestrator do
       environment_operation_fun: &Operations.run/5,
       runner_fun: &AgentRunner.run/3,
       running: %{},
+      dispatch_tokens: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
       blocked: %{},
@@ -217,6 +219,11 @@ defmodule SymphonyElixir.Orchestrator do
             complete_running_entry(state, issue_id, running_entry, reason, session_id)
           end)
 
+        state =
+          if managed_entry?(state, issue_id),
+            do: state,
+            else: release_dispatch_token(state, issue_id, Map.get(running_entry, :dispatch_token))
+
         Logger.info("Agent task finished for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}")
 
         notify_dashboard()
@@ -354,7 +361,9 @@ defmodule SymphonyElixir.Orchestrator do
       issue_url: running_entry.issue.url,
       error: "agent exited: #{inspect(reason)}",
       worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path)
+      workspace_path: Map.get(running_entry, :workspace_path),
+      execution_context: Map.get(running_entry, :execution_context),
+      lane_snapshot: Map.get(running_entry, :lane_snapshot)
     })
   end
 
@@ -376,7 +385,9 @@ defmodule SymphonyElixir.Orchestrator do
           issue_url: running_entry.issue.url,
           delay_type: :continuation,
           worker_host: Map.get(running_entry, :worker_host),
-          workspace_path: Map.get(running_entry, :workspace_path)
+          workspace_path: Map.get(running_entry, :workspace_path),
+          execution_context: Map.get(running_entry, :execution_context),
+          lane_snapshot: Map.get(running_entry, :lane_snapshot)
         })
     end
   end
@@ -550,8 +561,8 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_stalled_running_issues(state)
 
     state.running
-    |> Enum.group_by(fn {_id, entry} -> get_in(entry, [:lane_snapshot, Access.key(:version_id)]) end)
-    |> Enum.reduce(state, fn {_version, entries}, acc ->
+    |> Enum.group_by(fn {_id, entry} -> get_in(entry, [:lane_snapshot, Access.key(:config_identity)]) || get_in(entry, [:lane_snapshot, Access.key(:version_id)]) end)
+    |> Enum.reduce(state, fn {_config_identity, entries}, acc ->
       {_id, first} = hd(entries)
       ids = Enum.map(entries, &elem(&1, 0))
 
@@ -829,6 +840,8 @@ defmodule SymphonyElixir.Orchestrator do
           cleanup_issue_workspace(Map.get(running_entry, :issue, identifier), running_entry)
         end
 
+        state = release_dispatch_token(state, issue_id, Map.get(running_entry, :dispatch_token))
+
         %{
           state
           | running: Map.delete(state.running, issue_id),
@@ -891,7 +904,11 @@ defmodule SymphonyElixir.Orchestrator do
         |> schedule_issue_retry(issue_id, next_attempt, %{
           identifier: identifier,
           issue_url: running_entry.issue.url,
-          error: "stalled for #{elapsed_ms}ms without codex activity"
+          error: "stalled for #{elapsed_ms}ms without codex activity",
+          worker_host: Map.get(running_entry, :worker_host),
+          workspace_path: Map.get(running_entry, :workspace_path),
+          execution_context: Map.get(running_entry, :execution_context),
+          lane_snapshot: Map.get(running_entry, :lane_snapshot)
         })
       end
     else
@@ -1028,6 +1045,8 @@ defmodule SymphonyElixir.Orchestrator do
       issue: Map.get(running_entry, :issue),
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path),
+      execution_context: Map.get(running_entry, :execution_context),
+      lane_snapshot: Map.get(running_entry, :lane_snapshot),
       session_id: running_entry_session_id(running_entry),
       error: error,
       blocked_at: DateTime.utc_now(),
@@ -1037,6 +1056,8 @@ defmodule SymphonyElixir.Orchestrator do
     }
 
     Runs.finished(running_entry.attempt_id, "blocked")
+
+    state = release_dispatch_token(state, issue_id, Map.get(running_entry, :dispatch_token))
 
     %{
       state
@@ -1180,26 +1201,34 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
-    {:ok, snapshot} = LaneContext.capture()
-    with_lane_snapshot(snapshot, fn -> dispatch_issue_from_snapshot(state, issue, attempt, preferred_worker_host) end)
+    case LaneStore.reserve_dispatch(state.lane_id) do
+      {:ok, token, snapshot} ->
+        with_lane_snapshot(snapshot, fn ->
+          dispatch_issue_from_snapshot(state, issue, attempt, preferred_worker_host, token)
+        end)
+
+      {:error, reason} ->
+        Logger.warning("Skipping dispatch; lane reservation failed lane_id=#{state.lane_id} reason=#{inspect(reason)}")
+        state
+    end
   end
 
-  defp dispatch_issue_from_snapshot(state, issue, attempt, preferred_worker_host) do
+  defp dispatch_issue_from_snapshot(state, issue, attempt, preferred_worker_host, token) do
     case refresh_issue_for_dispatch(issue) do
       {:ok, %Issue{} = refreshed_issue} ->
         case backend_module_for_dispatch(refreshed_issue) do
           {:ok, backend_module} ->
-            do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, backend_module)
+            do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, backend_module, token)
 
           :error ->
-            state
+            release_dispatch_token(state, refreshed_issue.id, token)
         end
 
       {:skip, _reason} ->
-        state
+        release_dispatch_token(state, issue.id, token)
 
       {:error, _reason} ->
-        state
+        release_dispatch_token(state, issue.id, token)
     end
   end
 
@@ -1268,37 +1297,38 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp do_dispatch_issue(%State{environment_config: config} = state, issue, attempt, _preferred_worker_host, backend_module) when not is_nil(config) do
-    reserve_environment(state, issue, attempt, backend_module)
+  defp do_dispatch_issue(%State{environment_config: config} = state, issue, attempt, _preferred_worker_host, backend_module, token) when not is_nil(config) do
+    reserve_environment(state, issue, attempt, backend_module, token)
   end
 
-  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host, backend_module) do
+  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host, backend_module, token) do
     recipient = self()
 
     case select_worker_host(state, preferred_worker_host) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
-        state
+        release_dispatch_token(state, issue.id, token)
 
       worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, backend_module)
+        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, backend_module, token)
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, backend_module) do
+  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, backend_module, token) do
     context = static_execution_context(worker_host)
     attempt_id = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
-    spawn_issue_with_context(state, issue, attempt, recipient, backend_module, context, attempt_id, true)
+    spawn_issue_with_context(state, issue, attempt, recipient, backend_module, context, attempt_id, true, token)
   end
 
-  defp spawn_issue_with_context(state, issue, attempt, recipient, backend_module, context, attempt_id, claim?) do
+  defp spawn_issue_with_context(state, issue, attempt, recipient, backend_module, context, attempt_id, claim?, dispatch_token, reserved_snapshot \\ nil) do
     worker_host = context.worker_host
     runner = state.runner_fun
-    {:ok, snapshot} = LaneContext.capture()
+    {:ok, snapshot} = if(reserved_snapshot, do: {:ok, reserved_snapshot}, else: LaneContext.capture())
     lane_id = state.lane_id
 
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
            LaneContext.install(snapshot)
+           :ok = LaneStore.claim_dispatch(lane_id, dispatch_token)
 
            runner.(issue, recipient,
              attempt: attempt,
@@ -1313,6 +1343,8 @@ defmodule SymphonyElixir.Orchestrator do
         Runs.started(%{
           lane_id: lane_id,
           lane_version_id: snapshot.version_id,
+          execution_profile_id: snapshot.profile_id,
+          config_identity: snapshot.config_identity,
           executor: snapshot.executor,
           owner_pid: self(),
           issue: issue,
@@ -1349,6 +1381,7 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_total_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
+            dispatch_token: dispatch_token,
             started_at: DateTime.utc_now()
           })
 
@@ -1362,6 +1395,8 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
+
+        state = release_dispatch_token(state, issue.id, dispatch_token)
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
           identifier: issue.identifier,
@@ -1423,6 +1458,7 @@ defmodule SymphonyElixir.Orchestrator do
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
+    lane_snapshot = Map.get(metadata, :lane_snapshot) || Map.get(previous_retry, :lane_snapshot)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -1446,7 +1482,9 @@ defmodule SymphonyElixir.Orchestrator do
             issue_url: issue_url,
             error: error,
             worker_host: worker_host,
-            workspace_path: workspace_path
+            workspace_path: workspace_path,
+            execution_context: Map.get(metadata, :execution_context) || Map.get(previous_retry, :execution_context),
+            lane_snapshot: lane_snapshot
           })
     }
   end
@@ -1459,7 +1497,9 @@ defmodule SymphonyElixir.Orchestrator do
           issue_url: Map.get(retry_entry, :issue_url),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
-          workspace_path: Map.get(retry_entry, :workspace_path)
+          workspace_path: Map.get(retry_entry, :workspace_path),
+          execution_context: Map.get(retry_entry, :execution_context),
+          lane_snapshot: Map.get(retry_entry, :lane_snapshot)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -1517,14 +1557,16 @@ defmodule SymphonyElixir.Orchestrator do
   defp cleanup_issue_workspace(identifier, worker_host \\ nil)
 
   defp cleanup_issue_workspace(issue_or_identifier, metadata) when is_map(metadata) do
-    case Map.get(metadata, :workspace_path) do
-      workspace_path when is_binary(workspace_path) and workspace_path != "" ->
-        context = Map.get(metadata, :execution_context) || static_execution_context(Map.get(metadata, :worker_host))
-        Workspace.remove_recorded(workspace_path, context)
+    with_lane_snapshot(Map.get(metadata, :lane_snapshot), fn ->
+      case Map.get(metadata, :workspace_path) do
+        workspace_path when is_binary(workspace_path) and workspace_path != "" ->
+          context = Map.get(metadata, :execution_context) || static_execution_context(Map.get(metadata, :worker_host))
+          Workspace.remove_recorded(workspace_path, context)
 
-      _ ->
-        cleanup_issue_workspace(issue_or_identifier, Map.get(metadata, :worker_host))
-    end
+        _ ->
+          cleanup_issue_workspace(issue_or_identifier, Map.get(metadata, :worker_host))
+      end
+    end)
   end
 
   defp cleanup_issue_workspace(issue_or_identifier, nil) do
@@ -1540,8 +1582,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_issue_workspace(_issue_or_identifier, _worker_host), do: :ok
 
-  defp static_execution_context(nil), do: ExecutionContext.local(Config.local_workspace_root())
-  defp static_execution_context(host), do: ExecutionContext.ssh(Config.settings!().workspace.root, host)
+  defp static_execution_context(host) do
+    {:ok, snapshot} = LaneContext.capture()
+    root = snapshot.settings.workspace.root
+
+    if is_nil(host) do
+      ExecutionContext.local(Path.expand(root, Config.data_root()), snapshot.workspace_base)
+    else
+      ExecutionContext.ssh(root, host, snapshot.workspace_base)
+    end
+  end
 
   defp run_terminal_workspace_cleanup do
     case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
@@ -1587,33 +1637,43 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_refreshed_retry(state, issue, attempt, metadata) do
-    {:ok, snapshot} = LaneContext.capture()
-    with_lane_snapshot(snapshot, fn -> dispatch_refreshed_retry_from_snapshot(state, issue, attempt, metadata) end)
+    case LaneStore.reserve_dispatch(state.lane_id) do
+      {:ok, token, snapshot} ->
+        with_lane_snapshot(snapshot, fn ->
+          dispatch_refreshed_retry_from_snapshot(state, issue, attempt, metadata, token)
+        end)
+
+      {:error, reason} ->
+        Logger.warning("Skipping retry dispatch; lane reservation failed lane_id=#{state.lane_id} reason=#{inspect(reason)}")
+        {:noreply, state}
+    end
   end
 
-  defp dispatch_refreshed_retry_from_snapshot(state, issue, attempt, metadata) do
+  defp dispatch_refreshed_retry_from_snapshot(state, issue, attempt, metadata, token) do
     case refresh_issue_for_dispatch(issue) do
       {:ok, %Issue{} = refreshed_issue} ->
-        dispatch_retry_backend(state, refreshed_issue, attempt, metadata[:worker_host])
+        dispatch_retry_backend(state, refreshed_issue, attempt, metadata[:worker_host], token)
 
       {:skip, :missing} ->
-        {:noreply, release_issue_claim(state, issue.id)}
+        {:noreply, state |> release_dispatch_token(issue.id, token) |> release_issue_claim(issue.id)}
 
       {:skip, %Issue{} = refreshed_issue} ->
+        state = release_dispatch_token(state, issue.id, token)
         handle_retry_issue_lookup(refreshed_issue, state, issue.id, attempt, metadata)
 
       {:error, reason} ->
+        state = release_dispatch_token(state, issue.id, token)
         {:noreply, reschedule_retry_refresh_failure(state, issue, attempt, metadata, reason)}
     end
   end
 
-  defp dispatch_retry_backend(state, issue, attempt, worker_host) do
+  defp dispatch_retry_backend(state, issue, attempt, worker_host, token) do
     case backend_module_for_dispatch(issue) do
       {:ok, backend_module} ->
-        {:noreply, do_dispatch_issue(state, issue, attempt, worker_host, backend_module)}
+        {:noreply, do_dispatch_issue(state, issue, attempt, worker_host, backend_module, token)}
 
       :error ->
-        {:noreply, release_issue_claim(state, issue.id)}
+        {:noreply, state |> release_dispatch_token(issue.id, token) |> release_issue_claim(issue.id)}
     end
   end
 
@@ -1657,6 +1717,15 @@ defmodule SymphonyElixir.Orchestrator do
         retry_attempts: Map.delete(state.retry_attempts, issue_id),
         turn_exhaustions: Map.delete(state.turn_exhaustions, issue_id)
     }
+  end
+
+  defp release_dispatch_token(state, _issue_id, nil), do: state
+
+  defp release_dispatch_token(state, issue_id, token) do
+    _ = LaneStore.release_dispatch(state.lane_id, token)
+    %{state | dispatch_tokens: Map.delete(state.dispatch_tokens, issue_id)}
+  catch
+    :exit, _ -> %{state | dispatch_tokens: Map.delete(state.dispatch_tokens, issue_id)}
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
@@ -1935,7 +2004,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp attempt_id, do: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
   defp utc_ms, do: System.system_time(:millisecond)
 
-  defp reserve_environment(state, issue, attempt, backend) do
+  defp reserve_environment(state, issue, attempt, backend, dispatch_token) do
     with true <- managed_dispatch_ready?(state) and managed_issue_available?(state, issue.id),
          true <- environment_capacity?(state, claim_capacity_issue(issue)),
          {:ok, state} <- protect_environment(state) do
@@ -1978,17 +2047,25 @@ defmodule SymphonyElixir.Orchestrator do
       entry = %{
         entry
         | issue: issue,
+          environment_config: config,
+          lane_snapshot: current_lane_snapshot(),
           backend_module: backend,
           retry_attempt: attempt,
           agent_executable: selected_executable(backend),
           record: %{entry.record | attempt_id: id, issue_state: issue.state, issue_identifier: issue.identifier}
       }
 
-      state = %{put_environment(state, entry) | claimed: MapSet.put(state.claimed, issue.id), retry_attempts: Map.delete(state.retry_attempts, issue.id)}
+      state = %{
+        put_environment(state, entry)
+        | dispatch_tokens: Map.put(state.dispatch_tokens, issue.id, dispatch_token),
+          claimed: MapSet.put(state.claimed, issue.id),
+          retry_attempts: Map.delete(state.retry_attempts, issue.id)
+      }
+
       environment_step(state, issue.id, :prepare)
     else
-      {:error, state} -> state
-      _ -> state
+      {:error, state} -> release_dispatch_token(state, issue.id, dispatch_token)
+      _ -> release_dispatch_token(state, issue.id, dispatch_token)
     end
   end
 
@@ -2044,7 +2121,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp do_start_environment_job(state, entry, operation) do
-    {:ok, adapter} = ExecutionEnvironment.adapter(state.environment_config.kind)
+    config = entry.environment_config || state.environment_config
+    {:ok, adapter} = ExecutionEnvironment.adapter(config.kind)
     opts = environment_options(state)
     opts = if entry.purpose == :agent, do: Keyword.put(opts, :agent_executable, entry.agent_executable), else: opts
 
@@ -2055,7 +2133,7 @@ defmodule SymphonyElixir.Orchestrator do
         entry
       end
 
-    {:ok, task} = Operations.start(state.task_supervisor, adapter, state.environment_config, entry, operation, opts)
+    {:ok, task} = Operations.start(state.task_supervisor, adapter, config, entry, operation, opts)
     job = %{issue_id: entry.record.issue_id, operation_id: entry.operation_id, operation: operation, task: task}
     %{state | environment_jobs: Map.put(state.environment_jobs, task.ref, job)}
   end
@@ -2165,7 +2243,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp adopt_environment_entry(state, %Entry{}, _record), do: state
 
   defp adopt_environment_entry(state, nil, record) do
-    entry = Lifecycle.new(record, attempt_id(), :agent)
+    entry = %{Lifecycle.new(record, attempt_id(), :agent) | environment_config: state.environment_config, lane_snapshot: current_lane_snapshot()}
     phase = if qualified_stopped_record?(record), do: :stopped, else: :unknown
     state = put_environment(state, %{entry | phase: phase})
 
@@ -2202,12 +2280,7 @@ defmodule SymphonyElixir.Orchestrator do
     if record.issue_id == entry.record.issue_id and record.attempt_id == entry.attempt_id do
       state = put_environment(state, %{entry | context: context})
       state = environment_step(state, entry.record.issue_id, {:prepared, entry.operation_id, record})
-
-      cond do
-        not is_nil(entry.completion) -> managed_stop(state, entry.record.issue_id, entry.completion)
-        entry.purpose == :cleanup -> revalidate_cleanup_prepared(state, entry.record.issue_id)
-        true -> revalidate_prepared_environment(state, entry.record.issue_id)
-      end
+      continue_prepared_environment(state, state.environment_entries[entry.record.issue_id])
     else
       close_stale_prepared({:ok, context}, state)
       apply_environment_result(state, entry, :prepare, {:error, {:invalid, :prepared_identity}, entry.record})
@@ -2282,6 +2355,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp apply_environment_result(state, entry, operation, _result), do: apply_environment_result(state, entry, operation, {:error, {:unknown, :invalid_result}, entry.record})
 
+  defp continue_prepared_environment(state, %Entry{completion: completion} = entry) when not is_nil(completion) do
+    managed_stop(state, entry.record.issue_id, completion)
+  end
+
+  defp continue_prepared_environment(state, %Entry{purpose: :cleanup} = entry) do
+    with_lane_snapshot(entry.lane_snapshot, fn -> revalidate_cleanup_prepared(state, entry.record.issue_id) end)
+  end
+
+  defp continue_prepared_environment(state, entry) do
+    with_lane_snapshot(entry.lane_snapshot, fn -> revalidate_prepared_environment(state, entry.record.issue_id) end)
+  end
+
   defp cleanup_retry_after_metadata(%{terminal_observed_at: nil}, _retry_at), do: nil
   defp cleanup_retry_after_metadata(_intent, retry_at), do: retry_at
 
@@ -2289,6 +2374,7 @@ defmodule SymphonyElixir.Orchestrator do
     metadata = %{
       identifier: entry.record.issue_identifier,
       workspace_path: entry.record.workspace_path,
+      lane_snapshot: entry.lane_snapshot,
       error: "managed preparation failed"
     }
 
@@ -2322,8 +2408,11 @@ defmodule SymphonyElixir.Orchestrator do
          true <- backend == entry.backend_module and selected_executable(backend) == entry.agent_executable do
       state |> put_environment(%{entry | issue: issue}) |> environment_step(id, :launch)
     else
-      {:error, %State{} = failed_state} -> managed_stop(failed_state, id, :release)
-      _ -> managed_stop(state, id, :release)
+      {:error, %State{} = failed_state} ->
+        managed_stop(failed_state, id, :release)
+
+      _reason ->
+        managed_stop(state, id, :release)
     end
   end
 
@@ -2339,7 +2428,9 @@ defmodule SymphonyElixir.Orchestrator do
         entry.backend_module,
         context,
         entry.attempt_id,
-        false
+        false,
+        Map.get(state.dispatch_tokens, entry.record.issue_id),
+        entry.lane_snapshot
       )
 
     if Map.has_key?(state.running, entry.record.issue_id), do: state, else: managed_stop(state, entry.record.issue_id, state.environment_entries[entry.record.issue_id].completion || :release)
@@ -2380,6 +2471,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp finish_environment_stop(state, entry, completion) do
+    state =
+      case completion do
+        {:agent_down, _reason, running} -> release_dispatch_token(state, entry.record.issue_id, Map.get(running, :dispatch_token))
+        _ -> release_dispatch_token(state, entry.record.issue_id, Map.get(state.dispatch_tokens, entry.record.issue_id))
+      end
+
     error = if entry.purpose == :cleanup and not is_nil(entry.cleanup_retry_at), do: entry.last_error, else: nil
     state = put_environment(state, %{entry | completion: nil, last_error: error})
 
@@ -2443,9 +2540,12 @@ defmodule SymphonyElixir.Orchestrator do
   defp reconcile_environment_entries(state) do
     state.environment_entries
     |> Map.keys()
-    |> Enum.group_by(fn id -> get_in(state.running, [id, :lane_snapshot, Access.key(:version_id)]) end)
-    |> Enum.reduce(state, fn {_version, ids}, acc ->
-      snapshot = get_in(state.running, [hd(ids), :lane_snapshot])
+    |> Enum.group_by(fn id ->
+      snapshot = state.environment_entries[id].lane_snapshot || get_in(state.running, [id, :lane_snapshot])
+      snapshot && (snapshot.config_identity || snapshot.version_id)
+    end)
+    |> Enum.reduce(state, fn {_config_identity, ids}, acc ->
+      snapshot = state.environment_entries[hd(ids)].lane_snapshot || get_in(state.running, [hd(ids), :lane_snapshot])
 
       with_lane_snapshot(snapshot, fn ->
         refresh_environment_issue_group(acc, ids)
@@ -2587,7 +2687,7 @@ defmodule SymphonyElixir.Orchestrator do
         entry = %{entry | issue: issue, metadata_intent: intent}
         state |> put_environment(entry) |> environment_step(id, {:reconcile, :metadata})
 
-      not Lifecycle.deletion_due?(entry.record, :terminal, state.environment_config.terminal_retention_ms, utc_ms()) ->
+      not terminal_cleanup_due?(state, entry) ->
         state
 
       cleanup_retry_pending?(entry) ->
@@ -2596,7 +2696,7 @@ defmodule SymphonyElixir.Orchestrator do
       cleanup_hook_complete?(entry) ->
         environment_step(state, id, :destroy)
 
-      managed_dispatch_ready?(state) and environment_capacity?(state, issue) ->
+      cleanup_capacity?(state, issue) ->
         {entry, _} = Lifecycle.step(entry, {:reserve, attempt_id(), :cleanup}, utc_ms())
         entry = %{entry | issue: issue, record: %{entry.record | issue_state: issue.state}}
         state |> put_environment(entry) |> environment_step(id, :prepare)
@@ -2606,13 +2706,29 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp terminal_cleanup_due?(state, entry) do
+    config = entry.environment_config || state.environment_config
+    Lifecycle.deletion_due?(entry.record, :terminal, config.terminal_retention_ms, utc_ms())
+  end
+
+  defp cleanup_capacity?(state, issue), do: managed_dispatch_ready?(state) and environment_capacity?(state, issue)
+
   defp cleanup_retry_pending?(entry) do
     is_integer(entry.cleanup_retry_at) and utc_ms() < entry.cleanup_retry_at
   end
 
   defp cleanup_hook_complete?(entry) do
-    Config.settings!().hooks.before_remove in [nil, ""] or
-      entry.record.metadata["symphony_cleanup_hook_completed"] == true
+    with_lane_snapshot(entry.lane_snapshot, fn ->
+      Config.settings!().hooks.before_remove in [nil, ""] or
+        entry.record.metadata["symphony_cleanup_hook_completed"] == true
+    end)
+  end
+
+  defp current_lane_snapshot do
+    case LaneContext.capture() do
+      {:ok, snapshot} -> snapshot
+      _ -> nil
+    end
   end
 
   defp environment_capacity?(state, issue) do

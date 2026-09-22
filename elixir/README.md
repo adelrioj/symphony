@@ -89,15 +89,17 @@ mise exec -- mix symphony serve --data-root /data --port 4000 --i-understand-tha
 
 Create a writable persistent `/data` directory, or replace it consistently in all commands.
 Sign in at <http://localhost:4000/login> with the operator token, review the imported lane, then
-enable it. New lanes are disabled by default. Repeat import with a different slug for each lane.
+enable it. New lanes are disabled by default. Each import creates a dedicated execution profile
+and reports its generated name. Use the structured UI/API to share or edit profiles; changes apply
+to future runs on linked lanes while active attempts retain their captured settings.
 The daemon runs through Mix or a Burrito release because the SQLite NIF cannot load from an
 escript; `mix build` builds `bin/symphony` for agent-side `--linear-mcp` use only.
 
 ## Run in Docker (OrbStack-compatible)
 
 One container runs one installation with multiple independently scheduled lanes. Each lane selects
-its own tracker scope and workspace root; use distinct workspace roots and managed deployment
-identities where lanes must not share resources. For Linear, at least one of
+its own tracker scope and profile/subdirectory; use distinct workspace bases or subdirectories and
+managed deployment identities where lanes must not share resources. For Linear, at least one of
 `tracker.provider.team_keys`, `current_cycle`, or `project_slug` is required; label policies can
 narrow that scope further. This works with [OrbStack](https://orbstack.dev/) or Docker Desktop.
 
@@ -216,18 +218,28 @@ mix symphony lanes import /path/to/WORKFLOW.md --slug main --name "Main lane" --
 mix symphony lanes export main --data-root /data
 ```
 
-Import creates a disabled lane, or appends a version to an existing slug while preserving enabled
-state. These commands open only the database, not schedulers. They are offline tools: importing in
-another process while serve runs is not applied live until restart; use the UI/API instead.
+Import creates a disabled lane and a dedicated execution profile, or appends a version to an
+existing slug while selecting a new dedicated profile and preserving enabled state. The generated
+profile name is printed as an import warning. These commands open only the database, not schedulers.
+They are offline tools: importing in another process while serve runs is not applied live until
+restart; use the UI/API instead.
 For import, UI creation, and API create/update, lane slugs must match `^[a-z][a-z0-9-]{1,40}$`.
 The exact slug `new` is reserved for the creation page at `/lanes/new`; use an ordinary slug such as
 `main` or `new-work`. A rejected slug produces a field error without saving a lane or version.
-Export writes the current workflow to stdout. Canonical nonempty LF-delimited front matter with a
-newline after its closing delimiter round-trips exactly; arbitrary delimiter/newline envelopes
-normalize. Raw YAML and prompt text, including leading blank lines, remain editable content.
+Export writes the current workflow to stdout. Persistence is semantic, not byte-preserving: import
+parses YAML, stores canonical JSON lane configuration and a normalized prompt, and export recomposes
+the current profile and lane values. Comments, YAML formatting, delimiter style, and surrounding
+prompt whitespace may change. The standalone `Workflow.split/1` and `render/2` helpers still exactly
+round-trip their documented canonical raw-string cases. The live lane editor uses structured controls
+and an advanced object section.
 
 `WORKFLOW.md` uses YAML front matter plus a Markdown prompt. `server.port` and `server.host`
 are retained but ignored with a warning on import/save; listener settings belong to `serve`.
+
+The file is the flattened offline interchange format. Import splits `worker` and `workspace.root`
+into a generated execution profile and keeps the remaining keys as lane config. Export composes the
+current profile and lane values back into one importable file. No runtime watched-file configuration
+exists.
 
 Minimal example:
 
@@ -262,6 +274,8 @@ Notes:
   `tracker.provider`; the current Linear adapter still accepts the older flat `endpoint`,
   `api_key`, `project_slug`, and `assignee` aliases for compatibility. `team_keys` and
   `current_cycle` have no flat aliases and are read only from `tracker.provider`.
+  Non-null canonical values take precedence; a null canonical value retains its legacy fallback,
+  including when the structured editor saves an unrelated change.
 - `tracker.required_labels` is optional. When set, an issue must have every
   configured label to dispatch or continue running.
 - `tracker.any_labels` is optional. When set, an issue must have at least one
@@ -324,11 +338,31 @@ codex:
 ```
 
 - Invalid imports/saves return field-path errors without inserting a version. An invalid stored lane
-  at boot is disabled with an operator-visible error rather than preventing other lanes from running.
+  at boot is disabled with an operator-visible error. Other lanes may run only when their execution
+  ownership is provably disjoint; an unknown identity is not treated as free workspace.
 - Tracker preflight runs before runtime start and after tracker edits. Pending checks are tied to the
   current publication generation; newer edits replace pending checks and stale results cannot start
   or disable the lane. A current failure disables only that lane.
 - Local relative `workspace.root` values resolve against `--data-root`, not the import directory.
+- A lane's `workspace_subdir` must be relative and cannot contain `..`; local symlink escapes are
+  rejected. Identity changes fail closed while active, reserved, or retained work remains. An
+  unavailable SSH/managed inventory is not proof that a target is free; repair or supported cleanup
+  must clear ownership before retrying.
+- Repairing invalid operational settings in place preserves verifiable ownership and leaves the lane
+  disabled until explicitly enabled. Malformed migrated profile fields and lane adapter providers
+  remain visible as errors; unrelated edits do not silently replace them with runnable defaults.
+  Correct malformed lane provider JSON under **Uncommon adapter settings** before saving.
+- Known legacy overlap groups can be repaired independently after old-location inventory is empty.
+  An unlinked profile claims no workspace; linking or moving a lane still checks every retained owner.
+  Offline import also permits repairing one invalid lane while another retains a known, disjoint
+  identity; unverifiable ownership remains blocked.
+- Duration controls display seconds, including quoted millisecond values accepted by the schema.
+  Unrelated edits preserve raw scalar values, and nullable checkboxes display their effective default.
+  Backend-specific edits remain in the draft when switching backend hides their controls.
+  When switching trackers, the selected adapter's controls take precedence over old hidden aliases.
+- Profile deletion is rejected while lanes, preparing/active dispatch captures or retained runs
+  reference it. Queued history writes are flushed before checking run references, so relinking
+  to an equivalent profile cannot erase an attempt's original profile identity.
 
 ### Managed ticket environments
 
@@ -1084,9 +1118,11 @@ Tracker links use only tracker-provided `http`/`https` URLs.
 | --- | --- |
 | `/login` | Operator-token login |
 | `/` | Lane list, health, enable/disable controls |
-| `/lanes/new` | Create a disabled lane |
+| `/execution-profiles` | List, create, edit and delete execution profiles |
+| `/execution-profiles/:id` | Profile details, linked lanes and safe worker summary |
+| `/lanes/new` | Create a disabled lane with structured sections |
 | `/lanes/:slug` | Lane runtime, issue activity and durable run history |
-| `/lanes/:slug/edit` | Metadata, raw YAML and prompt editor with field-path errors |
+| `/lanes/:slug/edit` | Structured Work selection, Execution, Workflow and Limits editor |
 | `/lanes/:slug/versions` | Immutable version history and activation |
 | `/runs/:attempt_id` | Durable attempt details, token totals and event timeline |
 
@@ -1114,19 +1150,35 @@ All API routes below require authentication:
 | POST | `/api/v1/lanes/:slug/versions/:id/activate` | Activate a version of that lane, `200` |
 | GET | `/api/v1/lanes/:slug/export` | Current workflow as `text/markdown` |
 | DELETE | `/api/v1/lanes/:slug` | Soft delete, `204`; enabled/running lane returns `409` |
+| GET | `/api/v1/execution-profiles` | List profiles |
+| POST | `/api/v1/execution-profiles` | Create profile, `201` |
+| GET | `/api/v1/execution-profiles/:id` | Read profile |
+| PUT | `/api/v1/execution-profiles/:id` | Update profile and linked lanes atomically |
+| DELETE | `/api/v1/execution-profiles/:id` | Delete an unreferenced profile, `204` |
 | GET | `/api/v1/state` | `{"generated_at":"...","lanes":[...]}` with per-lane runtime payloads |
 | GET | `/api/v1/lanes/:slug/:issue_identifier` | Lane-scoped issue details including `"lane"` |
 | GET | `/api/v1/:issue_identifier` | First matching lane's issue details; prefer the scoped route |
 | POST | `/api/v1/refresh` | Best-effort refresh of available lanes, `202` with `{"lanes":[...]}`; `503` if none available |
 
-Create/update accepts `slug`, `name`, `enabled`, `executor`, `front_matter`, `prompt`, and `note`.
-`front_matter` is a YAML string without delimiters, `prompt` a string, `enabled` a boolean, and
-`note` a string or null. Slugs match `^[a-z][a-z0-9-]{1,40}$`; only executor `"local"` is currently
-accepted (SSH/managed worker selection still belongs inside the workflow). New lanes default disabled.
-Supplying either workflow string creates a version, even when unchanged; omitted strings retain
-their current values. Metadata-only updates create no version. Invalid input returns
-`422 {"errors":[{"path":"polling.interval_ms","message":"..."}]}`. Missing lanes return `404`.
-Soft deletion retains history and reserves the slug; disable and wait for runtime shutdown first.
+Lane create/update accepts `slug`, `name`, `enabled`, `execution_profile_id`, `workspace_subdir`,
+`config`, `prompt`, and `note`. `config` is the lane-owned JSON object; `worker`, `workspace`,
+and `workspace_base` are rejected because they belong to the selected execution profile. Slugs
+match `^[a-z][a-z0-9-]{1,40}$` and are immutable after creation. New lanes default disabled.
+Omitted values retain their current values. Editors display effective defaults without writing
+unchanged omitted settings, and retain meaningful explicit empty values on unrelated edits.
+Invalid input returns
+`422 {"errors":[{"path":"polling.interval_ms","message":"..."}]}`. Lane responses include
+profile ID/name, workspace subdirectory and lane config. Soft deletion retains history and reserves
+the slug; disable and wait for runtime shutdown first.
+
+Profile create/update accepts `name`, `description`, `workspace_base`, and raw `worker`. Responses
+include linked lane IDs and preserve `$VAR` credential references without returning resolved secrets.
+Deletion is rejected while any lane (including soft-deleted lanes) or retained run still references
+the profile. Relinking a lane does not discard the original profile reference from its historical runs.
+Profile edits validate every linked lane and publish future dispatch settings atomically. The profile
+detail shows linked-lane/shared-host impact for capacity planning and refreshes after lane creation,
+relinking, renaming or limit changes. Unsaved profile drafts survive these updates. Profiles do not
+create a global pool, provision infrastructure or create profile history.
 
 ### Durable history and retention
 
@@ -1141,6 +1193,13 @@ death finishes them as failed. Runtime crashes are isolated by lane; five abnorm
 60 seconds disable the lane with a visible error. Event retention starts one minute after boot and
 runs daily, deleting events older than `--events-retention-days` while preserving run summaries and
 workflow versions. Live views subscribe to lane/run updates.
+
+Version inspection shows lane-owned configuration and prompts with credential redaction. Redaction
+preserves complete `$VAR_NAME` references and follows sensitive values through nested maps and
+arrays. Dollar-prefixed literals such as `$private-token` and multiline values are masked. When historical
+front matter cannot be parsed, the UI shows a repair error and prompt, not the unsafe raw source.
+The original version bytes remain in SQLite for authorized recovery; saving a repaired configuration
+creates a replacement version instead of rewriting history.
 
 ## Project Layout
 

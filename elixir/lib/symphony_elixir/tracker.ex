@@ -30,6 +30,9 @@ defmodule SymphonyElixir.Tracker do
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
 
+  @spec kinds() :: [String.t()]
+  def kinds, do: @adapters |> Map.keys() |> Enum.sort()
+
   @optional_callbacks agent_tool_specs: 0,
                       execute_agent_tool: 3,
                       validate_config: 1,

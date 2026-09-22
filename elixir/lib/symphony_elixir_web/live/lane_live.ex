@@ -49,7 +49,8 @@ defmodule SymphonyElixirWeb.LaneLive do
             <p class="hero-copy">
               <a class="issue-link" href={"/lanes/#{@entry.slug}/edit"}>Edit</a>
               · <a class="issue-link" href={"/lanes/#{@entry.slug}/versions"}>Versions</a>
-              · executor {@entry.executor}
+              · <a :if={@entry.profile_id} class="issue-link" href={"/execution-profiles/#{@entry.profile_id}"}>profile: {@entry.profile_name || @entry.profile_id}</a>
+              · workspace <span class="mono">{@entry.workspace_subdir}</span>
               · {if @entry.enabled, do: "enabled", else: "disabled"}
             </p>
             <p :if={@entry.error} class="error-copy">{@entry.error}</p>

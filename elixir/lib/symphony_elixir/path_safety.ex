@@ -6,7 +6,7 @@ defmodule SymphonyElixir.PathSafety do
     expanded_path = Path.expand(path)
     {root, segments} = split_absolute_path(expanded_path)
 
-    case resolve_segments(root, [], segments) do
+    case resolve_segments(root, [], segments, 0) do
       {:ok, canonical_path} ->
         {:ok, canonical_path}
 
@@ -15,14 +15,26 @@ defmodule SymphonyElixir.PathSafety do
     end
   end
 
+  @spec contained?(Path.t(), Path.t()) :: {:ok, boolean()} | {:error, term()}
+  def contained?(path, root) when is_binary(path) and is_binary(root) do
+    with {:ok, canonical_path} <- canonicalize(path),
+         {:ok, canonical_root} <- canonicalize(root) do
+      path_parts = Path.split(canonical_path)
+      root_parts = Path.split(canonical_root)
+
+      {:ok, Enum.take(path_parts, length(root_parts)) == root_parts}
+    end
+  end
+
   defp split_absolute_path(path) when is_binary(path) do
     [root | segments] = Path.split(path)
     {root, segments}
   end
 
-  defp resolve_segments(root, resolved_segments, []), do: {:ok, join_path(root, resolved_segments)}
+  defp resolve_segments(_root, _resolved_segments, _segments, hops) when hops > 40, do: {:error, :eloop}
+  defp resolve_segments(root, resolved_segments, [], _hops), do: {:ok, join_path(root, resolved_segments)}
 
-  defp resolve_segments(root, resolved_segments, [segment | rest]) do
+  defp resolve_segments(root, resolved_segments, [segment | rest], hops) do
     candidate_path = join_path(root, resolved_segments ++ [segment])
 
     case File.lstat(candidate_path) do
@@ -30,11 +42,11 @@ defmodule SymphonyElixir.PathSafety do
         with {:ok, target} <- :file.read_link_all(String.to_charlist(candidate_path)) do
           resolved_target = Path.expand(IO.chardata_to_string(target), join_path(root, resolved_segments))
           {target_root, target_segments} = split_absolute_path(resolved_target)
-          resolve_segments(target_root, [], target_segments ++ rest)
+          resolve_segments(target_root, [], target_segments ++ rest, hops + 1)
         end
 
       {:ok, _stat} ->
-        resolve_segments(root, resolved_segments ++ [segment], rest)
+        resolve_segments(root, resolved_segments ++ [segment], rest, hops)
 
       {:error, :enoent} ->
         {:ok, join_path(root, resolved_segments ++ [segment | rest])}

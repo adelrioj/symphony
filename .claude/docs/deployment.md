@@ -18,7 +18,8 @@ or a Burrito release, not an escript, because SQLite's NIF needs an on-disk appl
 ## Docker and client deployments
 
 One installation serves one client and runs multiple lanes in one `mix symphony serve` process.
-Each lane has its own tracker scope, workspace root, hooks, agent settings, prompt, and scheduler.
+Each lane has its own tracker scope, hooks, agent settings, prompt, limits and scheduler; selected
+execution profiles share worker settings, credential references and workspace bases.
 For Linear, each lane needs at least one of `tracker.provider.team_keys`,
 `tracker.provider.current_cycle`, or `tracker.provider.project_slug`; see the adapter profile in
 `elixir/README.md`. Lanes share one SQLite database and installation credentials, not tenant isolation.
@@ -47,8 +48,8 @@ to start without it. Tracker and agent credentials are still required for the co
 
 The `/data` named volume holds `symphony.sqlite3` and `log/`; it replaces the old log-only mount
 and `--logs-root` flag. `/workspaces` remains a separate persistent volume. Preserve both during
-upgrades: `docker compose down -v` deletes them. Relative lane workspace roots resolve against
-`--data-root`; use distinct roots under `/workspaces` for container lanes.
+upgrades: `docker compose down -v` deletes them. Relative profile workspace bases resolve against
+`--data-root`; use distinct bases or lane subdirectories under `/workspaces` for container lanes.
 
 Both Compose files mount the import directory read-only at `/config`, not a single file, so
 explicit imports see files replaced by host editors. Mounted files are never watched. YAML
@@ -78,7 +79,7 @@ shares the host `~/.codex` directory; use separate credential directories when i
 Agents can read the installation environment and mounted `.env`; do not put unrelated secrets there.
 
 1. Render the client's existing workflows into `features.md`, `bugs.md`, and `qa.md` in its import
-   directory. Preserve the intended scopes/prompts and give lanes separate workspace roots under
+   directory. Preserve the intended scopes/prompts and assign safe profile bases/subdirectories under
    `/workspaces`. Remove `server:` settings; host/port are now service flags.
 2. Drain active work before stopping the old daemons so the new installation will not dispatch
    the same issues concurrently. With the new service stopped, import all three into its database:
@@ -108,18 +109,34 @@ Agents can read the installation environment and mounted `.env`; do not put unre
      --data @payload.json
    ```
 
-   `payload.json` is a JSON object: `front_matter` contains raw YAML without `---` delimiters;
-   `prompt` contains the Markdown body; optional `note` describes the revision. Omitted fields
-   retain their values. Supplying YAML or prompt creates an immutable version; metadata-only
-   updates do not. Invalid saves return HTTP 422 with field-path errors and leave configuration
-   unchanged. Valid saves do not restart active attempts, which retain dispatch-time snapshots.
-   Guarded identity changes are rejected while the lane owns work; explicitly disabling a lane
-   does stop its runtime and active work.
+   `payload.json` is a JSON object using lane-owned attributes: `execution_profile_id`,
+   `workspace_subdir`, `config`, `prompt`, optional `name`, `enabled`, and `note`. `config` must
+   not contain `worker`, `workspace`, or `workspace_base`; those belong to the selected profile.
+   Supplying config or prompt creates an immutable lane version; metadata-only updates do not.
+   Invalid saves return HTTP 422 with field-path errors and leave configuration unchanged. Valid
+   saves do not restart active attempts, which retain dispatch-time snapshots.
 
-`lanes import` is an offline operation. Imports made while `serve` runs are not picked up by that
-process until restart; use the UI/API for live changes. Changes to installation flags or environment
-credentials still require a planned service restart. Back up the database and workspaces before
-deployment migrations; old log-only volumes are not lane databases and are not migrated automatically.
+   Manage shared infrastructure separately:
+
+   ```bash
+   curl --fail-with-body -X PUT http://localhost:4000/api/v1/execution-profiles/1 \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     --data '{"description":"Shared workers","worker":{"ssh_hosts":["worker-1"]}}'
+   ```
+
+   Profile updates validate and publish every linked lane atomically. They apply to future runs and
+   leave active attempts/cleanup on their captured snapshot. Guarded workspace/target identity
+   changes are rejected while the lane/profile owns reservations, runs, retained resources, or an
+   unverifiable remote inventory; explicitly disable and complete supported cleanup before retrying.
+
+`lanes import` is an offline operation. It creates a disabled lane and a generated dedicated
+execution profile, and reports that profile name. Imports made while `serve` runs are not picked up
+by that process until restart; use the structured UI/API for live changes. Changes to installation
+flags or environment credentials still require a planned service restart. Back up the database and
+workspaces before deployment migrations; old log-only volumes are not lane databases and are not
+migrated automatically. Migration keeps invalid/overlapping legacy lanes disabled and visible for
+repair; do not delete their history or bypass the identity guard.
 
 ## Release builds
 

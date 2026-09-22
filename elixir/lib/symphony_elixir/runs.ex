@@ -30,6 +30,8 @@ defmodule SymphonyElixir.Runs do
        %{
          lane_id: lane_id,
          lane_version_id: Map.get(snapshot, :lane_version_id),
+         execution_profile_id: Map.get(snapshot, :execution_profile_id),
+         config_identity: Map.get(snapshot, :config_identity),
          executor: Map.get(snapshot, :executor),
          issue_id: issue.id,
          issue_identifier: issue.identifier,
@@ -97,13 +99,22 @@ defmodule SymphonyElixir.Runs do
 
   def kind_for(_event), do: "agent_message"
 
-  defp dispatch_snapshot(%{lane_version_id: version_id, executor: executor}, _lane_id), do: %{lane_version_id: version_id, executor: executor}
+  defp dispatch_snapshot(attrs, lane_id) do
+    current =
+      case LaneStore.lookup(lane_id) do
+        {:ok, entry} ->
+          %{
+            lane_version_id: entry.version_id,
+            execution_profile_id: entry.profile_id,
+            config_identity: entry.config_identity,
+            executor: entry.executor
+          }
 
-  defp dispatch_snapshot(_attrs, lane_id) do
-    case LaneStore.lookup(lane_id) do
-      {:ok, entry} -> %{lane_version_id: entry.version_id, executor: entry.executor}
-      _ -> %{}
-    end
+        _ ->
+          %{}
+      end
+
+    Map.merge(current, Map.take(attrs, [:lane_version_id, :execution_profile_id, :config_identity, :executor]))
   end
 
   defp enqueue(command), do: GenServer.cast(Writer, command)

@@ -116,6 +116,20 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     refute Config.identity(left) == Config.identity(put_in(right, [:worker, :environment, "provider", "config"], [{"a", 3}, {"b", []}]))
   end
 
+  @tag :tmp_dir
+  test "unresolvable local roots retain distinct ownership identities", %{tmp_dir: root} do
+    left = Path.join(root, "left-cycle")
+    right = Path.join(root, "right-cycle")
+    File.ln_s!(left, left)
+    File.ln_s!(right, right)
+    left_settings = %{worker: %{}, workspace: %{root: left}}
+    right_settings = %{worker: %{}, workspace: %{root: right}}
+    equivalent_settings = %{left_settings | workspace: %{root: left <> "/."}}
+
+    refute Config.location_identity(left_settings) == Config.location_identity(right_settings)
+    assert Config.location_identity(left_settings) == Config.location_identity(equivalent_settings)
+  end
+
   test "Kubernetes identity includes cluster credentials namespace and template references" do
     settings = put_in(settings(), [:worker, :environment], Map.merge(attributes(), %{"kind" => "kubernetes", "provider" => kubernetes_provider()}))
     identity = Config.identity(settings)

@@ -31,7 +31,7 @@ defmodule SymphonyElixir.LaneContextTest do
 
   test "supervised children and nested tasks resolve past untagged callers" do
     supervisor = start_supervised!(Task.Supervisor)
-    snapshot = %Entry{lane_id: 11, version_id: 1, prompt: "dispatch version"}
+    snapshot = %Entry{lane_id: 11, version_id: 1, name: "dispatch version"}
     LaneContext.install(snapshot)
 
     task =
@@ -44,7 +44,7 @@ defmodule SymphonyElixir.LaneContextTest do
   end
 
   test "the nearest tag wins and nested task overrides do not retag their ancestors" do
-    LaneContext.install(%Entry{lane_id: 11, version_id: 1, prompt: "ancestor dispatch"})
+    LaneContext.install(%Entry{lane_id: 11, version_id: 1, name: "ancestor dispatch"})
 
     task =
       Task.async(fn ->
@@ -64,7 +64,7 @@ defmodule SymphonyElixir.LaneContextTest do
 
     assert {{{22, :error}, 33, 33}, 22} = Task.await(task)
     assert 11 = LaneContext.current!()
-    assert {:ok, %{lane_id: 11, prompt: "ancestor dispatch"}} = LaneContext.snapshot()
+    assert {:ok, %{lane_id: 11, name: "ancestor dispatch"}} = LaneContext.snapshot()
   end
 
   test "two active lanes and their nested tasks remain isolated under one supervisor" do
@@ -97,12 +97,12 @@ defmodule SymphonyElixir.LaneContextTest do
   test "a surviving task skips a dead tagged caller and resolves the next live tag" do
     supervisor = start_supervised!(Task.Supervisor)
     parent = self()
-    snapshot = %Entry{lane_id: 11, version_id: 1, prompt: "surviving dispatch"}
+    snapshot = %Entry{lane_id: 11, version_id: 1, name: "surviving dispatch"}
     LaneContext.install(snapshot)
 
     caller =
       Task.Supervisor.async_nolink(supervisor, fn ->
-        LaneContext.install(%Entry{lane_id: 22, version_id: 2, prompt: "expired dispatch"})
+        LaneContext.install(%Entry{lane_id: 22, version_id: 2, name: "expired dispatch"})
 
         {:ok, reader} =
           Task.Supervisor.start_child(supervisor, fn ->
@@ -131,7 +131,7 @@ defmodule SymphonyElixir.LaneContextTest do
 
     caller =
       Task.Supervisor.async_nolink(supervisor, fn ->
-        LaneContext.install(%Entry{lane_id: 22, version_id: 2, prompt: "expired dispatch"})
+        LaneContext.install(%Entry{lane_id: 22, version_id: 2, name: "expired dispatch"})
 
         {:ok, reader} =
           Task.Supervisor.start_child(supervisor, fn ->

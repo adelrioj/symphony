@@ -46,6 +46,10 @@ defmodule SymphonyElixirWeb.Router do
 
     live_session :operator, on_mount: SymphonyElixirWeb.LiveAuth do
       live("/", LanesLive, :index)
+      live("/execution-profiles", ExecutionProfilesLive, :index)
+      live("/execution-profiles/new", ExecutionProfileEditorLive, :new)
+      live("/execution-profiles/:id/edit", ExecutionProfileEditorLive, :edit)
+      live("/execution-profiles/:id", ExecutionProfileLive, :show)
       live("/lanes/new", LaneEditorLive, :new)
       live("/lanes/:slug/edit", LaneEditorLive, :edit)
       live("/lanes/:slug/versions", LaneVersionsLive, :index)
@@ -59,6 +63,11 @@ defmodule SymphonyElixirWeb.Router do
 
     get("/state", ObservabilityApiController, :state)
     post("/refresh", ObservabilityApiController, :refresh)
+    get("/execution-profiles", ExecutionProfilesApiController, :index)
+    post("/execution-profiles", ExecutionProfilesApiController, :create)
+    get("/execution-profiles/:id", ExecutionProfilesApiController, :show)
+    put("/execution-profiles/:id", ExecutionProfilesApiController, :update)
+    delete("/execution-profiles/:id", ExecutionProfilesApiController, :delete)
     get("/lanes", LanesApiController, :index)
     post("/lanes", LanesApiController, :create)
     put("/lanes/:slug", LanesApiController, :update)
