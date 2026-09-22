@@ -253,6 +253,54 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     end
   end
 
+  test "Codex credentials remain optional but capture every authority reference in reload identity" do
+    assert {:ok, _} = Config.parse(attributes())
+
+    references = %{
+      "credential_id" => "features-personal-codex",
+      "secret" => "projects/123456/secrets/features-codex",
+      "control_bucket" => "fixture-codex-control",
+      "control_object" => "features/authority.json"
+    }
+
+    enabled = put_in(settings(), [:worker, :environment, "codex_credentials"], references)
+    assert Config.runtime(enabled).codex_credentials == references
+    refute Config.identity(enabled) == Config.identity(settings())
+
+    for {field, changed} <- [
+          {"credential_id", "another-credential"},
+          {"secret", "projects/123456/secrets/another-secret"},
+          {"control_bucket", "another-control-bucket"},
+          {"control_object", "features/another-authority.json"}
+        ] do
+      refute Config.identity(put_in(enabled, [:worker, :environment, "codex_credentials", field], changed)) == Config.identity(enabled)
+    end
+  end
+
+  test "Codex credentials reject partial references aliases extra fields and non Workstations environments" do
+    references = %{
+      "credential_id" => "features-personal-codex",
+      "secret" => "projects/123456/secrets/features-codex",
+      "control_bucket" => "fixture-codex-control",
+      "control_object" => "features/authority.json"
+    }
+
+    for invalid <- [
+          %{},
+          Map.delete(references, "control_object"),
+          Map.put(references, "secret", "projects/project-id/secrets/features-codex"),
+          Map.put(references, "secret", references["secret"] <> "/versions/latest"),
+          Map.put(references, "control_object", "../authority.json"),
+          Map.put(references, "token", "not-a-reference")
+        ] do
+      assert {:error, {:invalid_environment_config, _}} = Config.parse(Map.put(attributes(), "codex_credentials", invalid))
+    end
+
+    non_workstations = attributes() |> Map.put("kind", "kubernetes") |> Map.put("codex_credentials", references)
+    assert {:error, {:invalid_environment_config, _}} = Config.parse(non_workstations)
+    assert {:error, {:invalid_workflow_config, _}} = Schema.parse(%{"worker" => %{"environment" => non_workstations}})
+  end
+
   defp attributes do
     %{
       "kind" => "google_workstations",

@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   @behaviour SymphonyElixir.ExecutionEnvironment
 
   alias SymphonyElixir.ExecutionEnvironment
-  alias SymphonyElixir.ExecutionEnvironment.{Command, Config, Operations, Record}
+  alias SymphonyElixir.ExecutionEnvironment.{Command, Config, Credentials, Operations, Record}
   alias SymphonyElixir.ExecutionEnvironment.Workstations.Client
   alias SymphonyElixir.GoogleCredentials
   alias SymphonyElixir.SSH.Target
@@ -28,6 +28,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     with :ok <- validate_config(config.provider),
          {:ok, template} <- get(config, parent(config), opts),
          :ok <- compatible(template),
+         :ok <- credential_profile(config, template),
          {:ok, _} <- discover(config, opts) do
       :ok
     end
@@ -55,7 +56,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   def ensure(config, record, opts) do
     opts = Client.options(config, opts)
 
-    with :ok <- identity(config, record),
+    with :ok <- credential_create_authority(config, record, opts),
+         :ok <- identity(config, record),
          {:ok, workstation} <- get(config, resource_name(config, record), opts) do
       ensure_existing(config, record, workstation, opts)
     else
@@ -108,13 +110,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   def start(config, record, opts) do
     opts = Client.options(config, opts)
 
-    with {:ok, observed} <- ensure(config, record, opts),
-         {:ok, settled} <- settle(config, observed, opts) do
+    with :ok <- Credentials.authorize_start(config, record, opts),
+         {:ok, observed} <- ensure(config, record, opts),
+         {:ok, settled} <- settle(config, observed, opts),
+         :ok <- credential_start_guard(config, settled, opts) do
       cond do
         settled.phase == :running -> qualify_running(config, settled, opts)
         settled.desired != :running -> fail(settled, {:invalid, :workstations_intent})
         true -> mutate(config, settled, :start, opts)
       end
+    else
+      {:error, reason} when is_atom(reason) -> Credentials.failure(record, "cloud_authority")
+      {:error, failure} -> fail(record, failure)
+      {:error, _, _} = error -> error
     end
   end
 
@@ -138,12 +146,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   def destroy(config, record, opts) do
     opts = Client.options(config, opts)
 
-    with :ok <- identity(config, record),
+    with {:ok, record} <- Operations.reconcile_credentials(__MODULE__, config, record, opts),
+         :ok <- Credentials.authorize_destroy(config, record, opts),
+         :ok <- identity(config, record),
          {:ok, workstation} <- get(config, resource_name(config, record), opts),
          {:ok, owned} <- observe_owned(config, record, workstation) do
       destroy_owned(config, owned, opts)
     else
       {:error, :not_found} -> inspect_absence(config, record, opts)
+      {:error, :credential_outcome_unknown} -> Credentials.failure(record, "cloud_authority")
+      {:error, _, _} = error -> error
       {:error, failure} -> fail(record, failure)
     end
   end
@@ -239,7 +251,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp create(config, record, opts) do
     with {:ok, template} <- get(config, parent(config), opts),
-         :ok <- compatible(template) do
+         :ok <- compatible(template),
+         :ok <- credential_profile(config, template) do
       captured = %{
         record
         | template_identity: template["uid"],
@@ -284,7 +297,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
     with {:ok, durable} <- persist(config, candidate, opts),
          {:ok, workstation} <- get(config, resource_name(config, durable), opts),
-         {:ok, fresh} <- observe_owned(config, durable, workstation) do
+         {:ok, fresh} <- observe_owned(config, durable, workstation),
+         :ok <- credential_mutation_guard(config, fresh, verb, opts) do
       {method, suffix, query, body} =
         if verb == :delete,
           do: {:delete, "", [etag: fresh.version], nil},
@@ -378,26 +392,34 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       "labels" => Map.merge(Map.get(workstation, "labels", %{}), expected["labels"])
     }
 
-    case api(config, :patch, resource_name(config, owned), [updateMask: "annotations,labels"], body, opts) do
-      {:ok, operation} -> finish_metadata(config, candidate, operation, annotation, opts)
-      {:error, failure} -> mutation_failure(config, candidate, :update, failure, opts)
+    with {:ok, environment} <- credential_environment(config, record, workstation) do
+      body = if environment, do: Map.put(body, "env", environment), else: body
+      mask = if environment, do: "annotations,labels,env", else: "annotations,labels"
+
+      case api(config, :patch, resource_name(config, owned), [updateMask: mask], body, opts) do
+        {:ok, operation} -> finish_metadata(config, candidate, operation, annotation, environment, opts)
+        {:error, failure} -> mutation_failure(config, candidate, :update, failure, opts)
+      end
+    else
+      {:error, _} -> Credentials.failure(candidate, "identity_mismatch")
     end
   end
 
-  defp finish_metadata(config, record, operation, annotation, opts) do
+  defp finish_metadata(config, record, operation, annotation, environment, opts) do
     if valid_operation?(config, operation, resource_name(config, record), :update) do
       known = replace_last(record, :update, %{id: operation["name"], outcome: :pending})
-      verify_metadata(config, known, operation, annotation, opts)
+      verify_metadata(config, known, operation, annotation, environment, opts)
     else
       fail(record, {:unknown, :invalid_operation_evidence})
     end
   end
 
-  defp verify_metadata(config, record, operation, annotation, opts) do
+  defp verify_metadata(config, record, operation, annotation, environment, opts) do
     with {:ok, terminal} <- await_operation(config, operation, opts),
          false <- Map.has_key?(terminal, "error"),
          {:ok, readback} <- get(config, resource_name(config, record), opts),
          true <- get_in(readback, ["annotations", @annotation]) == annotation,
+         true <- is_nil(environment) or readback["env"] == environment,
          {:ok, verified} <- observe_owned(config, record, readback) do
       {:ok, verified}
     else
@@ -609,8 +631,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
       cond do
         leftovers != [] -> fail(captured, {:unknown, {:backing_resources_remaining, safe_ids(leftovers)}})
-        deleted?(settled) -> absent(captured, %{deleted_uid: ref_uid(record), backing_absent: true})
-        never_created?(settled) -> absent(captured, %{create_rejected: true, backing_absent: true})
+        deleted?(settled) -> absent(config, captured, %{deleted_uid: ref_uid(record), backing_absent: true}, opts)
+        never_created?(settled) -> absent(config, captured, %{create_rejected: true, backing_absent: true}, opts)
         true -> fail(captured, {:unknown, :absence_without_delete_evidence})
       end
     else
@@ -627,8 +649,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       Map.get(record.metadata, "backing_resources", []) == []
   end
 
-  defp absent(record, evidence),
-    do: {:ok, %{record | absent?: true, phase: :stopped, proof: {:quiescent, evidence}}}
+  defp absent(config, record, evidence, opts) do
+    absent = %{record | absent?: true, phase: :stopped, proof: {:quiescent, evidence}}
+
+    with {:ok, reconciled} <- Operations.reconcile_credentials(__MODULE__, config, absent, opts),
+         :ok <- Credentials.authorize_destroy(config, reconciled, opts) do
+      {:ok, reconciled}
+    else
+      {:error, _, _} = error -> error
+      {:error, _} -> Credentials.failure(absent, "cloud_authority")
+    end
+  end
 
   defp observe_owned(config, record, workstation) do
     with :ok <- identity(config, record),
@@ -647,7 +678,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
          | provider_ref: %{name: workstation["name"], uid: workstation["uid"]},
            version: workstation["etag"],
            template_identity: durable.template_identity,
-           metadata: Map.merge(durable.metadata, record.metadata),
+           metadata: Credentials.merge_metadata(durable.metadata, record.metadata),
            pending: pending
        }}
     else
@@ -804,6 +835,93 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   end
 
   defp nonblank?(value), do: is_binary(value) and String.trim(value) != ""
+
+  defp credential_profile(config, template) do
+    if Credentials.enabled?(config) do
+      env = get_in(template, ["container", "env"]) || %{}
+
+      valid =
+        config.kind == "google_workstations" and env["SYMPHONY_PROFILE"] == "features" and
+          env["SYMPHONY_CODEX_ENABLED"] == "1" and env["SYMPHONY_CODEX_SECRET"] == config.codex_credentials["secret"] and
+          not Map.has_key?(env, "SYMPHONY_CODEX_ASSIGNMENT") and not Map.has_key?(env, "SYMPHONY_CODEX_MODE")
+
+      if valid, do: :ok, else: {:error, {:invalid, :codex_profile}}
+    else
+      :ok
+    end
+  end
+
+  defp credential_create_authority(config, record, opts) do
+    if Credentials.enabled?(config) do
+      with {:ok, %{record: authority}} <- SymphonyElixir.CodexCredentials.read(config, opts),
+           assignment when is_map(assignment) <- Credentials.assignment(record),
+           expected = Map.take(authority, ~w(schema credential_id epoch claim_id owner)) |> Map.put("secret_version", authority["head_version"]),
+           true <-
+             (authority["state"] in ["OWNED", "CHECKPOINTED", "RECOVERY_REQUIRED"] and expected == assignment) or
+               (not is_nil(record.provider_ref) and Credentials.resolved?(record)) do
+        :ok
+      else
+        _ -> {:error, {:unknown, :credential_outcome_unknown}}
+      end
+    else
+      if Credentials.tracked?(record), do: {:error, {:unknown, :credential_outcome_unknown}}, else: :ok
+    end
+  end
+
+  defp credential_start_guard(config, record, opts) do
+    if Credentials.enabled?(config) or Credentials.tracked?(record) do
+      with :ok <- Credentials.authorize_start(config, record, opts),
+           {:ok, template} <- get(config, config_name(config, record), opts),
+           :ok <- credential_profile(config, template),
+           {:ok, workstation} <- get(config, resource_name(config, record), opts),
+           {:ok, expected} <- credential_environment(config, record, workstation),
+           true <- workstation["env"] == expected do
+        :ok
+      else
+        _ -> {:error, :credential_outcome_unknown}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp credential_mutation_guard(config, record, :start, opts), do: credential_start_guard(config, record, opts)
+
+  defp credential_mutation_guard(config, record, :delete, opts) do
+    case Credentials.authorize_destroy(config, record, opts) do
+      :ok -> :ok
+      {:error, _} -> {:error, {:unknown, :credential_outcome_unknown}}
+    end
+  end
+
+  defp credential_mutation_guard(_config, _record, _verb, _opts), do: :ok
+
+  defp credential_environment(config, record, workstation) do
+    unbound = Credentials.data(record)["stage"] == "claimed" and is_nil(get_in(Credentials.data(record), ["assignment", "owner", "workstation_uid"]))
+
+    old_assignment =
+      case Jason.decode(Map.get(workstation, "env", %{})["SYMPHONY_CODEX_ASSIGNMENT"] || "null") do
+        {:ok, value} when is_map(value) -> value
+        _ -> %{}
+      end
+
+    if Credentials.enabled?(config) and record.desired == :running and not (unbound and workstation["state"] == "STATE_STOPPED") do
+      assigned = Credentials.assignment(record)
+      mode = Credentials.data(record)["mode"]
+      env = Map.get(workstation, "env", %{})
+      reopened_recovery = env["SYMPHONY_CODEX_MODE"] == "recover" and mode == "execute" and old_assignment["claim_id"] == assigned["claim_id"]
+      markers = %{"SYMPHONY_PROFILE" => "features", "SYMPHONY_CODEX_ENABLED" => "1", "SYMPHONY_CODEX_SECRET" => config.codex_credentials["secret"]}
+
+      valid =
+        is_map(assigned) and is_binary(get_in(assigned, ["owner", "workstation_uid"])) and mode in ["execute", "recover"] and
+          Enum.all?(markers, fn {key, value} -> not Map.has_key?(env, key) or env[key] == value end)
+
+      expected = Map.merge(env, %{"SYMPHONY_CODEX_ASSIGNMENT" => Jason.encode!(assigned), "SYMPHONY_CODEX_MODE" => mode})
+      if valid and not reopened_recovery and (expected == env or workstation["state"] == "STATE_STOPPED"), do: {:ok, expected}, else: {:error, :credential_outcome_unknown}
+    else
+      if Credentials.tracked?(record) and not Credentials.enabled?(config), do: {:error, :credential_outcome_unknown}, else: {:ok, nil}
+    end
+  end
 
   defp compatible(template) do
     valid = nonblank?(template["uid"]) and template["reconciling"] != true

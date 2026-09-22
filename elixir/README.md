@@ -465,6 +465,64 @@ rebuilds accepted identities from SQLite before restarting enabled lanes. A comp
 remains fenced; rejected identity edits never reach the database and cannot become accepted
 merely because the store restarted.
 
+#### Personal Codex credentials
+
+An optional `worker.environment.codex_credentials` map coordinates one personal Codex
+credential across Features Workstations. Omit it to retain existing behavior. It is
+not valid for Kubernetes. These are operator-owned references, not deployable defaults:
+
+```yaml
+codex_credentials:
+  credential_id: features-personal-codex
+  secret: projects/123456789/secrets/features-codex
+  control_bucket: example-codex-control
+  control_object: features/authority.json
+```
+
+All four values are required when the map is present; extra keys, version aliases,
+project-ID secret names, and unsafe object paths are rejected. The secret uses its
+canonical **numeric project number**. All four references participate in captured
+configuration and reload identity. Provider preflight verifies authoritative config
+environment `SYMPHONY_PROFILE=features`, `SYMPHONY_CODEX_ENABLED=1`, and the matching
+`SYMPHONY_CODEX_SECRET`; per-instance overrides cannot contradict them.
+
+The controller reads current cloud authority before claiming, claims before resource
+creation, binds the observed Workstation UID, and persists and separately reads back
+the instance assignment and mode before starting it. SSH readiness alone is not agent
+admission: the worker management CLI must echo the exact assignment with `READY` and
+open admission. Token bytes are never copied into environment variables, resource
+annotations, SQLite, status responses, or controller logs.
+
+Controller-owned stop closes admission and checkpoints while SSH remains usable.
+Seal is capped at 30 seconds; combined credential work uses at most 45 seconds and
+half of the remaining operation deadline, retaining time for physical safety stop.
+A failed or timed-out checkpoint still attempts physical stop, but retains credential
+ownership and disk recovery state. A clean handoff requires the checkpoint candidate,
+correlated UID/original-attempt stop evidence, cloud head commit, durable exact resource
+disposition, and handoff acknowledgement. No workflow hook or elapsed timer substitutes
+for these checks. Missing cloud authority is never seeded from restored local state.
+
+Cleanup-only startup sets `recover` **before** start and does not admit an agent or
+replace uncertain retained cache. A recovery Entry may have a new scheduler attempt;
+its credential assignment retains the original owning attempt. Recover mode cannot
+be changed back to execute for the same unresolved claim. Reopen requires resolved
+prior disposition before acquiring a new claim. Direct, desired-absent, and resumed
+deletion paths enforce the same credential disposition checks.
+
+A definite busy credential before any resource, pending operation, or retained
+claim exists keeps only the local reservation for retry. Cancellation drops that
+reservation without changing cloud ownership. Once a claim or resource is retained,
+busy-shaped failures cannot take that unallocated shortcut.
+
+Environment snapshots expose only bounded credential stages (`claimed`, `bound`,
+`ready`, `checkpointed`, `committed`, `recovery_required`) and bounded reason codes.
+An unresolved credential remains occupied even if compute is physically stopped.
+Inspect the retained resource and current cloud authority through the managed
+operations path; do not delete its disk, restore an old head, or use an API-key
+fallback to unblock dispatch. Operator recovery, infrastructure changes, real login,
+refresh, model checks, image publication, and enabling a production lane require
+their separate approvals.
+
 #### Recovery, capacity, retention, and hooks
 
 Startup performs provider preflight and complete owned-resource discovery before dispatch. Denied,

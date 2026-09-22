@@ -571,6 +571,7 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     prerequisite = control_snapshot(ctx).checks["prerequisites"].evidence
     permissions = provider_value!(Provider.permission_preflight(ctx.config, ctx.permission_policy, prerequisite, provider_opts(ctx)))
     ctx = Map.put(ctx, :current_permissions, permissions)
+
     addresses =
       Map.new(issues, fn issue ->
         targets = provider_value!(Provider.runtime_targets(ctx.config, entry!(issue.id).record, provider_opts(ctx)))
@@ -613,16 +614,20 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       {"privileged_docker", "docker run --rm -i --pull=never --privileged --network host --entrypoint python3 #{image}"}
     ]
 
-    observations = Map.new(commands, fn {context, command} ->
-      # Execute runner-reviewed bytes, not the repository copy an agent can replace.
-      output = remote!(ctx, entry, "#{command} -I -S -c #{source} #{payload}")
-      require!(byte_size(output) <= 65_536, "permission_evidence_exceeds_bound")
-      parsed = case Jason.decode(output) do
-        {:ok, value} when is_map(value) -> value
-        _ -> require!(false, "permission_evidence_invalid")
-      end
-      {context, parsed}
-    end)
+    observations =
+      Map.new(commands, fn {context, command} ->
+        # Execute runner-reviewed bytes, not the repository copy an agent can replace.
+        output = remote!(ctx, entry, "#{command} -I -S -c #{source} #{payload}")
+        require!(byte_size(output) <= 65_536, "permission_evidence_exceeds_bound")
+
+        parsed =
+          case Jason.decode(output) do
+            {:ok, value} when is_map(value) -> value
+            _ -> require!(false, "permission_evidence_invalid")
+          end
+
+        {context, parsed}
+      end)
 
     require!(PermissionPolicy.evaluate(ctx.permission_policy, observations) == :ok, "permission_evidence_incomplete")
     %{mode: "scoped_gcp", identity: identity, probe_sha256: digest, observations: observations}

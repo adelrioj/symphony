@@ -25,8 +25,8 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
     end
 
     assert {:error, :permission_prerequisites_unavailable} =
-             Provider.permission_preflight(workstations_config(), %{mode: "scoped_gcp", scope: %{}},
-               %{template_uid: "config-uid"}, timeout_ms: 5_000, command_fun: command)
+             Provider.permission_preflight(workstations_config(), %{mode: "scoped_gcp", scope: %{}}, %{template_uid: "config-uid"}, timeout_ms: 5_000, command_fun: command)
+
     refute File.exists?(Path.join(directory, "checkout-code-ran"))
   end
 
@@ -40,8 +40,15 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
     for {vm_account, config_account, passes} <- [{expected, expected, true}, {"other@qual.iam.gserviceaccount.com", expected, false}, {expected, "other@qual.iam.gserviceaccount.com", false}] do
       request = fn req ->
         if String.ends_with?(req[:url], "/instances") do
-          instance = %{"id" => "123", "name" => "control", "selfLink" => "https://www.googleapis.com/compute/v1/projects/p/zones/l-a/instances/control",
-            "labels" => workstation_labels(), "status" => "RUNNING", "serviceAccounts" => [%{"email" => vm_account}]}
+          instance = %{
+            "id" => "123",
+            "name" => "control",
+            "selfLink" => "https://www.googleapis.com/compute/v1/projects/p/zones/l-a/instances/control",
+            "labels" => workstation_labels(),
+            "status" => "RUNNING",
+            "serviceAccounts" => [%{"email" => vm_account}]
+          }
+
           response(%{"items" => %{"zones/l-a" => %{"instances" => [instance]}}})
         else
           response(%{"uid" => "config-uid", "container" => %{"image" => image}, "host" => %{"gceInstance" => %{"serviceAccount" => config_account}}})
@@ -49,6 +56,7 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
       end
 
       result = Provider.permission_identity(config, record, policy, workstation_opts(request))
+
       if passes do
         assert {:ok, %{service_account: ^expected, instance_id: "123", config_uid: "config-uid"}} = result
       else

@@ -966,6 +966,103 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     end
   end
 
+  test "restored physically stopped Codex owner remains occupied and keeps the original credential attempt" do
+    issues([issue("first", 1)])
+    {owner, _tasks} = scheduler()
+    retained = unresolved_codex_record("orphan")
+    discover([retained])
+    {_, recovery, stop} = operation(:stop)
+    refute recovery.attempt_id == "credential-original-attempt"
+    assert recovery.record.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] == "credential-original-attempt"
+    stopped(stop, recovery)
+    wait_state(owner, &(&1.environment_entries["orphan"].phase == :unknown))
+    assert Lifecycle.occupied?(:sys.get_state(owner).environment_entries["orphan"])
+    refute_receive {:environment_operation, :prepare, _, _, _, _}, 0
+    refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+  end
+
+  test "cancellation during credential prepare retains the late assignment for controller stop without launch" do
+    issues([issue("first", 1)])
+    {owner, tasks} = scheduler()
+    discover([])
+    {config, entry, prepare} = operation(:prepare)
+    :ok = set_issue_state("first", "In Review")
+    poll(owner)
+    latest = unresolved_codex_record("first")
+    ready(config, %{entry | record: %{entry.record | metadata: latest.metadata, provider_ref: latest.provider_ref}}, prepare, owner, tasks)
+    {_, stopping, stop} = operation(:stop)
+    assert stopping.record.provider_ref.uid == "codex-uid"
+    assert stopping.record.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] == "credential-original-attempt"
+    refute_receive {:agent_started, _, _, _}, 0
+    stopped(stop, stopping)
+    wait_state(owner, &(&1.environment_entries["first"].phase == :unknown))
+    assert Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
+  end
+
+  test "definite preclaim busy reservations retry and cancellation drops only the unallocated reservation" do
+    issues([issue("first", 1)])
+    {owner, _tasks} = scheduler()
+    discover([])
+    {_config, entry, prepare} = operation(:prepare)
+    send(prepare, {:complete_operation, {:error, {:retryable, :credential_busy}, entry.record}})
+    wait_state(owner, &(&1.environment_entries["first"].phase == :reserved))
+    refute_receive {:environment_operation, :stop, _, _, _, _}, 0
+    poll(owner)
+    {_config, retry, prepare} = operation(:prepare)
+    assert retry.attempt_id == entry.attempt_id
+    assert [%{phase: :preparing, unresolved: nil}] = Orchestrator.snapshot(owner, 1_000).environments
+    send(prepare, {:complete_operation, {:error, {:retryable, :credential_busy}, retry.record}})
+    wait_state(owner, &(&1.environment_entries["first"].phase == :reserved))
+    :ok = set_issue_state("first", "In Review")
+    poll(owner)
+    wait_state(owner, &(not Map.has_key?(&1.environment_entries, "first")))
+    refute_receive {:environment_operation, :stop, _, _, _, _}, 0
+    refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+  end
+
+  test "busy-shaped failure cannot discard retained unbound credential ownership" do
+    issues([issue("first", 1)])
+    {owner, _tasks} = scheduler()
+    discover([])
+    {_config, entry, prepare} = operation(:prepare)
+
+    assignment =
+      unresolved_codex_record("first").metadata["codex_credentials"]["assignment"]
+      |> put_in(["owner", "workstation_uid"], nil)
+      |> put_in(["owner", "attempt_id"], entry.attempt_id)
+
+    retained = %{entry.record | metadata: %{"codex_credentials" => %{"stage" => "claimed", "assignment" => assignment}}}
+    send(prepare, {:complete_operation, {:error, {:retryable, :credential_busy}, retained}})
+    {_, stopping, stop} = operation(:stop)
+    assert stopping.record.metadata["codex_credentials"]["assignment"] == assignment
+    :ok = set_issue_state("first", "In Review")
+    stopped(stop, stopping)
+    wait_state(owner, &(&1.environment_entries["first"].phase == :unknown))
+    assert Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
+  end
+
+  defp unresolved_codex_record(id) do
+    record = record(id)
+    name = "projects/p/locations/l/workstationClusters/c/workstationConfigs/cfg/workstations/" <> record.key
+
+    assignment = %{
+      "schema" => 1,
+      "credential_id" => "features-personal-codex",
+      "epoch" => 1,
+      "claim_id" => "original-claim",
+      "secret_version" => "projects/123456/secrets/features-codex/versions/1",
+      "owner" => %{"deployment_id" => record.deployment_id, "lane" => "features", "workstation_name" => name, "workstation_uid" => "codex-uid", "attempt_id" => "credential-original-attempt"}
+    }
+
+    %{
+      record
+      | phase: :stopped,
+        proof: {:quiescent, %{uid: "codex-uid", operation: "projects/p/locations/l/operations/stop"}},
+        provider_ref: %{name: name, uid: "codex-uid"},
+        metadata: %{"codex_credentials" => %{"assignment" => assignment, "stage" => "recovery_required", "reason" => "checkpoint_failed"}}
+    }
+  end
+
   defp restart_store do
     previous_store = Process.whereis(LaneStore)
 

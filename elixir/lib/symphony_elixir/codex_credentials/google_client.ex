@@ -29,7 +29,9 @@ defmodule SymphonyElixir.CodexCredentials.GoogleClient do
     with {:ok, refs} <- configuration(config),
          true <- GoogleCredentials.remaining(opts) > 0 and permitted?(refs, method, URI.parse(url)) do
       case Keyword.get(opts, :request) do
-        request when is_function(request, 4) -> normalize(request.(method, url, headers, body))
+        request when is_function(request, 4) ->
+          normalize(request.(method, url, headers, body))
+
         nil ->
           with {:ok, token} <- GoogleCredentials.token(@identity, opts) do
             authenticated(method, url, headers, body, opts, token)
@@ -66,7 +68,8 @@ defmodule SymphonyElixir.CodexCredentials.GoogleClient do
           _ -> unknown()
         end
 
-      result -> result
+      result ->
+        result
     end
   end
 
@@ -117,7 +120,8 @@ defmodule SymphonyElixir.CodexCredentials.GoogleClient do
       {:get, "secretmanager.googleapis.com"} ->
         query == %{} and is_binary(uri.path) and String.starts_with?(uri.path, "/v1/") and numeric_version?(String.replace_prefix(uri.path, "/v1/", ""), refs["secret"])
 
-      _ -> false
+      _ ->
+        false
     end
   end
 

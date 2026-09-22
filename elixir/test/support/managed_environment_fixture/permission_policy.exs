@@ -18,6 +18,7 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.PermissionPolicy do
   def validate(_, _), do: {:error, :invalid_metadata_policy}
 
   defp scoped(nil), do: {:error, :permission_scope_required}
+
   defp scoped(scope) do
     if exact_keys?(scope, @scope_keys) and
          matches?(scope["service_account"], ~r/\A[a-z][a-z0-9-]{0,62}@[a-z][a-z0-9-]{0,62}\.iam\.gserviceaccount\.com\z/) and
@@ -42,7 +43,9 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.PermissionPolicy do
         [_, project, location, repository] ->
           prefix = Regex.escape("#{location}-docker.pkg.dev/#{project}/#{repository}/")
           matches?(value["image"], Regex.compile!("\\A#{prefix}[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}\\z"))
-        _ -> false
+
+        _ ->
+          false
       end
     else
       false
@@ -57,8 +60,7 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.PermissionPolicy do
   end
 
   def checks(%{mode: "scoped_gcp", scope: scope}) do
-    [{"identity", 200}, {"allowed_image", 200}, {"denied_image", 403}, {"backup_denied", 403},
-     {"gateway_denied", 403}, {"iam_diagnostics", 200}, {"other_clouds_denied", 200}] ++
+    [{"identity", 200}, {"allowed_image", 200}, {"denied_image", 403}, {"backup_denied", 403}, {"gateway_denied", 403}, {"iam_diagnostics", 200}, {"other_clouds_denied", 200}] ++
       indexed(scope["allowed_secret_versions"], "allowed_secret", 200) ++ indexed(scope["denied_secret_versions"], "denied_secret", 403)
   end
 
@@ -66,25 +68,33 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.PermissionPolicy do
   defp indexed(values, prefix, status), do: values |> Enum.with_index() |> Enum.map(fn {_, index} -> {"#{prefix}:#{index}", status} end)
 
   def evaluate(%{mode: "scoped_gcp", scope: scope} = policy, observations) do
-    valid = exact_keys?(observations, @contexts) and Enum.all?(@contexts, fn context ->
-      value = observations[context]
-      exact_keys?(value, ~w(complete identity checks)) and value["complete"] == true and
-        value["identity"] == scope["service_account"] and valid_checks?(value["checks"], checks(policy))
-    end)
+    valid =
+      exact_keys?(observations, @contexts) and
+        Enum.all?(@contexts, fn context ->
+          value = observations[context]
+
+          exact_keys?(value, ~w(complete identity checks)) and value["complete"] == true and
+            value["identity"] == scope["service_account"] and valid_checks?(value["checks"], checks(policy))
+        end)
+
     if valid, do: :ok, else: {:error, :permission_evidence_incomplete}
   end
 
   def evaluate(%{mode: "deny_all"} = policy, observations) do
     if exact_keys?(observations, ~w(complete checks)) and observations["complete"] == true and valid_checks?(observations["checks"], checks(policy)),
-      do: :ok, else: {:error, :permission_evidence_incomplete}
+      do: :ok,
+      else: {:error, :permission_evidence_incomplete}
   end
 
   def evaluate(_, _), do: {:error, :permission_evidence_incomplete}
+
   defp valid_checks?(observed, expected) do
-    exact_keys?(observed, Enum.map(expected, &elem(&1, 0))) and Enum.all?(expected, fn {id, status} ->
-      exact_keys?(observed[id], ~w(status ok)) and observed[id]["status"] == status and observed[id]["ok"] == true
-    end)
+    exact_keys?(observed, Enum.map(expected, &elem(&1, 0))) and
+      Enum.all?(expected, fn {id, status} ->
+        exact_keys?(observed[id], ~w(status ok)) and observed[id]["status"] == status and observed[id]["ok"] == true
+      end)
   end
+
   defp exact_keys?(value, keys), do: is_map(value) and Enum.sort(Map.keys(value)) == Enum.sort(keys)
   defp matches?(value, pattern), do: is_binary(value) and byte_size(value) <= 2048 and Regex.match?(pattern, value)
 end

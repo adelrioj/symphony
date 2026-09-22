@@ -27,7 +27,6 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations.Client do
     end
   end
 
-
   defp perform(config, method, path, query, body, opts, token) do
     if remaining(opts) <= 0 do
       {:error, {:unknown, :workstations_deadline}}
@@ -81,5 +80,4 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations.Client do
 
   defp endpoint("/compute/v1/" <> _ = path), do: "https://compute.googleapis.com" <> path
   defp endpoint("/v1/" <> _ = path), do: "https://workstations.googleapis.com" <> path
-
 end

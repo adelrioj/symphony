@@ -2,7 +2,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.ExecutionEnvironment
-  alias SymphonyElixir.ExecutionEnvironment.{Operations, Record, Workstations}
+  alias SymphonyElixir.ExecutionEnvironment.{Credentials, Operations, Record, Workstations}
   alias SymphonyElixir.ExecutionEnvironment.Workstations.Client
   alias SymphonyElixir.GoogleCredentials
   alias SymphonyElixir.SSH
@@ -208,6 +208,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
   test "lifecycle requests share bounded credential caching without losing impersonation" do
     parent = self()
+
     token_fun = fn identity, _ ->
       send(parent, {:token_identity, identity})
       {:ok, "shared-lifecycle-token"}
@@ -231,8 +232,12 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "missing lifecycle impersonation cannot fall back to controller credentials" do
     invalid = update_in(config(), [:provider], &Map.delete(&1, "impersonate_service_account"))
     parent = self()
+
     options = [
-      token_fun: fn _, _ -> send(parent, :unscoped_token); {:ok, "unscoped-token"} end,
+      token_fun: fn _, _ ->
+        send(parent, :unscoped_token)
+        {:ok, "unscoped-token"}
+      end,
       request_fun: fn _ -> response(200, %{"done" => true}) end
     ]
 
@@ -377,6 +382,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "SSH readiness polling consumes the existing deadline and removes staged trust" do
     {running, options, directory} =
       ssh_readiness_fixture("printf 'pinned-test-key\\n' > \"$hosts\"\nprintf 'kex_exchange_identification: read: Connection reset by peer\\n' >&2\nexit 255")
+
     prime_tunnel_executables(options)
 
     started = System.monotonic_time(:millisecond)
@@ -1469,6 +1475,146 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
         Process.sleep(5)
         eventually(predicate, attempts - 1)
     end
+  end
+
+  test "Codex preflight requires authoritative Features markers and matching dedicated secret" do
+    {server, request} = provider()
+    enabled = Map.put(config(), :codex_credentials, codex_references())
+    assert {:error, {:invalid, :codex_profile}} = Workstations.preflight(enabled, opts(request))
+    markers = %{"SYMPHONY_PROFILE" => "features", "SYMPHONY_CODEX_ENABLED" => "1", "SYMPHONY_CODEX_SECRET" => codex_references()["secret"]}
+    Agent.update(server, &put_in(&1, [:template, "container", "env"], markers))
+    assert :ok = Workstations.preflight(enabled, opts(request))
+    Agent.update(server, &put_in(&1, [:template, "container", "env", "SYMPHONY_PROFILE"], "bugs"))
+    assert {:error, {:invalid, :codex_profile}} = Workstations.preflight(enabled, opts(request))
+  end
+
+  test "direct credential start cannot create or launch without current cloud authority" do
+    {server, request} = provider()
+    enabled = Map.put(config(), :codex_credentials, codex_references())
+    options = Keyword.put(opts(request), :request, fn _, _, _, _ -> {:ok, 404, [], %{}} end)
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} = Workstations.start(enabled, %{record() | desired: :running}, options)
+    assert Agent.get(server, & &1.creates) == 0
+    assert Agent.get(server, & &1.workstation) == nil
+  end
+
+  test "direct desired absent and resumed credential deletion refuse an unresolved cache" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    enabled = Map.put(config(), :codex_credentials, codex_references())
+    options = Keyword.put(opts(request), :request, fn _, _, _, _ -> {:ok, 404, [], %{}} end)
+
+    for candidate <- [
+          created,
+          %{created | desired: :absent, metadata: Map.put(created.metadata, "symphony_cleanup_hook_completed", true)},
+          %{created | desired: :absent, pending: created.pending ++ [%{verb: :delete, id: operation_name(), outcome: :unknown}]}
+        ] do
+      assert {:error, {:unknown, :credential_outcome_unknown}, retained} = Workstations.destroy(enabled, candidate, options)
+      refute retained.absent?
+    end
+
+    assert Agent.get(server, & &1.workstation["uid"]) == "ws-uid"
+    refute Agent.get(server, &Enum.any?(&1.operations, fn operation -> operation["metadata"]["verb"] == "delete" end))
+  end
+
+  test "credential assignment env is read back before start and retained reopen cannot revive an old claim" do
+    {server, cloud, enabled, options} = codex_provider()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
+    assert Agent.get(server, & &1.workstation) == nil
+    assert {:ok, created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, bound} = Credentials.bind(enabled, created, :agent, options)
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} = Workstations.start(enabled, %{bound | desired: :running}, options)
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    assert Jason.decode!(Agent.get(server, & &1.workstation["env"]["SYMPHONY_CODEX_ASSIGNMENT"])) == Credentials.assignment(bound)
+    assert {:ok, running} = Workstations.start(enabled, assigned, options)
+    assert {:ok, stopped} = Workstations.stop(enabled, running, options)
+    receipt = Map.merge(Credentials.assignment(bound), %{"secret_version" => codex_references()["secret"] <> "/versions/2", "sha256" => String.duplicate("b", 64), "admission" => "sealed"})
+    assert {:ok, checkpointed} = Credentials.checkpoint(enabled, stopped, receipt, options)
+    assert {:ok, released} = Credentials.release(enabled, checkpointed, options)
+    assert Agent.get(cloud, & &1.record["last_handoff"]["resource_acknowledged"]) == false
+    assert {:ok, committed} = Operations.reconcile_credentials(Workstations, enabled, released, options)
+    assert Agent.get(cloud, & &1.record["last_handoff"]["resource_acknowledged"])
+    assert {:ok, [durable]} = Workstations.discover(enabled, options)
+    assert Credentials.resolved?(durable)
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} = Workstations.start(enabled, assigned, options)
+    assert {:ok, deleted} = Workstations.destroy(enabled, committed, options)
+    assert deleted.absent?
+  end
+
+  test "annotation readback cannot conceal lost assignment env or override a recover fence" do
+    {server, _cloud, enabled, options} = codex_provider()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
+    assert {:ok, created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, bound} = Credentials.bind(enabled, created, :agent, options)
+    transport = options[:request_fun]
+
+    missing_env = fn request ->
+      result = transport.(request)
+      if request[:method] == :patch, do: Agent.update(server, &Map.update!(&1, :workstation, fn ws -> Map.delete(ws, "env") end))
+      result
+    end
+
+    assert {:error, {:unknown, _}, _} = Workstations.put_intent(enabled, bound, %{desired: :running}, Keyword.put(options, :request_fun, missing_env))
+    assert Agent.get(server, & &1.workstation["state"]) == "STATE_STOPPED"
+    assert {:ok, recovery} = Workstations.put_intent(enabled, Credentials.put(bound, %{"mode" => "recover"}), %{desired: :running}, options)
+    assert {:error, {:unknown, _}, _} = Workstations.put_intent(enabled, Credentials.put(recovery, %{"mode" => "execute"}), %{desired: :running}, options)
+    assert Agent.get(server, & &1.workstation["env"]["SYMPHONY_CODEX_MODE"]) == "recover"
+  end
+
+  test "restart between create and UID bind recovers only the durable original unbound owner" do
+    {server, cloud, enabled, options} = codex_provider()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
+    assert {:ok, _created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, [durable]} = Workstations.discover(enabled, options)
+    assert Agent.get(cloud, & &1.record["owner"]["workstation_uid"]) == nil
+    restored = %{durable | attempt_id: "new-recovery-entry"}
+    assert {:ok, recovered} = Credentials.reconcile(enabled, restored, options)
+    assert {:ok, bound} = Credentials.bind(enabled, recovered, :cleanup, options)
+    assert bound.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] == "original"
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    assert Agent.get(server, & &1.workstation["env"]["SYMPHONY_CODEX_MODE"]) == "recover"
+    assert {:ok, running} = Workstations.start(enabled, assigned, options)
+    assert running.phase == :running
+    assert Agent.get(cloud, & &1.record["owner"]["workstation_uid"]) == "ws-uid"
+  end
+
+  defp codex_provider do
+    {server, transport} = provider()
+    enabled = Map.put(config(), :codex_credentials, codex_references())
+    env = %{"SYMPHONY_PROFILE" => "features", "SYMPHONY_CODEX_ENABLED" => "1", "SYMPHONY_CODEX_SECRET" => codex_references()["secret"]}
+    Agent.update(server, &put_in(&1, [:template, "container", "env"], env))
+    seed = SymphonyElixir.CodexCredentials.Record.initial("features-personal-codex", 1, codex_references()["secret"] <> "/versions/1")
+    cloud = start_supervised!({Agent, fn -> %{record: seed, generation: 1} end}, id: make_ref())
+
+    request = fn method, url, _, body ->
+      query = URI.decode_query(URI.parse(url).query || "")
+
+      Agent.get_and_update(cloud, fn state ->
+        cond do
+          String.contains?(url, "secretmanager.googleapis.com") ->
+            {{:ok, 200, [], %{"name" => codex_references()["secret"] <> "/versions/2", "state" => "ENABLED"}}, state}
+
+          method == :get and query["alt"] == "media" ->
+            assert query["generation"] == Integer.to_string(state.generation)
+            {{:ok, 200, [], Jason.encode!(state.record)}, state}
+
+          method == :get ->
+            {{:ok, 200, [], %{"generation" => Integer.to_string(state.generation)}}, state}
+
+          method == :post ->
+            assert query["ifGenerationMatch"] == Integer.to_string(state.generation)
+            next = %{state | record: Jason.decode!(body), generation: state.generation + 1}
+            {{:ok, 200, [], %{"generation" => Integer.to_string(next.generation)}}, next}
+        end
+      end)
+    end
+
+    options = Keyword.put(opts(transport), :request, request)
+    assert :ok = Workstations.preflight(enabled, options)
+    {server, cloud, enabled, options}
+  end
+
+  defp codex_references do
+    %{"credential_id" => "features-personal-codex", "secret" => "projects/123456/secrets/features-codex", "control_bucket" => "fixture-codex-control", "control_object" => "features/authority.json"}
   end
 
   defp provider(overrides \\ %{}) do

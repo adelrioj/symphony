@@ -36,9 +36,14 @@ defmodule SymphonyElixir.CodexCredentials.ControlStore do
             _ -> reconcile(config, snapshot, next_record, opts)
           end
 
-        {:ok, 412, _headers, _body} -> {:error, :credential_busy}
-        {:ok, status, _headers, _body} when status in 400..499 and status != 408 -> unknown()
-        _ -> reconcile(config, snapshot, next_record, opts)
+        {:ok, 412, _headers, _body} ->
+          {:error, :credential_busy}
+
+        {:ok, status, _headers, _body} when status in 400..499 and status != 408 ->
+          unknown()
+
+        _ ->
+          reconcile(config, snapshot, next_record, opts)
       end
     else
       _ -> unknown()
@@ -61,8 +66,11 @@ defmodule SymphonyElixir.CodexCredentials.ControlStore do
             _ -> unknown()
           end
 
-        {:ok, 404, _headers, _body} when retry_raced_read? -> read_current(config, refs, opts, false)
-        _ -> unknown()
+        {:ok, 404, _headers, _body} when retry_raced_read? ->
+          read_current(config, refs, opts, false)
+
+        _ ->
+          unknown()
       end
     else
       _ -> unknown()

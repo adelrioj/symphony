@@ -123,6 +123,7 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
 
   test "controller metadata and storage requests never use lifecycle or backup identity" do
     parent = self()
+
     token_fun = fn identity, _ ->
       send(parent, {:identity, identity})
       {:ok, "controller-test-token"}
@@ -134,6 +135,7 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
       assert options[:connect_options][:timeout] <= 2_000
       assert {"authorization", "Bearer controller-test-token"} in options[:headers]
       uri = URI.parse(options[:url])
+
       response =
         case uri.host do
           "secretmanager.googleapis.com" ->
@@ -173,7 +175,12 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
     assert {:error, :credential_outcome_unknown} = GoogleClient.request(config(), :get, "https://secretmanager.googleapis.com/v1/" <> @version <> ":access", [], nil, opts)
 
     parent = self()
-    failing = fn _ -> send(parent, :write); {:error, {:timeout, "private response"}} end
+
+    failing = fn _ ->
+      send(parent, :write)
+      {:error, {:timeout, "private response"}}
+    end
+
     url = "https://storage.googleapis.com/upload/storage/v1/b/fixture-codex-control/o?uploadType=media&name=features%2Fauthority.json&ifGenerationMatch=123"
     assert {:error, :credential_outcome_unknown} = GoogleClient.request(config(), :post, url, [{"content-type", "application/json"}], "{}", Keyword.put(opts, :request_fun, failing))
     assert_receive :write
@@ -215,6 +222,7 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
     File.mkdir!(directory)
     on_exit(fn -> File.rm_rf!(directory) end)
     executable = Path.join(directory, "gcloud")
+
     File.write!(executable, """
     #!/bin/sh
     selected=no
@@ -228,6 +236,7 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
     test "$CLOUDSDK_CORE_DISABLE_PROMPTS" = 1 || exit 5
     printf 'scripted-controller-token\\n'
     """)
+
     File.chmod!(executable, 0o700)
     supervisor = start_supervised!(Task.Supervisor)
 
@@ -236,8 +245,7 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
       {:ok, %{status: 200, body: %{"name" => @version, "state" => "ENABLED"}}}
     end
 
-    assert {:ok, _} = GoogleClient.version_metadata(config(), @version,
-      gcloud_executable: executable, task_supervisor: supervisor, authority: self(), request_fun: request, timeout_ms: 5_000)
+    assert {:ok, _} = GoogleClient.version_metadata(config(), @version, gcloud_executable: executable, task_supervisor: supervisor, authority: self(), request_fun: request, timeout_ms: 5_000)
   end
 
   defp config do
@@ -250,7 +258,13 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
   defp seed, do: Record.initial("features-personal-codex", 1, @version)
 
   defp owner(attempt \\ "attempt-a") do
-    %{"deployment_id" => "deployment-a", "lane" => "features", "workstation_name" => "projects/fixture-workers/locations/europe-west1/workstationClusters/fixture/workstationConfigs/features/workstations/ticket-1", "workstation_uid" => nil, "attempt_id" => attempt}
+    %{
+      "deployment_id" => "deployment-a",
+      "lane" => "features",
+      "workstation_name" => "projects/fixture-workers/locations/europe-west1/workstationClusters/fixture/workstationConfigs/features/workstations/ticket-1",
+      "workstation_uid" => nil,
+      "attempt_id" => attempt
+    }
   end
 
   defp owned do
@@ -260,13 +274,35 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
   end
 
   defp receipt do
-    %{"schema" => 1, "credential_id" => "features-personal-codex", "epoch" => 1, "claim_id" => "claim-a", "owner" => Map.put(owner(), "workstation_uid", "uid-a"), "secret_version" => @secret <> "/versions/2", "sha256" => String.duplicate("a", 64), "admission" => "sealed"}
+    %{
+      "schema" => 1,
+      "credential_id" => "features-personal-codex",
+      "epoch" => 1,
+      "claim_id" => "claim-a",
+      "owner" => Map.put(owner(), "workstation_uid", "uid-a"),
+      "secret_version" => @secret <> "/versions/2",
+      "sha256" => String.duplicate("a", 64),
+      "admission" => "sealed"
+    }
   end
 
   defp proof, do: %{"uid" => "uid-a", "operation" => "projects/fixture-workers/locations/europe-west1/operations/stop-1", "attempt_id" => "attempt-a"}
 
   defp store(record, opts \\ []) do
-    server = start_supervised!({Agent, fn -> %{generation: @generation, bytes: if(record, do: Jason.encode!(record)), writes: 0, metadata_reads: 0, mode: Keyword.get(opts, :mode), race_record: Keyword.get(opts, :race_record), metadata: Keyword.get(opts, :metadata)} end}, id: make_ref())
+    server =
+      start_supervised!(
+        {Agent,
+         fn ->
+           %{
+             generation: @generation,
+             bytes: if(record, do: Jason.encode!(record)),
+             writes: 0,
+             metadata_reads: 0,
+             mode: Keyword.get(opts, :mode),
+             race_record: Keyword.get(opts, :race_record),
+             metadata: Keyword.get(opts, :metadata)
+           }
+         end}, id: make_ref())
 
     request = fn method, url, headers, body ->
       uri = URI.parse(url)
@@ -312,8 +348,11 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
         updated = %{state | generation: increment(state.generation), bytes: Jason.encode!(state.race_record), race_record: nil}
         {{:ok, 404, [], %{}}, updated}
 
-      generation == state.generation -> {{:ok, 200, [], state.bytes}, state}
-      true -> {{:ok, 404, [], %{}}, state}
+      generation == state.generation ->
+        {{:ok, 200, [], state.bytes}, state}
+
+      true ->
+        {{:ok, 404, [], %{}}, state}
     end
   end
 

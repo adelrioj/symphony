@@ -61,6 +61,12 @@ workspace:
 #       credential_configuration: symphony-workers
 #       impersonate_service_account: symphony-workers@development-project.iam.gserviceaccount.com
 #       ssh_user: user
+#     # Optional, Features Workstations only; omit to keep credentials disabled:
+#     # codex_credentials:
+#     #   credential_id: features-personal-codex
+#     #   secret: projects/123456789/secrets/features-codex
+#     #   control_bucket: example-codex-control
+#     #   control_object: features/authority.json
 #
 # Kubernetes example (workspace.root: /state/workspaces):
 # worker:
@@ -99,6 +105,16 @@ workspace:
 # Workstations requires explicit noninteractive gcloud configuration + impersonation,
 # separate worker identity/provider-enforced credential isolation, persistent /home/private
 # Docker storage, DELETE reclaim, no archive/warm pool, and complete VM/disk inventory.
+# Personal Codex requires the authoritative config profile=features, enabled=1 and exact
+# secret markers. All four optional credential references are reload identity.
+# Claim precedes create; actual UID binding and instance env readback precede start;
+# worker READY/open with exact assignment precedes agent admission.
+# Controller seal/checkpoint retains SSH and reserves physical-stop time. Physical stop
+# alone never releases a credential or authorizes deletion. Current cloud authority,
+# exact durable disposition and handoff acknowledgement are required; SQLite is not authority.
+# Cleanup starts directly in recover mode, preserves the original owner attempt and
+# retained uncertain cache, and cannot reopen execute admission for the same claim.
+# Bounded credential recovery_required status retains the disk and blocks credential dispatch.
 # Kubernetes pins Agent Sandbox v1.0.1 and an immutable qualification ConfigMap referenced
 # by Template annotation symphony.dev/qualification; it requires qualified Kata guest
 # storage, admission/gates, enforcing NetworkPolicy, private SSH and kubelet/CSI evidence.

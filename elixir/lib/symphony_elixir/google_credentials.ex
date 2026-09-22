@@ -34,9 +34,15 @@ defmodule SymphonyElixir.GoogleCredentials do
     refresh_key = {__MODULE__, :refreshed, cache_key(identity)}
 
     cond do
-      remaining(opts) <= 0 -> {:error, {:unknown, :google_deadline}}
-      not valid_identity?(identity) -> {:error, {:denied, :google_credentials}}
-      Process.get(refresh_key, false) -> {:error, :google_refresh_exhausted}
+      remaining(opts) <= 0 ->
+        {:error, {:unknown, :google_deadline}}
+
+      not valid_identity?(identity) ->
+        {:error, {:denied, :google_credentials}}
+
+      Process.get(refresh_key, false) ->
+        {:error, :google_refresh_exhausted}
+
       true ->
         Process.put(refresh_key, true)
         Process.delete(cache_key(identity))
@@ -65,10 +71,12 @@ defmodule SymphonyElixir.GoogleCredentials do
               {:error, {:denied, :google_credentials}}
             end
 
-          _ -> {:error, {:denied, :google_credentials}}
+          _ ->
+            {:error, {:denied, :google_credentials}}
         end
 
-      value -> {:ok, value}
+      value ->
+        {:ok, value}
     end
   end
 

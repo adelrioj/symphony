@@ -163,8 +163,7 @@ defmodule SymphonyElixir.CodexCredentials.Record do
       "resource_acknowledged" => false
     }
 
-    %{record | "state" => "AVAILABLE", "head_version" => version, "claim_id" => nil,
-      "owner" => nil, "candidate" => nil, "stop_proof" => nil, "last_handoff" => handoff}
+    %{record | "state" => "AVAILABLE", "head_version" => version, "claim_id" => nil, "owner" => nil, "candidate" => nil, "stop_proof" => nil, "last_handoff" => handoff}
   end
 
   defp assignment_data(record) do
@@ -256,7 +255,8 @@ defmodule SymphonyElixir.CodexCredentials.Record do
       ["projects", project, "locations", location, "workstationClusters", cluster, "workstationConfigs", config, "workstations", workstation] ->
         Enum.all?([project, location, cluster, config, workstation], &resource_segment?/1)
 
-      _ -> false
+      _ ->
+        false
     end
   end
 
@@ -279,10 +279,10 @@ defmodule SymphonyElixir.CodexCredentials.Record do
   defp secret_resource(version) when is_binary(version) do
     case String.split(version, "/") do
       ["projects", project, "secrets", secret, "versions", number] ->
-        if resource_segment?(project) and resource_segment?(secret) and Regex.match?(~r/\A[1-9][0-9]*\z/, number),
-          do: {project, secret}, else: nil
+        if resource_segment?(project) and resource_segment?(secret) and Regex.match?(~r/\A[1-9][0-9]*\z/, number), do: {project, secret}, else: nil
 
-      _ -> nil
+      _ ->
+        nil
     end
   end
 

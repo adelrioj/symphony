@@ -1404,6 +1404,373 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     :error, :badarg -> :ok
   end
 
+  test "Codex claim bind readiness checkpoint stop disposition and acknowledgement form one handoff" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    assignment = context.environment.record.metadata["codex_credentials"]["assignment"]
+    assert assignment["owner"]["attempt_id"] == "original-attempt"
+    assert assignment["owner"]["workstation_uid"] == "ws-uid"
+    assert Agent.get(cloud, & &1.record["state"]) == "OWNED"
+    assert {:ok, stopped} = Operations.run(Provider, config, %{entry | context: context, record: context.environment.record}, :stop, options)
+    assert {:quiescent, %{uid: "ws-uid"}} = stopped.proof
+    assert stopped.metadata["codex_credentials"]["stage"] == "committed"
+    authority = Agent.get(cloud, & &1.record)
+    assert authority["state"] == "AVAILABLE"
+    assert authority["head_version"] == "projects/123456/secrets/features-codex/versions/2"
+    assert authority["last_handoff"]["resource_acknowledged"]
+    assert authority["last_handoff"]["owner"]["attempt_id"] == "original-attempt"
+    assert Agent.get(remote, & &1.events) == [:ensure, :bound_intent, :start, :prepare, :seal, :checkpoint, :stop, :disposition, :disposition]
+    assert {:error, :connection_closed} = Operations.close_connection(context.connection)
+  end
+
+  test "Codex invalid readiness never grants an agent connection and keeps ownership" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    Agent.update(remote, &Map.put(&1, :mode, :wrong_ready))
+    assert {:error, {:unknown, :credential_outcome_unknown}, record} = Operations.run(Provider, config, entry, :prepare, options)
+    assert record.metadata["codex_credentials"]["reason"] == "worker_readiness"
+    assert Agent.get(cloud, & &1.record["state"]) != "AVAILABLE"
+    assert Agent.get(remote, & &1.record.phase) == :running
+  end
+
+  test "Codex checkpoint failure still stops physically while SSH remains available and never releases" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    Agent.update(remote, &Map.put(&1, :mode, :checkpoint_failure))
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, stopped} =
+             Operations.run(Provider, config, %{entry | record: context.environment.record, context: context, attempt_id: "recovery-entry"}, :stop, options)
+
+    assert {:quiescent, %{uid: "ws-uid"}} = stopped.proof
+    assert stopped.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] == "original-attempt"
+    assert stopped.metadata["codex_credentials"]["stage"] == "recovery_required"
+    assert Agent.get(cloud, & &1.record["state"]) == "RECOVERY_REQUIRED"
+    assert :stop in Agent.get(remote, & &1.events)
+  end
+
+  test "Codex missing cloud authority cannot create or destroy even after a SQLite restore" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    Agent.update(cloud, &Map.put(&1, :record, nil))
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} = Operations.run(Provider, config, entry, :prepare, options)
+    assert Agent.get(remote, & &1.events) == []
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} = Operations.run(Provider, config, %{entry | record: %{entry.record | desired: :absent}}, :destroy, options)
+    assert Agent.get(remote, & &1.events) == []
+  end
+
+  test "Codex cleanup uses sealed recover mode before start and preserves original owning attempt" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    record = context.environment.record
+    assert :ok = Operations.close_connection(context.connection)
+    Agent.update(remote, &Map.put(&1, :record, %{record | phase: :stopped}))
+    cleanup = %{Lifecycle.new(%{record | phase: :stopped}, "new-cleanup-attempt", :cleanup) | agent_executable: nil}
+    assert {:ok, recovered} = Operations.run(Provider, config, cleanup, :prepare, options)
+    assert recovered.environment.record.metadata["codex_credentials"]["mode"] == "recover"
+    assert recovered.environment.record.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] == "original-attempt"
+    assert Agent.get(cloud, & &1.record["owner"]["attempt_id"]) == "original-attempt"
+    assert :ok = Operations.close_connection(recovered.connection)
+  end
+
+  test "expired Codex drain slice leaves time for physical stop but cannot manufacture a receipt" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    clock = start_supervised!({Agent, fn -> 0 end}, id: make_ref())
+
+    command = fn _, _, command_opts ->
+      assert command_opts[:timeout_ms] == 30_000
+      Agent.update(clock, &(&1 + command_opts[:timeout_ms]))
+      {:error, {:unknown, :timeout}}
+    end
+
+    options = Keyword.merge(options, clock: fn -> Agent.get(clock, & &1) end, command_fun: command)
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, stopped} =
+             Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, options)
+
+    assert {:quiescent, _} = stopped.proof
+    assert :stop in Agent.get(remote, & &1.events)
+    assert Agent.get(cloud, & &1.record["state"]) == "RECOVERY_REQUIRED"
+    assert Agent.get(cloud, & &1.record["candidate"]) == nil
+  end
+
+  test "lost disposition readback leaves a pending handoff that current-cloud inspection finishes before reopen" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    provider = options[:request_fun]
+
+    lose_disposition = fn
+      {:intent, intent}, record, opts ->
+        if record.metadata["codex_credentials"]["stage"] == "committed",
+          do: {:error, {:unknown, :metadata_not_durable}, record},
+          else: provider.({:intent, intent}, record, opts)
+
+      action, record, opts ->
+        provider.(action, record, opts)
+    end
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, uncertain} =
+             Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, Keyword.put(options, :request_fun, lose_disposition))
+
+    assert Agent.get(cloud, & &1.record["state"]) == "AVAILABLE"
+    refute Agent.get(cloud, & &1.record["last_handoff"]["resource_acknowledged"])
+    assert {:ok, reconciled} = Operations.run(Provider, config, %{entry | record: uncertain}, :inspect, options)
+    assert reconciled.metadata["codex_credentials"]["disposition"]["resource_acknowledged"]
+    assert Agent.get(cloud, & &1.record["last_handoff"]["resource_acknowledged"])
+    reopened = Lifecycle.new(reconciled, "next-attempt", :agent)
+    assert {:ok, next} = Operations.run(Provider, config, reopened, :prepare, options)
+
+    refute next.environment.record.metadata["codex_credentials"]["assignment"]["claim_id"] ==
+             context.environment.record.metadata["codex_credentials"]["assignment"]["claim_id"]
+
+    assert next.environment.record.metadata["codex_credentials"]["assignment"]["secret_version"] == "projects/123456/secrets/features-codex/versions/2"
+    assert Agent.get(remote, & &1.record.phase) == :running
+    assert :ok = Operations.close_connection(next.connection)
+  end
+
+  test "restored disposition survives an acknowledged handoff advancing to another resource" do
+    {config, entry, options, _cloud, _remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    assert {:ok, stopped} = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, options)
+    stale = put_in(stopped.metadata, ["codex_credentials", "disposition", "resource_acknowledged"], false)
+    stale = %{stopped | metadata: stale}
+
+    owner =
+      context.environment.record.metadata["codex_credentials"]["assignment"]["owner"]
+      |> Map.merge(%{
+        "workstation_uid" => nil,
+        "workstation_name" => "projects/p/locations/l/workstationClusters/c/workstationConfigs/features/workstations/another-ticket",
+        "attempt_id" => "another-attempt"
+      })
+
+    assert {:ok, claimed} = SymphonyElixir.CodexCredentials.claim(config, owner, options)
+    claim = claimed.record["claim_id"]
+    assert {:ok, bound} = SymphonyElixir.CodexCredentials.transition(config, claim, {:bind_uid, claim, "another-uid"}, options)
+    assert {:ok, assignment} = SymphonyElixir.CodexCredentials.Record.assignment(bound.record)
+    receipt = Map.merge(assignment, %{"sha256" => String.duplicate("a", 64), "admission" => "sealed"})
+    assert {:ok, _} = SymphonyElixir.CodexCredentials.transition(config, claim, {:checkpoint, receipt}, options)
+    proof = %{"uid" => "another-uid", "operation" => "projects/p/locations/l/operations/another-stop", "attempt_id" => "another-attempt"}
+    assert {:ok, _} = SymphonyElixir.CodexCredentials.transition(config, claim, {:stopped, claim, proof}, options)
+    assert {:ok, _} = SymphonyElixir.CodexCredentials.transition(config, claim, {:release, claim}, options)
+    assert {:ok, _} = SymphonyElixir.CodexCredentials.transition(config, claim, {:acknowledge_handoff, claim}, options)
+    assert {:ok, reconciled} = Operations.run(Provider, config, %{entry | record: stale}, :inspect, options)
+    assert SymphonyElixir.ExecutionEnvironment.Credentials.resolved?(reconciled)
+    assert reconciled.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] == "original-attempt"
+    assert :ok = SymphonyElixir.ExecutionEnvironment.Credentials.authorize_destroy(config, reconciled, options)
+  end
+
+  test "definite foreign credential ownership rejects before ensure without claiming or inventing recovery evidence" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+
+    owner = %{
+      "deployment_id" => "deployment",
+      "lane" => "features",
+      "workstation_name" => "projects/p/locations/l/workstationClusters/c/workstationConfigs/features/workstations/another-ticket",
+      "workstation_uid" => nil,
+      "attempt_id" => "foreign-attempt"
+    }
+
+    assert {:ok, held} = SymphonyElixir.CodexCredentials.claim(config, owner, options)
+    assert {:error, {:retryable, :credential_busy}, waiting} = Operations.run(Provider, config, entry, :prepare, options)
+    assert waiting.provider_ref == nil
+    assert waiting.pending == []
+    refute Map.has_key?(waiting.metadata, "codex_credentials")
+    assert Agent.get(remote, & &1.events) == []
+    assert Agent.get(cloud, & &1.record) == held.record
+  end
+
+  test "committed cleanup startup preserves exact disposition while admitting only recovery management" do
+    {config, entry, options, _cloud, _remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    assert {:ok, committed} = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, options)
+    cleanup = Lifecycle.new(committed, "cleanup-attempt", :cleanup)
+    assert {:ok, recovered} = Operations.run(Provider, config, cleanup, :prepare, options)
+    assert recovered.environment.record.metadata["codex_credentials"]["mode"] == "recover"
+    assert recovered.environment.record.metadata["codex_credentials"]["stage"] == "committed"
+    assert SymphonyElixir.ExecutionEnvironment.Credentials.resolved?(recovered.environment.record)
+    refute SymphonyElixir.ExecutionEnvironment.Credentials.ready?(recovered.environment.record)
+    assert :ok = Operations.close_connection(recovered.connection)
+  end
+
+  test "checkpoint connection exceptions still attempt physical safety stop and retain ownership" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    assert :ok = Operations.close_connection(context.connection)
+    Agent.update(remote, &Map.put(&1, :connection, nil))
+    provider = options[:request_fun]
+
+    broken_connection = fn
+      :connect, _, _ -> raise ArgumentError, "fixture connection validation failed"
+      operation, record, opts -> provider.(operation, record, opts)
+    end
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, stopped} =
+             Operations.run(Provider, config, %{entry | record: context.environment.record, context: nil}, :stop, Keyword.put(options, :request_fun, broken_connection))
+
+    assert {:quiescent, _} = stopped.proof
+    assert :stop in Agent.get(remote, & &1.events)
+    assert Agent.get(cloud, & &1.record["state"]) == "RECOVERY_REQUIRED"
+    assert Agent.get(cloud, & &1.record["owner"]["attempt_id"]) == "original-attempt"
+  end
+
+  for {failed_operation, verb} <- [ensure: :create, start: :start] do
+    test "lost #{failed_operation} retains credential ownership and provider uncertainty without an agent lease" do
+      {config, entry, options, cloud, _remote} = codex_fixture()
+      provider = options[:request_fun]
+      failing = unquote(failed_operation)
+
+      request = fn operation, record, opts ->
+        if operation == failing do
+          {:error, {:unknown, :lost_provider_response}, %{record | pending: [%{verb: unquote(verb), id: nil, outcome: :unknown}]}}
+        else
+          provider.(operation, record, opts)
+        end
+      end
+
+      assert {:error, {:unknown, :lost_provider_response}, uncertain} = Operations.run(Provider, config, entry, :prepare, Keyword.put(options, :request_fun, request))
+      assert [%{outcome: :unknown}] = uncertain.pending
+      refute uncertain.absent?
+      assert Agent.get(cloud, & &1.record["state"]) == "OWNED"
+      assert Agent.get(cloud, & &1.record["owner"]["attempt_id"]) == "original-attempt"
+      assert Agent.get(cloud, & &1.record["candidate"]) == nil
+    end
+  end
+
+  defp codex_fixture do
+    references = %{
+      "credential_id" => "features-personal-codex",
+      "secret" => "projects/123456/secrets/features-codex",
+      "control_bucket" => "fixture-codex-control",
+      "control_object" => "features/authority.json"
+    }
+
+    config = %{
+      kind: "google_workstations",
+      deployment_id: "deployment",
+      tracker_kind: "memory",
+      workspace_root: "/state/workspaces",
+      provider: %{"project" => "p", "location" => "l", "cluster" => "c", "config" => "features"},
+      startup_timeout_ms: 120_000,
+      shutdown_timeout_ms: 120_000,
+      codex_credentials: references
+    }
+
+    resource = "projects/p/locations/l/workstationClusters/c/workstationConfigs/features/workstations/" <> SymphonyElixir.ExecutionEnvironment.resource_key("deployment", "memory", "ticket")
+    record = %{record() | kind: "google_workstations", key: List.last(String.split(resource, "/")), scope: Config.scope(config), attempt_id: "original-attempt"}
+    entry = Lifecycle.new(record, "original-attempt", :agent)
+    seed = SymphonyElixir.CodexCredentials.Record.initial(references["credential_id"], 1, references["secret"] <> "/versions/1")
+    cloud = start_supervised!({Agent, fn -> %{record: seed, generation: 1} end}, id: make_ref())
+    remote = start_supervised!({Agent, fn -> %{record: record, events: [], mode: :normal, connection: nil} end}, id: make_ref())
+    supervisor = start_supervised!(Task.Supervisor)
+    target = %Target{executable: "/usr/bin/ssh", prefix: ["worker"], label: "worker"}
+
+    request = fn method, url, _headers, body ->
+      query = URI.decode_query(URI.parse(url).query || "")
+
+      Agent.get_and_update(cloud, fn state ->
+        cond do
+          String.contains?(url, "secretmanager.googleapis.com") ->
+            {{:ok, 200, [], %{"name" => references["secret"] <> "/versions/2", "state" => "ENABLED"}}, state}
+
+          is_nil(state.record) ->
+            {{:ok, 404, [], %{}}, state}
+
+          method == :get and query["alt"] == "media" ->
+            assert query["generation"] == Integer.to_string(state.generation)
+            {{:ok, 200, [], Jason.encode!(state.record)}, state}
+
+          method == :get ->
+            {{:ok, 200, [], %{"generation" => Integer.to_string(state.generation)}}, state}
+
+          method == :post ->
+            assert query["ifGenerationMatch"] == Integer.to_string(state.generation)
+            next = %{state | record: Jason.decode!(body), generation: state.generation + 1}
+            {{:ok, 200, [], %{"generation" => Integer.to_string(next.generation)}}, next}
+        end
+      end)
+    end
+
+    provider = fn operation, current, opts ->
+      case operation do
+        :preflight ->
+          :ok
+
+        :ensure ->
+          assert Agent.get(cloud, & &1.record["state"]) in ["OWNED", "CHECKPOINTED", "RECOVERY_REQUIRED", "AVAILABLE"]
+          next = %{current | provider_ref: %{name: resource, uid: "ws-uid"}, phase: :stopped}
+          Agent.update(remote, &%{&1 | record: next, events: &1.events ++ [:ensure]})
+          {:ok, next}
+
+        {:intent, intent} ->
+          next = struct!(current, intent)
+          credential = next.metadata["codex_credentials"]
+
+          event =
+            cond do
+              credential && credential["stage"] == "committed" -> :disposition
+              next.desired == :running -> :bound_intent
+              true -> nil
+            end
+
+          Agent.update(remote, &%{&1 | record: next, events: &1.events ++ List.wrap(event)})
+          {:ok, next}
+
+        :start ->
+          assert current.metadata["codex_credentials"]["assignment"]["owner"]["workstation_uid"] == "ws-uid"
+          assert current.metadata["codex_credentials"]["mode"] in ["execute", "recover"]
+          next = %{current | phase: :running}
+          Agent.update(remote, &%{&1 | record: next, events: &1.events ++ [:start]})
+          {:ok, next}
+
+        :connect ->
+          {:ok, connection} = Operations.open_connection(supervisor, opts[:authority], target, [])
+          Agent.update(remote, &Map.put(&1, :connection, connection))
+          {:ok, connection}
+
+        :inspect ->
+          {:ok, current}
+
+        :stop ->
+          connection = Agent.get(remote, & &1.connection)
+          if connection, do: assert(:ok == GenServer.call(connection.owner, {:validate_connection, connection.id, target}))
+          next = %{current | phase: :stopped, pending: [], proof: {:quiescent, %{uid: "ws-uid", operation: "projects/p/locations/l/operations/stop"}}}
+          Agent.update(remote, &%{&1 | record: next, events: &1.events ++ [:stop]})
+          {:ok, next}
+
+        :destroy ->
+          flunk("unresolved credential disk deleted")
+      end
+    end
+
+    command = fn _, arguments, opts ->
+      text = List.last(arguments)
+      state = Agent.get(remote, & &1)
+      credential = state.record.metadata["codex_credentials"]
+      assignment = credential["assignment"]
+      action = Enum.find(["prepare", "status", "seal", "checkpoint"], &String.contains?(text, "codex_guard.py " <> &1))
+      if action, do: Agent.update(remote, &%{&1 | events: &1.events ++ [String.to_existing_atom(action)]})
+      assert opts[:timeout_ms] > 0
+
+      cond do
+        action == nil ->
+          {:ok, %{status: 0, output: ""}}
+
+        action == "checkpoint" and state.mode == :checkpoint_failure ->
+          {:ok, %{status: 1, output: Jason.encode!(%{"ok" => false, "reason" => "checkpoint_failed"})}}
+
+        action == "checkpoint" ->
+          receipt = Map.merge(assignment, %{"secret_version" => references["secret"] <> "/versions/2", "sha256" => String.duplicate("a", 64), "admission" => "sealed"})
+          {:ok, %{status: 0, output: Jason.encode!(%{"ok" => true, "result" => receipt})}}
+
+        true ->
+          sealed = action == "seal" or credential["mode"] == "recover"
+          result = %{"assignment" => assignment, "state" => if(sealed, do: "SEALED", else: "READY"), "admission" => if(sealed, do: "sealed", else: "open"), "reason" => nil}
+          result = if state.mode == :wrong_ready, do: put_in(result, ["assignment", "claim_id"], "foreign-claim"), else: result
+          {:ok, %{status: 0, output: Jason.encode!(%{"ok" => true, "result" => result})}}
+      end
+    end
+
+    {config, entry, [authority: self(), task_supervisor: supervisor, agent_executable: "codex", request_fun: provider, request: request, command_fun: command], cloud, remote}
+  end
+
   defp temporary_path(label) do
     path = Path.join(System.tmp_dir!(), "symphony-#{label}-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf(path) end)
