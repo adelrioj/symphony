@@ -1486,6 +1486,34 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     assert Agent.get(cloud, & &1.record["candidate"]) == nil
   end
 
+  test "timed out stop intent leaves a real safety stop attempt after checkpoint failure" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    Agent.update(remote, &Map.put(&1, :mode, :checkpoint_failure))
+    clock = start_supervised!({Agent, fn -> 0 end}, id: make_ref())
+    provider = options[:request_fun]
+    request = fn
+      {:intent, %{desired: :stopped}}, current, opts ->
+        assert current.metadata["codex_credentials"]["stage"] == "recovery_required"
+        Agent.update(clock, &(&1 + opts[:timeout_ms]))
+        {:error, {:unknown, :intent_timeout}, current}
+      :stop, current, opts ->
+        send(self(), {:safety_stop, opts[:timeout_ms]})
+        provider.(:stop, current, opts)
+      operation, current, opts ->
+        provider.(operation, current, opts)
+    end
+    options = Keyword.merge(options, clock: fn -> Agent.get(clock, & &1) end, request_fun: request)
+    result = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, options)
+    assert_received {:safety_stop, remaining_ms}
+    assert remaining_ms > 0
+    assert {:error, {:unknown, :credential_outcome_unknown}, stopped} = result
+    assert {:quiescent, %{uid: "ws-uid"}} = stopped.proof
+    assert Agent.get(cloud, & &1.record["state"]) == "RECOVERY_REQUIRED"
+    assert Agent.get(cloud, & &1.record["owner"]["attempt_id"]) == "original-attempt"
+    assert Agent.get(cloud, & &1.record["candidate"]) == nil
+  end
+
   test "lost disposition readback leaves a pending handoff that current-cloud inspection finishes before reopen" do
     {config, entry, options, cloud, remote} = codex_fixture()
     assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
