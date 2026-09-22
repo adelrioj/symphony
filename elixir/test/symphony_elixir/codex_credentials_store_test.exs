@@ -302,7 +302,9 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
              race_record: Keyword.get(opts, :race_record),
              metadata: Keyword.get(opts, :metadata)
            }
-         end}, id: make_ref())
+         end},
+        id: make_ref()
+      )
 
     request = fn method, url, headers, body ->
       uri = URI.parse(url)

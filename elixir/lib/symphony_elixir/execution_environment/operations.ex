@@ -645,15 +645,24 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   end
 
   defp physical_stop(adapter, config, record, opts) do
-    # Failed credential metadata must never prevent the provider's safety stop attempt.
-    intended = intent(adapter, config, record, :stopped, opts)
+    # Reserve time for safety stop even if credential metadata persistence times out.
+    credential_stop? = Credentials.enabled?(config) or Credentials.tracked?(record)
+
+    intent_opts =
+      if credential_stop? do
+        Keyword.put(opts, :deadline, opts[:clock].() + div(remaining(opts), 2))
+      else
+        opts
+      end
+
+    intended = intent(adapter, config, record, :stopped, intent_opts)
 
     case intended do
       {:ok, current} ->
         with {:ok, stopped} <- mutate(adapter, :stop, config, current, opts), do: poll(adapter, config, stopped, :stopped, opts)
 
       {:error, _, current} = error ->
-        if Credentials.enabled?(config) or Credentials.tracked?(record) do
+        if credential_stop? do
           with {:ok, stopped} <- mutate(adapter, :stop, config, current, opts), do: poll(adapter, config, stopped, :stopped, opts)
         else
           error
