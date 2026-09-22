@@ -5,6 +5,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   alias SymphonyElixir.ExecutionEnvironment
   alias SymphonyElixir.ExecutionEnvironment.{Command, Config, Operations, Record}
   alias SymphonyElixir.ExecutionEnvironment.Workstations.Client
+  alias SymphonyElixir.GoogleCredentials
   alias SymphonyElixir.SSH.Target
 
   @required ~w(project location cluster config credential_configuration impersonate_service_account ssh_user)
@@ -1054,7 +1055,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
         "--cluster=" <> config.provider["cluster"],
         "--config=" <> List.last(String.split(config_name(config, record), "/")),
         "--local-host-port=127.0.0.1:0"
-      ] ++ Client.auth_args(config)
+      ] ++ GoogleCredentials.auth_args(config.provider)
 
     case Operations.start_staged_port(Keyword.fetch!(opts, :staged_paths), gcloud, args, env: [{"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}]) do
       {:ok, port} -> establish_tunnel(config, port, ssh, directory, supervisor, authority, opts)

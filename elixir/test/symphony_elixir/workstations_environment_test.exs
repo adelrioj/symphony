@@ -4,6 +4,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   alias SymphonyElixir.ExecutionEnvironment
   alias SymphonyElixir.ExecutionEnvironment.{Operations, Record, Workstations}
   alias SymphonyElixir.ExecutionEnvironment.Workstations.Client
+  alias SymphonyElixir.GoogleCredentials
   alias SymphonyElixir.SSH
 
   test "STOPPED with no listed operations cannot erase an unknown start" do
@@ -205,6 +206,46 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     assert Process.get(:tokens) == 2
   end
 
+  test "lifecycle requests share bounded credential caching without losing impersonation" do
+    parent = self()
+    token_fun = fn identity, _ ->
+      send(parent, {:token_identity, identity})
+      {:ok, "shared-lifecycle-token"}
+    end
+
+    options = [token_fun: token_fun, timeout_ms: 1_000]
+    assert {:ok, "shared-lifecycle-token"} = GoogleCredentials.token(config().provider, options)
+
+    request = fn options ->
+      assert {"authorization", "Bearer shared-lifecycle-token"} in options[:headers]
+      response(200, %{"done" => true})
+    end
+
+    assert {:ok, %{status: 200}} = Client.request(config(), :get, "/v1/" <> operation_name(), [], nil, Keyword.put(options, :request_fun, request))
+    assert_receive {:token_identity, identity}
+    assert identity["credential_configuration"] == "deploy"
+    assert identity["impersonate_service_account"] == "sa@example.com"
+    refute_receive {:token_identity, _}
+  end
+
+  test "missing lifecycle impersonation cannot fall back to controller credentials" do
+    invalid = update_in(config(), [:provider], &Map.delete(&1, "impersonate_service_account"))
+    parent = self()
+    options = [
+      token_fun: fn _, _ -> send(parent, :unscoped_token); {:ok, "unscoped-token"} end,
+      request_fun: fn _ -> response(200, %{"done" => true}) end
+    ]
+
+    assert {:error, {:denied, :workstations_credentials}} = Client.request(invalid, :get, "/v1/" <> operation_name(), [], nil, options)
+    refute_receive :unscoped_token
+  end
+
+  test "tunnel startup rejects missing lifecycle impersonation before accepting a connection" do
+    {running, options} = tunnel_fixture("read ignored")
+    invalid = update_in(config(), [:provider], &Map.delete(&1, "impersonate_service_account"))
+    assert {:error, {:denied, :workstations_credentials}} = Workstations.connect(invalid, running, options)
+  end
+
   test "an expired lifecycle deadline cannot issue a provider request" do
     request = fn _ -> flunk("provider request after deadline") end
 
@@ -336,6 +377,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "SSH readiness polling consumes the existing deadline and removes staged trust" do
     {running, options, directory} =
       ssh_readiness_fixture("printf 'pinned-test-key\\n' > \"$hosts\"\nprintf 'kex_exchange_identification: read: Connection reset by peer\\n' >&2\nexit 255")
+    prime_tunnel_executables(options)
 
     started = System.monotonic_time(:millisecond)
     options = Keyword.merge(options, deadline: started + 500, poll_interval_ms: 5_000)
@@ -368,6 +410,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
   test "SSH command timeout is bounded by the original deadline and redacts partial output" do
     {running, options, directory} = ssh_readiness_fixture("printf 'private remote output\\n'\nread ignored")
+    prime_tunnel_executables(options)
     started = System.monotonic_time(:millisecond)
     options = Keyword.put(options, :deadline, started + 500)
 
@@ -1249,10 +1292,10 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     assert {:error, _} = Workstations.connect(config(), running, Keyword.put(options, :gcloud_executable, missing))
   end
 
-  test "invalid tunnel authentication configuration is redacted at the connection boundary" do
+  test "invalid authentication configuration is rejected before tunnel startup" do
     {running, options} = tunnel_fixture("read ignored")
     invalid = put_in(config(), [:provider, "credential_configuration"], nil)
-    assert {:error, {:unknown, :workstations_tunnel_failed}} = Workstations.connect(invalid, running, options)
+    assert {:error, {:denied, :workstations_credentials}} = Workstations.connect(invalid, running, options)
   end
 
   test "local SSH launch exception is redacted after authenticated tunnel readiness" do
@@ -1324,6 +1367,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
     File.write!(ssh, """
     #!/bin/sh
+    if [ "$1" = --symphony-fixture-prime ]; then exit 0; fi
     for required in BatchMode=yes ForwardAgent=no IdentityAgent=none PubkeyAuthentication=no PreferredAuthentications=none PasswordAuthentication=no KbdInteractiveAuthentication=no GlobalKnownHostsFile=/dev/null; do
       case " $* " in *" $required "*) ;; *) exit 91 ;; esac
     done
@@ -1349,10 +1393,17 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     File.mkdir!(directory)
     on_exit(fn -> File.rm_rf!(directory) end)
     gcloud = Path.join(directory, "gcloud")
-    File.write!(gcloud, "#!/bin/sh\n" <> script <> "\n")
+    File.write!(gcloud, "#!/bin/sh\nif [ \"$1\" = --symphony-fixture-prime ]; then exit 0; fi\n" <> script <> "\n")
     File.chmod!(gcloud, 0o700)
     supervisor = start_supervised!(Task.Supervisor)
     {running, tunnel_options(request, gcloud, "/usr/bin/false", supervisor)}
+  end
+
+  defp prime_tunnel_executables(options) do
+    for key <- [:gcloud_executable, :ssh_executable] do
+      assert {:ok, %{status: 0, output: ""}} =
+               ExecutionEnvironment.Command.run(Keyword.fetch!(options, key), ["--symphony-fixture-prime"], options)
+    end
   end
 
   defp pending_response({:ok, %{body: body}}), do: response(200, Map.put(body, "done", false))
