@@ -57,6 +57,39 @@ defmodule SymphonyElixir.CLITest do
     )
   end
 
+
+  test "managed serve and offline routes reject before credentials, Repo, or scheduler startup", %{root: root} do
+    previous = System.get_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED")
+    System.put_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED", "1")
+
+    on_exit(fn ->
+      if previous, do: System.put_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED", previous), else: System.delete_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED")
+    end)
+
+    guarded = deps(%{operator_token: fn -> flunk("credentials read before maintenance gate") end})
+
+    for args <- [
+          ["serve", "--data-root", root, @ack_flag],
+          ["lanes", "import", "WORKFLOW.md", "--slug", "features", "--data-root", root],
+          ["lanes", "export", "features", "--data-root", root]
+        ] do
+      assert {:error, _reason} = CLI.evaluate(args, guarded)
+      refute File.exists?(root)
+    end
+  end
+
+  test "managed direct application startup rejects before opening a database", %{root: root} do
+    previous = System.get_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED")
+    System.put_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED", "1")
+    Application.put_env(:symphony_elixir, :data_root, root)
+
+    on_exit(fn ->
+      if previous, do: System.put_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED", previous), else: System.delete_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED")
+    end)
+
+    assert {:error, :maintenance_required} = SymphonyElixir.Application.start(:normal, [])
+    refute File.exists?(root)
+  end
   test "arguments are rejected before acknowledgement, credentials, or filesystem changes", %{root: root} do
     invalid = [
       [],

@@ -33,6 +33,12 @@ defmodule SymphonyElixir.Application do
   @doc false
   @spec start_runtime() :: Supervisor.on_start()
   def start_runtime do
+    with :ok <- SymphonyElixir.Maintenance.verify_managed(SymphonyElixir.Config.data_root(), :controller) do
+      start_supervisor()
+    end
+  end
+
+  defp start_supervisor do
     :ok = SymphonyElixir.LogFile.configure()
 
     children = [
