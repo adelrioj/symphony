@@ -39,12 +39,12 @@ defmodule SymphonyElixir.MaintenanceTest do
   end
 
   @tag :linux
+  @tag skip: if(:os.type() == {:unix, :linux}, do: false, else: "requires Linux flock and procfs")
   test "BEAM verifies the inherited open description, not another lock on its inode", %{root: root} do
-    if :os.type() == {:unix, :linux} do
       source = Path.expand("../../lib/symphony_elixir/maintenance.ex", __DIR__)
 
       program = """
-      import fcntl, os, pathlib, subprocess, sys
+      import fcntl, json, os, pathlib, subprocess, sys
       root = pathlib.Path(sys.argv[1]).resolve()
       directory = root / '.maintenance'
       directory.mkdir(mode=0o700)
@@ -59,6 +59,13 @@ defmodule SymphonyElixir.MaintenanceTest do
           assert child.returncode == 0, child.stderr
           assert child.stdout.strip() == expected, child.stdout + child.stderr
       check(':ok')
+      other = root / 'other'
+      (other / 'child').mkdir(mode=0o700, parents=True)
+      (root / 'redirect').symlink_to(other / 'child')
+      original_expression = expression
+      expression = 'IO.inspect(SymphonyElixir.Maintenance.verify(' + json.dumps(str(root / 'redirect' / '..')) + ', :operator))'
+      check('{:error, :maintenance_required}')
+      expression = original_expression
       os.environ['SYMPHONY_MAINTENANCE_MODE'] = 'controller'
       check('{:error, :maintenance_required}')
       os.environ['SYMPHONY_MAINTENANCE_MODE'] = 'operator'
@@ -72,6 +79,5 @@ defmodule SymphonyElixir.MaintenanceTest do
 
       {output, status} = System.cmd("python3", ["-c", program, root, source], stderr_to_stdout: true)
       assert status == 0, output
-    end
   end
 end
