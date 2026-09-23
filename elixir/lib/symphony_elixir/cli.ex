@@ -3,7 +3,7 @@ defmodule SymphonyElixir.CLI do
   Entrypoint for the installation daemon, lane commands, and standalone Linear MCP.
   """
 
-  alias SymphonyElixir.LogFile
+  alias SymphonyElixir.{LogFile, Maintenance}
   alias SymphonyElixir.MCP.LinearServer
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
@@ -90,6 +90,7 @@ defmodule SymphonyElixir.CLI do
     with {:ok, opts, []} <- parse(args, @serve_switches, 0),
          :ok <- validate_serve_options(opts),
          :ok <- require_guardrails_acknowledgement(opts),
+         :ok <- verify_maintenance(opts, :controller),
          {:ok, token} <- require_operator_token(deps),
          {:ok, root} <- prepare_data_root(opts),
          :ok <- create_directory(Path.join(root, "log")) do
@@ -220,13 +221,23 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp start_repo(opts, deps) do
-    with {:ok, root} <- prepare_data_root(opts) do
+    with :ok <- verify_maintenance(opts, :offline),
+         {:ok, root} <- prepare_data_root(opts) do
       Application.put_env(:symphony_elixir, :data_root, root)
 
       case deps.start_repo.() do
         :ok -> :ok
         {:error, reason} -> {:error, "Failed to open the Symphony database: #{inspect(reason)}"}
       end
+    end
+  end
+
+  defp verify_maintenance(opts, mode) do
+    root = Path.expand(Keyword.get(opts, :data_root, File.cwd!()))
+
+    case Maintenance.verify_managed(root, mode) do
+      :ok -> :ok
+      {:error, :maintenance_required} -> {:error, "maintenance_required"}
     end
   end
 
