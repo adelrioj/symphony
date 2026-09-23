@@ -30,12 +30,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
     with :ok <- invoke(adapter, :preflight, [config], opts),
          {:ok, records} <- invoke(adapter, :discover, [config], opts) do
-      {:ok, Enum.map(records, fn record ->
-        case reconcile_credentials(adapter, config, record, opts) do
-          {:ok, current} -> current
-          {:error, _, current} -> current
-        end
-      end)}
+      if Keyword.get(opts, :credential_reconcile, true) do
+        {:ok, Enum.map(records, fn record ->
+          case reconcile_credentials(adapter, config, record, opts) do
+            {:ok, current} -> current
+            {:error, _, current} -> current
+          end
+        end)}
+      else
+        {:ok, records}
+      end
     end
   end
 
@@ -74,6 +78,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     end
   end
 
+  def run(adapter, config, %Lifecycle.Entry{} = entry, :credential_safety_stop, opts) do
+    opts = deadline_options(config, :stop, opts)
+    try do
+      physical_stop(adapter, config, entry.record, opts)
+    after
+      close_entry_connection(entry)
+    end
+  end
+
   def run(adapter, config, %Lifecycle.Entry{} = entry, :destroy, opts) do
     opts = deadline_options(config, :destroy, opts)
 
@@ -91,7 +104,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   def run(adapter, config, %Lifecycle.Entry{} = entry, :inspect, opts) do
     opts = deadline_options(config, :inspect, opts)
     with {:ok, record} <- mutate(adapter, :inspect, config, entry.record, opts) do
-      reconcile_credentials(adapter, config, record, opts)
+      if Keyword.get(opts, :credential_reconcile, true), do: reconcile_credentials(adapter, config, record, opts), else: {:ok, record}
     end
   end
 
@@ -671,6 +684,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
         end
       end
     end
+  end
+
+  @doc "Reads the sealed checkpoint through the authenticated recovery connection; never changes cloud authority."
+  @spec checkpoint_receipt(ExecutionContext.t(), keyword()) :: {:ok, map()} | {:error, atom()}
+  def checkpoint_receipt(%ExecutionContext{} = context, opts) do
+    opts = deadline_options(context.environment.config, :inspect, opts)
+    credential_command(context, "checkpoint", opts)
   end
 
   defp credential_command(context, action, opts) do

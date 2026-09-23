@@ -106,6 +106,13 @@ workspace:
 # Cleanup starts directly in recover mode, preserves the original owner attempt and
 # retained uncertain cache, and cannot reopen execute admission for the same claim.
 # Bounded credential recovery_required status retains the disk and blocks credential dispatch.
+# Operator credentials reconcile requires the real inherited operator-mode maintenance
+# lock, an existing read-only database with every lane disabled, and this workflow's
+# parsed content matching the current Features version. It never starts scheduling.
+# inspect is read-only; checkpoint requires original clean provenance and physical stop.
+# reseed-stop preserves ownership; reseed-commit records resolved_epoch separately from
+# the original assignment epoch/attempt and durably acknowledges the pending handoff.
+# No file-mode disabled flag, caller-authored stop proof, force, or old-version fallback.
 # Kubernetes pins Agent Sandbox v1.0.1 and an immutable qualification ConfigMap referenced
 # by Template annotation symphony.dev/qualification; it requires qualified Kata guest
 # storage, admission/gates, enforcing NetworkPolicy, private SSH and kubelet/CSI evidence.

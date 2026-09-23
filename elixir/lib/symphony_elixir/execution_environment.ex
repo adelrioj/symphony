@@ -106,6 +106,9 @@ defmodule SymphonyElixir.ExecutionEnvironment do
       not tracked?(record) or valid_disposition?(record, true)
     end
 
+    @spec disposition(Record.t()) :: map() | nil
+    def disposition(record), do: if(valid_disposition?(record, false), do: data(record)["disposition"], else: nil)
+
     @spec ready?(Record.t()) :: boolean()
     def ready?(record) do
       not tracked?(record) or
@@ -288,10 +291,7 @@ defmodule SymphonyElixir.ExecutionEnvironment do
         authority["state"] != "AVAILABLE" and recoverable_owner?(authority, record) ->
           {:ok, capture(record, authority)}
         is_map(handoff) and owner_matches?(handoff["owner"], record, true) ->
-          assigned = assignment(record)
-          assigned = if valid_assignment?(assigned) and assigned["claim_id"] == handoff["claim_id"] and assigned["owner"] == handoff["owner"], do: assigned, else: Map.merge(Map.take(authority, ["schema", "credential_id", "epoch"]), Map.take(handoff, ["claim_id", "owner", "secret_version"]))
-          disposition = Map.merge(Map.take(authority, ["schema", "credential_id", "epoch"]), handoff)
-          {:ok, put(record, %{"assignment" => assigned, "disposition" => disposition, "stage" => "committed", "reason" => nil})}
+          reconcile_handoff(record, authority, handoff)
         historical_disposition?(record, authority) ->
           disposition = Map.put(data(record)["disposition"], "resource_acknowledged", true)
           {:ok, put(record, %{"stage" => "committed", "disposition" => disposition, "reason" => nil})}
@@ -304,6 +304,29 @@ defmodule SymphonyElixir.ExecutionEnvironment do
       end
     end
 
+    defp reconcile_handoff(record, authority, handoff) do
+      assigned = assignment(record)
+      matching = valid_assignment?(assigned) and assigned["claim_id"] == handoff["claim_id"] and assigned["owner"] == handoff["owner"] and
+        assigned["credential_id"] == authority["credential_id"]
+      same_epoch = matching and assigned["epoch"] == authority["epoch"]
+      reseeded = matching and assigned["epoch"] + 1 == authority["epoch"] and stopped_handoff?(record, handoff)
+
+      cond do
+        same_epoch or reseeded ->
+          disposition = Map.merge(Map.take(assigned, ~w(schema credential_id epoch)), handoff)
+          disposition = if reseeded, do: Map.put(disposition, "resolved_epoch", authority["epoch"]), else: disposition
+          {:ok, put(record, %{"assignment" => assigned, "disposition" => disposition, "stage" => "committed", "reason" => nil})}
+        true ->
+          failure(record, "disposition_unconfirmed")
+      end
+    end
+
+    defp stopped_handoff?(%Record{phase: :stopped, proof: {:quiescent, %{uid: uid, operation: operation}}} = record, handoff) do
+      proof = %{"uid" => uid, "operation" => operation, "attempt_id" => handoff["owner"]["attempt_id"]}
+      handoff["stop_proof"] == proof and not Enum.any?(record.pending, &(&1.outcome in [:pending, :unknown]))
+    end
+    defp stopped_handoff?(_, _), do: false
+
     defp recoverable_owner?(authority, record) do
       owner = authority["owner"]
       owner_matches?(owner, record, true) or
@@ -314,9 +337,15 @@ defmodule SymphonyElixir.ExecutionEnvironment do
     defp historical_disposition?(record, authority) do
       disposition = data(record)["disposition"]
       handoff = authority["last_handoff"]
-      valid_disposition?(record, false) and disposition["epoch"] == authority["epoch"] and disposition["credential_id"] == authority["credential_id"] and
-        is_map(handoff) and handoff["claim_id"] != disposition["claim_id"] and
+      valid_disposition?(record, false) and consistent_epoch?(disposition, authority) and disposition["credential_id"] == authority["credential_id"] and
+        ((is_map(handoff) and handoff["claim_id"] != disposition["claim_id"]) or
+          (disposition["resource_acknowledged"] == true and (disposition["resolved_epoch"] || disposition["epoch"]) < authority["epoch"])) and
         (not is_map(authority["owner"]) or authority["owner"]["workstation_name"] != disposition["owner"]["workstation_name"])
+    end
+
+    defp consistent_epoch?(disposition, authority) do
+      resolved = disposition["resolved_epoch"] || disposition["epoch"]
+      resolved == authority["epoch"] or (disposition["resource_acknowledged"] == true and resolved < authority["epoch"])
     end
 
     defp capture(record, authority) do
@@ -356,8 +385,12 @@ defmodule SymphonyElixir.ExecutionEnvironment do
       assigned = assignment(record)
       disposition = data(record)["disposition"]
       handoff_keys = ~w(claim_id secret_version owner stop_proof resource_acknowledged)
+      fields = ~w(schema credential_id epoch) ++ handoff_keys
+      resolved_epoch = if is_map(disposition), do: disposition["resolved_epoch"], else: nil
+      fields = if is_nil(resolved_epoch), do: fields, else: ["resolved_epoch" | fields]
       is_map(disposition) and assignment_matches?(assigned, record) and data(record)["stage"] == "committed" and
-        MapSet.new(Map.keys(disposition)) == MapSet.new(~w(schema credential_id epoch) ++ handoff_keys) and
+        MapSet.new(Map.keys(disposition)) == MapSet.new(fields) and
+        (is_nil(resolved_epoch) or (is_integer(resolved_epoch) and resolved_epoch == assigned["epoch"] + 1)) and
         Map.take(disposition, ~w(schema credential_id epoch claim_id owner)) == Map.take(assigned, ~w(schema credential_id epoch claim_id owner)) and
         (not acknowledged or disposition["resource_acknowledged"] == true) and
         Authority.validate(%{"schema" => disposition["schema"], "credential_id" => disposition["credential_id"], "epoch" => disposition["epoch"], "state" => "AVAILABLE",
@@ -367,7 +400,7 @@ defmodule SymphonyElixir.ExecutionEnvironment do
 
     defp committed_current?(record, authority) do
       disposition = data(record)["disposition"]
-      valid_disposition?(record, true) and disposition["epoch"] == authority["epoch"] and disposition["credential_id"] == authority["credential_id"] and
+      valid_disposition?(record, true) and consistent_epoch?(disposition, authority) and disposition["credential_id"] == authority["credential_id"] and
         (not is_map(authority["owner"]) or authority["owner"]["workstation_name"] != disposition["owner"]["workstation_name"]) and
         (not is_map(authority["last_handoff"]) or authority["last_handoff"]["claim_id"] != disposition["claim_id"] or authority["last_handoff"]["resource_acknowledged"] == true)
     end

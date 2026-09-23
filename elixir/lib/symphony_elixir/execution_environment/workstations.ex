@@ -42,6 +42,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     with {:ok, templates} <- pages(config, cluster(config) <> "/workstationConfigs", "workstationConfigs", opts),
          {:ok, operations} <- operation_inventory(config, opts),
          {:ok, workstations} <- list_templates(config, templates, opts),
+         :ok <- credential_inventory(config, templates, workstations, operations, opts),
          {:ok, records} <- decode_owned(config, workstations, operations),
          {:ok, backing} <- backing_inventory(config, opts) do
       keys = MapSet.new(records, & &1.key)
@@ -965,6 +966,51 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       {:halt, {:error, {:unknown, :invalid_inventory}}}
     end
   end
+
+  defp credential_inventory(config, templates, workstations, operations, opts) do
+    if Keyword.get(opts, :credential_inventory, false) do
+      credential_templates =
+        templates
+        |> Enum.filter(fn template ->
+          env = get_in(template, ["container", "env"]) || %{}
+          template["name"] == parent(config) or credential_markers?(env)
+        end)
+        |> MapSet.new(& &1["name"])
+      invalid_templates = not MapSet.member?(credential_templates, parent(config)) or
+        Enum.any?(templates, &(not valid_config_name?(config, &1["name"])))
+      pending = Enum.any?(operations, fn operation ->
+        target = get_in(operation, ["metadata", "target"])
+        operation["done"] != true and
+          (not is_binary(target) or target == cluster(config) or String.starts_with?(target, cluster(config) <> "/"))
+      end)
+
+      unaccounted = Enum.any?(workstations, fn workstation ->
+        name = workstation["name"]
+        template = inventory_workstation_template(config, name)
+        relevant = MapSet.member?(credential_templates, template) or credential_markers?(Map.get(workstation, "env", %{})) or
+          String.contains?(get_in(workstation, ["annotations", @annotation]) || "", "\"codex_credentials\"")
+        is_nil(template) or (relevant and get_in(workstation, ["labels", "symphony-deployment"]) != deployment_hash(config.deployment_id))
+      end)
+      if invalid_templates or pending or unaccounted, do: {:error, {:unknown, :credential_inventory_unaccounted}}, else: :ok
+    else
+      :ok
+    end
+  end
+
+  defp inventory_workstation_template(config, name) when is_binary(name) do
+    case String.split(name, "/workstations/") do
+      [template, key] ->
+        if valid_config_name?(config, template) and key not in ["", ".", ".."] and segment(key) == key, do: template, else: nil
+      _ -> nil
+    end
+  end
+  defp inventory_workstation_template(_config, _name), do: nil
+
+  defp credential_markers?(env) when is_map(env) do
+    env["SYMPHONY_PROFILE"] == "features" or
+      Enum.any?(~w(SYMPHONY_CODEX_ENABLED SYMPHONY_CODEX_SECRET SYMPHONY_CODEX_ASSIGNMENT SYMPHONY_CODEX_MODE), &Map.has_key?(env, &1))
+  end
+  defp credential_markers?(_), do: true
 
   defp decode_owned(config, workstations, operations) do
     workstations

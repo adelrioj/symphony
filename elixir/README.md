@@ -489,6 +489,55 @@ fallback to unblock dispatch. Operator recovery, infrastructure changes, real lo
 refresh, model checks, image publication, and enabling a production lane require
 their separate approvals.
 
+The isolated operator boundary is:
+
+```text
+symphony credentials reconcile --data-root /state --workflow /private/Features.md
+  --action inspect|checkpoint|reseed-stop|reseed-commit
+  [--resource FULL_WORKSTATION_NAME]
+  [--expected-epoch INTEGER --expected-generation DECIMAL]
+  [--receipt-file /private/receipt.json]
+```
+
+`inspect` is the default and does not change provider metadata or cloud authority.
+All actions strictly verify the inherited operator-mode descriptor 200 on the real
+controller-volume lock. Environment flags alone cannot authorize them. The database
+must already exist; it is opened read-only without Repo, migrations, or schedulers.
+Every persisted lane, including deleted rows, must be disabled. The supplied workflow's
+parsed front matter and prompt must match the current persisted Features version;
+tracker/operator secrets are not resolved. An arbitrary file-mode workflow is not a
+maintenance installation.
+
+Every mutation requires the exact resource and current epoch/generation. `checkpoint`
+also requires a private, singly linked mode-0600 receipt in a mode-0700 directory.
+The receipt must match the original assignment and either an authoritative checkpoint
+candidate or the authenticated recovery worker checkpoint. The command never reads
+credential payloads. It rechecks provider stop evidence before the conditional handoff,
+persists the exact resource disposition, and acknowledges that durable handoff.
+An operator can explicitly reconcile quarantine this way; ordinary transitions cannot.
+
+`reseed-stop` inventories the configured cluster through the existing Workstations
+provider and proves all accounted former credential users stopped with settled operations.
+Unknown Features instances, credential-bearing retained instances without ownership,
+mismatched UIDs, or incomplete provider inventory block the operation. The safety stop
+does not checkpoint, release ownership, or authorize deletion. Inventory is limited to
+the validated provider scope; it does not certify unrelated projects or out-of-scope users.
+
+After the separately authorized operator publishes and verifies the new numeric version
+and performs the epoch+1 authority CAS, `reseed-commit` checks current physical evidence
+again. A bound original owner stays in the new authority's unacknowledged `last_handoff`,
+blocking new claims until resource disposition is durably read back. Resource metadata
+retains the original assignment epoch and attempt, with a separate `resolved_epoch`.
+Retry against the **current** generation after either a lost disposition write or a lost
+final acknowledgement-metadata write; do not upload another seed or invent a new owner.
+An epoch increase alone never resolves an old claim.
+
+Successful output is one JSON object (`ok`, plus `result` containing `action`, validated
+`authority`, allowlisted `resources`, and `admission: "maintenance"`), limited to 1 MiB.
+Failures exit nonzero with only `ok: false` and a bounded `reason` code. Output is
+diagnostic evidence, not a reusable user-authored physical-stop certificate. The engine
+never initializes absent authority, enables lanes, or restarts the controller.
+
 #### Recovery, capacity, retention, and hooks
 
 Startup performs provider preflight and complete owned-resource discovery before dispatch. Denied,
