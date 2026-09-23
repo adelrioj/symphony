@@ -241,12 +241,14 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
 
   test "Codex credentials remain optional but capture every authority reference in reload identity" do
     assert {:ok, _} = Config.parse(attributes())
+
     references = %{
       "credential_id" => "features-personal-codex",
       "secret" => "projects/123456/secrets/features-codex",
       "control_bucket" => "fixture-codex-control",
       "control_object" => "features/authority.json"
     }
+
     enabled = put_in(settings(), [:worker, :environment, "codex_credentials"], references)
     assert Config.runtime(enabled).codex_credentials == references
     refute Config.identity(enabled) == Config.identity(settings())

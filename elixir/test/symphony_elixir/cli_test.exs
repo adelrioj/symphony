@@ -57,7 +57,6 @@ defmodule SymphonyElixir.CLITest do
     )
   end
 
-
   test "managed serve and offline routes reject before credentials, Repo, or scheduler startup", %{root: root} do
     previous = System.get_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED")
     System.put_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED", "1")
@@ -90,6 +89,7 @@ defmodule SymphonyElixir.CLITest do
     assert {:error, :maintenance_required} = SymphonyElixir.Application.start(:normal, [])
     refute File.exists?(root)
   end
+
   test "arguments are rejected before acknowledgement, credentials, or filesystem changes", %{root: root} do
     invalid = [
       [],

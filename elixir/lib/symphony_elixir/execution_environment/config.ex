@@ -91,6 +91,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
         keys = if config.kind == "google_workstations", do: @workstations_identity, else: @kubernetes_identity
 
         identity = {config.kind, config.deployment_id, config.tracker_kind, config.workspace_root, canonical(Map.take(config.provider, keys))}
+
         if(is_nil(config.codex_credentials), do: identity, else: {identity, canonical(config.codex_credentials)})
         |> :erlang.term_to_binary()
         |> then(&:crypto.hash(:sha256, &1))
@@ -118,7 +119,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
 
   defp validate_codex_credentials(changeset) do
     case get_field(changeset, :codex_credentials) do
-      nil -> changeset
+      nil ->
+        changeset
+
       references ->
         valid = get_field(changeset, :kind) == "google_workstations" and valid_codex_references?(references)
         if valid, do: changeset, else: add_error(changeset, :codex_credentials, "must contain exact Workstations credential references")
@@ -127,6 +130,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
 
   defp valid_codex_references?(references) when is_map(references) do
     keys = ~w(credential_id secret control_bucket control_object)
+
     MapSet.new(Map.keys(references)) == MapSet.new(keys) and
       Enum.all?(keys, &(is_binary(references[&1]) and String.trim(references[&1]) != "")) and
       Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/, references["credential_id"]) and

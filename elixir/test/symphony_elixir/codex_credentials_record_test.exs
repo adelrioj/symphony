@@ -42,6 +42,7 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
     assert {:error, _} = Record.transition(bound, {:bind_uid, "claim-a", "uid-b"}, "replace-uid")
 
     assert {:ok, assignment} = Record.assignment(bound)
+
     assert assignment == %{
              "schema" => 1,
              "credential_id" => "features",
@@ -53,8 +54,13 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
   end
 
   test "claims cannot bypass UID readback or introduce malformed owner identity" do
-    for invalid_owner <- [owner("uid-a"), Map.delete(owner(), "attempt_id"), Map.put(owner(), "attempt_id", ""),
-                          Map.put(owner(), "workstation_name", "ticket-1"), Map.put(owner(), "token", "synthetic-extra")] do
+    for invalid_owner <- [
+          owner("uid-a"),
+          Map.delete(owner(), "attempt_id"),
+          Map.put(owner(), "attempt_id", ""),
+          Map.put(owner(), "workstation_name", "ticket-1"),
+          Map.put(owner(), "token", "synthetic-extra")
+        ] do
       assert {:error, _} = Record.transition(initial(), {:claim, "claim-a", invalid_owner}, "claim")
     end
 
@@ -124,6 +130,7 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
     assert :ok = Record.validate(released)
     assert released["head_version"] == @next
     assert released["state"] == "AVAILABLE"
+
     assert released["last_handoff"] == %{
              "claim_id" => "claim-a",
              "secret_version" => @next,
@@ -155,9 +162,14 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
       assert quarantined["stop_proof"] == record["stop_proof"]
       assert quarantined["state"] == "RECOVERY_REQUIRED"
 
-      for event <- [{:claim, "recovery-claim", Map.put(owner(), "attempt_id", "recovery-attempt")},
-                    {:bind_uid, "claim-a", "uid-b"}, {:checkpoint, receipt()}, {:stopped, "claim-a", proof()},
-                    {:release, "claim-a"}, {:acknowledge_handoff, "claim-a"}] do
+      for event <- [
+            {:claim, "recovery-claim", Map.put(owner(), "attempt_id", "recovery-attempt")},
+            {:bind_uid, "claim-a", "uid-b"},
+            {:checkpoint, receipt()},
+            {:stopped, "claim-a", proof()},
+            {:release, "claim-a"},
+            {:acknowledge_handoff, "claim-a"}
+          ] do
         assert {:error, {:credential_recovery_required, _}} = Record.transition(quarantined, event, "recovery")
       end
 
@@ -172,17 +184,28 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
   end
 
   test "unknown and malformed authority fails closed instead of being repaired by transitions" do
-    for invalid <- [nil, [], %{}, Map.delete(initial(), "reason"), Map.put(initial(), "schema", 2),
-                    Map.put(initial(), "state", "EXPIRED"), Map.put(initial(), "epoch", 0),
-                    Map.put(initial(), "head_version", "latest"), Map.put(initial(), "generation", "3"),
-                    Map.put(initial(), "transition_id", ""), Map.put(initial(), "owner", owner()),
-                    Map.put(owned(), "owner", nil), Map.put(owned(), "candidate", receipt()),
-                    Map.put(owned(), "stop_proof", proof()), Map.put(bound(), "reason", "unexpected"),
-                    Map.put(checkpointed(), "candidate", nil),
-                    put_in(checkpointed(), ["candidate", "secret_version"], "projects/fixture-workers/secrets/other/versions/2"),
-                    put_in(checkpointed(), ["candidate", "owner", "attempt_id"], "recovery-attempt"),
-                    put_in(stopped(), ["stop_proof", "uid"], "uid-b"),
-                    Map.put(bound(), "state", "RECOVERY_REQUIRED")] do
+    for invalid <- [
+          nil,
+          [],
+          %{},
+          Map.delete(initial(), "reason"),
+          Map.put(initial(), "schema", 2),
+          Map.put(initial(), "state", "EXPIRED"),
+          Map.put(initial(), "epoch", 0),
+          Map.put(initial(), "head_version", "latest"),
+          Map.put(initial(), "generation", "3"),
+          Map.put(initial(), "transition_id", ""),
+          Map.put(initial(), "owner", owner()),
+          Map.put(owned(), "owner", nil),
+          Map.put(owned(), "candidate", receipt()),
+          Map.put(owned(), "stop_proof", proof()),
+          Map.put(bound(), "reason", "unexpected"),
+          Map.put(checkpointed(), "candidate", nil),
+          put_in(checkpointed(), ["candidate", "secret_version"], "projects/fixture-workers/secrets/other/versions/2"),
+          put_in(checkpointed(), ["candidate", "owner", "attempt_id"], "recovery-attempt"),
+          put_in(stopped(), ["stop_proof", "uid"], "uid-b"),
+          Map.put(bound(), "state", "RECOVERY_REQUIRED")
+        ] do
       assert {:error, :credential_outcome_unknown} = Record.validate(invalid)
       assert {:error, :credential_outcome_unknown} = Record.assignment(invalid)
       assert {:error, :credential_outcome_unknown} = Record.transition(invalid, {:claim, "claim-b", owner()}, "no-repair")
@@ -223,18 +246,24 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
   defp initial, do: Record.initial("features", 1, @head)
 
   defp owner(uid \\ nil) do
-    %{"deployment_id" => "deployment-a", "lane" => "features", "workstation_name" => @workstation,
-      "workstation_uid" => uid, "attempt_id" => "attempt-a"}
+    %{"deployment_id" => "deployment-a", "lane" => "features", "workstation_name" => @workstation, "workstation_uid" => uid, "attempt_id" => "attempt-a"}
   end
 
   defp receipt(version \\ @next) do
-    %{"schema" => 1, "credential_id" => "features", "epoch" => 1, "claim_id" => "claim-a",
-      "owner" => owner("uid-a"), "secret_version" => version, "sha256" => String.duplicate("a", 64), "admission" => "sealed"}
+    %{
+      "schema" => 1,
+      "credential_id" => "features",
+      "epoch" => 1,
+      "claim_id" => "claim-a",
+      "owner" => owner("uid-a"),
+      "secret_version" => version,
+      "sha256" => String.duplicate("a", 64),
+      "admission" => "sealed"
+    }
   end
 
   defp proof do
-    %{"uid" => "uid-a", "attempt_id" => "attempt-a",
-      "operation" => "projects/fixture-workers/locations/europe-west1/operations/stop-1"}
+    %{"uid" => "uid-a", "attempt_id" => "attempt-a", "operation" => "projects/fixture-workers/locations/europe-west1/operations/stop-1"}
   end
 
   defp owned do

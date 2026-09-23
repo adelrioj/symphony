@@ -2,10 +2,10 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
   @moduledoc "Explicit, maintenance-locked recovery using the current installation and existing provider lifecycle."
   import Bitwise
   alias Exqlite.Sqlite3
-  alias SymphonyElixir.{Maintenance, PathSafety, Workflow}
-  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.CodexCredentials.{ControlStore, GoogleClient, Record}
+  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ExecutionEnvironment.{Config, Credentials, Lifecycle, Operations, Workstations}
+  alias SymphonyElixir.{Maintenance, PathSafety, Workflow}
 
   @actions ~w(inspect checkpoint reseed-stop reseed-commit)
   @keys ~w(data_root workflow action resource expected_epoch expected_generation receipt_file)a
@@ -15,12 +15,21 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
   @spec validate_options(keyword()) :: :ok | {:error, :invalid_arguments}
   def validate_options(options) do
     action = Keyword.get(options, :action, "inspect")
-    valid = Keyword.keyword?(options) and Enum.all?(Keyword.keys(options), &(&1 in @keys)) and
-      length(Keyword.keys(options)) == length(Enum.uniq(Keyword.keys(options))) and
-      Enum.all?([:data_root, :workflow], &nonblank?(options[&1])) and action in @actions
-    mutation = action == "inspect" or (nonblank?(options[:resource]) and is_integer(options[:expected_epoch]) and options[:expected_epoch] > 0 and decimal?(options[:expected_generation]))
+
+    valid =
+      Keyword.keyword?(options) and Enum.all?(Keyword.keys(options), &(&1 in @keys)) and
+        length(Keyword.keys(options)) == length(Enum.uniq(Keyword.keys(options))) and
+        Enum.all?([:data_root, :workflow], &nonblank?(options[&1])) and action in @actions
+
+    mutation = valid_mutation_options?(action, options)
     receipt = if action == "checkpoint", do: nonblank?(options[:receipt_file]), else: is_nil(options[:receipt_file])
     if valid and mutation and receipt, do: :ok, else: {:error, :invalid_arguments}
+  end
+
+  defp valid_mutation_options?("inspect", _options), do: true
+
+  defp valid_mutation_options?(_action, options) do
+    nonblank?(options[:resource]) and is_integer(options[:expected_epoch]) and options[:expected_epoch] > 0 and decimal?(options[:expected_generation])
   end
 
   @spec reconcile(keyword(), keyword()) :: {:ok, map()} | {:error, atom()}
@@ -33,8 +42,10 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
          {:ok, _} <- Application.ensure_all_started(:req),
          {:ok, supervisor} <- Task.Supervisor.start_link() do
       try do
-        opts = Keyword.get(deps, :operation_options, [])
+        opts =
+          Keyword.get(deps, :operation_options, [])
           |> Keyword.merge(task_supervisor: supervisor, authority: self(), filesystem_uid: uid, credential_reconcile: false, credential_inventory: true)
+
         adapter = Keyword.get(deps, :adapter, Workstations)
         execute(config, adapter, Keyword.put_new(options, :action, "inspect"), opts)
       after
@@ -52,11 +63,13 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
 
   defp installation(root, workflow) do
     database = Path.join(root, "symphony.sqlite3")
+
     with {:ok, %File.Stat{type: :regular}} <- File.lstat(database),
          {:ok, db} <- Sqlite3.open(database, mode: :readonly) do
       try do
         with {:ok, [[0]]} <- query(db, "SELECT COUNT(*) FROM lanes WHERE enabled IS NOT 0"),
-             {:ok, [[front, prompt]]} <- query(db, "SELECT v.front_matter, v.prompt FROM lanes l JOIN lane_versions v ON v.id = l.current_version_id AND v.lane_id = l.id WHERE l.slug = 'features' AND l.deleted_at IS NULL"),
+             {:ok, [[front, prompt]]} <-
+               query(db, "SELECT v.front_matter, v.prompt FROM lanes l JOIN lane_versions v ON v.id = l.current_version_id AND v.lane_id = l.id WHERE l.slug = 'features' AND l.deleted_at IS NULL"),
              {:ok, persisted} <- Workflow.parse_parts(front, prompt),
              {:ok, content} <- File.read(workflow),
              {:ok, supplied} <- Workflow.parse(content),
@@ -123,6 +136,7 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
   defp read_authority(config, opts) do
     refs = config.codex_credentials
     url = "https://storage.googleapis.com/storage/v1/b/" <> encode(refs["control_bucket"]) <> "/o/" <> encode(refs["control_object"])
+
     case GoogleClient.request(config, :get, url, [], nil, opts) do
       {:ok, 404, _, _} -> {:ok, nil}
       {:ok, 200, _, _} -> ControlStore.read(config, opts)
@@ -131,15 +145,17 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
   end
 
   defp expected(_snapshot, options) when not is_list(options), do: {:error, :invalid_arguments}
+
   defp expected(snapshot, options) do
-    if options[:action] == "inspect" do
-      :ok
-    else
-      case snapshot do
-        %{generation: generation, record: record} ->
-          if generation == options[:expected_generation] and record["epoch"] == options[:expected_epoch], do: :ok, else: {:error, :authority_changed}
-        _ -> {:error, :authority_required}
-      end
+    case {options[:action], snapshot} do
+      {"inspect", _} ->
+        :ok
+
+      {_, %{generation: generation, record: record}} ->
+        if generation == options[:expected_generation] and record["epoch"] == options[:expected_epoch], do: :ok, else: {:error, :authority_changed}
+
+      _ ->
+        {:error, :authority_required}
     end
   end
 
@@ -147,13 +163,13 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
     names = Enum.map(records, &Credentials.resource_name(config, &1))
     if length(names) == length(Enum.uniq(names)) and Enum.all?(records, &valid_resource?(config, &1)), do: :ok, else: {:error, :inventory_unaccounted}
   end
+
   defp inventory(_, _), do: {:error, :inventory_unaccounted}
 
   defp valid_resource?(config, record) do
     assigned = Credentials.assignment(record)
-    valid_assignment?(assigned) and assigned["credential_id"] == config.codex_credentials["credential_id"] and
-      String.starts_with?(assigned["secret_version"], config.codex_credentials["secret"] <> "/versions/") and
-      assigned["owner"]["deployment_id"] == config.deployment_id and assigned["owner"]["lane"] == "features" and
+
+    assignment_in_scope?(config, assigned) and
       record.provider_ref == %{name: assigned["owner"]["workstation_name"], uid: assigned["owner"]["workstation_uid"]} and
       record.deployment_id == config.deployment_id and record.scope == Config.scope(config) and
       record.phase in [:running, :stopped, :stopping, :preparing] and
@@ -161,31 +177,46 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
       Enum.all?(record.pending, &(&1.outcome in [:succeeded, :failed]))
   end
 
+  defp assignment_in_scope?(config, assigned) do
+    valid_assignment?(assigned) and assigned["credential_id"] == config.codex_credentials["credential_id"] and
+      String.starts_with?(assigned["secret_version"], config.codex_credentials["secret"] <> "/versions/") and
+      assigned["owner"]["deployment_id"] == config.deployment_id and assigned["owner"]["lane"] == "features"
+  end
+
   defp valid_assignment?(assigned) when is_map(assigned) do
     MapSet.new(Map.keys(assigned)) == MapSet.new(@assignment_keys) and
-      Record.validate(Map.merge(Record.initial(assigned["credential_id"], assigned["epoch"], assigned["secret_version"]),
-        %{"state" => "OWNED", "claim_id" => assigned["claim_id"], "owner" => assigned["owner"], "transition_id" => "resource-evidence"})) == :ok and
+      Record.validate(
+        Map.merge(
+          Record.initial(assigned["credential_id"], assigned["epoch"], assigned["secret_version"]),
+          %{"state" => "OWNED", "claim_id" => assigned["claim_id"], "owner" => assigned["owner"], "transition_id" => "resource-evidence"}
+        )
+      ) == :ok and
       is_binary(assigned["owner"]["workstation_uid"])
   rescue
     _ -> false
   end
+
   defp valid_assignment?(_), do: false
 
   defp resource_scope(_config, nil), do: :ok
+
   defp resource_scope(config, name) do
     prefix = "projects/#{config.provider["project"]}/locations/#{config.provider["location"]}/workstationClusters/#{config.provider["cluster"]}/workstationConfigs/"
     suffix = String.replace_prefix(name, prefix, "")
-    if String.starts_with?(name, prefix) and Regex.match?(~r/\A[A-Za-z0-9._~-]+\/workstations\/[A-Za-z0-9._~-]+\z/, suffix),
-      do: :ok, else: {:error, :resource_mismatch}
+    if String.starts_with?(name, prefix) and Regex.match?(~r/\A[A-Za-z0-9._~-]+\/workstations\/[A-Za-z0-9._~-]+\z/, suffix), do: :ok, else: {:error, :resource_mismatch}
   end
 
   defp select(resources, options, authority) do
-    case options[:resource] do
-      nil -> {:ok, resources}
-      name ->
+    case {options[:resource], resources} do
+      {nil, _} ->
+        {:ok, resources}
+
+      {_, []} ->
+        if unbound_snapshot?(authority) and options[:action] in ["inspect", "reseed-stop", "reseed-commit"], do: {:ok, []}, else: {:error, :resource_mismatch}
+
+      {name, _} ->
         case Enum.filter(resources, &(&1.provider_ref.name == name)) do
           [record] -> {:ok, [record]}
-          [] -> if resources == [] and unbound_snapshot?(authority) and options[:action] in ["inspect", "reseed-stop", "reseed-commit"], do: {:ok, []}, else: {:error, :resource_mismatch}
           _ -> {:error, :resource_mismatch}
         end
     end
@@ -208,21 +239,30 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
 
   defp accounted(resources, authority) do
     active = if authority["state"] == "AVAILABLE", do: authority["last_handoff"], else: authority
-    known = Enum.all?(resources, fn record ->
-      assigned = Credentials.assignment(record)
-      matching = is_map(active) and active["claim_id"] == assigned["claim_id"] and active["owner"] == assigned["owner"]
-      matching = matching and
-        if authority["state"] == "AVAILABLE" do
-          assigned["epoch"] in [authority["epoch"], authority["epoch"] - 1]
-        else
-          Record.assignment(authority) == {:ok, assigned}
-        end
-      historical = Credentials.resolved?(record) and inactive?(authority, assigned) and disposition_epoch(record) <= authority["epoch"]
-      matching or historical
-    end)
+
+    known = Enum.all?(resources, &known_resource?(&1, authority, active))
+
     bound = is_map(active) and is_binary(active["owner"]["workstation_uid"])
     present = not bound or Enum.any?(resources, &(Credentials.assignment(&1)["owner"] == active["owner"]))
     if known and present and (bound or unbound_authority?(authority)), do: :ok, else: {:error, :inventory_unaccounted}
+  end
+
+  defp known_resource?(record, authority, active) do
+    assigned = Credentials.assignment(record)
+    matching = active_assignment?(authority, active, assigned)
+    historical = Credentials.resolved?(record) and inactive?(authority, assigned) and disposition_epoch(record) <= authority["epoch"]
+    matching or historical
+  end
+
+  defp active_assignment?(authority, active, assigned) do
+    matching = is_map(active) and active["claim_id"] == assigned["claim_id"] and active["owner"] == assigned["owner"]
+
+    matching and
+      if authority["state"] == "AVAILABLE" do
+        assigned["epoch"] in [authority["epoch"], authority["epoch"] - 1]
+      else
+        Record.assignment(authority) == {:ok, assigned}
+      end
   end
 
   defp unbound_authority?(%{"state" => "AVAILABLE", "last_handoff" => nil}), do: true
@@ -243,6 +283,7 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
   defp stop(config, adapter, record, opts) do
     with {:ok, current} <- operation(config, adapter, record, :inspect, opts) do
       observed = if stop_proof(current), do: {:ok, current}, else: operation(config, adapter, current, :credential_safety_stop, opts)
+
       with {:ok, stopped} <- observed,
            true <- valid_resource?(config, stopped) and not is_nil(stop_proof(stopped)) do
         {:ok, stopped}
@@ -254,6 +295,7 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
 
   defp checkpoint(config, adapter, resources, authority, options, opts) do
     record = Enum.find(resources, &(&1.provider_ref.name == options[:resource]))
+
     with {:ok, receipt} <- read_receipt(options[:receipt_file], Keyword.fetch!(opts, :filesystem_uid)),
          :ok <- receipt_matches(receipt, record, authority.record),
          :ok <- accounted(resources, authority.record),
@@ -273,8 +315,23 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
 
   defp receipt_matches(receipt, record, authority) do
     assigned = Credentials.assignment(record)
-    source = Map.merge(authority, %{"state" => "OWNED", "claim_id" => assigned["claim_id"], "owner" => assigned["owner"], "epoch" => assigned["epoch"], "head_version" => assigned["secret_version"], "candidate" => nil, "stop_proof" => nil, "last_handoff" => nil, "reason" => nil, "transition_id" => "receipt-validation"})
+
+    source =
+      Map.merge(authority, %{
+        "state" => "OWNED",
+        "claim_id" => assigned["claim_id"],
+        "owner" => assigned["owner"],
+        "epoch" => assigned["epoch"],
+        "head_version" => assigned["secret_version"],
+        "candidate" => nil,
+        "stop_proof" => nil,
+        "last_handoff" => nil,
+        "reason" => nil,
+        "transition_id" => "receipt-validation"
+      })
+
     active = if authority["state"] == "AVAILABLE", do: authority["last_handoff"], else: authority
+
     with true <- authority["epoch"] == assigned["epoch"] and is_map(active) and active["claim_id"] == assigned["claim_id"] and active["owner"] == assigned["owner"],
          {:ok, _} <- Record.transition(source, {:checkpoint, receipt}, "receipt-validation") do
       :ok
@@ -287,18 +344,23 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
     cond do
       is_map(authority["candidate"]) ->
         if authority["candidate"] == receipt, do: stop(config, adapter, record, opts), else: {:error, :receipt_mismatch}
+
       authority["state"] == "AVAILABLE" ->
         if authority["head_version"] == receipt["secret_version"], do: stop(config, adapter, record, opts), else: {:error, :receipt_mismatch}
-      true -> worker_checkpoint(config, adapter, record, receipt, opts)
+
+      true ->
+        worker_checkpoint(config, adapter, record, receipt, opts)
     end
   end
 
   defp worker_checkpoint(config, adapter, record, receipt, opts) do
     entry = entry(record)
+
     case Operations.run(adapter, config, entry, :prepare, opts) do
       {:ok, context} ->
         evidence = Operations.checkpoint_receipt(context, opts)
         stopped = Operations.run(adapter, config, %{entry | record: context.environment.record, context: context}, :credential_safety_stop, opts)
+
         with {:ok, ^receipt} <- evidence,
              {:ok, current} <- stopped,
              true <- valid_resource?(config, current) and not is_nil(stop_proof(current)) do
@@ -306,17 +368,22 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
         else
           _ -> {:error, :checkpoint_unconfirmed}
         end
+
       {:error, _, current} ->
         operation(config, adapter, current, :credential_safety_stop, opts)
         {:error, :checkpoint_unconfirmed}
-      _ -> {:error, :checkpoint_unconfirmed}
+
+      _ ->
+        {:error, :checkpoint_unconfirmed}
     end
   end
 
   defp commit_checkpoint(_config, %{record: %{"state" => "AVAILABLE"}} = snapshot, _receipt, _proof, _opts), do: {:ok, snapshot}
+
   defp commit_checkpoint(config, snapshot, receipt, proof, opts) do
     source = Map.merge(snapshot.record, %{"state" => "OWNED", "candidate" => nil, "stop_proof" => nil, "reason" => nil})
     transition = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+
     with {:ok, checkpointed} <- Record.transition(source, {:checkpoint, receipt}, transition),
          {:ok, stopped} <- Record.transition(checkpointed, {:stopped, source["claim_id"], proof}, transition),
          {:ok, released} <- Record.transition(stopped, {:release, source["claim_id"]}, transition) do
@@ -326,11 +393,17 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
 
   defp reseed_commit(config, adapter, resources, authority, _options, opts) do
     handoff = authority.record["last_handoff"]
+
     cond do
-      unbound_available?(authority) and resources == [] -> result("reseed-commit", authority, [])
-      authority.record["state"] != "AVAILABLE" or not is_map(handoff) -> {:error, :handoff_mismatch}
+      unbound_available?(authority) and resources == [] ->
+        result("reseed-commit", authority, [])
+
+      authority.record["state"] != "AVAILABLE" or not is_map(handoff) ->
+        {:error, :handoff_mismatch}
+
       true ->
         record = Enum.find(resources, &(Credentials.assignment(&1)["owner"] == handoff["owner"]))
+
         with true <- not is_nil(record) and authority.record["epoch"] == Credentials.assignment(record)["epoch"] + 1,
              :ok <- accounted(resources, authority.record),
              {:ok, stopped} <- observe_stopped(config, adapter, resources, opts),
@@ -379,24 +452,40 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
     owner = assigned["owner"]
     proof = %{"uid" => uid, "operation" => operation, "attempt_id" => owner["attempt_id"]}
     head = assigned["secret_version"]
-    authority = Record.initial(assigned["credential_id"], assigned["epoch"], head)
-      |> Map.merge(%{"transition_id" => "stop-validation", "last_handoff" => %{"claim_id" => assigned["claim_id"], "owner" => owner, "secret_version" => head, "stop_proof" => proof, "resource_acknowledged" => false}})
+
+    authority =
+      Record.initial(assigned["credential_id"], assigned["epoch"], head)
+      |> Map.merge(%{
+        "transition_id" => "stop-validation",
+        "last_handoff" => %{"claim_id" => assigned["claim_id"], "owner" => owner, "secret_version" => head, "stop_proof" => proof, "resource_acknowledged" => false}
+      })
+
     if Record.validate(authority) == :ok and Enum.all?(record.pending, &(&1.outcome in [:succeeded, :failed])), do: proof, else: nil
   end
+
   defp stop_proof(_), do: nil
 
   defp result(action, authority, resources) do
-    rows = Enum.map(resources, fn record ->
-      %{name: record.provider_ref.name, uid: record.provider_ref.uid, assignment: Credentials.assignment(record), phase: Atom.to_string(record.phase),
-        pending: Enum.map(record.pending, &%{name: &1.id, verb: Atom.to_string(&1.verb), outcome: Atom.to_string(&1.outcome)}),
-        stop_proof: stop_proof(record), disposition: Credentials.disposition(record)}
-    end)
+    rows =
+      Enum.map(resources, fn record ->
+        %{
+          name: record.provider_ref.name,
+          uid: record.provider_ref.uid,
+          assignment: Credentials.assignment(record),
+          phase: Atom.to_string(record.phase),
+          pending: Enum.map(record.pending, &%{name: &1.id, verb: Atom.to_string(&1.verb), outcome: Atom.to_string(&1.outcome)}),
+          stop_proof: stop_proof(record),
+          disposition: Credentials.disposition(record)
+        }
+      end)
+
     value = %{action: action, authority: authority, resources: rows, admission: "maintenance"}
     if byte_size(Jason.encode!(%{ok: true, result: value})) < @max_output, do: {:ok, value}, else: {:error, :output_limit}
   end
 
   defp read_receipt(path, uid) do
     expanded = Path.expand(path)
+
     with {:ok, ^expanded} <- PathSafety.canonicalize(expanded),
          {:ok, parent} <- File.lstat(Path.dirname(expanded)),
          true <- parent.type == :directory and parent.uid == uid and band(parent.mode, 0o777) == 0o700,

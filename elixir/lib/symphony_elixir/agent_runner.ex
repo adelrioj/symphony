@@ -53,6 +53,7 @@ defmodule SymphonyElixir.AgentRunner do
     enabled = credentials.enabled?(Map.get(environment, :config, %{}))
     if credentials.ready?(record) and (not enabled or credentials.tracked?(record)), do: :ok, else: {:error, :credential_outcome_unknown}
   end
+
   defp credential_admission(_context), do: :ok
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do

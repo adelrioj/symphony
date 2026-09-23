@@ -160,10 +160,22 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
   test "credential release requires an acknowledged exact disposition not a cleanup hook marker" do
     assignment = credential_assignment()
     proof = %{"uid" => "ws-uid", "operation" => "projects/p/locations/r/operations/stop", "attempt_id" => "original-attempt"}
-    disposition = Map.take(assignment, ["schema", "credential_id", "epoch", "claim_id", "owner"])
+
+    disposition =
+      Map.take(assignment, ["schema", "credential_id", "epoch", "claim_id", "owner"])
       |> Map.merge(%{"secret_version" => "projects/123456/secrets/features-codex/versions/2", "stop_proof" => proof, "resource_acknowledged" => true})
+
     credential = %{"assignment" => assignment, "stage" => "committed", "disposition" => disposition}
-    record = %{record() | kind: "google_workstations", provider_ref: %{name: assignment["owner"]["workstation_name"], uid: "ws-uid"}, metadata: %{"codex_credentials" => credential, "symphony_cleanup_hook_completed" => true}, proof: {:quiescent, %{uid: "ws-uid", operation: proof["operation"]}}, phase: :stopped}
+
+    record = %{
+      record()
+      | kind: "google_workstations",
+        provider_ref: %{name: assignment["owner"]["workstation_name"], uid: "ws-uid"},
+        metadata: %{"codex_credentials" => credential, "symphony_cleanup_hook_completed" => true},
+        proof: {:quiescent, %{uid: "ws-uid", operation: proof["operation"]}},
+        phase: :stopped
+    }
+
     {stopping, _} = Lifecycle.step(%{Lifecycle.new(record, "recovery-attempt", :agent) | phase: :running}, {:cancel, :done}, 0)
 
     for changed <- [
@@ -184,9 +196,18 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
 
   defp credential_assignment do
     %{
-      "schema" => 1, "credential_id" => "features-personal-codex", "epoch" => 1, "claim_id" => "claim-original",
+      "schema" => 1,
+      "credential_id" => "features-personal-codex",
+      "epoch" => 1,
+      "claim_id" => "claim-original",
       "secret_version" => "projects/123456/secrets/features-codex/versions/1",
-      "owner" => %{"deployment_id" => "deployment", "lane" => "features", "workstation_name" => "projects/p/locations/r/workstationClusters/c/workstationConfigs/features/workstations/se-ticket", "workstation_uid" => "ws-uid", "attempt_id" => "original-attempt"}
+      "owner" => %{
+        "deployment_id" => "deployment",
+        "lane" => "features",
+        "workstation_name" => "projects/p/locations/r/workstationClusters/c/workstationConfigs/features/workstations/se-ticket",
+        "workstation_uid" => "ws-uid",
+        "attempt_id" => "original-attempt"
+      }
     }
   end
 

@@ -2323,7 +2323,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-
   defp cleanup_retry_after_metadata(%{terminal_observed_at: nil}, _retry_at), do: nil
   defp cleanup_retry_after_metadata(_intent, retry_at), do: retry_at
 
@@ -2390,16 +2389,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp managed_stop(state, id, completion) do
     entry = Map.fetch!(state.environment_entries, id)
 
-    state =
-      case Map.pop(state.running, id) do
-        {nil, _} ->
-          state
-
-        {running, remaining} ->
-          stop_running_task(running.pid, running.ref, state.task_supervisor)
-          Runs.finished(running.attempt_id, "stopped")
-          record_session_completion_totals(%{state | running: remaining}, running)
-      end
+    state = stop_environment_agent(state, id)
 
     entry = %{entry | completion: completion}
     state = put_environment(state, entry)
@@ -2421,6 +2411,18 @@ defmodule SymphonyElixir.Orchestrator do
 
       true ->
         environment_step(state, id, {:reconcile, :stop})
+    end
+  end
+
+  defp stop_environment_agent(state, id) do
+    case Map.pop(state.running, id) do
+      {nil, _} ->
+        state
+
+      {running, remaining} ->
+        stop_running_task(running.pid, running.ref, state.task_supervisor)
+        Runs.finished(running.attempt_id, "stopped")
+        record_session_completion_totals(%{state | running: remaining}, running)
     end
   end
 
@@ -2568,8 +2570,10 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       not unallocated_credential_wait?(entry) ->
         environment_step(state, entry.record.issue_id, {:reconcile, :stop})
+
       not is_nil(entry.completion) or not eligible_environment_issue?(issue) ->
         discard_credential_wait(state, entry.record.issue_id)
+
       true ->
         state |> put_environment(%{entry | last_error: nil}) |> environment_step(entry.record.issue_id, :prepare)
     end

@@ -29,21 +29,25 @@ defmodule SymphonyElixir.CodexCredentials.ControlStore do
          {:ok, body} <- Jason.encode(next_record) do
       url = upload_url(refs, generation)
 
-      case GoogleClient.request(config, :post, url, [{"content-type", "application/json"}], body, opts) do
-        {:ok, status, _headers, response} when status in 200..299 ->
-          case generation(response) do
-            {:ok, next_generation} when next_generation != generation -> {:ok, %{generation: next_generation, record: next_record}}
-            _ -> reconcile(config, snapshot, next_record, opts)
-          end
-
-        {:ok, 412, _headers, _body} -> {:error, :credential_busy}
-        {:ok, status, _headers, _body} when status in 400..499 and status != 408 -> unknown()
-        _ -> reconcile(config, snapshot, next_record, opts)
-      end
+      result = GoogleClient.request(config, :post, url, [{"content-type", "application/json"}], body, opts)
+      resolve_replacement(result, config, snapshot, next_record, opts)
     else
       _ -> unknown()
     end
   end
+
+  defp resolve_replacement({:ok, status, _headers, response}, config, snapshot, next_record, opts) when status in 200..299 do
+    case generation(response) do
+      {:ok, next_generation} when next_generation != snapshot.generation -> {:ok, %{generation: next_generation, record: next_record}}
+      _ -> reconcile(config, snapshot, next_record, opts)
+    end
+  end
+
+  defp resolve_replacement({:ok, 412, _headers, _body}, _config, _snapshot, _next_record, _opts), do: {:error, :credential_busy}
+
+  defp resolve_replacement({:ok, status, _headers, _body}, _config, _snapshot, _next_record, _opts) when status in 400..499 and status != 408, do: unknown()
+
+  defp resolve_replacement(_result, config, snapshot, next_record, opts), do: reconcile(config, snapshot, next_record, opts)
 
   defp read_current(config, refs, opts, retry_raced_read?) do
     url = object_url(refs)
@@ -54,16 +58,23 @@ defmodule SymphonyElixir.CodexCredentials.ControlStore do
 
       case GoogleClient.request(config, :get, pinned, [], nil, opts) do
         {:ok, 200, _headers, body} ->
-          with {:ok, record} <- json(body),
-               :ok <- validate_record(record, refs) do
-            {:ok, %{generation: generation, record: record}}
-          else
-            _ -> unknown()
-          end
+          decode_snapshot(body, refs, generation)
 
-        {:ok, 404, _headers, _body} when retry_raced_read? -> read_current(config, refs, opts, false)
-        _ -> unknown()
+        {:ok, 404, _headers, _body} when retry_raced_read? ->
+          read_current(config, refs, opts, false)
+
+        _ ->
+          unknown()
       end
+    else
+      _ -> unknown()
+    end
+  end
+
+  defp decode_snapshot(body, refs, generation) do
+    with {:ok, record} <- json(body),
+         :ok <- validate_record(record, refs) do
+      {:ok, %{generation: generation, record: record}}
     else
       _ -> unknown()
     end

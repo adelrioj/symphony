@@ -3,9 +3,9 @@ defmodule SymphonyElixir.CLI do
   Entrypoint for the installation daemon, lane commands, and standalone Linear MCP.
   """
 
+  alias SymphonyElixir.CodexCredentials.Recovery
   alias SymphonyElixir.{LogFile, Maintenance}
   alias SymphonyElixir.MCP.LinearServer
-  alias SymphonyElixir.CodexCredentials.Recovery
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @serve_switches [
@@ -95,6 +95,7 @@ defmodule SymphonyElixir.CLI do
 
   defp evaluate_credentials(args, deps) do
     switches = args |> Enum.filter(&String.starts_with?(&1, "--")) |> Enum.map(&(&1 |> String.split("=", parts: 2) |> hd()))
+
     with true <- length(switches) == length(Enum.uniq(switches)),
          {options, [], []} <- OptionParser.parse(args, strict: @credential_switches),
          options = Keyword.put_new(options, :action, "inspect"),

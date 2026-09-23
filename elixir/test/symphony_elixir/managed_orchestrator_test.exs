@@ -919,9 +919,12 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     {owner, _tasks} = scheduler()
     discover([])
     {_config, entry, prepare} = operation(:prepare)
-    assignment = unresolved_codex_record("first").metadata["codex_credentials"]["assignment"]
+
+    assignment =
+      unresolved_codex_record("first").metadata["codex_credentials"]["assignment"]
       |> put_in(["owner", "workstation_uid"], nil)
       |> put_in(["owner", "attempt_id"], entry.attempt_id)
+
     retained = %{entry.record | metadata: %{"codex_credentials" => %{"stage" => "claimed", "assignment" => assignment}}}
     send(prepare, {:complete_operation, {:error, {:retryable, :credential_busy}, retained}})
     {_, stopping, stop} = operation(:stop)
@@ -935,11 +938,23 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   defp unresolved_codex_record(id) do
     record = record(id)
     name = "projects/p/locations/l/workstationClusters/c/workstationConfigs/cfg/workstations/" <> record.key
-    assignment = %{"schema" => 1, "credential_id" => "features-personal-codex", "epoch" => 1, "claim_id" => "original-claim",
+
+    assignment = %{
+      "schema" => 1,
+      "credential_id" => "features-personal-codex",
+      "epoch" => 1,
+      "claim_id" => "original-claim",
       "secret_version" => "projects/123456/secrets/features-codex/versions/1",
-      "owner" => %{"deployment_id" => record.deployment_id, "lane" => "features", "workstation_name" => name, "workstation_uid" => "codex-uid", "attempt_id" => "credential-original-attempt"}}
-    %{record | phase: :stopped, proof: {:quiescent, %{uid: "codex-uid", operation: "projects/p/locations/l/operations/stop"}}, provider_ref: %{name: name, uid: "codex-uid"},
-      metadata: %{"codex_credentials" => %{"assignment" => assignment, "stage" => "recovery_required", "reason" => "checkpoint_failed"}}}
+      "owner" => %{"deployment_id" => record.deployment_id, "lane" => "features", "workstation_name" => name, "workstation_uid" => "codex-uid", "attempt_id" => "credential-original-attempt"}
+    }
+
+    %{
+      record
+      | phase: :stopped,
+        proof: {:quiescent, %{uid: "codex-uid", operation: "projects/p/locations/l/operations/stop"}},
+        provider_ref: %{name: name, uid: "codex-uid"},
+        metadata: %{"codex_credentials" => %{"assignment" => assignment, "stage" => "recovery_required", "reason" => "checkpoint_failed"}}
+    }
   end
 
   defp restart_store do

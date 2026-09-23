@@ -208,6 +208,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
   test "lifecycle requests share bounded credential caching without losing impersonation" do
     parent = self()
+
     token_fun = fn identity, _ ->
       send(parent, {:token_identity, identity})
       {:ok, "shared-lifecycle-token"}
@@ -231,8 +232,12 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "missing lifecycle impersonation cannot fall back to controller credentials" do
     invalid = update_in(config(), [:provider], &Map.delete(&1, "impersonate_service_account"))
     parent = self()
+
     options = [
-      token_fun: fn _, _ -> send(parent, :unscoped_token); {:ok, "unscoped-token"} end,
+      token_fun: fn _, _ ->
+        send(parent, :unscoped_token)
+        {:ok, "unscoped-token"}
+      end,
       request_fun: fn _ -> response(200, %{"done" => true}) end
     ]
 
@@ -377,6 +382,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "SSH readiness polling consumes the existing deadline and removes staged trust" do
     {running, options, directory} =
       ssh_readiness_fixture("printf 'pinned-test-key\\n' > \"$hosts\"\nprintf 'kex_exchange_identification: read: Connection reset by peer\\n' >&2\nexit 255")
+
     prime_tunnel_executables(options)
 
     started = System.monotonic_time(:millisecond)
@@ -493,10 +499,12 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     options = tunnel_options(request, gcloud, ssh, supervisor)
     task = Task.Supervisor.async_nolink(supervisor, fn -> Workstations.connect(config(), running, options) end)
     ref = task.ref
+
     eventually(fn ->
       refute_received {^ref, _result}
       File.exists?(marker)
     end)
+
     hosts = File.read!(marker)
     assert File.exists?(hosts)
     Process.exit(task.pid, :kill)
@@ -1514,11 +1522,13 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     assert {:ok, created} = Workstations.ensure(enabled, claimed, options)
     assert {:ok, bound} = Credentials.bind(enabled, created, :agent, options)
     transport = options[:request_fun]
+
     missing_env = fn request ->
       result = transport.(request)
       if request[:method] == :patch, do: Agent.update(server, &Map.update!(&1, :workstation, fn ws -> Map.delete(ws, "env") end))
       result
     end
+
     assert {:error, {:unknown, _}, _} = Workstations.put_intent(enabled, bound, %{desired: :running}, Keyword.put(options, :request_fun, missing_env))
     assert Agent.get(server, & &1.workstation["state"]) == "STATE_STOPPED"
     assert {:ok, recovery} = Workstations.put_intent(enabled, Credentials.put(bound, %{"mode" => "recover"}), %{desired: :running}, options)
@@ -1550,25 +1560,35 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     Agent.update(server, &put_in(&1, [:template, "container", "env"], env))
     seed = SymphonyElixir.CodexCredentials.Record.initial("features-personal-codex", 1, codex_references()["secret"] <> "/versions/1")
     cloud = start_supervised!({Agent, fn -> %{record: seed, generation: 1} end}, id: make_ref())
+
     request = fn method, url, _, body ->
       query = URI.decode_query(URI.parse(url).query || "")
-      Agent.get_and_update(cloud, fn state ->
-        cond do
-          String.contains?(url, "secretmanager.googleapis.com") -> {{:ok, 200, [], %{"name" => codex_references()["secret"] <> "/versions/2", "state" => "ENABLED"}}, state}
-          method == :get and query["alt"] == "media" ->
-            assert query["generation"] == Integer.to_string(state.generation)
-            {{:ok, 200, [], Jason.encode!(state.record)}, state}
-          method == :get -> {{:ok, 200, [], %{"generation" => Integer.to_string(state.generation)}}, state}
-          method == :post ->
-            assert query["ifGenerationMatch"] == Integer.to_string(state.generation)
-            next = %{state | record: Jason.decode!(body), generation: state.generation + 1}
-            {{:ok, 200, [], %{"generation" => Integer.to_string(next.generation)}}, next}
-        end
-      end)
+
+      Agent.get_and_update(cloud, &codex_cloud_response(method, url, query, body, &1))
     end
+
     options = Keyword.put(opts(transport), :request, request)
     assert :ok = Workstations.preflight(enabled, options)
     {server, cloud, enabled, options}
+  end
+
+  defp codex_cloud_response(method, url, query, body, state) do
+    cond do
+      String.contains?(url, "secretmanager.googleapis.com") ->
+        {{:ok, 200, [], %{"name" => codex_references()["secret"] <> "/versions/2", "state" => "ENABLED"}}, state}
+
+      method == :get and query["alt"] == "media" ->
+        assert query["generation"] == Integer.to_string(state.generation)
+        {{:ok, 200, [], Jason.encode!(state.record)}, state}
+
+      method == :get ->
+        {{:ok, 200, [], %{"generation" => Integer.to_string(state.generation)}}, state}
+
+      method == :post ->
+        assert query["ifGenerationMatch"] == Integer.to_string(state.generation)
+        next = %{state | record: Jason.decode!(body), generation: state.generation + 1}
+        {{:ok, 200, [], %{"generation" => Integer.to_string(next.generation)}}, next}
+    end
   end
 
   defp codex_references do
@@ -1681,6 +1701,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "operator credential inventory cannot hide unlabelled or foreign Features instances" do
     for labels <- [%{}, %{"symphony-deployment" => "foreign"}] do
       unknown = Map.put(workstation(), "labels", labels)
+
       request = fn req ->
         cond do
           String.ends_with?(req[:url], "/workstationConfigs") -> response(200, %{"workstationConfigs" => [%{"name" => String.split(name(), "/workstations/") |> hd()}]})
@@ -1688,15 +1709,18 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
           true -> response(200, %{})
         end
       end
+
       assert {:ok, []} = Workstations.discover(config(), opts(request))
+
       assert {:error, {:unknown, :credential_inventory_unaccounted}} =
-        Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+               Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
     end
   end
 
   test "operator inventory rejects credential-bearing instances in retained configs" do
     retained = String.replace(name(), "/cfg/", "/retained/")
     unknown = workstation() |> Map.put("name", retained) |> Map.put("env", %{"SYMPHONY_CODEX_ASSIGNMENT" => "{}"})
+
     request = fn req ->
       cond do
         String.ends_with?(req[:url], "/workstationConfigs") -> response(200, %{"workstationConfigs" => [%{"name" => String.split(retained, "/workstations/") |> hd()}]})
@@ -1704,8 +1728,9 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
         true -> response(200, %{})
       end
     end
+
     assert {:error, {:unknown, :credential_inventory_unaccounted}} =
-      Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+             Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
   end
 
   test "operator inventory rejects malformed resource identities instead of filtering them away" do
@@ -1716,8 +1741,9 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
         true -> response(200, %{})
       end
     end
+
     assert {:error, {:unknown, :credential_inventory_unaccounted}} =
-      Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+             Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
   end
 
   test "operator inventory refuses pending create before its workstation becomes visible" do
@@ -1728,17 +1754,20 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
         true -> response(200, %{})
       end
     end
+
     assert {:error, {:unknown, :credential_inventory_unaccounted}} =
-      Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+             Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
   end
 
   test "operator inventory cannot certify empty after omitting the existing configured template" do
     {_server, request} = provider()
+
     omit_template = fn req ->
       if String.ends_with?(req[:url], "/workstationConfigs"), do: response(200, %{}), else: request.(req)
     end
+
     assert {:error, {:unknown, :credential_inventory_unaccounted}} =
-      Workstations.preflight(config(), Keyword.put(opts(omit_template), :credential_inventory, true))
+             Workstations.preflight(config(), Keyword.put(opts(omit_template), :credential_inventory, true))
   end
 
   defp config do
