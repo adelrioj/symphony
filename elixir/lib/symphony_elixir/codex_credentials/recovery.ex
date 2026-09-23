@@ -28,12 +28,13 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
     with :ok <- validate_options(options),
          root = Path.expand(options[:data_root]),
          :ok <- Keyword.get(deps, :verify_maintenance, &Maintenance.verify/2).(root, :operator),
+         {:ok, uid, _gid} when is_integer(uid) and uid >= 0 <- Keyword.get(deps, :filesystem_identity, &Maintenance.filesystem_identity/0).(),
          {:ok, config} <- installation(root, options[:workflow]),
          {:ok, _} <- Application.ensure_all_started(:req),
          {:ok, supervisor} <- Task.Supervisor.start_link() do
       try do
         opts = Keyword.get(deps, :operation_options, [])
-          |> Keyword.merge(task_supervisor: supervisor, authority: self(), credential_reconcile: false, credential_inventory: true)
+          |> Keyword.merge(task_supervisor: supervisor, authority: self(), filesystem_uid: uid, credential_reconcile: false, credential_inventory: true)
         adapter = Keyword.get(deps, :adapter, Workstations)
         execute(config, adapter, Keyword.put_new(options, :action, "inspect"), opts)
       after
@@ -253,7 +254,7 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
 
   defp checkpoint(config, adapter, resources, authority, options, opts) do
     record = Enum.find(resources, &(&1.provider_ref.name == options[:resource]))
-    with {:ok, receipt} <- read_receipt(options[:receipt_file], options[:data_root]),
+    with {:ok, receipt} <- read_receipt(options[:receipt_file], Keyword.fetch!(opts, :filesystem_uid)),
          :ok <- receipt_matches(receipt, record, authority.record),
          :ok <- accounted(resources, authority.record),
          {:ok, _} <- GoogleClient.version_metadata(config, receipt["secret_version"], opts),
@@ -394,10 +395,9 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
     if byte_size(Jason.encode!(%{ok: true, result: value})) < @max_output, do: {:ok, value}, else: {:error, :output_limit}
   end
 
-  defp read_receipt(path, root) do
+  defp read_receipt(path, uid) do
     expanded = Path.expand(path)
     with {:ok, ^expanded} <- PathSafety.canonicalize(expanded),
-         {:ok, %{uid: uid}} <- File.stat(root),
          {:ok, parent} <- File.lstat(Path.dirname(expanded)),
          true <- parent.type == :directory and parent.uid == uid and band(parent.mode, 0o777) == 0o700,
          {:ok, before} <- File.lstat(expanded),

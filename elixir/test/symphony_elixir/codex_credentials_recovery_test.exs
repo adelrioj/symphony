@@ -20,12 +20,23 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
     end
   end
 
-  setup do
-    root = Path.join(System.tmp_dir!(), "codex-recovery-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(root)
-    File.chmod!(root, 0o700)
+  setup context do
+    root_owned_pvc? = Map.get(context, :root_owned_pvc, false)
+    root = if root_owned_pvc?, do: System.fetch_env!("SYMPHONY_TEST_ROOT_OWNED_PVC"), else: Path.join(System.tmp_dir!(), "codex-recovery-#{System.unique_integer([:positive])}")
+    if root_owned_pvc? do
+      refute File.exists?(Path.join(root, "symphony.sqlite3"))
+    else
+      File.mkdir_p!(root)
+      File.chmod!(root, 0o700)
+    end
     {:ok, root} = SymphonyElixir.PathSafety.canonicalize(root)
-    on_exit(fn -> File.rm_rf!(root) end)
+    on_exit(fn ->
+      if root_owned_pvc? do
+        Enum.each(~w(symphony.sqlite3 symphony.sqlite3-wal symphony.sqlite3-shm WORKFLOW.md), &File.rm(Path.join(root, &1)))
+      else
+        File.rm_rf!(root)
+      end
+    end)
     refs = %{"credential_id" => "features-codex", "secret" => "projects/123456/secrets/features-codex", "control_bucket" => "fixture-control", "control_object" => "authority.json"}
     environment = %{"kind" => "google_workstations", "deployment_id" => "deployment", "startup_timeout_ms" => 1000, "shutdown_timeout_ms" => 1000, "codex_credentials" => refs,
       "provider" => %{"project" => "p", "location" => "l", "cluster" => "c", "config" => "features", "credential_configuration" => "maintenance", "impersonate_service_account" => "lifecycle@example.iam.gserviceaccount.com", "ssh_user" => "worker"}}
@@ -104,8 +115,42 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
       end
       {:ok, %{status: 0, output: Jason.encode!(%{"ok" => true, "result" => result})}}
     end
-    deps = [verify_maintenance: fn ^root, :operator -> :ok end, adapter: Provider, operation_options: [provider: provider, request: request, command_fun: command]]
+    owner = File.stat!(root)
+    deps = [verify_maintenance: fn ^root, :operator -> :ok end, filesystem_identity: fn -> {:ok, owner.uid, owner.gid} end,
+      adapter: Provider, operation_options: [provider: provider, request: request, command_fun: command]]
     %{root: root, database: database, workflow: workflow, options: options, deps: deps, cloud: cloud, remote: remote, resource: resource, receipt: receipt, owned: owned, name: name}
+  end
+
+  @tag :root_owned_pvc
+  @tag skip: is_nil(System.get_env("SYMPHONY_TEST_ROOT_OWNED_PVC"))
+  test "root-owned PVC accepts a process-owned private checkpoint receipt under the real maintenance lock", c do
+    root_info = File.stat!(c.root)
+    assert root_info.uid == 0
+    assert Bitwise.band(root_info.mode, 0o7777) == 0o2770
+    private = Path.join(c.root, "private-receipt")
+    File.mkdir!(private)
+    File.chmod!(private, 0o700)
+    on_exit(fn -> File.rm_rf!(private) end)
+    receipt = Path.join(private, "receipt.json")
+    File.write!(receipt, Jason.encode!(c.receipt))
+    File.chmod!(receipt, 0o600)
+    receipt_info = File.stat!(receipt)
+    assert receipt_info.uid != root_info.uid
+    assert File.stat!(private).uid == receipt_info.uid
+    deps = Keyword.drop(c.deps, [:verify_maintenance, :filesystem_identity])
+    options = Keyword.put(mutation(c, "checkpoint"), :receipt_file, receipt)
+    assert {:ok, %{authority: %{record: record}}} = Recovery.reconcile(options, deps)
+    assert record["state"] == "AVAILABLE"
+    assert record["last_handoff"]["resource_acknowledged"]
+    assert record["last_handoff"]["owner"]["attempt_id"] == "original-attempt"
+  end
+
+  test "receipt ownership follows filesystem identity rather than installation directory ownership", c do
+    owner = File.stat!(c.root)
+    deps = Keyword.put(c.deps, :filesystem_identity, fn -> {:ok, owner.uid + 1, owner.gid} end)
+    assert {:error, :receipt_invalid} = Recovery.reconcile(receipt_options(c, c.receipt), deps)
+    assert Agent.get(c.cloud, & &1.writes) == []
+    assert Agent.get(c.remote, & &1.writes) == []
   end
 
   test "inspect uses existing disabled database without scheduler or provider mutations", c do

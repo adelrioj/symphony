@@ -49,7 +49,9 @@ defmodule SymphonyElixir.Maintenance do
     if System.get_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED") == "1", do: verify(data_root, mode), else: :ok
   end
 
-  defp filesystem_identity do
+  @doc false
+  @spec filesystem_identity() :: {:ok, non_neg_integer(), non_neg_integer()} | :error
+  def filesystem_identity do
     with {:ok, status} <- File.read("/proc/self/status"),
          true <- byte_size(status) <= 8192,
          [_, uid, uid] <- Regex.run(~r/^Uid:\s+[0-9]+\s+([0-9]+)\s+[0-9]+\s+([0-9]+)$/m, status),
