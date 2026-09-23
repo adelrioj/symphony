@@ -21,9 +21,9 @@ defmodule SymphonyElixir.Maintenance do
          "200" <- System.get_env("SYMPHONY_MAINTENANCE_FD"),
          ^root <- System.get_env("SYMPHONY_CONTROLLER_DATA_ROOT"),
          true <- System.get_env("SYMPHONY_MAINTENANCE_MODE") == Atom.to_string(mode),
-         {:ok, uid} <- filesystem_uid(),
+         {:ok, uid, gid} <- filesystem_identity(),
          {:ok, root_info} <- File.lstat(root),
-         true <- safe_root?(root_info, uid),
+         true <- safe_root?(root_info, uid, gid),
          true <- safe_parents?(Path.dirname(root), uid),
          {:ok, directory_info} <- File.lstat(directory),
          true <- private?(directory_info, :directory, 0o700, uid),
@@ -48,16 +48,22 @@ defmodule SymphonyElixir.Maintenance do
     if System.get_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED") == "1", do: verify(data_root, mode), else: :ok
   end
 
-  defp filesystem_uid do
+  defp filesystem_identity do
     with {:ok, status} <- File.read("/proc/self/status"),
-         [_, uid] <- Regex.run(~r/^Uid:\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+([0-9]+)$/m, status) do
-      {:ok, String.to_integer(uid)}
+         true <- byte_size(status) <= 8192,
+         [_, uid, uid] <- Regex.run(~r/^Uid:\s+[0-9]+\s+([0-9]+)\s+[0-9]+\s+([0-9]+)$/m, status),
+         [_, gid, gid] <- Regex.run(~r/^Gid:\s+[0-9]+\s+([0-9]+)\s+[0-9]+\s+([0-9]+)$/m, status) do
+      {:ok, String.to_integer(uid), String.to_integer(gid)}
     else
       _ -> :error
     end
   end
 
-  defp safe_root?(info, uid), do: info.type == :directory and info.uid == uid and band(info.mode, 0o022) == 0
+  defp safe_root?(info, uid, gid) do
+    private_root = info.uid == uid and band(info.mode, 0o022) == 0
+    pod_root = info.uid == 0 and info.gid == gid and band(info.mode, 0o002) == 0
+    info.type == :directory and (private_root or pod_root)
+  end
 
   defp safe_parents?(path, uid) do
     with {:ok, info} <- File.lstat(path),
