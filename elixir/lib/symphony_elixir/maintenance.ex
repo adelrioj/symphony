@@ -18,6 +18,7 @@ defmodule SymphonyElixir.Maintenance do
     lock = Path.join(directory, "controller.lock")
 
     with {:unix, :linux} <- :os.type(),
+         false <- ".." in Path.split(data_root),
          "200" <- System.get_env("SYMPHONY_MAINTENANCE_FD"),
          ^root <- System.get_env("SYMPHONY_CONTROLLER_DATA_ROOT"),
          true <- System.get_env("SYMPHONY_MAINTENANCE_MODE") == Atom.to_string(mode),
