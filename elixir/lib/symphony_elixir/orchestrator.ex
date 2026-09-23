@@ -2483,16 +2483,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp managed_stop(state, id, completion) do
     entry = Map.fetch!(state.environment_entries, id)
 
-    state =
-      case Map.pop(state.running, id) do
-        {nil, _} ->
-          state
-
-        {running, remaining} ->
-          stop_running_task(running.pid, running.ref, state.task_supervisor)
-          Runs.finished(running.attempt_id, "stopped")
-          record_session_completion_totals(%{state | running: remaining}, running)
-      end
+    state = stop_environment_agent(state, id)
 
     entry = %{entry | completion: completion}
     state = put_environment(state, entry)
@@ -2514,6 +2505,18 @@ defmodule SymphonyElixir.Orchestrator do
 
       true ->
         environment_step(state, id, {:reconcile, :stop})
+    end
+  end
+
+  defp stop_environment_agent(state, id) do
+    case Map.pop(state.running, id) do
+      {nil, _} ->
+        state
+
+      {running, remaining} ->
+        stop_running_task(running.pid, running.ref, state.task_supervisor)
+        Runs.finished(running.attempt_id, "stopped")
+        record_session_completion_totals(%{state | running: remaining}, running)
     end
   end
 

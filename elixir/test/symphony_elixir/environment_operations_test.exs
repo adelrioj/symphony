@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.EnvironmentOperationsTest do
   use ExUnit.Case, async: true
-  alias SymphonyElixir.ExecutionEnvironment.{Command, Config, Lifecycle, Operations, Record}
+  alias SymphonyElixir.ExecutionEnvironment.{Command, Config, Credentials, Lifecycle, Operations, Record}
   alias SymphonyElixir.SSH.Target
 
   defmodule Provider do
@@ -1584,9 +1584,9 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     assert {:ok, _} = SymphonyElixir.CodexCredentials.transition(config, claim, {:release, claim}, options)
     assert {:ok, _} = SymphonyElixir.CodexCredentials.transition(config, claim, {:acknowledge_handoff, claim}, options)
     assert {:ok, reconciled} = Operations.run(Provider, config, %{entry | record: stale}, :inspect, options)
-    assert SymphonyElixir.ExecutionEnvironment.Credentials.resolved?(reconciled)
+    assert Credentials.resolved?(reconciled)
     assert reconciled.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] == "original-attempt"
-    assert :ok = SymphonyElixir.ExecutionEnvironment.Credentials.authorize_destroy(config, reconciled, options)
+    assert :ok = Credentials.authorize_destroy(config, reconciled, options)
   end
 
   test "definite foreign credential ownership rejects before ensure without claiming or inventing recovery evidence" do
@@ -1617,8 +1617,8 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     assert {:ok, recovered} = Operations.run(Provider, config, cleanup, :prepare, options)
     assert recovered.environment.record.metadata["codex_credentials"]["mode"] == "recover"
     assert recovered.environment.record.metadata["codex_credentials"]["stage"] == "committed"
-    assert SymphonyElixir.ExecutionEnvironment.Credentials.resolved?(recovered.environment.record)
-    refute SymphonyElixir.ExecutionEnvironment.Credentials.ready?(recovered.environment.record)
+    assert Credentials.resolved?(recovered.environment.record)
+    refute Credentials.ready?(recovered.environment.record)
     assert :ok = Operations.close_connection(recovered.connection)
   end
 
@@ -1674,7 +1674,7 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     assert {:ok, stopped} = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :credential_safety_stop, options)
     assert {:quiescent, %{uid: "ws-uid"}} = stopped.proof
     assert Agent.get(cloud, & &1) == before
-    refute SymphonyElixir.ExecutionEnvironment.Credentials.resolved?(stopped)
+    refute Credentials.resolved?(stopped)
     refute :checkpoint in Agent.get(remote, & &1.events)
   end
 
@@ -1682,11 +1682,15 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     {config, entry, options, cloud, _remote} = codex_fixture()
     assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
     provider = options[:request_fun]
+
     reject_disposition = fn
       {:intent, _}, %{metadata: %{"codex_credentials" => %{"stage" => "committed"}}} = current, _ ->
         {:error, {:unknown, :write_lost}, current}
-      operation, current, opts -> provider.(operation, current, opts)
+
+      operation, current, opts ->
+        provider.(operation, current, opts)
     end
+
     assert {:error, _, unresolved} = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, Keyword.put(options, :request_fun, reject_disposition))
     before = Agent.get(cloud, & &1)
     assert before.record["last_handoff"]["resource_acknowledged"] == false
@@ -1725,110 +1729,116 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     request = fn method, url, _headers, body ->
       query = URI.decode_query(URI.parse(url).query || "")
 
-      Agent.get_and_update(cloud, fn state ->
-        cond do
-          String.contains?(url, "secretmanager.googleapis.com") ->
-            {{:ok, 200, [], %{"name" => references["secret"] <> "/versions/2", "state" => "ENABLED"}}, state}
-
-          is_nil(state.record) ->
-            {{:ok, 404, [], %{}}, state}
-
-          method == :get and query["alt"] == "media" ->
-            assert query["generation"] == Integer.to_string(state.generation)
-            {{:ok, 200, [], Jason.encode!(state.record)}, state}
-
-          method == :get ->
-            {{:ok, 200, [], %{"generation" => Integer.to_string(state.generation)}}, state}
-
-          method == :post ->
-            assert query["ifGenerationMatch"] == Integer.to_string(state.generation)
-            next = %{state | record: Jason.decode!(body), generation: state.generation + 1}
-            {{:ok, 200, [], %{"generation" => Integer.to_string(next.generation)}}, next}
-        end
-      end)
+      Agent.get_and_update(cloud, &codex_cloud_response(method, url, query, body, references, &1))
     end
 
-    provider = fn operation, current, opts ->
-      case operation do
-        :preflight ->
-          :ok
+    fixture = %{cloud: cloud, remote: remote, resource: resource, supervisor: supervisor, target: target}
+    provider = &codex_provider(&1, &2, &3, fixture)
 
-        :ensure ->
-          assert Agent.get(cloud, & &1.record["state"]) in ["OWNED", "CHECKPOINTED", "RECOVERY_REQUIRED", "AVAILABLE"]
-          next = %{current | provider_ref: %{name: resource, uid: "ws-uid"}, phase: :stopped}
-          Agent.update(remote, &%{&1 | record: next, events: &1.events ++ [:ensure]})
-          {:ok, next}
-
-        {:intent, intent} ->
-          next = struct!(current, intent)
-          credential = next.metadata["codex_credentials"]
-
-          event =
-            cond do
-              credential && credential["stage"] == "committed" -> :disposition
-              next.desired == :running -> :bound_intent
-              true -> nil
-            end
-
-          Agent.update(remote, &%{&1 | record: next, events: &1.events ++ List.wrap(event)})
-          {:ok, next}
-
-        :start ->
-          assert current.metadata["codex_credentials"]["assignment"]["owner"]["workstation_uid"] == "ws-uid"
-          assert current.metadata["codex_credentials"]["mode"] in ["execute", "recover"]
-          next = %{current | phase: :running}
-          Agent.update(remote, &%{&1 | record: next, events: &1.events ++ [:start]})
-          {:ok, next}
-
-        :connect ->
-          {:ok, connection} = Operations.open_connection(supervisor, opts[:authority], target, [])
-          Agent.update(remote, &Map.put(&1, :connection, connection))
-          {:ok, connection}
-
-        :inspect ->
-          {:ok, current}
-
-        :stop ->
-          connection = Agent.get(remote, & &1.connection)
-          if connection, do: assert(:ok == GenServer.call(connection.owner, {:validate_connection, connection.id, target}))
-          next = %{current | phase: :stopped, pending: [], proof: {:quiescent, %{uid: "ws-uid", operation: "projects/p/locations/l/operations/stop"}}}
-          Agent.update(remote, &%{&1 | record: next, events: &1.events ++ [:stop]})
-          {:ok, next}
-
-        :destroy ->
-          flunk("unresolved credential disk deleted")
-      end
-    end
-
-    command = fn _, arguments, opts ->
-      text = List.last(arguments)
-      state = Agent.get(remote, & &1)
-      credential = state.record.metadata["codex_credentials"]
-      assignment = credential["assignment"]
-      action = Enum.find(["prepare", "status", "seal", "checkpoint"], &String.contains?(text, "codex_guard.py " <> &1))
-      if action, do: Agent.update(remote, &%{&1 | events: &1.events ++ [String.to_existing_atom(action)]})
-      assert opts[:timeout_ms] > 0
-
-      cond do
-        action == nil ->
-          {:ok, %{status: 0, output: ""}}
-
-        action == "checkpoint" and state.mode == :checkpoint_failure ->
-          {:ok, %{status: 1, output: Jason.encode!(%{"ok" => false, "reason" => "checkpoint_failed"})}}
-
-        action == "checkpoint" ->
-          receipt = Map.merge(assignment, %{"secret_version" => references["secret"] <> "/versions/2", "sha256" => String.duplicate("a", 64), "admission" => "sealed"})
-          {:ok, %{status: 0, output: Jason.encode!(%{"ok" => true, "result" => receipt})}}
-
-        true ->
-          sealed = action == "seal" or credential["mode"] == "recover"
-          result = %{"assignment" => assignment, "state" => if(sealed, do: "SEALED", else: "READY"), "admission" => if(sealed, do: "sealed", else: "open"), "reason" => nil}
-          result = if state.mode == :wrong_ready, do: put_in(result, ["assignment", "claim_id"], "foreign-claim"), else: result
-          {:ok, %{status: 0, output: Jason.encode!(%{"ok" => true, "result" => result})}}
-      end
-    end
+    command = fn _, arguments, opts -> codex_command(remote, references, arguments, opts) end
 
     {config, entry, [authority: self(), task_supervisor: supervisor, agent_executable: "codex", request_fun: provider, request: request, command_fun: command], cloud, remote}
+  end
+
+  defp codex_cloud_response(method, url, query, body, references, state) do
+    cond do
+      String.contains?(url, "secretmanager.googleapis.com") ->
+        {{:ok, 200, [], %{"name" => references["secret"] <> "/versions/2", "state" => "ENABLED"}}, state}
+
+      is_nil(state.record) ->
+        {{:ok, 404, [], %{}}, state}
+
+      method == :get and query["alt"] == "media" ->
+        assert query["generation"] == Integer.to_string(state.generation)
+        {{:ok, 200, [], Jason.encode!(state.record)}, state}
+
+      method == :get ->
+        {{:ok, 200, [], %{"generation" => Integer.to_string(state.generation)}}, state}
+
+      method == :post ->
+        assert query["ifGenerationMatch"] == Integer.to_string(state.generation)
+        next = %{state | record: Jason.decode!(body), generation: state.generation + 1}
+        {{:ok, 200, [], %{"generation" => Integer.to_string(next.generation)}}, next}
+    end
+  end
+
+  defp codex_provider(:preflight, _current, _opts, _fixture), do: :ok
+
+  defp codex_provider(:ensure, current, _opts, fixture) do
+    assert Agent.get(fixture.cloud, & &1.record["state"]) in ["OWNED", "CHECKPOINTED", "RECOVERY_REQUIRED", "AVAILABLE"]
+    next = %{current | provider_ref: %{name: fixture.resource, uid: "ws-uid"}, phase: :stopped}
+    Agent.update(fixture.remote, &%{&1 | record: next, events: &1.events ++ [:ensure]})
+    {:ok, next}
+  end
+
+  defp codex_provider({:intent, intent}, current, _opts, fixture) do
+    next = struct!(current, intent)
+    credential = next.metadata["codex_credentials"]
+
+    event =
+      cond do
+        credential && credential["stage"] == "committed" -> :disposition
+        next.desired == :running -> :bound_intent
+        true -> nil
+      end
+
+    Agent.update(fixture.remote, &%{&1 | record: next, events: &1.events ++ List.wrap(event)})
+    {:ok, next}
+  end
+
+  defp codex_provider(:start, current, _opts, fixture) do
+    assert current.metadata["codex_credentials"]["assignment"]["owner"]["workstation_uid"] == "ws-uid"
+    assert current.metadata["codex_credentials"]["mode"] in ["execute", "recover"]
+    next = %{current | phase: :running}
+    Agent.update(fixture.remote, &%{&1 | record: next, events: &1.events ++ [:start]})
+    {:ok, next}
+  end
+
+  defp codex_provider(:connect, _current, opts, fixture) do
+    {:ok, connection} = Operations.open_connection(fixture.supervisor, opts[:authority], fixture.target, [])
+    Agent.update(fixture.remote, &Map.put(&1, :connection, connection))
+    {:ok, connection}
+  end
+
+  defp codex_provider(:inspect, current, _opts, _fixture), do: {:ok, current}
+
+  defp codex_provider(:stop, current, _opts, fixture) do
+    connection = Agent.get(fixture.remote, & &1.connection)
+    if connection, do: assert(:ok == GenServer.call(connection.owner, {:validate_connection, connection.id, fixture.target}))
+    next = %{current | phase: :stopped, pending: [], proof: {:quiescent, %{uid: "ws-uid", operation: "projects/p/locations/l/operations/stop"}}}
+    Agent.update(fixture.remote, &%{&1 | record: next, events: &1.events ++ [:stop]})
+    {:ok, next}
+  end
+
+  defp codex_provider(:destroy, _current, _opts, _fixture), do: flunk("unresolved credential disk deleted")
+
+  defp codex_command(remote, references, arguments, opts) do
+    text = List.last(arguments)
+    state = Agent.get(remote, & &1)
+    credential = state.record.metadata["codex_credentials"]
+    assignment = credential["assignment"]
+    action = Enum.find(["prepare", "status", "seal", "checkpoint"], &String.contains?(text, "codex_guard.py " <> &1))
+    if action, do: Agent.update(remote, &%{&1 | events: &1.events ++ [String.to_existing_atom(action)]})
+    assert opts[:timeout_ms] > 0
+    codex_command_result(action, state, credential, assignment, references)
+  end
+
+  defp codex_command_result(nil, _state, _credential, _assignment, _references), do: {:ok, %{status: 0, output: ""}}
+
+  defp codex_command_result("checkpoint", %{mode: :checkpoint_failure}, _credential, _assignment, _references) do
+    {:ok, %{status: 1, output: Jason.encode!(%{"ok" => false, "reason" => "checkpoint_failed"})}}
+  end
+
+  defp codex_command_result("checkpoint", _state, _credential, assignment, references) do
+    receipt = Map.merge(assignment, %{"secret_version" => references["secret"] <> "/versions/2", "sha256" => String.duplicate("a", 64), "admission" => "sealed"})
+    {:ok, %{status: 0, output: Jason.encode!(%{"ok" => true, "result" => receipt})}}
+  end
+
+  defp codex_command_result(action, state, credential, assignment, _references) do
+    sealed = action == "seal" or credential["mode"] == "recover"
+    result = %{"assignment" => assignment, "state" => if(sealed, do: "SEALED", else: "READY"), "admission" => if(sealed, do: "sealed", else: "open"), "reason" => nil}
+    result = if state.mode == :wrong_ready, do: put_in(result, ["assignment", "claim_id"], "foreign-claim"), else: result
+    {:ok, %{status: 0, output: Jason.encode!(%{"ok" => true, "result" => result})}}
   end
 
   defp temporary_path(label) do

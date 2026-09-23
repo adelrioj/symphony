@@ -36,12 +36,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     with :ok <- invoke(adapter, :preflight, [config], opts),
          {:ok, records} <- invoke(adapter, :discover, [config], opts) do
       if Keyword.get(opts, :credential_reconcile, true) do
-        {:ok, Enum.map(records, fn record ->
-          case reconcile_credentials(adapter, config, record, opts) do
-            {:ok, current} -> current
-            {:error, _, current} -> current
-          end
-        end)}
+        {:ok,
+         Enum.map(records, fn record ->
+           case reconcile_credentials(adapter, config, record, opts) do
+             {:ok, current} -> current
+             {:error, _, current} -> current
+           end
+         end)}
       else
         {:ok, records}
       end
@@ -85,6 +86,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
   def run(adapter, config, %Lifecycle.Entry{} = entry, :credential_safety_stop, opts) do
     opts = deadline_options(config, :stop, opts)
+
     try do
       physical_stop(adapter, config, entry.record, opts)
     after
@@ -555,20 +557,32 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     opts = deadline_options(config, :inspect, opts)
 
     with {:ok, current} <- Credentials.reconcile(config, record, opts) do
-      if Credentials.enabled?(config) and Credentials.data(current)["stage"] == "committed" do
-        previous = Credentials.data(record)["disposition"]
-        selected = Credentials.data(current)["disposition"]
+      reconcile_credential_disposition(adapter, config, record, current, opts)
+    end
+  end
 
-        if previous == selected and selected["resource_acknowledged"] == true do
-          {:ok, current}
-        else
-          with {:ok, durable} <- credential_disposition(adapter, config, current, opts),
-               {:ok, acknowledged} <- Credentials.acknowledge(config, durable, opts) do
-            if Credentials.data(durable) == Credentials.data(acknowledged), do: {:ok, durable}, else: credential_disposition(adapter, config, acknowledged, opts)
-          end
-        end
-      else
+  defp reconcile_credential_disposition(adapter, config, previous_record, current, opts) do
+    if Credentials.enabled?(config) and Credentials.data(current)["stage"] == "committed" do
+      previous = Credentials.data(previous_record)["disposition"]
+      selected = Credentials.data(current)["disposition"]
+
+      if previous == selected and selected["resource_acknowledged"] == true do
         {:ok, current}
+      else
+        acknowledge_credential_disposition(adapter, config, current, opts)
+      end
+    else
+      {:ok, current}
+    end
+  end
+
+  defp acknowledge_credential_disposition(adapter, config, current, opts) do
+    with {:ok, durable} <- credential_disposition(adapter, config, current, opts),
+         {:ok, acknowledged} <- Credentials.acknowledge(config, durable, opts) do
+      if Credentials.data(durable) == Credentials.data(acknowledged) do
+        {:ok, durable}
+      else
+        credential_disposition(adapter, config, acknowledged, opts)
       end
     end
   end
@@ -594,39 +608,31 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
   defp credential_readiness(config, record, context, purpose, opts) do
     if Credentials.enabled?(config) do
-      with {:ok, result} <- credential_command(context, "prepare", opts),
-           true <- valid_status?(result, Credentials.assignment(record)),
-           true <-
-             if(purpose == :agent,
-               do: result["state"] == "READY" and result["admission"] == "open",
-               else: result["state"] in ["SEALED", "CHECKPOINTED", "RECOVERY_REQUIRED"] and result["admission"] == "sealed"
-             ) do
-        if purpose == :agent, do: {:ok, Credentials.put(record, %{"stage" => "ready", "reason" => nil})}, else: {:ok, record}
-      else
-        _ -> Credentials.failure(record, "worker_readiness")
-      end
+      credential_worker_readiness(record, context, purpose, opts)
     else
       {:ok, record}
     end
   end
 
+  defp credential_worker_readiness(record, context, purpose, opts) do
+    with {:ok, result} <- credential_command(context, "prepare", opts),
+         true <- valid_status?(result, Credentials.assignment(record)),
+         true <- credential_ready_for_purpose?(result, purpose) do
+      if purpose == :agent, do: {:ok, Credentials.put(record, %{"stage" => "ready", "reason" => nil})}, else: {:ok, record}
+    else
+      _ -> Credentials.failure(record, "worker_readiness")
+    end
+  end
+
+  defp credential_ready_for_purpose?(result, :agent), do: result["state"] == "READY" and result["admission"] == "open"
+
+  defp credential_ready_for_purpose?(result, _purpose),
+    do: result["state"] in ["SEALED", "CHECKPOINTED", "RECOVERY_REQUIRED"] and result["admission"] == "sealed"
+
   defp credential_stop(adapter, config, entry, opts) do
     credential_opts = Keyword.put(opts, :deadline, Keyword.fetch!(opts, :clock).() + min(45_000, div(remaining(opts), 2)))
 
-    progress =
-      try do
-        with {:ok, current} <- reconcile_credentials(adapter, config, entry.record, credential_opts) do
-          cond do
-            Credentials.data(current)["stage"] in ["committed", "checkpointed"] -> {:ok, current}
-            Credentials.data(current)["stage"] == "recovery_required" -> Credentials.failure(current, "checkpoint_failed")
-            true -> credential_checkpoint(adapter, config, %{entry | record: current}, credential_opts)
-          end
-        end
-      rescue
-        _ -> Credentials.failure(entry.record, "checkpoint_failed")
-      catch
-        _kind, _reason -> Credentials.failure(entry.record, "checkpoint_failed")
-      end
+    progress = checkpoint_before_stop(adapter, config, entry, credential_opts)
 
     current =
       case progress do
@@ -634,25 +640,40 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
         {:error, _, record} -> record
       end
 
-    case physical_stop(adapter, config, current, opts) do
-      {:ok, stopped} ->
-        cond do
-          match?({:error, _, _}, progress) ->
-            Credentials.quarantine(config, stopped, opts)
+    with {:ok, stopped} <- physical_stop(adapter, config, current, opts) do
+      finish_credential_stop(adapter, config, stopped, progress, opts)
+    end
+  end
 
-          Credentials.resolved?(stopped) ->
-            {:ok, stopped}
+  defp checkpoint_before_stop(adapter, config, entry, opts) do
+    with {:ok, current} <- reconcile_credentials(adapter, config, entry.record, opts) do
+      cond do
+        Credentials.data(current)["stage"] in ["committed", "checkpointed"] -> {:ok, current}
+        Credentials.data(current)["stage"] == "recovery_required" -> Credentials.failure(current, "checkpoint_failed")
+        true -> credential_checkpoint(adapter, config, %{entry | record: current}, opts)
+      end
+    end
+  rescue
+    _ -> Credentials.failure(entry.record, "checkpoint_failed")
+  catch
+    _kind, _reason -> Credentials.failure(entry.record, "checkpoint_failed")
+  end
 
-          true ->
-            with {:ok, released} <- Credentials.release(config, stopped, opts),
-                 {:ok, durable} <- credential_disposition(adapter, config, released, opts),
-                 {:ok, acknowledged} <- Credentials.acknowledge(config, durable, opts) do
-              credential_disposition(adapter, config, acknowledged, opts)
-            end
-        end
+  defp finish_credential_stop(_adapter, config, stopped, {:error, _, _}, opts), do: Credentials.quarantine(config, stopped, opts)
 
-      {:error, _, _} = error ->
-        error
+  defp finish_credential_stop(adapter, config, stopped, {:ok, _}, opts) do
+    if Credentials.resolved?(stopped) do
+      {:ok, stopped}
+    else
+      release_credential_disposition(adapter, config, stopped, opts)
+    end
+  end
+
+  defp release_credential_disposition(adapter, config, stopped, opts) do
+    with {:ok, released} <- Credentials.release(config, stopped, opts),
+         {:ok, durable} <- credential_disposition(adapter, config, released, opts),
+         {:ok, acknowledged} <- Credentials.acknowledge(config, durable, opts) do
+      credential_disposition(adapter, config, acknowledged, opts)
     end
   end
 
@@ -671,15 +692,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
     case intended do
       {:ok, current} ->
-        with {:ok, stopped} <- mutate(adapter, :stop, config, current, opts), do: poll(adapter, config, stopped, :stopped, opts)
+        stop_and_poll(adapter, config, current, opts)
 
       {:error, _, current} = error ->
         if credential_stop? do
-          with {:ok, stopped} <- mutate(adapter, :stop, config, current, opts), do: poll(adapter, config, stopped, :stopped, opts)
+          stop_and_poll(adapter, config, current, opts)
         else
           error
         end
     end
+  end
+
+  defp stop_and_poll(adapter, config, current, opts) do
+    with {:ok, stopped} <- mutate(adapter, :stop, config, current, opts), do: poll(adapter, config, stopped, :stopped, opts)
   end
 
   defp credential_checkpoint(adapter, config, entry, opts) do
@@ -711,17 +736,21 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
   defp checkpoint_context(adapter, config, entry, opts) do
     with {:ok, observed} <- mutate(adapter, :inspect, config, entry.record, opts) do
-      if observed.phase == :running do
-        case invoke(adapter, :connect, [config, observed], opts) do
-          {:ok, connection} -> {:ok, ExecutionContext.managed(config, observed, connection), true}
-          {:error, _} = error -> error
-        end
-      else
-        case run(adapter, config, %{entry | record: observed, purpose: :cleanup}, :prepare, opts) do
-          {:ok, context} -> {:ok, context, true}
-          error -> error
-        end
-      end
+      open_checkpoint_context(adapter, config, %{entry | record: observed}, opts)
+    end
+  end
+
+  defp open_checkpoint_context(adapter, config, %{record: %{phase: :running} = observed}, opts) do
+    case invoke(adapter, :connect, [config, observed], opts) do
+      {:ok, connection} -> {:ok, ExecutionContext.managed(config, observed, connection), true}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp open_checkpoint_context(adapter, config, entry, opts) do
+    case run(adapter, config, %{entry | purpose: :cleanup}, :prepare, opts) do
+      {:ok, context} -> {:ok, context, true}
+      error -> error
     end
   end
 

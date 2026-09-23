@@ -310,35 +310,37 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
       uri = URI.parse(url)
       query = URI.decode_query(uri.query || "")
 
-      Agent.get_and_update(server, fn state ->
-        cond do
-          uri.host == "secretmanager.googleapis.com" ->
-            assert method == :get
-            assert uri.path == "/v1/" <> @secret <> "/versions/2"
-            metadata = state.metadata || %{"name" => @secret <> "/versions/2", "state" => "ENABLED"}
-            {{:ok, 200, [], metadata}, %{state | metadata_reads: state.metadata_reads + 1}}
-
-          method == :get ->
-            assert uri.host == "storage.googleapis.com"
-            assert uri.path == "/storage/v1/b/fixture-codex-control/o/features%2Fauthority.json"
-            read_object(state, query)
-
-          method == :post ->
-            assert uri.host == "storage.googleapis.com"
-            assert uri.path == "/upload/storage/v1/b/fixture-codex-control/o"
-            assert query["uploadType"] == "media"
-            assert query["name"] == "features/authority.json"
-            assert query["ifGenerationMatch"] not in [nil, "0"]
-            assert {"content-type", "application/json"} in headers
-            replace_object(state, query["ifGenerationMatch"], body)
-
-          true ->
-            flunk("unsupported authority operation")
-        end
-      end)
+      Agent.get_and_update(server, &handle_request(&1, method, uri, query, headers, body))
     end
 
     {server, request}
+  end
+
+  defp handle_request(state, method, uri, query, headers, body) do
+    cond do
+      uri.host == "secretmanager.googleapis.com" ->
+        assert method == :get
+        assert uri.path == "/v1/" <> @secret <> "/versions/2"
+        metadata = state.metadata || %{"name" => @secret <> "/versions/2", "state" => "ENABLED"}
+        {{:ok, 200, [], metadata}, %{state | metadata_reads: state.metadata_reads + 1}}
+
+      method == :get ->
+        assert uri.host == "storage.googleapis.com"
+        assert uri.path == "/storage/v1/b/fixture-codex-control/o/features%2Fauthority.json"
+        read_object(state, query)
+
+      method == :post ->
+        assert uri.host == "storage.googleapis.com"
+        assert uri.path == "/upload/storage/v1/b/fixture-codex-control/o"
+        assert query["uploadType"] == "media"
+        assert query["name"] == "features/authority.json"
+        assert query["ifGenerationMatch"] not in [nil, "0"]
+        assert {"content-type", "application/json"} in headers
+        replace_object(state, query["ifGenerationMatch"], body)
+
+      true ->
+        flunk("unsupported authority operation")
+    end
   end
 
   defp read_object(%{bytes: nil} = state, _query), do: {{:ok, 404, [], %{}}, state}

@@ -28,17 +28,7 @@ defmodule SymphonyElixir.CodexCredentials.GoogleClient do
 
     with {:ok, refs} <- configuration(config),
          true <- GoogleCredentials.remaining(opts) > 0 and permitted?(refs, method, URI.parse(url)) do
-      case Keyword.get(opts, :request) do
-        request when is_function(request, 4) ->
-          normalize(request.(method, url, headers, body))
-
-        nil ->
-          with {:ok, token} <- GoogleCredentials.token(@identity, opts) do
-            authenticated(method, url, headers, body, opts, token)
-          else
-            _ -> unknown()
-          end
-      end
+      dispatch(Keyword.get(opts, :request), method, url, headers, body, opts)
     else
       _ -> unknown()
     end
@@ -55,6 +45,17 @@ defmodule SymphonyElixir.CodexCredentials.GoogleClient do
          {:ok, %{"name" => ^version, "state" => "ENABLED"}} <- json(body) do
       {:ok, %{"name" => version, "state" => "ENABLED"}}
     else
+      _ -> unknown()
+    end
+  end
+
+  defp dispatch(request, method, url, headers, body, _opts) when is_function(request, 4) do
+    normalize(request.(method, url, headers, body))
+  end
+
+  defp dispatch(nil, method, url, headers, body, opts) do
+    case GoogleCredentials.token(@identity, opts) do
+      {:ok, token} -> authenticated(method, url, headers, body, opts, token)
       _ -> unknown()
     end
   end
@@ -105,27 +106,31 @@ defmodule SymphonyElixir.CodexCredentials.GoogleClient do
 
   defp permitted?(refs, method, %URI{scheme: "https", port: 443, userinfo: nil, fragment: nil} = uri) do
     query = URI.decode_query(uri.query || "")
-    bucket = URI.encode(refs["control_bucket"], &URI.char_unreserved?/1)
-    object = URI.encode(refs["control_object"], &URI.char_unreserved?/1)
-
-    case {method, uri.host} do
-      {:get, "storage.googleapis.com"} ->
-        uri.path == "/storage/v1/b/" <> bucket <> "/o/" <> object and
-          (query == %{} or (map_size(query) == 2 and query["alt"] == "media" and decimal?(query["generation"])))
-
-      {:post, "storage.googleapis.com"} ->
-        uri.path == "/upload/storage/v1/b/" <> bucket <> "/o" and map_size(query) == 3 and
-          query["uploadType"] == "media" and query["name"] == refs["control_object"] and decimal?(query["ifGenerationMatch"])
-
-      {:get, "secretmanager.googleapis.com"} ->
-        query == %{} and is_binary(uri.path) and String.starts_with?(uri.path, "/v1/") and numeric_version?(String.replace_prefix(uri.path, "/v1/", ""), refs["secret"])
-
-      _ ->
-        false
-    end
+    permitted_operation?(refs, method, uri, query)
   end
 
   defp permitted?(_refs, _method, _uri), do: false
+
+  defp permitted_operation?(refs, :get, %URI{host: "storage.googleapis.com", path: path}, query) do
+    bucket = URI.encode(refs["control_bucket"], &URI.char_unreserved?/1)
+    object = URI.encode(refs["control_object"], &URI.char_unreserved?/1)
+
+    path == "/storage/v1/b/" <> bucket <> "/o/" <> object and
+      (query == %{} or (map_size(query) == 2 and query["alt"] == "media" and decimal?(query["generation"])))
+  end
+
+  defp permitted_operation?(refs, :post, %URI{host: "storage.googleapis.com", path: path}, query) do
+    bucket = URI.encode(refs["control_bucket"], &URI.char_unreserved?/1)
+
+    path == "/upload/storage/v1/b/" <> bucket <> "/o" and map_size(query) == 3 and
+      query["uploadType"] == "media" and query["name"] == refs["control_object"] and decimal?(query["ifGenerationMatch"])
+  end
+
+  defp permitted_operation?(refs, :get, %URI{host: "secretmanager.googleapis.com", path: path}, query) do
+    query == %{} and is_binary(path) and String.starts_with?(path, "/v1/") and numeric_version?(String.replace_prefix(path, "/v1/", ""), refs["secret"])
+  end
+
+  defp permitted_operation?(_refs, _method, _uri, _query), do: false
 
   defp numeric_version?(version, secret) when is_binary(version) do
     prefix = secret <> "/versions/"

@@ -58,15 +58,13 @@ defmodule SymphonyElixir.CodexCredentials.Record do
   @doc "Applies one ordinary event without I/O, expiry, or implicit recovery."
   @spec transition(term(), event(), String.t()) :: {:ok, t()} | {:error, error()}
   def transition(record, event, transition_id) do
-    with :ok <- validate(record) do
-      if nonblank?(transition_id) do
-        case apply_event(record, event) do
-          {:ok, updated} -> {:ok, %{updated | "transition_id" => transition_id}}
-          {:error, _} = error -> error
-        end
-      else
-        recovery(:invalid_transition_id)
-      end
+    with :ok <- validate(record),
+         true <- nonblank?(transition_id),
+         {:ok, updated} <- apply_event(record, event) do
+      {:ok, %{updated | "transition_id" => transition_id}}
+    else
+      false -> recovery(:invalid_transition_id)
+      {:error, _} = error -> error
     end
   end
 

@@ -1588,29 +1588,31 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     request = fn method, url, _, body ->
       query = URI.decode_query(URI.parse(url).query || "")
 
-      Agent.get_and_update(cloud, fn state ->
-        cond do
-          String.contains?(url, "secretmanager.googleapis.com") ->
-            {{:ok, 200, [], %{"name" => codex_references()["secret"] <> "/versions/2", "state" => "ENABLED"}}, state}
-
-          method == :get and query["alt"] == "media" ->
-            assert query["generation"] == Integer.to_string(state.generation)
-            {{:ok, 200, [], Jason.encode!(state.record)}, state}
-
-          method == :get ->
-            {{:ok, 200, [], %{"generation" => Integer.to_string(state.generation)}}, state}
-
-          method == :post ->
-            assert query["ifGenerationMatch"] == Integer.to_string(state.generation)
-            next = %{state | record: Jason.decode!(body), generation: state.generation + 1}
-            {{:ok, 200, [], %{"generation" => Integer.to_string(next.generation)}}, next}
-        end
-      end)
+      Agent.get_and_update(cloud, &codex_cloud_response(method, url, query, body, &1))
     end
 
     options = Keyword.put(opts(transport), :request, request)
     assert :ok = Workstations.preflight(enabled, options)
     {server, cloud, enabled, options}
+  end
+
+  defp codex_cloud_response(method, url, query, body, state) do
+    cond do
+      String.contains?(url, "secretmanager.googleapis.com") ->
+        {{:ok, 200, [], %{"name" => codex_references()["secret"] <> "/versions/2", "state" => "ENABLED"}}, state}
+
+      method == :get and query["alt"] == "media" ->
+        assert query["generation"] == Integer.to_string(state.generation)
+        {{:ok, 200, [], Jason.encode!(state.record)}, state}
+
+      method == :get ->
+        {{:ok, 200, [], %{"generation" => Integer.to_string(state.generation)}}, state}
+
+      method == :post ->
+        assert query["ifGenerationMatch"] == Integer.to_string(state.generation)
+        next = %{state | record: Jason.decode!(body), generation: state.generation + 1}
+        {{:ok, 200, [], %{"generation" => Integer.to_string(next.generation)}}, next}
+    end
   end
 
   defp codex_references do
@@ -1723,6 +1725,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "operator credential inventory cannot hide unlabelled or foreign Features instances" do
     for labels <- [%{}, %{"symphony-deployment" => "foreign"}] do
       unknown = Map.put(workstation(), "labels", labels)
+
       request = fn req ->
         cond do
           String.ends_with?(req[:url], "/workstationConfigs") -> response(200, %{"workstationConfigs" => [%{"name" => String.split(name(), "/workstations/") |> hd()}]})
@@ -1730,15 +1733,18 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
           true -> response(200, %{})
         end
       end
+
       assert {:ok, []} = Workstations.discover(config(), opts(request))
+
       assert {:error, {:unknown, :credential_inventory_unaccounted}} =
-        Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+               Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
     end
   end
 
   test "operator inventory rejects credential-bearing instances in retained configs" do
     retained = String.replace(name(), "/cfg/", "/retained/")
     unknown = workstation() |> Map.put("name", retained) |> Map.put("env", %{"SYMPHONY_CODEX_ASSIGNMENT" => "{}"})
+
     request = fn req ->
       cond do
         String.ends_with?(req[:url], "/workstationConfigs") -> response(200, %{"workstationConfigs" => [%{"name" => String.split(retained, "/workstations/") |> hd()}]})
@@ -1746,8 +1752,9 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
         true -> response(200, %{})
       end
     end
+
     assert {:error, {:unknown, :credential_inventory_unaccounted}} =
-      Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+             Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
   end
 
   test "operator inventory rejects malformed resource identities instead of filtering them away" do
@@ -1758,8 +1765,9 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
         true -> response(200, %{})
       end
     end
+
     assert {:error, {:unknown, :credential_inventory_unaccounted}} =
-      Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+             Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
   end
 
   test "operator inventory refuses pending create before its workstation becomes visible" do
@@ -1770,17 +1778,20 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
         true -> response(200, %{})
       end
     end
+
     assert {:error, {:unknown, :credential_inventory_unaccounted}} =
-      Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+             Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
   end
 
   test "operator inventory cannot certify empty after omitting the existing configured template" do
     {_server, request} = provider()
+
     omit_template = fn req ->
       if String.ends_with?(req[:url], "/workstationConfigs"), do: response(200, %{}), else: request.(req)
     end
+
     assert {:error, {:unknown, :credential_inventory_unaccounted}} =
-      Workstations.preflight(config(), Keyword.put(opts(omit_template), :credential_inventory, true))
+             Workstations.preflight(config(), Keyword.put(opts(omit_template), :credential_inventory, true))
   end
 
   defp config do

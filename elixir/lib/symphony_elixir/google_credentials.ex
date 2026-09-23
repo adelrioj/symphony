@@ -62,17 +62,12 @@ defmodule SymphonyElixir.GoogleCredentials do
 
     case Process.get(key) do
       nil ->
-        case Keyword.get(opts, :token_fun, &fetch_token/2).(identity, opts) do
-          {:ok, value} ->
-            if valid_token?(value) do
-              Process.put(key, value)
-              {:ok, value}
-            else
-              {:error, {:denied, :google_credentials}}
-            end
-
-          _ ->
-            {:error, {:denied, :google_credentials}}
+        with {:ok, value} <- Keyword.get(opts, :token_fun, &fetch_token/2).(identity, opts),
+             true <- valid_token?(value) do
+          Process.put(key, value)
+          {:ok, value}
+        else
+          _ -> {:error, {:denied, :google_credentials}}
         end
 
       value ->
