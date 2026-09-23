@@ -1516,6 +1516,85 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     assert deleted.absent?
   end
 
+  for verb <- [:start, :delete] do
+    @tag :final_credential_guard
+    test "a final #{verb} credential refusal is durable and permits a later physical stop" do
+      verb = unquote(verb)
+      {server, cloud, enabled, options, ready} = credential_mutation_fixture(verb)
+      authority = Agent.get(cloud, & &1)
+      refused_options = refuse_final_credential_guard(server, options, verb)
+
+      assert {:error, {:unknown, :credential_outcome_unknown}, refused} =
+               credential_mutation(verb, enabled, ready, refused_options)
+
+      refute_receive {:submitted, ^verb}
+      assert [%{id: nil, outcome: :failed}] = Enum.filter(refused.pending, &(&1.verb == verb))
+      assert Credentials.assignment(refused) == Credentials.assignment(ready)
+      assert Agent.get(cloud, & &1) == authority
+      assert {:ok, [durable]} = Workstations.discover(enabled, options)
+      assert [%{id: nil, outcome: :failed}] = Enum.filter(durable.pending, &(&1.verb == verb))
+      assert Credentials.assignment(durable) == Credentials.assignment(ready)
+      assert {:ok, stopped} = Workstations.stop(enabled, durable, options)
+      assert {:quiescent, %{uid: "ws-uid"}} = stopped.proof
+      assert Credentials.assignment(stopped) == Credentials.assignment(ready)
+    end
+  end
+
+  @tag :final_credential_guard
+  test "a final credential refusal preserves an older unresolved operation found during correction" do
+    {server, cloud, enabled, options, ready} = credential_mutation_fixture(:start)
+    authority = Agent.get(cloud, & &1)
+    older = %{"verb" => "start", "id" => nil, "outcome" => "unknown", "from" => "2026-09-11T10:00:00Z", "until" => "2026-09-11T10:01:00Z"}
+
+    refused_options =
+      refuse_final_credential_guard(server, options, :start, fn ->
+        change_annotation(server, &Map.update!(&1, "pending", fn pending -> pending ++ [older] end))
+      end)
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, refused} = Workstations.start(enabled, ready, refused_options)
+    refute_receive {:submitted, :start}
+    assert Enum.count(refused.pending, &(&1.verb == :start and &1.outcome == :failed)) == 1
+    assert {:ok, [durable]} = Workstations.discover(enabled, options)
+    assert Enum.count(durable.pending, &(&1.verb == :start and &1.outcome == :failed)) == 1
+    assert Enum.any?(durable.pending, &(&1.verb == :start and &1.outcome == :unknown and &1.from == older["from"]))
+    assert {:error, {:unknown, :uncorrelated_mutation}, blocked} = Workstations.stop(enabled, durable, options)
+    assert Credentials.assignment(blocked) == Credentials.assignment(ready)
+    assert Agent.get(cloud, & &1) == authority
+  end
+
+  @tag :final_credential_guard
+  test "an unconfirmed correction of a final credential refusal keeps physical stop blocked" do
+    {server, cloud, enabled, options, ready} = credential_mutation_fixture(:start)
+    authority = Agent.get(cloud, & &1)
+    refused_options = refuse_final_credential_guard(server, options, :start)
+    transport = refused_options[:request_fun]
+
+    uncertain_correction = fn request ->
+      annotation = get_in(request[:json] || %{}, ["annotations", "symphony.dev/record"])
+      pending = if annotation, do: Jason.decode!(annotation)["pending"], else: []
+
+      if request[:method] == :patch and Enum.any?(pending, &(&1["verb"] == "start" and &1["outcome"] == "failed")) do
+        send(self(), :correction_attempted)
+        {:error, :timeout}
+      else
+        transport.(request)
+      end
+    end
+
+    assert {:error, {:unknown, _}, refused} =
+             Workstations.start(enabled, ready, Keyword.put(refused_options, :request_fun, uncertain_correction))
+
+    assert_received :correction_attempted
+    refute_receive {:submitted, :start}
+    assert Enum.any?(refused.pending, &(&1.verb == :start and &1.outcome == :unknown))
+    assert {:ok, [durable]} = Workstations.discover(enabled, options)
+    assert Enum.any?(durable.pending, &(&1.verb == :start and &1.outcome == :unknown))
+    assert {:error, {:unknown, _}, _} = Workstations.stop(enabled, refused, options)
+    assert {:error, {:unknown, :uncorrelated_mutation}, blocked} = Workstations.stop(enabled, durable, options)
+    assert Credentials.assignment(blocked) == Credentials.assignment(ready)
+    assert Agent.get(cloud, & &1) == authority
+  end
+
   test "annotation readback cannot conceal lost assignment env or override a recover fence" do
     {server, _cloud, enabled, options} = codex_provider()
     assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
@@ -1551,6 +1630,58 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     assert {:ok, running} = Workstations.start(enabled, assigned, options)
     assert running.phase == :running
     assert Agent.get(cloud, & &1.record["owner"]["workstation_uid"]) == "ws-uid"
+  end
+
+  defp credential_mutation_fixture(verb) do
+    {server, cloud, enabled, options} = codex_provider()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
+    assert {:ok, created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, bound} = Credentials.bind(enabled, created, :agent, options)
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+
+    ready =
+      if verb == :delete do
+        assert {:ok, stopped} = Workstations.stop(enabled, assigned, options)
+        receipt = Map.merge(Credentials.assignment(bound), %{"secret_version" => codex_references()["secret"] <> "/versions/2", "sha256" => String.duplicate("b", 64), "admission" => "sealed"})
+        assert {:ok, checkpointed} = Credentials.checkpoint(enabled, stopped, receipt, options)
+        assert {:ok, released} = Credentials.release(enabled, checkpointed, options)
+        assert {:ok, committed} = Operations.reconcile_credentials(Workstations, enabled, released, options)
+        committed
+      else
+        assigned
+      end
+
+    {server, cloud, enabled, options, ready}
+  end
+
+  defp credential_mutation(:start, config, record, options), do: Workstations.start(config, record, options)
+  defp credential_mutation(:delete, config, record, options), do: Workstations.destroy(config, record, options)
+
+  defp refuse_final_credential_guard(server, options, verb, on_refusal \\ fn -> :ok end) do
+    cloud_request = options[:request]
+    transport = options[:request_fun]
+    parent = self()
+
+    request = fn method, url, headers, body ->
+      journal = Agent.get(server, &Jason.decode!(&1.workstation["annotations"]["symphony.dev/record"]))
+
+      if Enum.any?(journal["pending"], &(&1["verb"] == Atom.to_string(verb) and &1["outcome"] == "unknown")) do
+        on_refusal.()
+        {:ok, 503, [], %{}}
+      else
+        cloud_request.(method, url, headers, body)
+      end
+    end
+
+    request_fun = fn request ->
+      if (verb == :start and request[:method] == :post and String.ends_with?(request[:url], ":start")) or
+           (verb == :delete and request[:method] == :delete),
+         do: send(parent, {:submitted, verb})
+
+      transport.(request)
+    end
+
+    Keyword.merge(options, request: request, request_fun: request_fun)
   end
 
   defp codex_provider do

@@ -298,22 +298,47 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
     with {:ok, durable} <- persist(config, candidate, opts),
          {:ok, workstation} <- get(config, resource_name(config, durable), opts),
-         {:ok, fresh} <- observe_owned(config, durable, workstation),
-         :ok <- credential_mutation_guard(config, fresh, verb, opts) do
-      {method, suffix, query, body} =
-        if verb == :delete,
-          do: {:delete, "", [etag: fresh.version], nil},
-          else: {:post, ":" <> Atom.to_string(verb), [], %{"etag" => fresh.version}}
+         {:ok, fresh} <- observe_owned(config, durable, workstation) do
+      case credential_mutation_guard(config, fresh, verb, opts) do
+        :ok ->
+          submit_mutation(config, fresh, verb, opts)
 
-      case api(config, method, resource_name(config, fresh) <> suffix, query, body, opts) do
-        {:ok, operation} -> finish_mutation(config, fresh, verb, operation, opts)
-        {:error, failure} -> mutation_failure(config, fresh, verb, failure, opts)
+        {:error, failure} ->
+          reject_unsubmitted_mutation(config, fresh, pending, failure, opts)
       end
     else
       {:error, _, _} = error -> error
       {:error, failure} -> fail(candidate, failure)
     end
   end
+
+  defp submit_mutation(config, record, verb, opts) do
+    {method, suffix, query, body} =
+      if verb == :delete,
+        do: {:delete, "", [etag: record.version], nil},
+        else: {:post, ":" <> Atom.to_string(verb), [], %{"etag" => record.version}}
+
+    case api(config, method, resource_name(config, record) <> suffix, query, body, opts) do
+      {:ok, operation} -> finish_mutation(config, record, verb, operation, opts)
+      {:error, failure} -> mutation_failure(config, record, verb, failure, opts)
+    end
+  end
+
+  defp reject_unsubmitted_mutation(config, record, pending, failure, opts) do
+    rejected = %{pending | outcome: :failed}
+    candidate = replace_marker(record, pending, rejected)
+
+    case persist(config, candidate, opts) do
+      {:ok, durable} ->
+        fail(durable, failure)
+
+      {:error, correction_failure, uncertain} ->
+        fail(replace_marker(uncertain, rejected, pending), correction_failure)
+    end
+  end
+
+  defp replace_marker(record, pending, replacement),
+    do: %{record | pending: Enum.map(record.pending, &if(&1 == pending, do: replacement, else: &1))}
 
   defp finish_mutation(config, record, verb, operation, opts) do
     if valid_operation?(config, operation, resource_name(config, record), verb) do
@@ -883,7 +908,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     end
   end
 
-  defp credential_mutation_guard(config, record, :start, opts), do: credential_start_guard(config, record, opts)
+  defp credential_mutation_guard(config, record, :start, opts) do
+    case credential_start_guard(config, record, opts) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:unknown, reason}}
+    end
+  end
 
   defp credential_mutation_guard(config, record, :delete, opts) do
     case Credentials.authorize_destroy(config, record, opts) do
