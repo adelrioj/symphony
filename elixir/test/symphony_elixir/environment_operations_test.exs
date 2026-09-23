@@ -1666,6 +1666,34 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     end
   end
 
+  test "explicit operator safety stop never checkpoints quarantines or releases authority" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    before = Agent.get(cloud, & &1)
+    options = Keyword.put(options, :command_fun, fn _, _, _ -> flunk("safety stop invoked worker credentials") end)
+    assert {:ok, stopped} = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :credential_safety_stop, options)
+    assert {:quiescent, %{uid: "ws-uid"}} = stopped.proof
+    assert Agent.get(cloud, & &1) == before
+    refute SymphonyElixir.ExecutionEnvironment.Credentials.resolved?(stopped)
+    refute :checkpoint in Agent.get(remote, & &1.events)
+  end
+
+  test "read-only credential inspection never acknowledges a pending handoff" do
+    {config, entry, options, cloud, _remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    provider = options[:request_fun]
+    reject_disposition = fn
+      {:intent, _}, %{metadata: %{"codex_credentials" => %{"stage" => "committed"}}} = current, _ ->
+        {:error, {:unknown, :write_lost}, current}
+      operation, current, opts -> provider.(operation, current, opts)
+    end
+    assert {:error, _, unresolved} = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, Keyword.put(options, :request_fun, reject_disposition))
+    before = Agent.get(cloud, & &1)
+    assert before.record["last_handoff"]["resource_acknowledged"] == false
+    assert {:ok, _} = Operations.run(Provider, config, %{entry | record: unresolved}, :inspect, Keyword.put(options, :credential_reconcile, false))
+    assert Agent.get(cloud, & &1) == before
+  end
+
   defp codex_fixture do
     references = %{
       "credential_id" => "features-personal-codex",

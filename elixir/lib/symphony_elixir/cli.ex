@@ -5,6 +5,7 @@ defmodule SymphonyElixir.CLI do
 
   alias SymphonyElixir.{LogFile, Maintenance}
   alias SymphonyElixir.MCP.LinearServer
+  alias SymphonyElixir.CodexCredentials.Recovery
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @serve_switches [
@@ -17,6 +18,7 @@ defmodule SymphonyElixir.CLI do
   @import_switches [slug: :string, name: :string, note: :string, data_root: :string]
   @export_switches [data_root: :string]
   @mcp_switches [linear_mcp: :boolean, workflow: :string]
+  @credential_switches [data_root: :string, workflow: :string, action: :string, resource: :string, expected_epoch: :integer, expected_generation: :string, receipt_file: :string]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
@@ -26,6 +28,7 @@ defmodule SymphonyElixir.CLI do
           required(:export_lane) => (String.t() -> {:ok, String.t()} | {:error, :not_found | :no_version}),
           required(:operator_token) => (-> String.t() | nil),
           required(:write_output) => (String.t() -> :ok),
+          optional(:reconcile_credentials) => (keyword() -> {:ok, map()} | {:error, atom()}),
           optional(:ensure_linear_mcp_started) => (-> ensure_started_result()),
           optional(:configure_linear_mcp_logger) => (-> :ok),
           optional(:serve_linear_mcp) => (-> :ok)
@@ -75,6 +78,10 @@ defmodule SymphonyElixir.CLI do
     with :ok <- evaluate_export(args, deps), do: {:ok, :command}
   end
 
+  defp evaluate_mode(["credentials", "reconcile" | args], deps) do
+    with :ok <- evaluate_credentials(args, deps), do: {:ok, :command}
+  end
+
   defp evaluate_mode(args, deps) do
     with {:ok, opts, []} <- parse(args, @mcp_switches, 0),
          true <- Keyword.get(opts, :linear_mcp, false),
@@ -84,6 +91,33 @@ defmodule SymphonyElixir.CLI do
       false -> {:error, usage_message()}
       {:error, _message} = error -> error
     end
+  end
+
+  defp evaluate_credentials(args, deps) do
+    switches = args |> Enum.filter(&String.starts_with?(&1, "--")) |> Enum.map(&(&1 |> String.split("=", parts: 2) |> hd()))
+    with true <- length(switches) == length(Enum.uniq(switches)),
+         {options, [], []} <- OptionParser.parse(args, strict: @credential_switches),
+         options = Keyword.put_new(options, :action, "inspect"),
+         :ok <- Recovery.validate_options(options),
+         {:ok, result} <- Map.get(deps, :reconcile_credentials, &Recovery.reconcile/1).(options),
+         {:ok, output} <- Jason.encode(%{ok: true, result: result}),
+         true <- byte_size(output) < 1_048_576 do
+      deps.write_output.(output <> "\n")
+    else
+      {:error, reason} when is_atom(reason) -> credential_error(reason)
+      false -> credential_error(:output_limit)
+      _ -> credential_error(:invalid_arguments)
+    end
+  rescue
+    _ -> credential_error(:recovery_failed)
+  catch
+    _, _ -> credential_error(:recovery_failed)
+  end
+
+  defp credential_error(reason) do
+    code = Atom.to_string(reason)
+    code = if Regex.match?(~r/\A[a-z][a-z0-9_]{0,63}\z/, code), do: code, else: "recovery_failed"
+    {:error, Jason.encode!(%{ok: false, reason: code})}
   end
 
   defp evaluate_serve(args, deps) do
@@ -273,6 +307,7 @@ defmodule SymphonyElixir.CLI do
     Usage: symphony serve [--data-root <dir>] [--port <port>] [--host <ip>] [--events-retention-days <n>] --i-understand-that-this-will-be-running-without-the-usual-guardrails
            symphony lanes import <WORKFLOW.md> --slug <slug> [--name <name>] [--note <text>] [--data-root <dir>]
            symphony lanes export <slug> [--data-root <dir>]
+           symphony credentials reconcile --data-root <dir> --workflow <path> [--action inspect|checkpoint|reseed-stop|reseed-commit] [--resource <name> --expected-epoch <n> --expected-generation <decimal>] [--receipt-file <private-json>]
            symphony --linear-mcp --workflow <path-to-WORKFLOW.md>
     The daemon no longer takes a WORKFLOW.md path: import it as a lane first.
     """
@@ -287,6 +322,7 @@ defmodule SymphonyElixir.CLI do
       export_lane: &export_lane/1,
       operator_token: fn -> System.get_env("SYMPHONY_OPERATOR_TOKEN") end,
       write_output: &IO.write/1,
+      reconcile_credentials: &Recovery.reconcile/1,
       ensure_linear_mcp_started: &start_linear_mcp_runtime/0,
       configure_linear_mcp_logger: &configure_linear_mcp_logger/0,
       serve_linear_mcp: &serve_linear_mcp/0

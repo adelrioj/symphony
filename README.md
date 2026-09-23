@@ -26,8 +26,10 @@ generation-checked cloud ownership and sealed worker checkpoints. Physical stop 
 does not release that credential or authorize disk deletion. The option is disabled
 when omitted; it does not change Bugs, QA, static workers, or Claude authentication.
 See [personal Codex credentials](elixir/README.md#personal-codex-credentials) for the
-explicit configuration and recovery-required outcomes. No production enablement or
-credential/model qualification is implied.
+explicit configuration and recovery-required outcomes. Recovery uses the isolated
+`credentials reconcile` command under the real controller-volume maintenance lock;
+it never starts scheduling or treats physical stop alone as credential release.
+No production enablement or credential/model qualification is implied.
 
 ## Install
 

@@ -1720,6 +1720,69 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   defp stamp_etag(nil, _version), do: nil
   defp stamp_etag(workstation, version), do: Map.put(workstation, "etag", "etag-" <> Integer.to_string(version))
 
+  test "operator credential inventory cannot hide unlabelled or foreign Features instances" do
+    for labels <- [%{}, %{"symphony-deployment" => "foreign"}] do
+      unknown = Map.put(workstation(), "labels", labels)
+      request = fn req ->
+        cond do
+          String.ends_with?(req[:url], "/workstationConfigs") -> response(200, %{"workstationConfigs" => [%{"name" => String.split(name(), "/workstations/") |> hd()}]})
+          String.ends_with?(req[:url], "/workstations") -> response(200, %{"workstations" => [unknown]})
+          true -> response(200, %{})
+        end
+      end
+      assert {:ok, []} = Workstations.discover(config(), opts(request))
+      assert {:error, {:unknown, :credential_inventory_unaccounted}} =
+        Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+    end
+  end
+
+  test "operator inventory rejects credential-bearing instances in retained configs" do
+    retained = String.replace(name(), "/cfg/", "/retained/")
+    unknown = workstation() |> Map.put("name", retained) |> Map.put("env", %{"SYMPHONY_CODEX_ASSIGNMENT" => "{}"})
+    request = fn req ->
+      cond do
+        String.ends_with?(req[:url], "/workstationConfigs") -> response(200, %{"workstationConfigs" => [%{"name" => String.split(retained, "/workstations/") |> hd()}]})
+        String.ends_with?(req[:url], "/workstations") -> response(200, %{"workstations" => [unknown]})
+        true -> response(200, %{})
+      end
+    end
+    assert {:error, {:unknown, :credential_inventory_unaccounted}} =
+      Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+  end
+
+  test "operator inventory rejects malformed resource identities instead of filtering them away" do
+    request = fn req ->
+      cond do
+        String.ends_with?(req[:url], "/workstationConfigs") -> response(200, %{"workstationConfigs" => [%{"name" => String.split(name(), "/workstations/") |> hd()}]})
+        String.ends_with?(req[:url], "/workstations") -> response(200, %{"workstations" => [%{"state" => "STATE_RUNNING"}]})
+        true -> response(200, %{})
+      end
+    end
+    assert {:error, {:unknown, :credential_inventory_unaccounted}} =
+      Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+  end
+
+  test "operator inventory refuses pending create before its workstation becomes visible" do
+    request = fn req ->
+      cond do
+        String.ends_with?(req[:url], "/workstationConfigs") -> response(200, %{"workstationConfigs" => [%{"name" => String.split(name(), "/workstations/") |> hd()}]})
+        String.ends_with?(req[:url], "/operations") -> response(200, %{"operations" => [operation("create", false)]})
+        true -> response(200, %{})
+      end
+    end
+    assert {:error, {:unknown, :credential_inventory_unaccounted}} =
+      Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+  end
+
+  test "operator inventory cannot certify empty after omitting the existing configured template" do
+    {_server, request} = provider()
+    omit_template = fn req ->
+      if String.ends_with?(req[:url], "/workstationConfigs"), do: response(200, %{}), else: request.(req)
+    end
+    assert {:error, {:unknown, :credential_inventory_unaccounted}} =
+      Workstations.preflight(config(), Keyword.put(opts(omit_template), :credential_inventory, true))
+  end
+
   defp config do
     %{
       kind: "google_workstations",
