@@ -32,10 +32,14 @@ defmodule SymphonyElixir.AppServerTest do
       }
 
       assert {:error, {:invalid_workspace_cwd, :workspace_root, _path}} =
-               AppServer.run(workspace_root, "guard", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               AppServer.run(workspace_root, "guard", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       assert {:error, {:invalid_workspace_cwd, :outside_workspace_root, _path, _root}} =
-               AppServer.run(outside_workspace, "guard", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               AppServer.run(outside_workspace, "guard", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
     after
       File.rm_rf(test_root)
     end
@@ -72,7 +76,9 @@ defmodule SymphonyElixir.AppServerTest do
       }
 
       assert {:error, {:invalid_workspace_cwd, :symlink_escape, ^symlink_workspace, _root}} =
-               AppServer.run(symlink_workspace, "guard", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               AppServer.run(symlink_workspace, "guard", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
     after
       File.rm_rf(test_root)
     end
@@ -116,7 +122,13 @@ defmodule SymphonyElixir.AppServerTest do
         codex_command: "#{codex_binary} app-server"
       )
 
-      issue = %Issue{id: "issue-correlation", identifier: "MT-CORRELATION", title: "Correlate turns", state: "In Progress"}
+      issue = %Issue{
+        id: "issue-correlation",
+        identifier: "MT-CORRELATION",
+        title: "Correlate turns",
+        state: "In Progress"
+      }
+
       test_pid = self()
       on_message = fn message -> send(test_pid, {:app_server_message, message}) end
       context = SymphonyElixir.ExecutionContext.local(Config.local_workspace_root())
@@ -132,7 +144,10 @@ defmodule SymphonyElixir.AppServerTest do
                          %{
                            event: :turn_completed,
                            session_id: "thread-correlation-turn-success",
-                           payload: %{"method" => "turn/completed", "params" => %{"turn" => %{"id" => "turn-success", "status" => "completed"}}}
+                           payload: %{
+                             "method" => "turn/completed",
+                             "params" => %{"turn" => %{"id" => "turn-success", "status" => "completed"}}
+                           }
                          }}
 
         assert {:error, {:turn_failed, %{"error" => %{"message" => "turn rejected"}}}} =
@@ -144,10 +159,15 @@ defmodule SymphonyElixir.AppServerTest do
                          %{
                            event: :turn_failed,
                            session_id: "thread-correlation-turn-failure",
-                           payload: %{"method" => "turn/failed", "params" => %{"turnId" => "turn-failure", "error" => %{"message" => "turn rejected"}}}
+                           payload: %{
+                             "method" => "turn/failed",
+                             "params" => %{"turnId" => "turn-failure", "error" => %{"message" => "turn rejected"}}
+                           }
                          }}
 
-        assert_received {:app_server_message, %{event: :turn_ended_with_error, session_id: "thread-correlation-turn-failure"}}
+        assert_received {:app_server_message,
+                         %{event: :turn_ended_with_error, session_id: "thread-correlation-turn-failure"}}
+
         refute_received {:app_server_message, %{event: :turn_completed}}
       after
         Codex.stop_session(session)
@@ -212,7 +232,10 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "stream updates", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, _result} =
+               AppServer.run(workspace, "stream updates", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       File.write!(codex_binary, """
       #!/bin/sh
@@ -240,7 +263,10 @@ defmodule SymphonyElixir.AppServerTest do
         codex_turn_timeout_ms: 100
       )
 
-      assert {:error, :turn_timeout} = AppServer.run(workspace, "silent turn", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:error, :turn_timeout} =
+               AppServer.run(workspace, "silent turn", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
     after
       File.rm_rf(test_root)
     end
@@ -330,7 +356,10 @@ defmodule SymphonyElixir.AppServerTest do
         )
 
         assert {:ok, _result} =
-                 AppServer.run(workspace, "Validate supported turn policy", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+                 AppServer.run(workspace, "Validate supported turn policy", issue,
+                   execution_context:
+                     SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+                 )
 
         trace = File.read!(trace_file)
         lines = String.split(trace, "\n", trim: true)
@@ -425,7 +454,9 @@ defmodule SymphonyElixir.AppServerTest do
       }
 
       assert {:error, {:turn_input_required, payload}} =
-               AppServer.run(workspace, "Needs input", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               AppServer.run(workspace, "Needs input", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       assert payload["method"] == "turn/input_required"
     after
@@ -490,7 +521,9 @@ defmodule SymphonyElixir.AppServerTest do
       }
 
       assert {:error, {:turn_input_required, payload}} =
-               AppServer.run(workspace, "Needs MCP input", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               AppServer.run(workspace, "Needs MCP input", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       assert payload["method"] == "mcpServer/elicitation/request"
     after
@@ -553,7 +586,9 @@ defmodule SymphonyElixir.AppServerTest do
       }
 
       assert {:error, {:approval_required, payload}} =
-               AppServer.run(workspace, "Handle approval request", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               AppServer.run(workspace, "Handle approval request", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       assert payload["method"] == "item/commandExecution/requestApproval"
     after
@@ -636,7 +671,10 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Handle approval request", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Handle approval request", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
@@ -777,7 +815,10 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Handle tool approval prompt", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Handle tool approval prompt", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
@@ -863,7 +904,9 @@ defmodule SymphonyElixir.AppServerTest do
       }
 
       assert {:error, {:turn_input_required, payload}} =
-               AppServer.run(workspace, "Handle generic tool input", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               AppServer.run(workspace, "Handle generic tool input", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       assert payload["method"] == "item/tool/requestUserInput"
     after
@@ -933,7 +976,9 @@ defmodule SymphonyElixir.AppServerTest do
       }
 
       assert {:error, {:turn_input_required, payload}} =
-               AppServer.run(workspace, "Handle option based tool input", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               AppServer.run(workspace, "Handle option based tool input", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       assert payload["method"] == "item/tool/requestUserInput"
     after
@@ -1015,7 +1060,10 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Reject unsupported tool calls", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Reject unsupported tool calls", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
@@ -1268,7 +1316,8 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert_received {:tool_called, "linear_graphql", %{"query" => "query Viewer { viewer { id } }"}}
 
-      assert_received {:app_server_message, %{event: :tool_call_failed, payload: %{"params" => %{"tool" => "linear_graphql"}}}}
+      assert_received {:app_server_message,
+                       %{event: :tool_call_failed, payload: %{"params" => %{"tool" => "linear_graphql"}}}}
     after
       File.rm_rf(test_root)
     end
@@ -1333,7 +1382,9 @@ defmodule SymphonyElixir.AppServerTest do
       }
 
       assert {:ok, _result} =
-               AppServer.run(workspace, "Validate newline-delimited buffering", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               AppServer.run(workspace, "Validate newline-delimited buffering", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
     after
       File.rm_rf(test_root)
     end
@@ -1403,7 +1454,11 @@ defmodule SymphonyElixir.AppServerTest do
       log =
         capture_log(fn ->
           assert {:ok, _result} =
-                   AppServer.run(workspace, "Capture stderr log", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()), on_message: on_message)
+                   AppServer.run(workspace, "Capture stderr log", issue,
+                     execution_context:
+                       SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
+                     on_message: on_message
+                   )
         end)
 
       assert_received {:app_server_message, %{event: :turn_completed}}
@@ -1580,7 +1635,11 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["security"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Do not inherit tracker auth", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Do not inherit tracker auth", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       assert File.read!(trace_file) =~ "PROFILE_LOADED:1\n"
       assert File.read!(trace_file) =~ "CANONICAL_SECRET:\n"
       assert File.read!(trace_file) =~ "CUSTOM_SECRET:\n"

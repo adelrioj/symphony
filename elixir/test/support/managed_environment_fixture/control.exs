@@ -95,7 +95,14 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
     opts = if Keyword.keyword?(options), do: options, else: []
     context = opts[:execution_context]
     mode = runner_mode(context)
-    record = %{event: :runner_invocation, issue_id: Map.get(event, :issue_id), attempt_id: opts[:attempt_id], mode: mode}
+
+    record = %{
+      event: :runner_invocation,
+      issue_id: Map.get(event, :issue_id),
+      attempt_id: opts[:attempt_id],
+      mode: mode
+    }
+
     record = Map.put(record, :outcome, if(allowed, do: :accepted, else: :rejected))
     record = if allowed, do: Map.put(record, :environment_id, context.environment.record.key), else: record
     rejected = state.runner_rejected or not allowed
@@ -122,14 +129,20 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
     {:reply, :ok, %{state | checks: Map.put(state.checks, name, Map.merge(%{name: name}, result))}}
   end
 
-  def handle_call({:baseline, baseline}, _from, state), do: {:reply, :ok, %{state | baseline: decode_baseline(baseline)}}
+  def handle_call({:baseline, baseline}, _from, state),
+    do: {:reply, :ok, %{state | baseline: decode_baseline(baseline)}}
+
   def handle_call(:allocation_started, _from, state), do: {:reply, :ok, %{state | allocation_started: true}}
   def handle_call(:clear_faults, _from, state), do: {:reply, :ok, %{state | faults: MapSet.new()}}
 
   def handle_call({:interrupted, evidence}, _from, state) do
     state = capture(state, safe_resources(evidence["captured_resources"] || []))
     state = capture(state, safe_resources(evidence["remaining_owned_resources"] || []))
-    state = %{state | retained_guards: Enum.uniq(state.retained_guards ++ safe_resources(evidence["retained_guards"] || []))}
+
+    state = %{
+      state
+      | retained_guards: Enum.uniq(state.retained_guards ++ safe_resources(evidence["retained_guards"] || []))
+    }
 
     cleanup_issues =
       (evidence["cleanup_issue_ids"] || [])
@@ -250,7 +263,13 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
       end
 
     backing = safe_resources(metadata["backing_resources"] || [])
-    volumes = metadata |> Map.get("volumes") |> resource_entries() |> Enum.flat_map(fn {_, value} -> volume_resources(value) end)
+
+    volumes =
+      metadata
+      |> Map.get("volumes")
+      |> resource_entries()
+      |> Enum.flat_map(fn {_, value} -> volume_resources(value) end)
+
     cleanup = metadata |> Map.get("cleanup_remaining") |> resource_entries() |> Enum.flat_map(&cleanup_resources/1)
     guard = if Map.get(record, :absent?) == true, do: [], else: safe_resources([metadata["guard"] || %{}])
     safe_resources([parent]) ++ backing ++ volumes ++ cleanup ++ guard
@@ -263,7 +282,8 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
 
     resources =
       Enum.reject(state.captured_resources, fn resource ->
-        resource["kind"] == "ConfigMap" and Enum.any?(receipts, &(&1["uid"] == resource["uid"] and is_binary(resource["uid"])))
+        resource["kind"] == "ConfigMap" and
+          Enum.any?(receipts, &(&1["uid"] == resource["uid"] and is_binary(resource["uid"])))
       end)
 
     %{state | retained_guards: receipts, captured_resources: resources}
@@ -278,7 +298,9 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
   defp result_guards(_), do: []
 
   defp record_guards(%{kind: "kubernetes", absent?: true, proof: {:quiescent, %{guard_uid: uid}}} = record) do
-    safe_resources([%{"kind" => "ConfigMap", "name" => Guard.name(record), "uid" => uid, "namespace" => record.scope["namespace"]}])
+    safe_resources([
+      %{"kind" => "ConfigMap", "name" => Guard.name(record), "uid" => uid, "namespace" => record.scope["namespace"]}
+    ])
   end
 
   defp record_guards(_), do: []
@@ -286,7 +308,12 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
   defp volume_resources(volume) when is_map(volume) do
     safe_resources([
       %{"kind" => "pvc", "name" => volume["pvc_name"], "uid" => volume["pvc_uid"]},
-      %{"kind" => "pv", "name" => volume["pv_name"], "uid" => volume["pv_uid"], "volume_handle" => volume["volume_handle"]}
+      %{
+        "kind" => "pv",
+        "name" => volume["pv_name"],
+        "uid" => volume["pv_uid"],
+        "volume_handle" => volume["volume_handle"]
+      }
     ])
   end
 
@@ -306,7 +333,11 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.Control do
         safe_resources([%{"kind" => "environment", "id" => record.key}])
       end)
 
-    workers = for {key, count} <- counts, is_integer(count) and count > 0, do: %{"kind" => "live_worker", "id" => key, "live_worker_count" => count}
+    workers =
+      for {key, count} <- counts,
+          is_integer(count) and count > 0,
+          do: %{"kind" => "live_worker", "id" => key, "live_worker_count" => count}
+
     Enum.map(parents ++ workers, &Map.put(&1, "status", "observed_present"))
   end
 

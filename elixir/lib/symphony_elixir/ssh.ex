@@ -20,7 +20,12 @@ defmodule SymphonyElixir.SSH do
   @spec run(String.t() | Target.t(), String.t(), keyword()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
   def run(target, command, opts \\ []) when is_binary(command) do
     with {:ok, executable, args, env} <- invocation(target, command) do
-      {:ok, System.cmd(executable, args, Keyword.update(opts, :env, env, &(Map.merge(Map.new(&1), Map.new(env)) |> Map.to_list())))}
+      {:ok,
+       System.cmd(
+         executable,
+         args,
+         Keyword.update(opts, :env, env, &(Map.merge(Map.new(&1), Map.new(env)) |> Map.to_list()))
+       )}
     end
   end
 
@@ -35,7 +40,10 @@ defmodule SymphonyElixir.SSH do
           :exit_status,
           :stderr_to_stdout,
           args: Enum.map(args, &String.to_charlist/1),
-          env: Enum.map(env, fn {name, value} -> {String.to_charlist(name), if(is_nil(value), do: false, else: String.to_charlist(value))} end)
+          env:
+            Enum.map(env, fn {name, value} ->
+              {String.to_charlist(name), if(is_nil(value), do: false, else: String.to_charlist(value))}
+            end)
         ]
         |> maybe_put_line_option(line_bytes)
 

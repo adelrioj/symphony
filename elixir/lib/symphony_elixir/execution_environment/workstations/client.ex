@@ -5,7 +5,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations.Client do
 
   @spec options(map(), keyword()) :: keyword()
   def options(config, opts) do
-    Keyword.put_new_lazy(opts, :deadline, fn -> System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, Map.get(config, :startup_timeout_ms, 30_000)) end)
+    Keyword.put_new_lazy(opts, :deadline, fn ->
+      System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, Map.get(config, :startup_timeout_ms, 30_000))
+    end)
   end
 
   @spec remaining(keyword()) :: non_neg_integer()

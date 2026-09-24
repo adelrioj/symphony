@@ -10,7 +10,11 @@ defmodule SymphonyElixir.ExecutionProfileConfigurationTest do
     {profile, lane} = Configuration.split(raw)
     assert profile == %{"worker" => %{}}
     assert {:ok, resolved} = Configuration.resolve(Map.put(profile, "workspace_base", root), lane, "isolated", "work")
-    assert resolved.workflow.config["workspace"] == %{"root" => Path.join(root, "isolated"), "retention" => %{"keep" => true}}
+
+    assert resolved.workflow.config["workspace"] == %{
+             "root" => Path.join(root, "isolated"),
+             "retention" => %{"keep" => true}
+           }
   end
 
   test "invalid composition representations return errors rather than selecting an execution location" do
@@ -32,8 +36,22 @@ defmodule SymphonyElixir.ExecutionProfileConfigurationTest do
   end
 
   test "invalid provider qualification prevents composing a runnable managed lane" do
-    environment = %{"kind" => "kubernetes", "deployment_id" => "unqualified", "provider" => %{}, "startup_timeout_ms" => 1_000, "shutdown_timeout_ms" => 1_000, "terminal_retention_ms" => 0}
-    assert {:error, [%{path: "config"}]} = Configuration.resolve(%{"worker" => %{"environment" => environment}}, %{"tracker" => %{"kind" => "memory"}}, ".", "work")
+    environment = %{
+      "kind" => "kubernetes",
+      "deployment_id" => "unqualified",
+      "provider" => %{},
+      "startup_timeout_ms" => 1_000,
+      "shutdown_timeout_ms" => 1_000,
+      "terminal_retention_ms" => 0
+    }
+
+    assert {:error, [%{path: "config"}]} =
+             Configuration.resolve(
+               %{"worker" => %{"environment" => environment}},
+               %{"tracker" => %{"kind" => "memory"}},
+               ".",
+               "work"
+             )
   end
 
   test "unbound workspace references compose against the configured default base" do
@@ -42,7 +60,9 @@ defmodule SymphonyElixir.ExecutionProfileConfigurationTest do
     on_exit(fn -> if previous, do: System.put_env(key, previous), else: System.delete_env(key) end)
     System.delete_env(key)
     config = %{"tracker" => %{"kind" => "memory"}}
-    assert {:ok, expected_root} = SymphonyElixir.PathSafety.canonicalize(Path.expand(%Schema.Workspace{}.root, Config.data_root()))
+
+    assert {:ok, expected_root} =
+             SymphonyElixir.PathSafety.canonicalize(Path.expand(%Schema.Workspace{}.root, Config.data_root()))
 
     assert {:ok, missing} = Configuration.resolve(%{"workspace_base" => "$" <> key}, config, ".", "work")
     assert missing.settings.workspace.root == expected_root
@@ -65,7 +85,14 @@ defmodule SymphonyElixir.ExecutionProfileConfigurationTest do
       end
     end)
 
-    assert {:ok, resolved} = Configuration.resolve(%{"workspace_base" => "$literal/path"}, %{"tracker" => %{"kind" => "memory"}}, ".", "work")
+    assert {:ok, resolved} =
+             Configuration.resolve(
+               %{"workspace_base" => "$literal/path"},
+               %{"tracker" => %{"kind" => "memory"}},
+               ".",
+               "work"
+             )
+
     assert resolved.settings.workspace.root == Path.join(root, "$literal/path")
   end
 
@@ -102,9 +129,13 @@ defmodule SymphonyElixir.ExecutionProfileConfigurationTest do
   end
 
   test "redaction restoration rejects unmatched values inside nested arrays with a usable field path" do
-    assert {:error, [%{path: "accounts[0].token"}]} = Configuration.restore_redacted(%{"accounts" => [%{"token" => "$REDACTED"}]}, %{}, "")
+    assert {:error, [%{path: "accounts[0].token"}]} =
+             Configuration.restore_redacted(%{"accounts" => [%{"token" => "$REDACTED"}]}, %{}, "")
+
     original = %{"accounts" => [%{"token" => "stored", "name" => "original"}]}
     replacement = %{"accounts" => [%{"token" => "$REDACTED", "name" => "changed"}]}
-    assert {:ok, %{"accounts" => [%{"token" => "stored", "name" => "changed"}]}} = Configuration.restore_redacted(replacement, original, "")
+
+    assert {:ok, %{"accounts" => [%{"token" => "stored", "name" => "changed"}]}} =
+             Configuration.restore_redacted(replacement, original, "")
   end
 end

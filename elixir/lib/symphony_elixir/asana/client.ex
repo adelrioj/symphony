@@ -237,7 +237,8 @@ defmodule SymphonyElixir.Asana.Client do
 
   defp task_outside_project?(%{"gid" => gid, "name" => name, "memberships" => memberships}, project_gid)
        when is_binary(gid) and is_binary(name) and is_list(memberships) do
-    present_string?(gid) and present_string?(name) and is_nil(project_membership(%{"memberships" => memberships}, project_gid))
+    present_string?(gid) and present_string?(name) and
+      is_nil(project_membership(%{"memberships" => memberships}, project_gid))
   end
 
   defp task_outside_project?(_task, _project_gid), do: false
@@ -325,7 +326,12 @@ defmodule SymphonyElixir.Asana.Client do
   defp settings(tracker_settings, validation \\ :runtime) when is_map(tracker_settings) do
     provider = provider_settings(tracker_settings)
     endpoint = provider["endpoint"] || @default_endpoint
-    api_key = if validation == :runtime, do: resolve_setting(provider["api_key"], System.get_env("ASANA_PAT")), else: provider["api_key"]
+
+    api_key =
+      if validation == :runtime,
+        do: resolve_setting(provider["api_key"], System.get_env("ASANA_PAT")),
+        else: provider["api_key"]
+
     project_gid = resolve_setting(provider["project_gid"], nil)
 
     cond do

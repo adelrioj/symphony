@@ -41,14 +41,19 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(), max_turn_exhaustions: 4)
     assert Config.settings!().agent.max_turn_exhaustions == 4
 
-    assert {:error, errors} = write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
+    assert {:error, errors} =
+             write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
+
     assert Enum.any?(errors, &(&1.path == "tracker.active_states"))
 
     assert {:error, [%{path: "tracker", message: "missing linear scope"}]} =
              write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: "token", tracker_project_slug: nil)
 
     assert {:error, [%{path: "tracker", message: "missing linear api token"}]} =
-             write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: "   ", tracker_project_slug: "project")
+             write_workflow_file!(Workflow.workflow_file_path(),
+               tracker_api_token: "   ",
+               tracker_project_slug: "project"
+             )
 
     assert {:error, [%{path: "tracker", message: "missing linear scope"}]} =
              write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: "token", tracker_project_slug: "")
@@ -565,7 +570,8 @@ defmodule SymphonyElixir.CoreTest do
         workspace_root: test_root,
         tracker_active_states: ["Todo", "In Progress", "In Review"],
         tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
-        hook_before_remove: "if [ -f \"#{worker_alive_marker}\" ]; then printf alive > \"#{cleanup_marker}\"; else printf stopped > \"#{cleanup_marker}\"; fi"
+        hook_before_remove:
+          "if [ -f \"#{worker_alive_marker}\" ]; then printf alive > \"#{cleanup_marker}\"; else printf stopped > \"#{cleanup_marker}\"; fi"
       )
 
       File.mkdir_p!(workspace)
@@ -1442,7 +1448,14 @@ defmodule SymphonyElixir.CoreTest do
       session_id: "thread-turn-budget",
       started_at: DateTime.utc_now(),
       workspace_path: workspace_path,
-      execution_context: context || SymphonyElixir.ExecutionContext.local(if(is_binary(workspace_path), do: Path.dirname(workspace_path), else: SymphonyElixir.Config.local_workspace_root()))
+      execution_context:
+        context ||
+          SymphonyElixir.ExecutionContext.local(
+            if(is_binary(workspace_path),
+              do: Path.dirname(workspace_path),
+              else: SymphonyElixir.Config.local_workspace_root()
+            )
+          )
     }
 
     :sys.replace_state(pid, fn state ->
@@ -1819,7 +1832,12 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       before = MapSet.new(File.ls!(workspace_root))
-      assert :ok = AgentRunner.run(issue, nil, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+
+      assert :ok =
+               AgentRunner.run(issue, nil,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       entries_after = MapSet.new(File.ls!(workspace_root))
 
       created =
@@ -1987,7 +2005,10 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       assert_raise RuntimeError, ~r/workspace_prepare_failed/, fn ->
-        AgentRunner.run(issue, nil, execution_context: SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, "worker-a"))
+        AgentRunner.run(issue, nil,
+          execution_context:
+            SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, "worker-a")
+        )
       end
 
       trace = File.read!(trace_file)
@@ -2099,7 +2120,12 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()), issue_state_fetcher: state_fetcher)
+      assert :ok =
+               AgentRunner.run(issue, nil,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
+                 issue_state_fetcher: state_fetcher
+               )
+
       assert_receive {:issue_state_fetch, 1}
       assert_receive {:issue_state_fetch, 2}
 
@@ -2217,7 +2243,11 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()), issue_state_fetcher: state_fetcher)
+      assert :ok =
+               AgentRunner.run(issue, nil,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
+                 issue_state_fetcher: state_fetcher
+               )
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
@@ -2301,7 +2331,11 @@ defmodule SymphonyElixir.CoreTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Fix workspace start args", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       assert {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
 
       trace = File.read!(trace_file)
@@ -2449,7 +2483,10 @@ defmodule SymphonyElixir.CoreTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Fix workspace start args", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
@@ -2544,7 +2581,10 @@ defmodule SymphonyElixir.CoreTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue, execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Fix workspace start args", issue,
+                 execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       lines = File.read!(trace_file) |> String.split("\n", trim: true)
 

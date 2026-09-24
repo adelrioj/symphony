@@ -15,7 +15,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
   @fields @required_fields ++ [:codex_credentials]
   @workstations_scope ["project", "location", "cluster"]
   @kubernetes_scope ["kubeconfig", "context", "namespace"]
-  @workstations_identity @workstations_scope ++ ["config", "credential_configuration", "impersonate_service_account", "ssh_user"]
+  @workstations_identity @workstations_scope ++
+                           ["config", "credential_configuration", "impersonate_service_account", "ssh_user"]
   @kubernetes_identity @kubernetes_scope ++ ["template", "ssh_user", "ssh_auth_volume", "ssh_port"]
 
   embedded_schema do
@@ -53,7 +54,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
     end
   end
 
-  def parse(_config), do: {:error, {:invalid_environment_config, %{environment: ["must be a managed configuration map"]}}}
+  def parse(_config),
+    do: {:error, {:invalid_environment_config, %{environment: ["must be a managed configuration map"]}}}
 
   @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
   def changeset(schema, config) do
@@ -90,7 +92,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
       config ->
         keys = if config.kind == "google_workstations", do: @workstations_identity, else: @kubernetes_identity
 
-        identity = {config.kind, config.deployment_id, config.tracker_kind, config.workspace_root, canonical(Map.take(config.provider, keys))}
+        identity =
+          {config.kind, config.deployment_id, config.tracker_kind, config.workspace_root,
+           canonical(Map.take(config.provider, keys))}
 
         if(is_nil(config.codex_credentials), do: identity, else: {identity, canonical(config.codex_credentials)})
         |> :erlang.term_to_binary()
@@ -162,7 +166,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
 
       references ->
         valid = get_field(changeset, :kind) == "google_workstations" and valid_codex_references?(references)
-        if valid, do: changeset, else: add_error(changeset, :codex_credentials, "must contain exact Workstations credential references")
+
+        if valid,
+          do: changeset,
+          else: add_error(changeset, :codex_credentials, "must contain exact Workstations credential references")
     end
   end
 
@@ -194,7 +201,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Config do
   defp normalize_keys(list) when is_list(list), do: Enum.map(list, &normalize_keys/1)
   defp normalize_keys(value), do: value
 
-  defp string_keys?(map) when is_map(map), do: Enum.all?(map, fn {key, value} -> is_binary(key) and string_keys?(value) end)
+  defp string_keys?(map) when is_map(map),
+    do: Enum.all?(map, fn {key, value} -> is_binary(key) and string_keys?(value) end)
+
   defp string_keys?(list) when is_list(list), do: Enum.all?(list, &string_keys?/1)
   defp string_keys?(_value), do: true
 

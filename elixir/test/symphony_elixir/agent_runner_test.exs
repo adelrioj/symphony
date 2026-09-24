@@ -216,11 +216,19 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
   test "failed after-create reports failure before removing the partial workspace" do
     root = hook_workspace_root!()
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_create: "touch partial; exit 7")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_after_create: "touch partial; exit 7"
+    )
+
     issue = build_issue([])
 
     assert_raise RuntimeError, ~r/workspace_hook_failed/, fn ->
-      AgentRunner.run(issue, self(), attempt_id: "create-failed", execution_context: SymphonyElixir.ExecutionContext.local(root))
+      AgentRunner.run(issue, self(),
+        attempt_id: "create-failed",
+        execution_context: SymphonyElixir.ExecutionContext.local(root)
+      )
     end
 
     assert_hook_update("create-failed", "after_create", "started")
@@ -271,7 +279,12 @@ defmodule SymphonyElixir.AgentRunnerTest do
 
   test "managed recovery credentials cannot reach workspace hooks or either agent backend" do
     root = hook_workspace_root!()
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: root, hook_before_run: "printf unsafe > admission-ran")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: root,
+      hook_before_run: "printf unsafe > admission-ran"
+    )
 
     record = %SymphonyElixir.ExecutionEnvironment.Record{
       key: "se-ticket",
@@ -288,7 +301,10 @@ defmodule SymphonyElixir.AgentRunnerTest do
     context = %{managed_hook_context!(root) | environment: %{record: record}}
 
     assert {:error, :credential_outcome_unknown} =
-             AgentRunner.run(build_issue([]), self(), execution_context: context, backend_module: SymphonyElixir.AgentRunnerStubBackend)
+             AgentRunner.run(build_issue([]), self(),
+               execution_context: context,
+               backend_module: SymphonyElixir.AgentRunnerStubBackend
+             )
 
     refute File.exists?(Path.join(context.workspace_path, "admission-ran"))
   end
@@ -296,7 +312,11 @@ defmodule SymphonyElixir.AgentRunnerTest do
   test "managed exceptional cleanup reports after-run failure without replacing the backend exception" do
     root = hook_workspace_root!()
     context = managed_hook_context!(root)
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_run: "printf attempted > after; exit 9")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_after_run: "printf attempted > after; exit 9"
+    )
 
     assert_raise ArgumentError, "backend exploded", fn ->
       AgentRunner.run(build_issue([]), self(),
@@ -324,7 +344,9 @@ defmodule SymphonyElixir.AgentRunnerTest do
     )
 
     assert {:managed_execution_unknown, {:remote_command_timeout, "before_run", 500}} =
-             catch_exit(AgentRunner.run(build_issue([]), self(), execution_context: context, attempt_id: "managed-timeout"))
+             catch_exit(
+               AgentRunner.run(build_issue([]), self(), execution_context: context, attempt_id: "managed-timeout")
+             )
 
     assert_hook_update("managed-timeout", "before_run", "started")
     assert_hook_update("managed-timeout", "before_run", "failed")
@@ -499,7 +521,12 @@ defmodule SymphonyElixir.AgentRunnerTest do
   end
 
   test "Claude continuation turns include the rendered issue prompt" do
-    tmp = Path.join(System.tmp_dir!(), "symphony-elixir-agent-runner-claude-continuation-#{System.unique_integer([:positive])}")
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-claude-continuation-#{System.unique_integer([:positive])}"
+      )
+
     workspace_root = Path.join(tmp, "workspaces")
     fake_claude = Path.join(tmp, "fake_claude")
     prompt_capture = Path.join(tmp, "prompts.txt")
@@ -598,14 +625,28 @@ defmodule SymphonyElixir.AgentRunnerTest do
   end
 
   defp managed_hook_context!(root) do
-    realpath = System.find_executable("grealpath") || System.find_executable("realpath") || flunk("realpath is required")
+    realpath =
+      System.find_executable("grealpath") || System.find_executable("realpath") || flunk("realpath is required")
+
     bin = Path.join(root, "bin")
     File.mkdir_p!(bin)
     File.ln_s!(realpath, Path.join(bin, "realpath"))
     bash_env = Path.join(root, "bash-env")
     File.write!(bash_env, "export PATH='#{bin}':\"$PATH\"\n")
-    target = %SymphonyElixir.SSH.Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture", env: [{"BASH_ENV", bash_env}]}
-    %SymphonyElixir.ExecutionContext{mode: :managed, workspace_root: root, workspace_path: Path.join(root, "ticket"), target: target}
+
+    target = %SymphonyElixir.SSH.Target{
+      executable: "/bin/sh",
+      prefix: ["-c"],
+      label: "fixture",
+      env: [{"BASH_ENV", bash_env}]
+    }
+
+    %SymphonyElixir.ExecutionContext{
+      mode: :managed,
+      workspace_root: root,
+      workspace_path: Path.join(root, "ticket"),
+      target: target
+    }
   end
 
   defp assert_hook_update(attempt_id, hook_name, outcome) do

@@ -79,7 +79,8 @@ defmodule SymphonyElixir.Maintenance do
   end
 
   defp private?(info, type, mode, uid) do
-    info.type == type and info.uid == uid and band(info.mode, 0o7777) == mode and (type == :directory or info.links == 1)
+    info.type == type and info.uid == uid and band(info.mode, 0o7777) == mode and
+      (type == :directory or info.links == 1)
   end
 
   defp same_file?(left, right), do: left.major_device == right.major_device and left.inode == right.inode
@@ -102,7 +103,9 @@ defmodule SymphonyElixir.Maintenance do
       device = info.major_device
       major_device = bor(band(bsr(device, 8), 0xFFF), band(bsr(device, 32), 0xFFFFF000))
       minor_device = bor(band(device, 0xFF), band(bsr(device, 12), 0xFFFFFF00))
-      String.to_integer(major, 16) == major_device and String.to_integer(minor, 16) == minor_device and String.to_integer(inode) == info.inode
+
+      String.to_integer(major, 16) == major_device and String.to_integer(minor, 16) == minor_device and
+        String.to_integer(inode) == info.inode
     else
       _ -> false
     end

@@ -53,7 +53,8 @@ defmodule SymphonyElixir.Runs.Writer do
     {:noreply, state}
   end
 
-  defp track_owner({:started, %{owner_pid: owner, attempt_id: attempt_id, lane_id: lane_id}}, state) when is_pid(owner) do
+  defp track_owner({:started, %{owner_pid: owner, attempt_id: attempt_id, lane_id: lane_id}}, state)
+       when is_pid(owner) do
     Map.put(state, Process.monitor(owner), %{attempt_id: attempt_id, lane_id: lane_id})
   end
 
@@ -116,12 +117,17 @@ defmodule SymphonyElixir.Runs.Writer do
         "session_id" => Map.get(update, :session_id)
       })
 
-    usage = if Enum.any?(delta, fn {_key, value} -> value > 0 end), do: [insert_event(run.id, at, "usage", delta)], else: []
+    usage =
+      if Enum.any?(delta, fn {_key, value} -> value > 0 end), do: [insert_event(run.id, at, "usage", delta)], else: []
 
     from(r in Run, where: r.id == ^run.id and r.status == "running")
     |> Repo.update_all(
       set: [turns: max(turns, run.turns)],
-      inc: [input_tokens: delta["input_tokens"], output_tokens: delta["output_tokens"], cached_tokens: delta["cached_tokens"]]
+      inc: [
+        input_tokens: delta["input_tokens"],
+        output_tokens: delta["output_tokens"],
+        cached_tokens: delta["cached_tokens"]
+      ]
     )
 
     [event | usage]
@@ -143,7 +149,8 @@ defmodule SymphonyElixir.Runs.Writer do
     if runs != [], do: ObservabilityPubSub.broadcast_update()
   end
 
-  defp insert_event(run_id, at, kind, payload), do: Repo.insert!(%Event{run_id: run_id, at: at, kind: kind, payload: payload})
+  defp insert_event(run_id, at, kind, payload),
+    do: Repo.insert!(%Event{run_id: run_id, at: at, kind: kind, payload: payload})
 
   defp token_delta(delta) do
     Map.new([:input_tokens, :output_tokens, :cached_tokens, :total_tokens], fn key ->
@@ -158,7 +165,8 @@ defmodule SymphonyElixir.Runs.Writer do
   defp event_name(event), do: inspect(event)
 
   defp validate_terminal_status!(status) do
-    unless status in Run.statuses() and status != "running", do: raise(ArgumentError, "unknown terminal run status #{inspect(status)}")
+    unless status in Run.statuses() and status != "running",
+      do: raise(ArgumentError, "unknown terminal run status #{inspect(status)}")
   end
 
   defp prune(days) do
@@ -168,7 +176,11 @@ defmodule SymphonyElixir.Runs.Writer do
   end
 
   defp log_context(attrs) do
-    Logger.metadata(issue_id: Map.get(attrs, :issue_id), issue_identifier: Map.get(attrs, :issue_identifier), attempt_id: Map.get(attrs, :attempt_id))
+    Logger.metadata(
+      issue_id: Map.get(attrs, :issue_id),
+      issue_identifier: Map.get(attrs, :issue_identifier),
+      attempt_id: Map.get(attrs, :attempt_id)
+    )
   end
 
   defp label({:started, _}), do: "record run start"

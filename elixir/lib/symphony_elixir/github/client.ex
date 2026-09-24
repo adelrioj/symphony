@@ -286,16 +286,23 @@ defmodule SymphonyElixir.GitHub.Client do
     provider = provider_settings(tracker_settings)
     api_url = provider["api_url"] || @default_api_url
     repo = resolve_setting(provider["repo"], System.get_env("GITHUB_REPO"))
-    token = if validation == :runtime, do: resolve_setting(provider["token"], System.get_env("GITHUB_TOKEN")), else: provider["token"]
+
+    token =
+      if validation == :runtime,
+        do: resolve_setting(provider["token"], System.get_env("GITHUB_TOKEN")),
+        else: provider["token"]
 
     cond do
       not valid_api_url?(api_url) -> {:error, :invalid_github_api_url}
       not present_string?(repo) -> {:error, :missing_github_repo}
       not valid_repo?(repo) -> {:error, :invalid_github_repo}
-      not present_string?(token) and (validation == :runtime or not is_nil(token)) -> {:error, :missing_github_token}
+      missing_credential?(token, validation) -> {:error, :missing_github_token}
       true -> {:ok, %{api_url: String.trim_trailing(api_url, "/"), repo: repo, token: token}}
     end
   end
+
+  defp missing_credential?(nil, validation), do: validation == :runtime
+  defp missing_credential?(value, _validation), do: not present_string?(value)
 
   defp provider_settings(%{provider: provider}) when is_map(provider), do: provider
   defp provider_settings(_tracker_settings), do: %{}

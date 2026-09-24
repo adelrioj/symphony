@@ -36,9 +36,11 @@ defmodule SymphonyElixir.ExecutionContext do
   def ssh(root, target), do: ssh(root, target, root)
 
   @spec ssh(String.t(), Target.t() | String.t(), String.t()) :: t()
-  def ssh(root, %Target{label: label} = target, base), do: %__MODULE__{mode: :ssh, workspace_base: base, workspace_root: root, target: target, worker_host: label}
+  def ssh(root, %Target{label: label} = target, base),
+    do: %__MODULE__{mode: :ssh, workspace_base: base, workspace_root: root, target: target, worker_host: label}
 
-  def ssh(root, target, base) when is_binary(target), do: %__MODULE__{mode: :ssh, workspace_base: base, workspace_root: root, target: target, worker_host: target}
+  def ssh(root, target, base) when is_binary(target),
+    do: %__MODULE__{mode: :ssh, workspace_base: base, workspace_root: root, target: target, worker_host: target}
 
   @spec managed(map(), Record.t(), Connection.t()) :: t()
   def managed(config, record, connection) do
@@ -113,7 +115,9 @@ defmodule SymphonyElixir.ExecutionContext do
   defp template_identity?(value) when is_map(value), do: map_size(value) > 0
   defp template_identity?(_value), do: false
 
-  defp environment_entry?({key, value}), do: nonblank?(key) and (is_nil(value) or transport_string?(value)) and not String.contains?(key, "=")
+  defp environment_entry?({key, value}),
+    do: nonblank?(key) and (is_nil(value) or transport_string?(value)) and not String.contains?(key, "=")
+
   defp environment_entry?(_entry), do: false
 
   defp nonblank?(value), do: transport_string?(value) and String.trim(value) != ""

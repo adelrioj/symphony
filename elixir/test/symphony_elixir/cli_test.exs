@@ -62,7 +62,9 @@ defmodule SymphonyElixir.CLITest do
     System.put_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED", "1")
 
     on_exit(fn ->
-      if previous, do: System.put_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED", previous), else: System.delete_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED")
+      if previous,
+        do: System.put_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED", previous),
+        else: System.delete_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED")
     end)
 
     guarded = deps(%{operator_token: fn -> flunk("credentials read before maintenance gate") end})
@@ -83,7 +85,9 @@ defmodule SymphonyElixir.CLITest do
     Application.put_env(:symphony_elixir, :data_root, root)
 
     on_exit(fn ->
-      if previous, do: System.put_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED", previous), else: System.delete_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED")
+      if previous,
+        do: System.put_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED", previous),
+        else: System.delete_env("SYMPHONY_CONTROLLER_LOCK_REQUIRED")
     end)
 
     assert {:error, :maintenance_required} = SymphonyElixir.Application.start(:normal, [])
@@ -118,7 +122,9 @@ defmodule SymphonyElixir.CLITest do
     ]
 
     for args <- invalid do
-      assert {:error, message} = CLI.evaluate(args, deps(%{operator_token: fn -> flunk("credentials read before parsing") end}))
+      assert {:error, message} =
+               CLI.evaluate(args, deps(%{operator_token: fn -> flunk("credentials read before parsing") end}))
+
       assert message =~ "Usage: symphony serve"
     end
 
@@ -129,7 +135,10 @@ defmodule SymphonyElixir.CLITest do
 
   test "serve requires acknowledgement before reading credentials or creating directories", %{root: root} do
     assert {:error, banner} =
-             CLI.evaluate(["serve", "--data-root", root], deps(%{operator_token: fn -> flunk("credentials read before acknowledgement") end}))
+             CLI.evaluate(
+               ["serve", "--data-root", root],
+               deps(%{operator_token: fn -> flunk("credentials read before acknowledgement") end})
+             )
 
     assert banner =~ @ack_flag
     refute File.exists?(root)
@@ -137,7 +146,9 @@ defmodule SymphonyElixir.CLITest do
 
   test "serve refuses missing or blank operator tokens before touching disk", %{root: root} do
     for token <- [nil, "", " \t\n"] do
-      assert {:error, message} = CLI.evaluate(["serve", "--data-root", root, @ack_flag], deps(%{operator_token: fn -> token end}))
+      assert {:error, message} =
+               CLI.evaluate(["serve", "--data-root", root, @ack_flag], deps(%{operator_token: fn -> token end}))
+
       assert message =~ "SYMPHONY_OPERATOR_TOKEN"
       refute File.exists?(root)
     end
@@ -158,7 +169,10 @@ defmodule SymphonyElixir.CLITest do
                      assert Config.events_retention_days() == 30
                      assert Config.operator_token() == "test-token"
                      assert File.dir?(Path.join(Config.data_root(), "log"))
-                     assert Application.fetch_env!(:symphony_elixir, :log_file) == Path.join(Config.data_root(), "log/symphony.log")
+
+                     assert Application.fetch_env!(:symphony_elixir, :log_file) ==
+                              Path.join(Config.data_root(), "log/symphony.log")
+
                      {:ok, []}
                    end
                  })
@@ -169,7 +183,18 @@ defmodule SymphonyElixir.CLITest do
   test "serve accepts explicit installation values, ephemeral ports, and IPv6", %{root: root} do
     assert :ok =
              CLI.evaluate(
-               ["serve", "--data-root", root, "--port", "0", "--host", "::1", "--events-retention-days", "1", @ack_flag],
+               [
+                 "serve",
+                 "--data-root",
+                 root,
+                 "--port",
+                 "0",
+                 "--host",
+                 "::1",
+                 "--events-retention-days",
+                 "1",
+                 @ack_flag
+               ],
                deps(%{
                  ensure_all_started: fn ->
                    assert Config.data_root() == Path.expand(root)
@@ -185,7 +210,10 @@ defmodule SymphonyElixir.CLITest do
 
   test "serve reports application and directory failures", %{root: root} do
     assert {:error, message} =
-             CLI.evaluate(["serve", "--data-root", root, @ack_flag], deps(%{ensure_all_started: fn -> {:error, :boom} end}))
+             CLI.evaluate(
+               ["serve", "--data-root", root, @ack_flag],
+               deps(%{ensure_all_started: fn -> {:error, :boom} end})
+             )
 
     assert message =~ "Failed to start Symphony"
     assert message =~ "boom"
@@ -214,7 +242,19 @@ defmodule SymphonyElixir.CLITest do
       capture_io(fn ->
         assert :ok =
                  CLI.evaluate(
-                   ["lanes", "import", path, "--slug", slug, "--name", "Imported lane", "--note", "initial", "--data-root", root],
+                   [
+                     "lanes",
+                     "import",
+                     path,
+                     "--slug",
+                     slug,
+                     "--name",
+                     "Imported lane",
+                     "--note",
+                     "initial",
+                     "--data-root",
+                     root
+                   ],
                    offline
                  )
       end)
@@ -239,22 +279,36 @@ defmodule SymphonyElixir.CLITest do
     path = Path.join(root, "WORKFLOW.md")
     File.write!(path, "---\ntracker:\n  kind: unsupported\n---\nPrompt")
     offline = deps(%{start_repo: fn -> :ok end})
-    assert {:error, message} = CLI.evaluate(["lanes", "import", path, "--slug", "invalid-cli", "--data-root", root], offline)
+
+    assert {:error, message} =
+             CLI.evaluate(["lanes", "import", path, "--slug", "invalid-cli", "--data-root", root], offline)
+
     assert message =~ "tracker.kind:"
     assert is_nil(Lanes.get_by_slug("invalid-cli"))
-    assert {:error, message} = CLI.evaluate(["lanes", "import", path <> ".missing", "--slug", "missing-cli", "--data-root", root], offline)
+
+    assert {:error, message} =
+             CLI.evaluate(
+               ["lanes", "import", path <> ".missing", "--slug", "missing-cli", "--data-root", root],
+               offline
+             )
+
     assert message =~ "Invalid lane configuration"
   end
 
   test "offline commands report database and export errors without starting the daemon", %{root: root} do
     assert {:error, message} =
-             CLI.evaluate(["lanes", "export", "missing", "--data-root", root], deps(%{start_repo: fn -> {:error, :locked} end}))
+             CLI.evaluate(
+               ["lanes", "export", "missing", "--data-root", root],
+               deps(%{start_repo: fn -> {:error, :locked} end})
+             )
 
     assert message =~ "Failed to open the Symphony database"
     assert message =~ "locked"
 
     offline = deps(%{start_repo: fn -> :ok end})
-    assert {:error, "no lane with slug missing-cli-lane"} = CLI.evaluate(["lanes", "export", "missing-cli-lane", "--data-root", root], offline)
+
+    assert {:error, "no lane with slug missing-cli-lane"} =
+             CLI.evaluate(["lanes", "export", "missing-cli-lane", "--data-root", root], offline)
 
     assert {:error, "lane empty has no version"} =
              CLI.evaluate(
@@ -284,7 +338,9 @@ defmodule SymphonyElixir.CLITest do
 
   test "evaluate/2 with --linear-mcp keeps startup and request logs off protocol stdout" do
     response = Jason.encode!(%{"jsonrpc" => "2.0", "id" => 1, "result" => %{"isError" => true}})
-    protocol_output = IO.iodata_to_binary(["Content-Length: ", Integer.to_string(byte_size(response)), "\r\n\r\n", response])
+
+    protocol_output =
+      IO.iodata_to_binary(["Content-Length: ", Integer.to_string(byte_size(response)), "\r\n\r\n", response])
 
     stdout =
       capture_io(fn ->
@@ -351,7 +407,12 @@ defmodule SymphonyElixir.CLITest do
     response = Jason.decode!(body)
 
     assert response["id"] == 1
-    assert response["result"]["tools"] |> Enum.map(& &1["name"]) |> Enum.sort() == ["approval_prompt", "linear_fetch_attachment", "linear_graphql"]
+
+    assert response["result"]["tools"] |> Enum.map(& &1["name"]) |> Enum.sort() == [
+             "approval_prompt",
+             "linear_fetch_attachment",
+             "linear_graphql"
+           ]
   end
 
   test "serve_linear_mcp_loop/2 preserves newline-delimited JSON compatibility" do

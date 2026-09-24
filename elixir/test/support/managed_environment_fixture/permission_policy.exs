@@ -4,7 +4,9 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.PermissionPolicy do
   @contexts ~w(ordinary root docker privileged_docker)
   @segment "[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}"
   @secret Regex.compile!("\\Aprojects/#{@segment}/secrets/#{@segment}/versions/[1-9][0-9]*\\z")
-  @workstation Regex.compile!("\\Aprojects/#{@segment}/locations/#{@segment}/workstationClusters/#{@segment}/workstationConfigs/#{@segment}/workstations/#{@segment}\\z")
+  @workstation Regex.compile!(
+                 "\\Aprojects/#{@segment}/locations/#{@segment}/workstationClusters/#{@segment}/workstationConfigs/#{@segment}/workstations/#{@segment}\\z"
+               )
 
   def validate(kind, profile) when is_map(profile) do
     case Map.get(profile, "metadata_policy", "deny_all") do
@@ -21,25 +23,43 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.PermissionPolicy do
 
   defp scoped(scope) do
     if exact_keys?(scope, @scope_keys) and
-         matches?(scope["service_account"], ~r/\A[a-z][a-z0-9-]{0,62}@[a-z][a-z0-9-]{0,62}\.iam\.gserviceaccount\.com\z/) and
-         versions?(scope["allowed_secret_versions"]) and versions?(scope["denied_secret_versions"]) and
-         MapSet.disjoint?(MapSet.new(scope["allowed_secret_versions"]), MapSet.new(scope["denied_secret_versions"])) and
-         repository?(scope["image_repository"]) and repository?(scope["denied_image_repository"]) and
-         scope["image_repository"]["name"] != scope["denied_image_repository"]["name"] and
+         matches?(
+           scope["service_account"],
+           ~r/\A[a-z][a-z0-9-]{0,62}@[a-z][a-z0-9-]{0,62}\.iam\.gserviceaccount\.com\z/
+         ) and
+         secret_access_scope?(scope) and image_access_scope?(scope) and
          backup?(scope["denied_backup_object"]) and matches?(scope["denied_workstation"], @workstation) and
-         is_binary(scope["iam_review_reference"]) and byte_size(scope["iam_review_reference"]) in 1..4096 and
-         String.trim(scope["iam_review_reference"]) != "" do
+         review_reference?(scope["iam_review_reference"]) do
       {:ok, %{mode: "scoped_gcp", scope: scope}}
     else
       {:error, :invalid_permission_scope}
     end
   end
 
-  defp versions?(values), do: is_list(values) and length(values) in 1..16 and Enum.uniq(values) == values and Enum.all?(values, &matches?(&1, @secret))
+  defp secret_access_scope?(scope) do
+    versions?(scope["allowed_secret_versions"]) and versions?(scope["denied_secret_versions"]) and
+      MapSet.disjoint?(MapSet.new(scope["allowed_secret_versions"]), MapSet.new(scope["denied_secret_versions"]))
+  end
+
+  defp image_access_scope?(scope) do
+    repository?(scope["image_repository"]) and repository?(scope["denied_image_repository"]) and
+      scope["image_repository"]["name"] != scope["denied_image_repository"]["name"]
+  end
+
+  defp review_reference?(reference),
+    do: is_binary(reference) and byte_size(reference) in 1..4096 and String.trim(reference) != ""
+
+  defp versions?(values),
+    do:
+      is_list(values) and length(values) in 1..16 and Enum.uniq(values) == values and
+        Enum.all?(values, &matches?(&1, @secret))
 
   defp repository?(value) do
     if exact_keys?(value, ~w(name image)) and is_binary(value["name"]) do
-      case Regex.run(~r/\Aprojects\/([a-z][a-z0-9-]*)\/locations\/([a-z][a-z0-9-]*)\/repositories\/([a-z][a-z0-9_-]*)\z/, value["name"]) do
+      case Regex.run(
+             ~r/\Aprojects\/([a-z][a-z0-9-]*)\/locations\/([a-z][a-z0-9-]*)\/repositories\/([a-z][a-z0-9_-]*)\z/,
+             value["name"]
+           ) do
         [_, project, location, repository] ->
           prefix = Regex.escape("#{location}-docker.pkg.dev/#{project}/#{repository}/")
           matches?(value["image"], Regex.compile!("\\A#{prefix}[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}\\z"))
@@ -60,12 +80,23 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.PermissionPolicy do
   end
 
   def checks(%{mode: "scoped_gcp", scope: scope}) do
-    [{"identity", 200}, {"allowed_image", 200}, {"denied_image", 403}, {"backup_denied", 403}, {"gateway_denied", 403}, {"iam_diagnostics", 200}, {"other_clouds_denied", 200}] ++
-      indexed(scope["allowed_secret_versions"], "allowed_secret", 200) ++ indexed(scope["denied_secret_versions"], "denied_secret", 403)
+    [
+      {"identity", 200},
+      {"allowed_image", 200},
+      {"denied_image", 403},
+      {"backup_denied", 403},
+      {"gateway_denied", 403},
+      {"iam_diagnostics", 200},
+      {"other_clouds_denied", 200}
+    ] ++
+      indexed(scope["allowed_secret_versions"], "allowed_secret", 200) ++
+      indexed(scope["denied_secret_versions"], "denied_secret", 403)
   end
 
   def checks(%{mode: "deny_all"}), do: [{"metadata_denied", 200}]
-  defp indexed(values, prefix, status), do: values |> Enum.with_index() |> Enum.map(fn {_, index} -> {"#{prefix}:#{index}", status} end)
+
+  defp indexed(values, prefix, status),
+    do: values |> Enum.with_index() |> Enum.map(fn {_, index} -> {"#{prefix}:#{index}", status} end)
 
   def evaluate(%{mode: "scoped_gcp", scope: scope} = policy, observations) do
     valid =
@@ -81,9 +112,10 @@ defmodule SymphonyElixir.ManagedEnvironmentFixture.PermissionPolicy do
   end
 
   def evaluate(%{mode: "deny_all"} = policy, observations) do
-    if exact_keys?(observations, ~w(complete checks)) and observations["complete"] == true and valid_checks?(observations["checks"], checks(policy)),
-      do: :ok,
-      else: {:error, :permission_evidence_incomplete}
+    if exact_keys?(observations, ~w(complete checks)) and observations["complete"] == true and
+         valid_checks?(observations["checks"], checks(policy)),
+       do: :ok,
+       else: {:error, :permission_evidence_incomplete}
   end
 
   def evaluate(_, _), do: {:error, :permission_evidence_incomplete}

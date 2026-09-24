@@ -21,7 +21,8 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
   end
 
   test "step/1 initializes a stream accumulator and emits a worker update" do
-    assert {%Stream{session_id: "sess-step"}, %{event: :session_started, session_id: "sess-step", timestamp: %DateTime{}}} =
+    assert {%Stream{session_id: "sess-step"},
+            %{event: :session_started, session_id: "sess-step", timestamp: %DateTime{}}} =
              Stream.step(%{"type" => "system", "subtype" => "init", "session_id" => "sess-step"})
   end
 
@@ -39,7 +40,8 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
   end
 
   test "truncated stream with no result and nonzero exit is a stream error" do
-    assert {:error, {:claude_stream, _}} = Stream.fold([%{"type" => "system", "subtype" => "init", "session_id" => "sess-4"}], 1)
+    assert {:error, {:claude_stream, _}} =
+             Stream.fold([%{"type" => "system", "subtype" => "init", "session_id" => "sess-4"}], 1)
   end
 
   test "fallback branches preserve useful stream state" do
@@ -90,7 +92,10 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
 
   test "failure activity reports the outcome instead of retaining the last successful action" do
     {acc, _} =
-      Stream.step(%{"type" => "assistant", "message" => %{"content" => [%{"type" => "text", "text" => "Reading code"}]}})
+      Stream.step(%{
+        "type" => "assistant",
+        "message" => %{"content" => [%{"type" => "text", "text" => "Reading code"}]}
+      })
 
     {_, update} = Stream.step(%{"type" => "result", "is_error" => true, "subtype" => "error_max_turns"}, acc)
 
@@ -100,7 +105,15 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
   end
 
   test "cached usage deduplicates repeated message blocks and reconciles final invocation totals" do
-    event = %{"type" => "assistant", "message" => %{"id" => "message-1", "usage" => %{"input_tokens" => 2, "cache_read_input_tokens" => 8}, "content" => []}}
+    event = %{
+      "type" => "assistant",
+      "message" => %{
+        "id" => "message-1",
+        "usage" => %{"input_tokens" => 2, "cache_read_input_tokens" => 8},
+        "content" => []
+      }
+    }
+
     {first, update} = Stream.step(event)
     assert update.usage.cached_tokens == 8
     {repeated, update} = Stream.step(event, first)
@@ -108,7 +121,18 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
     second = put_in(event, ["message", "id"], "message-2")
     {summed, update} = Stream.step(second, repeated)
     assert update.usage.cached_tokens == 16
-    {_final, update} = Stream.step(%{"type" => "result", "subtype" => "success", "is_error" => false, "usage" => %{"input_tokens" => 4, "cache_read_input_tokens" => 16}}, summed)
+
+    {_final, update} =
+      Stream.step(
+        %{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "usage" => %{"input_tokens" => 4, "cache_read_input_tokens" => 16}
+        },
+        summed
+      )
+
     assert update.usage.cached_tokens == 16
     assert update.usage.input_tokens == 20
   end

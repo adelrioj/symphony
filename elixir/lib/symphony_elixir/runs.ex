@@ -81,7 +81,8 @@ defmodule SymphonyElixir.Runs do
 
   @doc "Synchronously prunes events only, serialized with history writes. Failures return zero and warn."
   @spec prune_events(pos_integer()) :: non_neg_integer()
-  def prune_events(days) when is_integer(days) and days > 0, do: GenServer.call(Writer, {:prune_events, days}, :infinity)
+  def prune_events(days) when is_integer(days) and days > 0,
+    do: GenServer.call(Writer, {:prune_events, days}, :infinity)
 
   @spec kind_for(term()) :: String.t()
   def kind_for(event) when is_atom(event), do: event |> Atom.to_string() |> kind_for()

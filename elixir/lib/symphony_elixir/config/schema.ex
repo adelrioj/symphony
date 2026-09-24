@@ -535,17 +535,7 @@ defmodule SymphonyElixir.Config.Schema do
           {settings.tracker.api_key, settings.tracker.assignee, provider, []}
       end
 
-    {active_states, terminal_states} =
-      case settings.tracker.kind do
-        kind when kind in ["linear", "memory"] ->
-          {
-            settings.tracker.active_states || @linear_active_states,
-            settings.tracker.terminal_states || @linear_terminal_states
-          }
-
-        _ ->
-          {settings.tracker.active_states, settings.tracker.terminal_states}
-      end
+    {active_states, terminal_states} = tracker_states(settings.tracker)
 
     tracker = %{
       settings.tracker
@@ -573,6 +563,12 @@ defmodule SymphonyElixir.Config.Schema do
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
   end
 
+  defp tracker_states(%{kind: kind} = tracker) when kind in ["linear", "memory"] do
+    {tracker.active_states || @linear_active_states, tracker.terminal_states || @linear_terminal_states}
+  end
+
+  defp tracker_states(tracker), do: {tracker.active_states, tracker.terminal_states}
+
   defp normalize_keys(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, raw_value}, normalized ->
       Map.put(normalized, normalize_key(key), normalize_keys(raw_value))
@@ -583,7 +579,10 @@ defmodule SymphonyElixir.Config.Schema do
   defp normalize_keys(value), do: value
 
   defp stringify_structs(%{__struct__: _} = value), do: value |> Map.from_struct() |> stringify_structs()
-  defp stringify_structs(value) when is_map(value), do: Map.new(value, fn {key, item} -> {to_string(key), stringify_structs(item)} end)
+
+  defp stringify_structs(value) when is_map(value),
+    do: Map.new(value, fn {key, item} -> {to_string(key), stringify_structs(item)} end)
+
   defp stringify_structs(value) when is_list(value), do: Enum.map(value, &stringify_structs/1)
   defp stringify_structs(value), do: value
 

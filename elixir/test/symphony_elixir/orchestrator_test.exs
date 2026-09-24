@@ -5,10 +5,16 @@ defmodule SymphonyElixir.OrchestratorTest do
 
   @tag :remediation
   @tag :tmp_dir
-  test "remediation: SSH startup cleanup cannot delete through a stable root symlink outside its profile", %{tmp_dir: root} do
+  test "remediation: SSH startup cleanup cannot delete through a stable root symlink outside its profile", %{
+    tmp_dir: root
+  } do
     bin = Path.join(root, "fixture-bin")
     File.mkdir_p!(bin)
-    realpath = System.find_executable("grealpath") || System.find_executable("realpath") || flunk("SSH fixtures require realpath supporting -m")
+
+    realpath =
+      System.find_executable("grealpath") || System.find_executable("realpath") ||
+        flunk("SSH fixtures require realpath supporting -m")
+
     File.ln_s!(realpath, Path.join(bin, "realpath"))
     File.ln_s!("/bin/bash", Path.join(bin, "bash"))
     ssh = Path.join(bin, "ssh")
@@ -29,7 +35,10 @@ defmodule SymphonyElixir.OrchestratorTest do
     fixture =
       Command.run(
         ssh,
-        ["controlled-fixture", SymphonyElixir.SSH.remote_shell_command("realpath -m -- / /symphony-fixture-missing/..")],
+        [
+          "controlled-fixture",
+          SymphonyElixir.SSH.remote_shell_command("realpath -m -- / /symphony-fixture-missing/..")
+        ],
         timeout_ms: 5_000,
         task_supervisor: SymphonyElixir.TaskSupervisor
       )
@@ -402,20 +411,37 @@ defmodule SymphonyElixir.OrchestratorTest do
   defp assert_startup_cleanup_retains_base(root) do
     base = Path.join(root, "profile-base")
     File.mkdir_p!(base)
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Startup containment", workspace_base: base, worker: %{"ssh_hosts" => ["controlled-fixture"]}})
+
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Startup containment",
+        workspace_base: base,
+        worker: %{"ssh_hosts" => ["controlled-fixture"]}
+      })
 
     {:ok, lane} =
       Lanes.create(%{
         slug: "startup-containment",
         execution_profile_id: profile.id,
         workspace_subdir: "lane",
-        config: %{"tracker" => %{"kind" => "memory", "terminal_states" => ["Done"]}, "polling" => %{"interval_ms" => 60_000}}
+        config: %{
+          "tracker" => %{"kind" => "memory", "terminal_states" => ["Done"]},
+          "polling" => %{"interval_ms" => 60_000}
+        }
       })
 
     LaneContext.put(lane.id)
     {:ok, entry} = LaneStore.lookup(lane.id)
     workspace_root = entry.settings.workspace.root
-    terminal = %Issue{id: "terminal-cleanup", identifier: "CLEANUP-1", title: "Finished", state: "Done", dispatchable: true}
+
+    terminal = %Issue{
+      id: "terminal-cleanup",
+      identifier: "CLEANUP-1",
+      title: "Finished",
+      state: "Done",
+      dispatchable: true
+    }
+
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [terminal])
     terminal_workspace = Path.join(workspace_root, terminal.identifier)
     File.mkdir_p!(terminal_workspace)

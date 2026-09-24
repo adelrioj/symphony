@@ -43,7 +43,12 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
       end
     end
 
-    assert {:ok, task} = Operations.start(supervisor, Provider, %{}, entry, :prepare, authority: owner, operation_fun: operation_fun)
+    assert {:ok, task} =
+             Operations.start(supervisor, Provider, %{}, entry, :prepare,
+               authority: owner,
+               operation_fun: operation_fun
+             )
+
     assert_receive {:blocked, job, ^owner, ^supervisor}
     assert Agent.get(owner, & &1) == :responsive
     send(job, :finish)
@@ -228,7 +233,10 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     assert_receive {:DOWN, ^monitor, :process, ^owner, _}
     refute File.exists?(path)
     assert Port.info(port) == nil
-    {_diagnostic, status} = System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true)
+
+    {_diagnostic, status} =
+      System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true)
+
     refute status == 0
   end
 
@@ -299,7 +307,9 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
       :stop, record, _ -> {:error, {:unknown, :still_starting}, record}
     end
 
-    assert {:error, {:unknown, :still_starting}, latest} = Operations.run(Provider, %{shutdown_timeout_ms: 100}, entry, :stop, request_fun: request)
+    assert {:error, {:unknown, :still_starting}, latest} =
+             Operations.run(Provider, %{shutdown_timeout_ms: 100}, entry, :stop, request_fun: request)
+
     assert latest.pending == pending.pending
     assert latest.proof == :unknown
     assert {:error, :connection_closed} = Operations.close_connection(lease)
@@ -320,13 +330,24 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     }
     """)
 
-    target = %Target{executable: "/bin/sh", prefix: ["-c", "eval \"$1\"", "fake-ssh"], label: "worker", env: [{"BASH_ENV", shell_env}, {"SYMPHONY_REALPATH_PROBE", probe_observation}]}
+    target = %Target{
+      executable: "/bin/sh",
+      prefix: ["-c", "eval \"$1\"", "fake-ssh"],
+      label: "worker",
+      env: [{"BASH_ENV", shell_env}, {"SYMPHONY_REALPATH_PROBE", probe_observation}]
+    }
+
     {config, entry} = preparation(root)
     parent = self()
     request = prepare_request(supervisor, target, parent)
 
     assert {:error, {:invalid, :worker_readiness}, latest} =
-             Operations.run(Provider, config, entry, :prepare, task_supervisor: supervisor, authority: self(), agent_executable: "sh", request_fun: request)
+             Operations.run(Provider, config, entry, :prepare,
+               task_supervisor: supervisor,
+               authority: self(),
+               agent_executable: "sh",
+               request_fun: request
+             )
 
     assert latest.phase == :running
     assert latest.version == "observed-running"
@@ -382,7 +403,12 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     request = prepare_request(supervisor, target, self())
 
     assert {:ok, context} =
-             Operations.run(Provider, config, entry, :prepare, task_supervisor: supervisor, authority: self(), agent_executable: "sh", request_fun: request)
+             Operations.run(Provider, config, entry, :prepare,
+               task_supervisor: supervisor,
+               authority: self(),
+               agent_executable: "sh",
+               request_fun: request
+             )
 
     assert :ok = Operations.close_connection(context.connection)
     assert Bitwise.band(File.stat!(docker_root).mode, 0o777) == 0o555
@@ -451,12 +477,30 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     {config, entry} = preparation("/state/workspaces")
     request = prepare_request(supervisor, target, self())
     opts = [task_supervisor: supervisor, authority: self(), agent_executable: "codex", request_fun: request]
-    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, Keyword.put(opts, :command_fun, fn _, _, _ -> {:ok, %{output: "", status: 0}} end))
+
+    assert {:ok, context} =
+             Operations.run(
+               Provider,
+               config,
+               entry,
+               :prepare,
+               Keyword.put(opts, :command_fun, fn _, _, _ -> {:ok, %{output: "", status: 0}} end)
+             )
+
     assert context.environment.record.version == "observed-running"
     assert :ok = GenServer.call(context.connection.owner, {:validate_connection, context.connection.id, target})
     assert :ok = Operations.close_connection(context.connection)
     assert_receive {:connected, _}
-    assert {:error, {:unknown, _}, latest} = Operations.run(Provider, config, entry, :prepare, Keyword.put(opts, :command_fun, fn _, _, _ -> {:error, {:unknown, :timeout}} end))
+
+    assert {:error, {:unknown, _}, latest} =
+             Operations.run(
+               Provider,
+               config,
+               entry,
+               :prepare,
+               Keyword.put(opts, :command_fun, fn _, _, _ -> {:error, {:unknown, :timeout}} end)
+             )
+
     assert latest.version == "observed-running"
     assert_receive {:connected, failed_lease}
     assert {:error, :connection_closed} = Operations.close_connection(failed_lease)
@@ -479,7 +523,13 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     supervisor = start_supervised!(Task.Supervisor)
     target = %Target{executable: "/usr/bin/ssh", prefix: ["worker"], label: "worker"}
     {config, entry} = preparation("/state/workspaces")
-    entry = %{entry | attempt_id: "current-attempt", record: %{entry.record | issue_state: "In Review", issue_identifier: "ISSUE-42"}}
+
+    entry = %{
+      entry
+      | attempt_id: "current-attempt",
+        record: %{entry.record | issue_state: "In Review", issue_identifier: "ISSUE-42"}
+    }
+
     fallback = prepare_request(supervisor, target, self())
 
     request = fn
@@ -607,8 +657,15 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
       :inspect, record, opts -> {:ok, %{record | version: opts[:timeout_ms]}}
     end
 
-    opts = [request_fun: request, clock: fn -> Agent.get(clock, & &1) end, sleep_fun: fn milliseconds -> Agent.update(clock, &(&1 + milliseconds)) end]
-    assert {:error, {:unknown, {:operation_timeout, :stopped}}, latest} = Operations.run(Provider, %{shutdown_timeout_ms: 1_500}, entry, :stop, opts)
+    opts = [
+      request_fun: request,
+      clock: fn -> Agent.get(clock, & &1) end,
+      sleep_fun: fn milliseconds -> Agent.update(clock, &(&1 + milliseconds)) end
+    ]
+
+    assert {:error, {:unknown, {:operation_timeout, :stopped}}, latest} =
+             Operations.run(Provider, %{shutdown_timeout_ms: 1_500}, entry, :stop, opts)
+
     assert latest.version == 500
     assert latest.pending == pending.pending
     assert latest.terminal_observed_at == 1_000
@@ -616,21 +673,41 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
 
   test "argv helper does not interpret shell metacharacters and bounds diagnostics" do
     supervisor = start_supervised!(Task.Supervisor)
-    assert {:ok, %{output: "$(echo forbidden)", status: 0}} = Command.run(System.find_executable("printf"), ["%s", "$(echo forbidden)"], task_supervisor: supervisor, timeout_ms: 1_000)
+
+    assert {:ok, %{output: "$(echo forbidden)", status: 0}} =
+             Command.run(System.find_executable("printf"), ["%s", "$(echo forbidden)"],
+               task_supervisor: supervisor,
+               timeout_ms: 1_000
+             )
 
     assert {:error, {:unknown, {:output_limit, output}}} =
-             Command.run(System.find_executable("printf"), ["%s", String.duplicate("x", 100)], task_supervisor: supervisor, timeout_ms: 1_000, max_output_bytes: 8)
+             Command.run(System.find_executable("printf"), ["%s", String.duplicate("x", 100)],
+               task_supervisor: supervisor,
+               timeout_ms: 1_000,
+               max_output_bytes: 8
+             )
 
     assert byte_size(output) <= 8
-    assert {:error, {:unknown, {:timeout, _}}} = Command.run(System.find_executable("sleep"), ["10"], task_supervisor: supervisor, timeout_ms: 10)
+
+    assert {:error, {:unknown, {:timeout, _}}} =
+             Command.run(System.find_executable("sleep"), ["10"], task_supervisor: supervisor, timeout_ms: 10)
   end
 
   test "command timeout reaps the known local process rather than just closing its port" do
     supervisor = start_supervised!(Task.Supervisor)
-    assert {:error, {:unknown, {:timeout, output}}} = Command.run("/bin/sh", ["-c", "printf '%s\\n' \"$$\"; exec sleep 10"], task_supervisor: supervisor, timeout_ms: 200)
+
+    assert {:error, {:unknown, {:timeout, output}}} =
+             Command.run("/bin/sh", ["-c", "printf '%s\\n' \"$$\"; exec sleep 10"],
+               task_supervisor: supervisor,
+               timeout_ms: 200
+             )
+
     pid = output |> String.trim() |> String.to_integer()
     assert pid > 0
-    {_diagnostic, status} = System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true)
+
+    {_diagnostic, status} =
+      System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true)
+
     refute status == 0
   end
 
@@ -666,14 +743,26 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
 
     task =
       Task.Supervisor.async_nolink(supervisor, fn ->
-        Command.run("/bin/sh", ["-c", "printf '%s\\n' \"$$\" > \"$PID_FILE\"; exec sleep 30"], task_supervisor: supervisor, authority: authority, timeout_ms: 30_000, env: [{"PID_FILE", pid_path}])
+        Command.run("/bin/sh", ["-c", "printf '%s\\n' \"$$\" > \"$PID_FILE\"; exec sleep 30"],
+          task_supervisor: supervisor,
+          authority: authority,
+          timeout_ms: 30_000,
+          env: [{"PID_FILE", pid_path}]
+        )
       end)
 
     eventually(fn -> match?({:ok, content} when byte_size(content) > 0, File.read(pid_path)) end)
     pid = pid_path |> File.read!() |> String.trim() |> String.to_integer()
-    assert {_diagnostic, 0} = System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true)
+
+    assert {_diagnostic, 0} =
+             System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true)
+
     Task.shutdown(task, :brutal_kill)
-    eventually(fn -> elem(System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true), 1) != 0 end)
+
+    eventually(fn ->
+      elem(System.cmd(System.find_executable("kill"), ["-0", Integer.to_string(pid)], stderr_to_stdout: true), 1) != 0
+    end)
+
     eventually(fn -> Task.Supervisor.children(supervisor) == [] end)
   end
 
@@ -971,7 +1060,12 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     request = prepare_request(supervisor, target, self())
 
     assert {:error, {:invalid, :managed_execution_context}, latest} =
-             Operations.run(Provider, config, entry, :prepare, task_supervisor: supervisor, authority: self(), request_fun: request, agent_executable: "sh")
+             Operations.run(Provider, config, entry, :prepare,
+               task_supervisor: supervisor,
+               authority: self(),
+               request_fun: request,
+               agent_executable: "sh"
+             )
 
     assert latest.phase == :running
     assert_receive {:connected, lease}
@@ -1411,7 +1505,16 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     assert assignment["owner"]["attempt_id"] == "original-attempt"
     assert assignment["owner"]["workstation_uid"] == "ws-uid"
     assert Agent.get(cloud, & &1.record["state"]) == "OWNED"
-    assert {:ok, stopped} = Operations.run(Provider, config, %{entry | context: context, record: context.environment.record}, :stop, options)
+
+    assert {:ok, stopped} =
+             Operations.run(
+               Provider,
+               config,
+               %{entry | context: context, record: context.environment.record},
+               :stop,
+               options
+             )
+
     assert {:quiescent, %{uid: "ws-uid"}} = stopped.proof
     assert stopped.metadata["codex_credentials"]["stage"] == "committed"
     authority = Agent.get(cloud, & &1.record)
@@ -1419,17 +1522,44 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     assert authority["head_version"] == "projects/123456/secrets/features-codex/versions/2"
     assert authority["last_handoff"]["resource_acknowledged"]
     assert authority["last_handoff"]["owner"]["attempt_id"] == "original-attempt"
-    assert Agent.get(remote, & &1.events) == [:ensure, :bound_intent, :start, :prepare, :seal, :checkpoint, :stop, :disposition, :disposition]
+
+    assert Agent.get(remote, & &1.events) == [
+             :ensure,
+             :bound_intent,
+             :start,
+             :prepare,
+             :seal,
+             :checkpoint,
+             :stop,
+             :disposition,
+             :disposition
+           ]
+
     assert {:error, :connection_closed} = Operations.close_connection(context.connection)
   end
 
   test "Codex invalid readiness never grants an agent connection and keeps ownership" do
     {config, entry, options, cloud, remote} = codex_fixture()
     Agent.update(remote, &Map.put(&1, :mode, :wrong_ready))
-    assert {:error, {:unknown, :credential_outcome_unknown}, record} = Operations.run(Provider, config, entry, :prepare, options)
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, record} =
+             Operations.run(Provider, config, entry, :prepare, options)
+
     assert record.metadata["codex_credentials"]["reason"] == "worker_readiness"
     assert Agent.get(cloud, & &1.record["state"]) != "AVAILABLE"
     assert Agent.get(remote, & &1.record.phase) == :running
+  end
+
+  test "Codex worker status rejects extra claims before granting an agent connection" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    Agent.update(remote, &Map.put(&1, :mode, :extra_status_field))
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, rejected} =
+             Operations.run(Provider, config, entry, :prepare, options)
+
+    assert rejected.metadata["codex_credentials"]["reason"] == "worker_readiness"
+    assert Agent.get(cloud, & &1.record["state"]) == "OWNED"
+    refute :checkpoint in Agent.get(remote, & &1.events)
   end
 
   test "Codex checkpoint failure still stops physically while SSH remains available and never releases" do
@@ -1438,7 +1568,13 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     Agent.update(remote, &Map.put(&1, :mode, :checkpoint_failure))
 
     assert {:error, {:unknown, :credential_outcome_unknown}, stopped} =
-             Operations.run(Provider, config, %{entry | record: context.environment.record, context: context, attempt_id: "recovery-entry"}, :stop, options)
+             Operations.run(
+               Provider,
+               config,
+               %{entry | record: context.environment.record, context: context, attempt_id: "recovery-entry"},
+               :stop,
+               options
+             )
 
     assert {:quiescent, %{uid: "ws-uid"}} = stopped.proof
     assert stopped.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] == "original-attempt"
@@ -1450,9 +1586,15 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
   test "Codex missing cloud authority cannot create or destroy even after a SQLite restore" do
     {config, entry, options, cloud, remote} = codex_fixture()
     Agent.update(cloud, &Map.put(&1, :record, nil))
-    assert {:error, {:unknown, :credential_outcome_unknown}, _} = Operations.run(Provider, config, entry, :prepare, options)
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} =
+             Operations.run(Provider, config, entry, :prepare, options)
+
     assert Agent.get(remote, & &1.events) == []
-    assert {:error, {:unknown, :credential_outcome_unknown}, _} = Operations.run(Provider, config, %{entry | record: %{entry.record | desired: :absent}}, :destroy, options)
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} =
+             Operations.run(Provider, config, %{entry | record: %{entry.record | desired: :absent}}, :destroy, options)
+
     assert Agent.get(remote, & &1.events) == []
   end
 
@@ -1465,7 +1607,10 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     cleanup = %{Lifecycle.new(%{record | phase: :stopped}, "new-cleanup-attempt", :cleanup) | agent_executable: nil}
     assert {:ok, recovered} = Operations.run(Provider, config, cleanup, :prepare, options)
     assert recovered.environment.record.metadata["codex_credentials"]["mode"] == "recover"
-    assert recovered.environment.record.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] == "original-attempt"
+
+    assert recovered.environment.record.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] ==
+             "original-attempt"
+
     assert Agent.get(cloud, & &1.record["owner"]["attempt_id"]) == "original-attempt"
     assert :ok = Operations.close_connection(recovered.connection)
   end
@@ -1484,7 +1629,13 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     options = Keyword.merge(options, clock: fn -> Agent.get(clock, & &1) end, command_fun: command)
 
     assert {:error, {:unknown, :credential_outcome_unknown}, stopped} =
-             Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, options)
+             Operations.run(
+               Provider,
+               config,
+               %{entry | record: context.environment.record, context: context},
+               :stop,
+               options
+             )
 
     assert {:quiescent, _} = stopped.proof
     assert :stop in Agent.get(remote, & &1.events)
@@ -1514,7 +1665,10 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     end
 
     options = Keyword.merge(options, clock: fn -> Agent.get(clock, & &1) end, request_fun: request)
-    result = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, options)
+
+    result =
+      Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, options)
+
     assert_received {:safety_stop, remaining_ms}
     assert remaining_ms > 0
     assert {:error, {:unknown, :credential_outcome_unknown}, stopped} = result
@@ -1540,7 +1694,13 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     end
 
     assert {:error, {:unknown, :credential_outcome_unknown}, uncertain} =
-             Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, Keyword.put(options, :request_fun, lose_disposition))
+             Operations.run(
+               Provider,
+               config,
+               %{entry | record: context.environment.record, context: context},
+               :stop,
+               Keyword.put(options, :request_fun, lose_disposition)
+             )
 
     assert Agent.get(cloud, & &1.record["state"]) == "AVAILABLE"
     refute Agent.get(cloud, & &1.record["last_handoff"]["resource_acknowledged"])
@@ -1553,7 +1713,9 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     refute next.environment.record.metadata["codex_credentials"]["assignment"]["claim_id"] ==
              context.environment.record.metadata["codex_credentials"]["assignment"]["claim_id"]
 
-    assert next.environment.record.metadata["codex_credentials"]["assignment"]["secret_version"] == "projects/123456/secrets/features-codex/versions/2"
+    assert next.environment.record.metadata["codex_credentials"]["assignment"]["secret_version"] ==
+             "projects/123456/secrets/features-codex/versions/2"
+
     assert Agent.get(remote, & &1.record.phase) == :running
     assert :ok = Operations.close_connection(next.connection)
   end
@@ -1561,7 +1723,16 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
   test "restored disposition survives an acknowledged handoff advancing to another resource" do
     {config, entry, options, _cloud, _remote} = codex_fixture()
     assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
-    assert {:ok, stopped} = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, options)
+
+    assert {:ok, stopped} =
+             Operations.run(
+               Provider,
+               config,
+               %{entry | record: context.environment.record, context: context},
+               :stop,
+               options
+             )
+
     stale = put_in(stopped.metadata, ["codex_credentials", "disposition", "resource_acknowledged"], false)
     stale = %{stopped | metadata: stale}
 
@@ -1569,17 +1740,27 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
       context.environment.record.metadata["codex_credentials"]["assignment"]["owner"]
       |> Map.merge(%{
         "workstation_uid" => nil,
-        "workstation_name" => "projects/p/locations/l/workstationClusters/c/workstationConfigs/features/workstations/another-ticket",
+        "workstation_name" =>
+          "projects/p/locations/l/workstationClusters/c/workstationConfigs/features/workstations/another-ticket",
         "attempt_id" => "another-attempt"
       })
 
     assert {:ok, claimed} = SymphonyElixir.CodexCredentials.claim(config, owner, options)
     claim = claimed.record["claim_id"]
-    assert {:ok, bound} = SymphonyElixir.CodexCredentials.transition(config, claim, {:bind_uid, claim, "another-uid"}, options)
+
+    assert {:ok, bound} =
+             SymphonyElixir.CodexCredentials.transition(config, claim, {:bind_uid, claim, "another-uid"}, options)
+
     assert {:ok, assignment} = SymphonyElixir.CodexCredentials.Record.assignment(bound.record)
     receipt = Map.merge(assignment, %{"sha256" => String.duplicate("a", 64), "admission" => "sealed"})
     assert {:ok, _} = SymphonyElixir.CodexCredentials.transition(config, claim, {:checkpoint, receipt}, options)
-    proof = %{"uid" => "another-uid", "operation" => "projects/p/locations/l/operations/another-stop", "attempt_id" => "another-attempt"}
+
+    proof = %{
+      "uid" => "another-uid",
+      "operation" => "projects/p/locations/l/operations/another-stop",
+      "attempt_id" => "another-attempt"
+    }
+
     assert {:ok, _} = SymphonyElixir.CodexCredentials.transition(config, claim, {:stopped, claim, proof}, options)
     assert {:ok, _} = SymphonyElixir.CodexCredentials.transition(config, claim, {:release, claim}, options)
     assert {:ok, _} = SymphonyElixir.CodexCredentials.transition(config, claim, {:acknowledge_handoff, claim}, options)
@@ -1595,13 +1776,17 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     owner = %{
       "deployment_id" => "deployment",
       "lane" => "features",
-      "workstation_name" => "projects/p/locations/l/workstationClusters/c/workstationConfigs/features/workstations/another-ticket",
+      "workstation_name" =>
+        "projects/p/locations/l/workstationClusters/c/workstationConfigs/features/workstations/another-ticket",
       "workstation_uid" => nil,
       "attempt_id" => "foreign-attempt"
     }
 
     assert {:ok, held} = SymphonyElixir.CodexCredentials.claim(config, owner, options)
-    assert {:error, {:retryable, :credential_busy}, waiting} = Operations.run(Provider, config, entry, :prepare, options)
+
+    assert {:error, {:retryable, :credential_busy}, waiting} =
+             Operations.run(Provider, config, entry, :prepare, options)
+
     assert waiting.provider_ref == nil
     assert waiting.pending == []
     refute Map.has_key?(waiting.metadata, "codex_credentials")
@@ -1612,7 +1797,16 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
   test "committed cleanup startup preserves exact disposition while admitting only recovery management" do
     {config, entry, options, _cloud, _remote} = codex_fixture()
     assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
-    assert {:ok, committed} = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, options)
+
+    assert {:ok, committed} =
+             Operations.run(
+               Provider,
+               config,
+               %{entry | record: context.environment.record, context: context},
+               :stop,
+               options
+             )
+
     cleanup = Lifecycle.new(committed, "cleanup-attempt", :cleanup)
     assert {:ok, recovered} = Operations.run(Provider, config, cleanup, :prepare, options)
     assert recovered.environment.record.metadata["codex_credentials"]["mode"] == "recover"
@@ -1635,7 +1829,13 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     end
 
     assert {:error, {:unknown, :credential_outcome_unknown}, stopped} =
-             Operations.run(Provider, config, %{entry | record: context.environment.record, context: nil}, :stop, Keyword.put(options, :request_fun, broken_connection))
+             Operations.run(
+               Provider,
+               config,
+               %{entry | record: context.environment.record, context: nil},
+               :stop,
+               Keyword.put(options, :request_fun, broken_connection)
+             )
 
     assert {:quiescent, _} = stopped.proof
     assert :stop in Agent.get(remote, & &1.events)
@@ -1651,13 +1851,16 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
 
       request = fn operation, record, opts ->
         if operation == failing do
-          {:error, {:unknown, :lost_provider_response}, %{record | pending: [%{verb: unquote(verb), id: nil, outcome: :unknown}]}}
+          {:error, {:unknown, :lost_provider_response},
+           %{record | pending: [%{verb: unquote(verb), id: nil, outcome: :unknown}]}}
         else
           provider.(operation, record, opts)
         end
       end
 
-      assert {:error, {:unknown, :lost_provider_response}, uncertain} = Operations.run(Provider, config, entry, :prepare, Keyword.put(options, :request_fun, request))
+      assert {:error, {:unknown, :lost_provider_response}, uncertain} =
+               Operations.run(Provider, config, entry, :prepare, Keyword.put(options, :request_fun, request))
+
       assert [%{outcome: :unknown}] = uncertain.pending
       refute uncertain.absent?
       assert Agent.get(cloud, & &1.record["state"]) == "OWNED"
@@ -1671,7 +1874,16 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
     before = Agent.get(cloud, & &1)
     options = Keyword.put(options, :command_fun, fn _, _, _ -> flunk("safety stop invoked worker credentials") end)
-    assert {:ok, stopped} = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :credential_safety_stop, options)
+
+    assert {:ok, stopped} =
+             Operations.run(
+               Provider,
+               config,
+               %{entry | record: context.environment.record, context: context},
+               :credential_safety_stop,
+               options
+             )
+
     assert {:quiescent, %{uid: "ws-uid"}} = stopped.proof
     assert Agent.get(cloud, & &1) == before
     refute Credentials.resolved?(stopped)
@@ -1691,10 +1903,27 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
         provider.(operation, current, opts)
     end
 
-    assert {:error, _, unresolved} = Operations.run(Provider, config, %{entry | record: context.environment.record, context: context}, :stop, Keyword.put(options, :request_fun, reject_disposition))
+    assert {:error, _, unresolved} =
+             Operations.run(
+               Provider,
+               config,
+               %{entry | record: context.environment.record, context: context},
+               :stop,
+               Keyword.put(options, :request_fun, reject_disposition)
+             )
+
     before = Agent.get(cloud, & &1)
     assert before.record["last_handoff"]["resource_acknowledged"] == false
-    assert {:ok, _} = Operations.run(Provider, config, %{entry | record: unresolved}, :inspect, Keyword.put(options, :credential_reconcile, false))
+
+    assert {:ok, _} =
+             Operations.run(
+               Provider,
+               config,
+               %{entry | record: unresolved},
+               :inspect,
+               Keyword.put(options, :credential_reconcile, false)
+             )
+
     assert Agent.get(cloud, & &1) == before
   end
 
@@ -1717,12 +1946,34 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
       codex_credentials: references
     }
 
-    resource = "projects/p/locations/l/workstationClusters/c/workstationConfigs/features/workstations/" <> SymphonyElixir.ExecutionEnvironment.resource_key("deployment", "memory", "ticket")
-    record = %{record() | kind: "google_workstations", key: List.last(String.split(resource, "/")), scope: Config.scope(config), attempt_id: "original-attempt"}
+    resource =
+      "projects/p/locations/l/workstationClusters/c/workstationConfigs/features/workstations/" <>
+        SymphonyElixir.ExecutionEnvironment.resource_key("deployment", "memory", "ticket")
+
+    record = %{
+      record()
+      | kind: "google_workstations",
+        key: List.last(String.split(resource, "/")),
+        scope: Config.scope(config),
+        attempt_id: "original-attempt"
+    }
+
     entry = Lifecycle.new(record, "original-attempt", :agent)
-    seed = SymphonyElixir.CodexCredentials.Record.initial(references["credential_id"], 1, references["secret"] <> "/versions/1")
+
+    seed =
+      SymphonyElixir.CodexCredentials.Record.initial(
+        references["credential_id"],
+        1,
+        references["secret"] <> "/versions/1"
+      )
+
     cloud = start_supervised!({Agent, fn -> %{record: seed, generation: 1} end}, id: make_ref())
-    remote = start_supervised!({Agent, fn -> %{record: record, events: [], mode: :normal, connection: nil} end}, id: make_ref())
+
+    remote =
+      start_supervised!({Agent, fn -> %{record: record, events: [], mode: :normal, connection: nil} end},
+        id: make_ref()
+      )
+
     supervisor = start_supervised!(Task.Supervisor)
     target = %Target{executable: "/usr/bin/ssh", prefix: ["worker"], label: "worker"}
 
@@ -1737,7 +1988,15 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
 
     command = fn _, arguments, opts -> codex_command(remote, references, arguments, opts) end
 
-    {config, entry, [authority: self(), task_supervisor: supervisor, agent_executable: "codex", request_fun: provider, request: request, command_fun: command], cloud, remote}
+    {config, entry,
+     [
+       authority: self(),
+       task_supervisor: supervisor,
+       agent_executable: "codex",
+       request_fun: provider,
+       request: request,
+       command_fun: command
+     ], cloud, remote}
   end
 
   defp codex_cloud_response(method, url, query, body, references, state) do
@@ -1804,8 +2063,17 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
 
   defp codex_provider(:stop, current, _opts, fixture) do
     connection = Agent.get(fixture.remote, & &1.connection)
-    if connection, do: assert(:ok == GenServer.call(connection.owner, {:validate_connection, connection.id, fixture.target}))
-    next = %{current | phase: :stopped, pending: [], proof: {:quiescent, %{uid: "ws-uid", operation: "projects/p/locations/l/operations/stop"}}}
+
+    if connection,
+      do: assert(:ok == GenServer.call(connection.owner, {:validate_connection, connection.id, fixture.target}))
+
+    next = %{
+      current
+      | phase: :stopped,
+        pending: [],
+        proof: {:quiescent, %{uid: "ws-uid", operation: "projects/p/locations/l/operations/stop"}}
+    }
+
     Agent.update(fixture.remote, &%{&1 | record: next, events: &1.events ++ [:stop]})
     {:ok, next}
   end
@@ -1830,14 +2098,31 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
   end
 
   defp codex_command_result("checkpoint", _state, _credential, assignment, references) do
-    receipt = Map.merge(assignment, %{"secret_version" => references["secret"] <> "/versions/2", "sha256" => String.duplicate("a", 64), "admission" => "sealed"})
+    receipt =
+      Map.merge(assignment, %{
+        "secret_version" => references["secret"] <> "/versions/2",
+        "sha256" => String.duplicate("a", 64),
+        "admission" => "sealed"
+      })
+
     {:ok, %{status: 0, output: Jason.encode!(%{"ok" => true, "result" => receipt})}}
   end
 
   defp codex_command_result(action, state, credential, assignment, _references) do
     sealed = action == "seal" or credential["mode"] == "recover"
-    result = %{"assignment" => assignment, "state" => if(sealed, do: "SEALED", else: "READY"), "admission" => if(sealed, do: "sealed", else: "open"), "reason" => nil}
-    result = if state.mode == :wrong_ready, do: put_in(result, ["assignment", "claim_id"], "foreign-claim"), else: result
+
+    result = %{
+      "assignment" => assignment,
+      "state" => if(sealed, do: "SEALED", else: "READY"),
+      "admission" => if(sealed, do: "sealed", else: "open"),
+      "reason" => nil
+    }
+
+    result =
+      if state.mode == :wrong_ready, do: put_in(result, ["assignment", "claim_id"], "foreign-claim"), else: result
+
+    result = if state.mode == :extra_status_field, do: Map.put(result, "authority_override", true), else: result
+
     {:ok, %{status: 0, output: Jason.encode!(%{"ok" => true, "result" => result})}}
   end
 
@@ -1866,7 +2151,12 @@ defmodule SymphonyElixir.EnvironmentOperationsHookTest do
 
   test "cleanup hook runs in the retained workspace without deleting it" do
     {root, entry} = hook_entry()
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_remove: "printf cleaned > marker")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_before_remove: "printf cleaned > marker"
+    )
+
     assert {:ok, _} = Operations.run(nil, %{}, entry, :cleanup_hook, [])
     assert File.read!(Path.join(entry.record.workspace_path, "marker")) == "cleaned"
     assert File.read!(Path.join(entry.record.workspace_path, "retained")) == "disk"
@@ -1875,7 +2165,12 @@ defmodule SymphonyElixir.EnvironmentOperationsHookTest do
   test "async cleanup runs the retained hook after its caller restores a lane with the hook cleared" do
     supervisor = start_supervised!(Task.Supervisor)
     {root, entry} = hook_entry()
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_remove: "printf archived > marker")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_before_remove: "printf archived > marker"
+    )
+
     {:ok, snapshot} = LaneContext.capture()
     entry = %{entry | lane_snapshot: snapshot}
     parent = self()
@@ -1903,7 +2198,11 @@ defmodule SymphonyElixir.EnvironmentOperationsHookTest do
   test "async managed cleanup uses its retained timeout after a newer timeout is published" do
     supervisor = start_supervised!(Task.Supervisor)
     {root, entry} = hook_entry()
-    realpath = System.find_executable("grealpath") || System.find_executable("realpath") || flunk("managed workspace fixtures require realpath supporting -m")
+
+    realpath =
+      System.find_executable("grealpath") || System.find_executable("realpath") ||
+        flunk("managed workspace fixtures require realpath supporting -m")
+
     bin = Path.join(root, "fixture-bin")
     File.mkdir_p!(bin)
     File.ln_s!(realpath, Path.join(bin, "realpath"))
@@ -1944,7 +2243,9 @@ defmodule SymphonyElixir.EnvironmentOperationsHookTest do
     write_workflow_file!(workflow_path, workspace_root: root, hook_before_remove: hook, hook_timeout_ms: 2_000)
     send(worker, :run_cleanup)
 
-    assert {nil, {:error, {:managed_execution_unknown, {:remote_command_timeout, "before_remove", 1_000}}, latest}} = Task.await(task)
+    assert {nil, {:error, {:managed_execution_unknown, {:remote_command_timeout, "before_remove", 1_000}}, latest}} =
+             Task.await(task)
+
     assert File.read(Path.join(latest.workspace_path, "marker")) == {:ok, "archived"}
     assert File.read!(Path.join(latest.workspace_path, "retained")) == "disk"
     assert Lifecycle.occupied?(Lifecycle.new(latest, "a", :cleanup))

@@ -298,7 +298,10 @@ defmodule SymphonyElixir.GitLab.Client do
     api_url = provider["api_url"] || @default_api_url
     project_path = resolve_setting(provider["project_path"], System.get_env("GITLAB_PROJECT_PATH"))
 
-    api_key = if validation == :runtime, do: resolve_setting(provider["api_key"], System.get_env("GITLAB_PAT")), else: provider["api_key"]
+    api_key =
+      if validation == :runtime,
+        do: resolve_setting(provider["api_key"], System.get_env("GITLAB_PAT")),
+        else: provider["api_key"]
 
     cond do
       not valid_api_url?(api_url) ->
@@ -310,7 +313,7 @@ defmodule SymphonyElixir.GitLab.Client do
       not valid_project_path?(project_path) ->
         {:error, :invalid_gitlab_project_path}
 
-      not present_string?(api_key) and (validation == :runtime or not is_nil(api_key)) ->
+      missing_credential?(api_key, validation) ->
         {:error, :missing_gitlab_api_key}
 
       true ->
@@ -322,6 +325,9 @@ defmodule SymphonyElixir.GitLab.Client do
          }}
     end
   end
+
+  defp missing_credential?(nil, validation), do: validation == :runtime
+  defp missing_credential?(value, _validation), do: not present_string?(value)
 
   defp provider_settings(%{provider: provider}) when is_map(provider), do: provider
   defp provider_settings(_tracker_settings), do: %{}

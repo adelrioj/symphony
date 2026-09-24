@@ -82,7 +82,10 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
         # Pins are the only Kubernetes route, and never a Workstations one.
         require!(is_map(pins) == (config.kind == "kubernetes"), "kubernetes_candidate_pins_required")
         permission_policy = provider_value!(PermissionPolicy.validate(config.kind, profile))
-        check_names = if config.kind == "kubernetes", do: @checks ++ ["delayed_gate_release", "node_disconnection"], else: @checks
+
+        check_names =
+          if config.kind == "kubernetes", do: @checks ++ ["delayed_gate_release", "node_disconnection"], else: @checks
+
         control_opts = [checks: check_names, session_limit: profile["max_backend_sessions"], config: config]
         {:ok, control} = Control.start_link(control_opts)
         {:ok, tasks} = Task.Supervisor.start_link()
@@ -161,7 +164,14 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       GenServer.call(ctx.control, {:issues, ctx.issues})
       refresh()
       first_five = Enum.take(ctx.issues, 5)
-      await(ctx, "five_backends_active", fn -> Enum.all?(first_five, &workload_ready?(ctx, &1)) end, ctx.config.startup_timeout_ms * 3)
+
+      await(
+        ctx,
+        "five_backends_active",
+        fn -> Enum.all?(first_five, &workload_ready?(ctx, &1)) end,
+        ctx.config.startup_timeout_ms * 3
+      )
+
       facts = Enum.map(first_five, &verify_workload!(ctx, &1))
       pass(ctx, "codex_workloads", %{issues: Enum.map(first_five, & &1.id), observations: facts})
       begin_check("five_slots_and_queue")
@@ -171,7 +181,12 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       require!(five_occupied and sixth_not_started, "sixth_worker_started_without_capacity")
       require!(length(Enum.uniq(Enum.map(facts, & &1.engine_id))) == 5, "docker_daemon_identity_shared")
       assert_no_duplicate_resources!(ctx)
-      pass(ctx, "five_slots_and_queue", %{environment_ids: Enum.map(first_five, &entry!(&1.id).record.key), queued_issue: issue(ctx, 6).id})
+
+      pass(ctx, "five_slots_and_queue", %{
+        environment_ids: Enum.map(first_five, &entry!(&1.id).record.key),
+        queued_issue: issue(ctx, 6).id
+      })
+
       begin_check("isolation")
       isolation = isolation!(ctx, first_five)
       pass(ctx, "isolation", %{issues: Enum.map(first_five, & &1.id), permissions: isolation})
@@ -192,13 +207,25 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       arm(ctx, {:deny_stop, first.id})
       transition(ctx, first, "In Review")
       await(ctx, "actual_stop_denied", fn -> event?(ctx, :stop_denied, first.id) and unknown_occupied?(first.id) end)
-      require!(not Map.has_key?(scheduler_state().environment_entries, issue(ctx, 6).id), "denied_stop_released_capacity")
+
+      require!(
+        not Map.has_key?(scheduler_state().environment_entries, issue(ctx, 6).id),
+        "denied_stop_released_capacity"
+      )
+
       pass(ctx, "denied_stop", %{environment_id: first_entry.record.key})
       begin_check("review_and_resume")
       disarm(ctx, {:deny_stop, first.id})
       refresh()
       await(ctx, "review_compute_stopped", fn -> stopped?(first.id) end)
-      await(ctx, "queued_sixth_started", fn -> workload_ready?(ctx, issue(ctx, 6)) end, ctx.config.startup_timeout_ms * 2)
+
+      await(
+        ctx,
+        "queued_sixth_started",
+        fn -> workload_ready?(ctx, issue(ctx, 6)) end,
+        ctx.config.startup_timeout_ms * 2
+      )
+
       verify_workload!(ctx, issue(ctx, 6))
       review_before = review_response!(ctx)
       for other <- Enum.drop(ctx.issues, 1), do: transition(ctx, other, "In Review")
@@ -207,11 +234,30 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       transition(ctx, first, "Qualification Claude")
       await(ctx, "claude_resumed_workload", fn -> workload_ready?(ctx, first) end, ctx.config.startup_timeout_ms * 2)
       resumed = entry!(first.id)
-      require!(resumed.record.provider_ref == first_entry.record.provider_ref and resumed.record.workspace_path == first_entry.record.workspace_path, "resume_replaced_environment_or_checkout")
+
+      require!(
+        resumed.record.provider_ref == first_entry.record.provider_ref and
+          resumed.record.workspace_path == first_entry.record.workspace_path,
+        "resume_replaced_environment_or_checkout"
+      )
+
       require!(remote!(ctx, resumed, "cat qualification-sentinel.txt") =~ review_nonce, "uncommitted_checkout_lost")
-      require!(String.trim(remote!(ctx, resumed, sql_command(ctx, 1, "SELECT value FROM qualification WHERE value='#{review_nonce}'"))) == review_nonce, "named_volume_row_lost")
+
+      require!(
+        String.trim(
+          remote!(ctx, resumed, sql_command(ctx, 1, "SELECT value FROM qualification WHERE value='#{review_nonce}'"))
+        ) == review_nonce,
+        "named_volume_row_lost"
+      )
+
       require!(review_response!(ctx) == review_before, "independent_review_app_changed_with_worker")
-      pass(ctx, "review_and_resume", %{environment_id: resumed.record.key, all_workers_stopped: true, review_response_sha256: review_before})
+
+      pass(ctx, "review_and_resume", %{
+        environment_id: resumed.record.key,
+        all_workers_stopped: true,
+        review_response_sha256: review_before
+      })
+
       begin_check("claude_workloads")
       pass(ctx, "claude_workloads", verify_workload!(ctx, first))
 
@@ -222,21 +268,43 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       begin_check("retained_restart_and_reopen")
       set_retention(ctx, 300_000)
       transition(ctx, issue(ctx, 2), "Done")
-      await(ctx, "terminal_observation_persisted", fn -> is_integer(entry!(issue(ctx, 2).id).record.terminal_observed_at) end)
+
+      await(ctx, "terminal_observation_persisted", fn ->
+        is_integer(entry!(issue(ctx, 2).id).record.terminal_observed_at)
+      end)
+
       retained = entry!(issue(ctx, 2).id).record
       restart_runtime(ctx)
 
       await(ctx, "retained_inventory_recovered", fn ->
         case scheduler_state().environment_entries[retained.issue_id] do
-          nil -> false
-          entry -> entry.record.terminal_observed_at == retained.terminal_observed_at and entry.record.desired != :absent
+          nil ->
+            false
+
+          entry ->
+            entry.record.terminal_observed_at == retained.terminal_observed_at and entry.record.desired != :absent
         end
       end)
 
       transition(ctx, issue(ctx, 2), "Qualification Codex")
-      await(ctx, "retained_ticket_reopened", fn -> running?(retained.issue_id) and entry!(retained.issue_id).record.terminal_observed_at == nil end, ctx.config.startup_timeout_ms * 2)
-      require!(entry!(retained.issue_id).record.provider_ref == retained.provider_ref, "retention_reopen_replaced_resource")
-      pass(ctx, "retained_restart_and_reopen", %{environment_id: retained.key, first_terminal_observed_at: retained.terminal_observed_at})
+
+      await(
+        ctx,
+        "retained_ticket_reopened",
+        fn -> running?(retained.issue_id) and entry!(retained.issue_id).record.terminal_observed_at == nil end,
+        ctx.config.startup_timeout_ms * 2
+      )
+
+      require!(
+        entry!(retained.issue_id).record.provider_ref == retained.provider_ref,
+        "retention_reopen_replaced_resource"
+      )
+
+      pass(ctx, "retained_restart_and_reopen", %{
+        environment_id: retained.key,
+        first_terminal_observed_at: retained.terminal_observed_at
+      })
+
       set_retention(ctx, 0)
 
       begin_check("tunnel_loss")
@@ -246,15 +314,34 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       ports = Enum.filter(Port.list(), &(Port.info(&1, :connected) == {:connected, victim.context.connection.owner}))
       require!(ports != [], "owned_tunnel_port_not_found")
       Enum.each(ports, &Command.terminate_port/1)
-      await(ctx, "tunnel_loss_recovered", fn -> running?(victim.record.issue_id) and entry!(victim.record.issue_id).attempt_id != victim.attempt_id end, ctx.config.startup_timeout_ms * 3)
+
+      await(
+        ctx,
+        "tunnel_loss_recovered",
+        fn -> running?(victim.record.issue_id) and entry!(victim.record.issue_id).attempt_id != victim.attempt_id end,
+        ctx.config.startup_timeout_ms * 3
+      )
+
       current = entry!(victim.record.issue_id)
       remote!(ctx, current, "test -f qualification-sentinel.txt")
       assert_no_duplicate_resources!(ctx)
       pass(ctx, "tunnel_loss", %{environment_id: current.record.key})
       begin_check("attempt_fencing")
-      send(Process.whereis(@orchestrator), {:worker_runtime_info, victim.record.issue_id, victim.attempt_id, %{workspace_path: "/must-not-become-a-local-fallback"}})
-      observed = Orchestrator.snapshot(@orchestrator, 1_000).running |> Enum.find(&(&1.issue_id == victim.record.issue_id))
-      require!(observed != nil and observed.workspace_path == current.record.workspace_path, "stale_attempt_changed_workspace")
+
+      send(
+        Process.whereis(@orchestrator),
+        {:worker_runtime_info, victim.record.issue_id, victim.attempt_id,
+         %{workspace_path: "/must-not-become-a-local-fallback"}}
+      )
+
+      observed =
+        Orchestrator.snapshot(@orchestrator, 1_000).running |> Enum.find(&(&1.issue_id == victim.record.issue_id))
+
+      require!(
+        observed != nil and observed.workspace_path == current.record.workspace_path,
+        "stale_attempt_changed_workspace"
+      )
+
       pass(ctx, "attempt_fencing", %{old_attempt: victim.attempt_id, new_attempt: current.attempt_id})
 
       begin_check("delayed_storage_deletion")
@@ -264,7 +351,13 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       await(ctx, "storage_delete_accepted", fn -> event?(ctx, :delete_accepted, storage_victim.issue_id) end)
       # Natural asynchronous deletion latency is insufficient: an accepted operation must
       # actually fail/become uncertain while the exact physical storage still exists.
-      await(ctx, "physical_deletion_uncertainty_observed", fn -> deletion_uncertain?(ctx, storage_victim) and storage_present?(ctx, storage_victim) end, ctx.config.shutdown_timeout_ms * 2)
+      await(
+        ctx,
+        "physical_deletion_uncertainty_observed",
+        fn -> deletion_uncertain?(ctx, storage_victim) and storage_present?(ctx, storage_victim) end,
+        ctx.config.shutdown_timeout_ms * 2
+      )
+
       begin_check("deletion_restart")
       restart_runtime(ctx)
 
@@ -302,7 +395,11 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       await(ctx, "start_fault_baseline_stopped", fn -> stopped?(sixth.id) end)
       arm(ctx, {:lose_start, sixth.id})
       transition(ctx, sixth, "Qualification Codex")
-      await(ctx, "accepted_start_response_lost", fn -> event?(ctx, :start_response_lost, sixth.id) and unknown_occupied?(sixth.id) end)
+
+      await(ctx, "accepted_start_response_lost", fn ->
+        event?(ctx, :start_response_lost, sixth.id) and unknown_occupied?(sixth.id)
+      end)
+
       assert_no_duplicate_resources!(ctx)
       await(ctx, "lost_start_recovered", fn -> running?(sixth.id) end, ctx.config.startup_timeout_ms * 3)
       assert_no_duplicate_resources!(ctx)
@@ -318,7 +415,9 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     end
 
     evidence = Jason.decode!(File.read!(ctx.output))
-    assert evidence["qualified?"], "Managed qualification did not pass; inspect the authorized evidence file for deployment #{ctx.run_id}"
+
+    assert evidence["qualified?"],
+           "Managed qualification did not pass; inspect the authorized evidence file for deployment #{ctx.run_id}"
   end
 
   defp prerequisites!(ctx) do
@@ -336,7 +435,10 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       {:ok, evidence} ->
         evidence
         |> Map.put(:quota_evidence, quota)
-        |> Map.put(:budget, Map.take(profile, ["max_concurrent_workers", "max_retained_environments", "max_backend_sessions"]))
+        |> Map.put(
+          :budget,
+          Map.take(profile, ["max_concurrent_workers", "max_retained_environments", "max_backend_sessions"])
+        )
         |> Map.put(:review_app_probe_sha256, review_response!(ctx))
 
       {:error, code} ->
@@ -348,7 +450,11 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     authorized = profile["paid_model_calls_authorized"] == true and profile["max_concurrent_workers"] == 5
     retained = profile["max_retained_environments"]
     sessions = profile["max_backend_sessions"]
-    require!(authorized and at_least?(retained, 6) and at_least?(sessions, 20), "explicit_qualification_budget_required")
+
+    require!(
+      authorized and at_least?(retained, 6) and at_least?(sessions, 20),
+      "explicit_qualification_budget_required"
+    )
   end
 
   defp qualification_quota!(profile) do
@@ -388,10 +494,25 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     environment = Map.get(worker, "environment", %{})
 
     raw
-    |> Map.put("tracker", %{"kind" => "memory", "active_states" => ["Qualification Codex", "Qualification Claude"], "terminal_states" => ["Done"]})
-    |> Map.put("worker", Map.put(worker, "environment", Map.merge(environment, %{"deployment_id" => run_id, "terminal_retention_ms" => 0})))
+    |> Map.put("tracker", %{
+      "kind" => "memory",
+      "active_states" => ["Qualification Codex", "Qualification Claude"],
+      "terminal_states" => ["Done"]
+    })
+    |> Map.put(
+      "worker",
+      Map.put(worker, "environment", Map.merge(environment, %{"deployment_id" => run_id, "terminal_retention_ms" => 0}))
+    )
     |> Map.put("polling", %{"interval_ms" => 5_000})
-    |> Map.update("agent", %{}, &Map.merge(&1, %{"max_concurrent_agents" => 5, "backend" => "codex", "backend_by_state" => %{"Qualification Codex" => "codex", "Qualification Claude" => "claude"}}))
+    |> Map.update(
+      "agent",
+      %{},
+      &Map.merge(&1, %{
+        "max_concurrent_agents" => 5,
+        "backend" => "codex",
+        "backend_by_state" => %{"Qualification Codex" => "codex", "Qualification Claude" => "claude"}
+      })
+    )
   end
 
   defp install_workloads!(ctx) do
@@ -445,7 +566,10 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     operation_fun = fn adapter, config, entry, operation, opts ->
       timeout = if operation in [:stop, :destroy], do: config.shutdown_timeout_ms, else: config.startup_timeout_ms
       deadline = min(ctx.deadline, min(Keyword.get(opts, :deadline, ctx.deadline), now() + timeout))
-      opts = opts |> Keyword.put(:deadline, deadline) |> Keyword.put(:timeout_ms, max(1, min(timeout, deadline - now())))
+
+      opts =
+        opts |> Keyword.put(:deadline, deadline) |> Keyword.put(:timeout_ms, max(1, min(timeout, deadline - now())))
+
       callbacks = %{armed?: &armed?(ctx, &1), disarm: &disarm(ctx, &1), event: &event(ctx, &1)}
       opts = Provider.fault_options(config, entry, operation, opts, callbacks)
       if entry, do: capture_result(ctx, {:ok, entry.record})
@@ -453,7 +577,14 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       capture_result(ctx, result)
 
       if entry,
-        do: event(ctx, %{event: :operation_result, issue_id: entry.record.issue_id, operation: operation, attempt_id: entry.attempt_id, outcome: if(match?({:ok, _}, result), do: :ok, else: :error)})
+        do:
+          event(ctx, %{
+            event: :operation_result,
+            issue_id: entry.record.issue_id,
+            operation: operation,
+            attempt_id: entry.attempt_id,
+            outcome: if(match?({:ok, _}, result), do: :ok, else: :error)
+          })
 
       result
     end
@@ -531,13 +662,42 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     index = Enum.find_index(ctx.issues, &(&1.id == issue.id)) + 1
     sentinel_values = remote!(ctx, entry, "cat qualification-sentinel.txt") |> String.split("\n")
     require!(issue.id in sentinel_values, "agent_file_change_missing")
-    require!(Enum.all?(ctx.issues, &(&1.id == issue.id or &1.id not in sentinel_values)), "ticket_sentinel_files_shared")
-    require!(String.trim(remote!(ctx, entry, "git status --porcelain -- qualification-sentinel.txt")) != "", "agent_uncommitted_change_missing")
-    require!(String.trim(remote!(ctx, entry, sql_command(ctx, index, "SELECT value FROM qualification WHERE value='#{issue.id}'"))) == issue.id, "agent_database_write_missing")
+
+    require!(
+      Enum.all?(ctx.issues, &(&1.id == issue.id or &1.id not in sentinel_values)),
+      "ticket_sentinel_files_shared"
+    )
+
+    require!(
+      String.trim(remote!(ctx, entry, "git status --porcelain -- qualification-sentinel.txt")) != "",
+      "agent_uncommitted_change_missing"
+    )
+
+    require!(
+      String.trim(
+        remote!(ctx, entry, sql_command(ctx, index, "SELECT value FROM qualification WHERE value='#{issue.id}'"))
+      ) == issue.id,
+      "agent_database_write_missing"
+    )
+
     other_ids = Enum.reject(ctx.issues, &(&1.id == issue.id)) |> Enum.map_join(",", &("'" <> &1.id <> "'"))
-    require!(String.trim(remote!(ctx, entry, sql_command(ctx, index, "SELECT count(*) FROM qualification WHERE value IN (#{other_ids})"))) == "0", "ticket_database_rows_shared")
-    require!(String.trim(remote!(ctx, entry, "cat .symphony-qualification/testcontainers.out")) == "testcontainers-ok", "agent_testcontainers_probe_failed")
-    require!(String.trim(remote!(ctx, entry, "cat .symphony-qualification/browser.out")) == "browser-ok", "agent_browser_probe_failed")
+
+    require!(
+      String.trim(
+        remote!(ctx, entry, sql_command(ctx, index, "SELECT count(*) FROM qualification WHERE value IN (#{other_ids})"))
+      ) == "0",
+      "ticket_database_rows_shared"
+    )
+
+    require!(
+      String.trim(remote!(ctx, entry, "cat .symphony-qualification/testcontainers.out")) == "testcontainers-ok",
+      "agent_testcontainers_probe_failed"
+    )
+
+    require!(
+      String.trim(remote!(ctx, entry, "cat .symphony-qualification/browser.out")) == "browser-ok",
+      "agent_browser_probe_failed"
+    )
 
     hashes =
       for file <- @fixture_files, into: %{} do
@@ -548,28 +708,82 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       end
 
     script_hash = :crypto.hash(:sha256, workload_script(ctx.run_id)) |> Base.encode16(case: :lower)
-    require!(remote!(ctx, entry, "sha256sum .symphony-qualification/run-probes.sh") |> String.split() |> List.first() == script_hash, "qualification_workload_script_modified")
+
+    require!(
+      remote!(ctx, entry, "sha256sum .symphony-qualification/run-probes.sh") |> String.split() |> List.first() ==
+        script_hash,
+      "qualification_workload_script_modified"
+    )
+
     daemon = remote!(ctx, entry, "docker info --format '{{json .}}'") |> Jason.decode!()
-    require!(is_binary(daemon["ID"]) and Regex.match?(~r/\A[A-Za-z0-9:-]{8,128}\z/, daemon["ID"]), "docker_identity_unavailable")
+
+    require!(
+      is_binary(daemon["ID"]) and Regex.match?(~r/\A[A-Za-z0-9:-]{8,128}\z/, daemon["ID"]),
+      "docker_identity_unavailable"
+    )
 
     runtime = %{
       kernel: observed_version!(remote!(ctx, entry, "uname -r")),
       docker: observed_version!(daemon["ServerVersion"]),
       compose: observed_version!(remote!(ctx, entry, "docker compose version --short")),
       node: observed_version!(remote!(ctx, entry, "node --version")),
-      codex: observed_version!(remote!(ctx, entry, "#{shell_quote(Config.settings!().codex.command |> OptionParser.split() |> hd())} --version")),
-      claude: observed_version!(remote!(ctx, entry, "#{shell_quote(Config.settings!().claude.command |> OptionParser.split() |> hd())} --version")),
-      testcontainers: observed_version!(remote!(ctx, entry, "python3 -c 'import importlib.metadata; print(importlib.metadata.version(\"testcontainers\"))'")),
-      playwright: observed_version!(remote!(ctx, entry, "node -p 'require(\"./.symphony-qualification/node_modules/playwright/package.json\").version'"))
+      codex:
+        observed_version!(
+          remote!(
+            ctx,
+            entry,
+            "#{shell_quote(Config.settings!().codex.command |> OptionParser.split() |> hd())} --version"
+          )
+        ),
+      claude:
+        observed_version!(
+          remote!(
+            ctx,
+            entry,
+            "#{shell_quote(Config.settings!().claude.command |> OptionParser.split() |> hd())} --version"
+          )
+        ),
+      testcontainers:
+        observed_version!(
+          remote!(
+            ctx,
+            entry,
+            "python3 -c 'import importlib.metadata; print(importlib.metadata.version(\"testcontainers\"))'"
+          )
+        ),
+      playwright:
+        observed_version!(
+          remote!(
+            ctx,
+            entry,
+            "node -p 'require(\"./.symphony-qualification/node_modules/playwright/package.json\").version'"
+          )
+        )
     }
 
-    require!(not File.exists?(Path.join(entry.record.workspace_path, "qualification-sentinel.txt")), "managed_file_created_on_controller")
-    %{issue_id: issue.id, environment_id: entry.record.key, engine_id: daemon["ID"], runtime: runtime, fixture_sha256: hashes, workload_sha256: script_hash}
+    require!(
+      not File.exists?(Path.join(entry.record.workspace_path, "qualification-sentinel.txt")),
+      "managed_file_created_on_controller"
+    )
+
+    %{
+      issue_id: issue.id,
+      environment_id: entry.record.key,
+      engine_id: daemon["ID"],
+      runtime: runtime,
+      fixture_sha256: hashes,
+      workload_sha256: script_hash
+    }
   end
 
   defp isolation!(ctx, issues) do
     prerequisite = control_snapshot(ctx).checks["prerequisites"].evidence
-    permissions = provider_value!(Provider.permission_preflight(ctx.config, ctx.permission_policy, prerequisite, provider_opts(ctx)))
+
+    permissions =
+      provider_value!(
+        Provider.permission_preflight(ctx.config, ctx.permission_policy, prerequisite, provider_opts(ctx))
+      )
+
     ctx = Map.put(ctx, :current_permissions, permissions)
 
     addresses =
@@ -581,7 +795,18 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
 
     for issue <- issues do
       peers = addresses |> Map.delete(issue.id) |> Map.values() |> List.flatten() |> Enum.uniq()
-      require!(String.trim(remote!(ctx, entry!(issue.id), isolation_script(peers, ctx.config.provider["ssh_user"], ctx.permission_policy.mode))) == "isolation-ok", "isolation_probe_did_not_complete")
+
+      require!(
+        String.trim(
+          remote!(
+            ctx,
+            entry!(issue.id),
+            isolation_script(peers, ctx.config.provider["ssh_user"], ctx.permission_policy.mode)
+          )
+        ) == "isolation-ok",
+        "isolation_probe_did_not_complete"
+      )
+
       metadata_policy!(ctx, entry!(issue.id))
     end
   end
@@ -594,11 +819,19 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   end
 
   defp metadata_policy!(ctx, entry) do
-    identity = provider_value!(Provider.permission_identity(ctx.config, entry.record, ctx.permission_policy, provider_opts(ctx)))
+    identity =
+      provider_value!(Provider.permission_identity(ctx.config, entry.record, ctx.permission_policy, provider_opts(ctx)))
+
     original = control_snapshot(ctx).checks["prerequisites"].evidence
     require!(identity.config_uid == original.template_uid, "permission_config_identity_changed")
     prerequisite = ctx.current_permissions
-    require!(prerequisite.receipt == original.permission_policy.receipt and prerequisite.probe_sha256 == original.permission_policy.probe_sha256, "permission_controls_changed")
+
+    require!(
+      prerequisite.receipt == original.permission_policy.receipt and
+        prerequisite.probe_sha256 == original.permission_policy.probe_sha256,
+      "permission_controls_changed"
+    )
+
     bytes = File.read!(Path.join(@fixture_root, "gcp_permission_probe.py"))
     digest = :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
     require!(digest == prerequisite.probe_sha256, "permission_probe_source_changed")
@@ -759,7 +992,12 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     await(ctx, "gate_release_held", fn -> event?(ctx, :gate_held, issue.id) end)
     record = entry!(issue.id).record
     gate = provider_value!(Provider.gate_observation(ctx.config, record, provider_opts(ctx)))
-    require!(gate.held? and occupied?(issue.id) and not running?(issue.id), "gated_worker_executed_or_released_capacity")
+
+    require!(
+      gate.held? and occupied?(issue.id) and not running?(issue.id),
+      "gated_worker_executed_or_released_capacity"
+    )
+
     disarm(ctx, {:hold_gate, issue.id})
     await(ctx, "gate_released_worker_running", fn -> running?(issue.id) end, ctx.config.startup_timeout_ms * 2)
     released = provider_value!(Provider.gate_observation(ctx.config, entry!(issue.id).record, provider_opts(ctx)))
@@ -768,7 +1006,13 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     pass(ctx, "delayed_gate_release", %{pod_uid: gate.pod_uid})
 
     begin_check("node_disconnection")
-    require!(ctx.profile["node_fault_authorized"] == true and is_list(ctx.profile["authorized_node_uids"]) and ctx.profile["authorized_node_uids"] != [], "explicit_dedicated_node_permission_required")
+
+    require!(
+      ctx.profile["node_fault_authorized"] == true and is_list(ctx.profile["authorized_node_uids"]) and
+        ctx.profile["authorized_node_uids"] != [],
+      "explicit_dedicated_node_permission_required"
+    )
+
     record = entry!(issue.id).record
     before_fault = provider_value!(Provider.node_observation(ctx.config, record, ctx.profile, provider_opts(ctx)))
     require!(before_fault.ready?, "dedicated_node_not_ready_before_fault")
@@ -782,7 +1026,14 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     end)
 
     transition(ctx, issue, "In Review")
-    await(ctx, "disconnected_node_stop_unknown", fn -> unknown_occupied?(issue.id) end, ctx.config.shutdown_timeout_ms * 2)
+
+    await(
+      ctx,
+      "disconnected_node_stop_unknown",
+      fn -> unknown_occupied?(issue.id) end,
+      ctx.config.shutdown_timeout_ms * 2
+    )
+
     require!(not stopped?(issue.id), "node_not_ready_mistaken_for_stop_proof")
     fault_driver!(ctx, "node_disconnection", "restore", record)
 
@@ -853,7 +1104,9 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   end
 
   defp cleanup_failure(ctx, code) do
-    name = if code == "unrelated_resource_identity_changed_during_cleanup", do: "unrelated_resources", else: "final_absence"
+    name =
+      if code == "unrelated_resource_identity_changed_during_cleanup", do: "unrelated_resources", else: "final_absence"
+
     GenServer.call(ctx.control, {:check, name, %{status: :failed, code: code}})
     stop_runtime()
 
@@ -861,9 +1114,17 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       try do
         verify_unrelated_after_cleanup!(ctx)
       rescue
-        _ -> GenServer.call(ctx.control, {:check, "unrelated_resources", %{status: :failed, code: "post_cleanup_negative_control_unresolved"}})
+        _ ->
+          GenServer.call(
+            ctx.control,
+            {:check, "unrelated_resources", %{status: :failed, code: "post_cleanup_negative_control_unresolved"}}
+          )
       catch
-        _, _ -> GenServer.call(ctx.control, {:check, "unrelated_resources", %{status: :failed, code: "post_cleanup_negative_control_unresolved"}})
+        _, _ ->
+          GenServer.call(
+            ctx.control,
+            {:check, "unrelated_resources", %{status: :failed, code: "post_cleanup_negative_control_unresolved"}}
+          )
       end
     end
 
@@ -903,7 +1164,10 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
       for result <- evidence["checks"] || [], result["name"] in ctx.check_names do
         status = restored_check_status(result["status"])
 
-        GenServer.call(control, {:check, result["name"], %{status: status, evidence: result["evidence"], code: result["code"]}})
+        GenServer.call(
+          control,
+          {:check, result["name"], %{status: status, evidence: result["evidence"], code: result["code"]}}
+        )
       end
 
       GenServer.call(control, {:interrupted, evidence})
@@ -1000,17 +1264,36 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   end
 
   defp bootstrap_blocked(output, run_id, code) do
-    checks = Enum.map(@checks, fn name -> if name == "prerequisites", do: %{name: name, status: :blocked, code: code}, else: %{name: name, status: :not_run} end)
+    checks =
+      Enum.map(@checks, fn name ->
+        if name == "prerequisites",
+          do: %{name: name, status: :blocked, code: code},
+          else: %{name: name, status: :not_run}
+      end)
 
     replace_private!(
       output,
-      Jason.encode!(%{deployment_id: run_id, qualified?: false, allocation_started: false, inventory_complete: false, checks: checks, remaining_owned_resources: []}, pretty: true)
+      Jason.encode!(
+        %{
+          deployment_id: run_id,
+          qualified?: false,
+          allocation_started: false,
+          inventory_complete: false,
+          checks: checks,
+          remaining_owned_resources: []
+        },
+        pretty: true
+      )
     )
   end
 
   defp fixture_images do
     for file <- ["compose.yaml", "testcontainers_probe.py"],
-        [image] <- Regex.scan(~r/(?:postgres:16|alpine:3.20|testcontainers\/ryuk:0.8.1)@sha256:[0-9a-f]{64}/, File.read!(Path.join(@fixture_root, file))),
+        [image] <-
+          Regex.scan(
+            ~r/(?:postgres:16|alpine:3.20|testcontainers\/ryuk:0.8.1)@sha256:[0-9a-f]{64}/,
+            File.read!(Path.join(@fixture_root, file))
+          ),
         do: image
   end
 
@@ -1023,32 +1306,68 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
 
   defp validate_fault_driver!(profile) do
     path = profile["fault_driver"]
-    require!(is_binary(path) and Path.type(path) == :absolute and File.regular?(path), "authorized_physical_fault_driver_required")
+
+    require!(
+      is_binary(path) and Path.type(path) == :absolute and File.regular?(path),
+      "authorized_physical_fault_driver_required"
+    )
+
     digest = :crypto.hash(:sha256, File.read!(path)) |> Base.encode16(case: :lower)
-    require!(digest == profile["fault_driver_sha256"] and profile["storage_fault_authorized"] == true, "physical_fault_driver_authorization_mismatch")
+
+    require!(
+      digest == profile["fault_driver_sha256"] and profile["storage_fault_authorized"] == true,
+      "physical_fault_driver_authorization_mismatch"
+    )
   end
 
-  defp storage_present?(ctx, record), do: provider_value!(Provider.storage_present(ctx.config, record, provider_opts(ctx)))
-  defp unrelated_resources!(ctx), do: provider_value!(Provider.unrelated_snapshot(ctx.config, ctx.profile["unrelated_resource_paths"], provider_opts(ctx)))
+  defp storage_present?(ctx, record),
+    do: provider_value!(Provider.storage_present(ctx.config, record, provider_opts(ctx)))
+
+  defp unrelated_resources!(ctx),
+    do:
+      provider_value!(
+        Provider.unrelated_snapshot(ctx.config, ctx.profile["unrelated_resource_paths"], provider_opts(ctx))
+      )
 
   defp review_response!(ctx) do
     timeout = min(5_000, remaining(ctx))
     require!(timeout > 0, "qualification_deadline")
 
-    case Req.get(ctx.profile["review_app_url"], retry: false, redirect: false, receive_timeout: timeout, connect_options: [timeout: timeout]) do
-      {:ok, %{status: 200, body: body}} when is_binary(body) -> :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
-      _ -> require!(false, "independent_review_app_unavailable")
+    case Req.get(ctx.profile["review_app_url"],
+           retry: false,
+           redirect: false,
+           receive_timeout: timeout,
+           connect_options: [timeout: timeout]
+         ) do
+      {:ok, %{status: 200, body: body}} when is_binary(body) ->
+        :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
+
+      _ ->
+        require!(false, "independent_review_app_unavailable")
     end
   end
 
   defp assert_no_duplicate_resources!(ctx) do
     %{records: records, live_worker_counts: counts} = provider_value!(inventory(ctx))
-    require!(length(Enum.uniq_by(records, & &1.issue_id)) == length(records) and length(records) <= 6, "duplicate_owned_environment")
-    require!(Enum.all?(counts, fn {_, count} -> is_integer(count) and count in 0..1 end) and Enum.sum(Map.values(counts)) <= 5, "duplicate_or_overbudget_actual_workers")
+
+    require!(
+      length(Enum.uniq_by(records, & &1.issue_id)) == length(records) and length(records) <= 6,
+      "duplicate_owned_environment"
+    )
+
+    require!(
+      Enum.all?(counts, fn {_, count} -> is_integer(count) and count in 0..1 end) and Enum.sum(Map.values(counts)) <= 5,
+      "duplicate_or_overbudget_actual_workers"
+    )
   end
 
   defp deletion_uncertain?(ctx, record) do
-    failed = Enum.any?(control_snapshot(ctx).events, &(&1[:event] == :operation_result and &1[:issue_id] == record.issue_id and &1[:operation] == :destroy and &1[:outcome] == :error))
+    failed =
+      Enum.any?(
+        control_snapshot(ctx).events,
+        &(&1[:event] == :operation_result and &1[:issue_id] == record.issue_id and &1[:operation] == :destroy and
+            &1[:outcome] == :error)
+      )
 
     case scheduler_state().environment_entries[record.issue_id] do
       %{record: %{desired: :absent}, phase: :unknown, last_error: error} -> failed and error != nil
@@ -1057,7 +1376,13 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   end
 
   defp remote(ctx, %{context: %{mode: :managed, target: %SSH.Target{} = target}, record: record}, command) do
-    opts = Keyword.merge(provider_opts(ctx), env: target.env, timeout_ms: min(30_000, remaining(ctx)), max_output_bytes: 1_048_576)
+    opts =
+      Keyword.merge(provider_opts(ctx),
+        env: target.env,
+        timeout_ms: min(30_000, remaining(ctx)),
+        max_output_bytes: 1_048_576
+      )
+
     script = "set -e\ncd -- #{shell_quote(record.workspace_path)}\n" <> command
 
     case Command.run(target.executable, target.prefix ++ [SSH.remote_shell_command(script)], opts) do
@@ -1076,7 +1401,8 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   end
 
   defp sql_command(ctx, index, sql),
-    do: "docker compose -f .symphony-qualification/compose.yaml -p sq-#{ctx.run_id}-#{index} exec -T postgres psql -U postgres -v ON_ERROR_STOP=1 -Atc #{shell_quote(sql)}"
+    do:
+      "docker compose -f .symphony-qualification/compose.yaml -p sq-#{ctx.run_id}-#{index} exec -T postgres psql -U postgres -v ON_ERROR_STOP=1 -Atc #{shell_quote(sql)}"
 
   defp set_retention(ctx, milliseconds) do
     # Read back the staged workflow, preserving installed hooks rather than restoring ctx.raw.
@@ -1093,7 +1419,12 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   end
 
   defp await_absence(ctx, issue) do
-    await(ctx, "owned_compute_and_storage_absent", fn -> issue_absent?(ctx, issue.id) end, ctx.config.shutdown_timeout_ms * 2)
+    await(
+      ctx,
+      "owned_compute_and_storage_absent",
+      fn -> issue_absent?(ctx, issue.id) end,
+      ctx.config.shutdown_timeout_ms * 2
+    )
   end
 
   defp issue_absent?(ctx, id) do
@@ -1109,7 +1440,8 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
 
   defp bounded_worker_counts?(counts), do: Enum.all?(counts, fn {_, count} -> count in 0..1 end)
 
-  defp await(ctx, label, predicate, timeout \\ 180_000), do: await_loop(ctx, label, predicate, min(ctx.deadline, now() + timeout))
+  defp await(ctx, label, predicate, timeout \\ 180_000),
+    do: await_loop(ctx, label, predicate, min(ctx.deadline, now() + timeout))
 
   defp await_loop(ctx, label, predicate, deadline) do
     require!(now() < deadline, label <> "_deadline")
@@ -1164,14 +1496,23 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   end
 
   defp occupied_count(state),
-    do: state.environment_entries |> Enum.filter(fn {_, entry} -> Lifecycle.occupied?(entry) end) |> Enum.map(&elem(&1, 0)) |> Kernel.++(Map.keys(state.running)) |> Enum.uniq() |> length()
+    do:
+      state.environment_entries
+      |> Enum.filter(fn {_, entry} -> Lifecycle.occupied?(entry) end)
+      |> Enum.map(&elem(&1, 0))
+      |> Kernel.++(Map.keys(state.running))
+      |> Enum.uniq()
+      |> length()
 
   defp issue(ctx, index), do: Enum.at(ctx.issues, index - 1)
   defp arm(ctx, key), do: GenServer.call(ctx.control, {:fault, :arm, key})
   defp disarm(ctx, key), do: GenServer.call(ctx.control, {:fault, :disarm, key})
   defp armed?(ctx, key), do: GenServer.call(ctx.control, {:armed?, key})
   defp event(ctx, data), do: GenServer.call(ctx.control, {:event, data})
-  defp event?(ctx, event, id), do: Enum.any?(control_snapshot(ctx).events, &(&1[:event] == event and &1[:issue_id] == id))
+
+  defp event?(ctx, event, id),
+    do: Enum.any?(control_snapshot(ctx).events, &(&1[:event] == event and &1[:issue_id] == id))
+
   defp control_snapshot(ctx), do: GenServer.call(ctx.control, :snapshot)
 
   defp assert_exact_create_recovery!(ctx, issue) do
@@ -1181,12 +1522,23 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     require!(length(events) == 1, "create_replayed")
     [accepted] = events
     record = entry!(issue.id).record
-    require!(accepted[:resource_uid] == record.provider_ref and accepted[:environment_id] == record.key, "create_recovery_identity_changed")
-    lost = Enum.filter(control_snapshot(ctx).events, &(&1[:event] == :create_response_lost and &1[:issue_id] == issue.id))
+
+    require!(
+      accepted[:resource_uid] == record.provider_ref and accepted[:environment_id] == record.key,
+      "create_recovery_identity_changed"
+    )
+
+    lost =
+      Enum.filter(control_snapshot(ctx).events, &(&1[:event] == :create_response_lost and &1[:issue_id] == issue.id))
+
     require!(length(lost) == 1, "create_loss_not_exact")
     [lost] = lost
     keys = [:attempt_id, :create_attempt_id, :guard_uid, :resource_uid, :environment_id]
-    require!(Enum.all?(keys, &(nonblank?(accepted[&1]) and accepted[&1] == lost[&1])), "create_recovery_attribution_changed")
+
+    require!(
+      Enum.all?(keys, &(nonblank?(accepted[&1]) and accepted[&1] == lost[&1])),
+      "create_recovery_attribution_changed"
+    )
   end
 
   defp begin_check(name), do: Process.put(:qualification_check, name)
@@ -1198,13 +1550,25 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
 
   defp fail_current(ctx, code) do
     name = Process.get(:qualification_check, "prerequisites")
-    GenServer.call(ctx.control, {:check, name, %{status: if(name == "prerequisites", do: :blocked, else: :failed), code: code}})
+
+    GenServer.call(
+      ctx.control,
+      {:check, name, %{status: if(name == "prerequisites", do: :blocked, else: :failed), code: code}}
+    )
+
     write_evidence(ctx, [], false)
   end
 
   defp provider_opts(ctx) do
     require!(remaining(ctx) > 0, "qualification_deadline")
-    opts = [task_supervisor: ctx.tasks, authority: self(), timeout_ms: min(60_000, remaining(ctx)), deadline: ctx.deadline]
+
+    opts = [
+      task_supervisor: ctx.tasks,
+      authority: self(),
+      timeout_ms: min(60_000, remaining(ctx)),
+      deadline: ctx.deadline
+    ]
+
     # Every operation in the suite runs on the same pinned path the preflight validated.
     if is_map(ctx.candidate_pins), do: Keyword.put(opts, :candidate_baseline, ctx.candidate_pins), else: opts
   end
@@ -1215,7 +1579,11 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
   defp provider_failure!(_), do: require!(false, "provider_qualification_failed")
 
   defp observed_version!(value) do
-    require!(is_binary(value) and Regex.match?(~r/\A[A-Za-z0-9 .+()_:\/-]{1,160}\s*\z/, value), "runtime_version_unavailable")
+    require!(
+      is_binary(value) and Regex.match?(~r/\A[A-Za-z0-9 .+()_:\/-]{1,160}\s*\z/, value),
+      "runtime_version_unavailable"
+    )
+
     String.trim(value)
   end
 
@@ -1241,7 +1609,10 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
     end
   end
 
-  defp safe_scope(ctx), do: EnvironmentConfig.scope(ctx.config) |> Map.take(["project", "location", "cluster", "config", "context", "namespace"])
+  defp safe_scope(ctx),
+    do:
+      EnvironmentConfig.scope(ctx.config)
+      |> Map.take(["project", "location", "cluster", "config", "context", "namespace"])
 
   defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\\''") <> "'"
   defp require!(true, _code), do: :ok
@@ -1263,7 +1634,10 @@ defmodule SymphonyElixir.ManagedEnvironmentLiveE2ETest do
          true <- Bitwise.band(mode, 0o077) == 0,
          {:ok, []} <- File.ls(parent),
          {:error, :enoent} <- File.lstat(path) do
-      parent |> Path.split() |> Enum.scan(&Path.join(&2, &1)) |> Enum.all?(fn ancestor -> match?({:ok, %{type: :directory}}, File.lstat(ancestor)) end)
+      parent
+      |> Path.split()
+      |> Enum.scan(&Path.join(&2, &1))
+      |> Enum.all?(fn ancestor -> match?({:ok, %{type: :directory}}, File.lstat(ancestor)) end)
     else
       _ -> false
     end

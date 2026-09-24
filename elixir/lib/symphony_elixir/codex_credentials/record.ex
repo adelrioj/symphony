@@ -140,7 +140,8 @@ defmodule SymphonyElixir.CodexCredentials.Record do
     end
   end
 
-  defp apply_event(%{"state" => state} = record, {:quarantine, claim_id, reason}) when state in ["OWNED", "CHECKPOINTED"] do
+  defp apply_event(%{"state" => state} = record, {:quarantine, claim_id, reason})
+       when state in ["OWNED", "CHECKPOINTED"] do
     cond do
       claim_id != record["claim_id"] -> recovery(:claim_mismatch)
       not valid_reason?(reason) -> recovery(:invalid_reason)
@@ -161,7 +162,16 @@ defmodule SymphonyElixir.CodexCredentials.Record do
       "resource_acknowledged" => false
     }
 
-    %{record | "state" => "AVAILABLE", "head_version" => version, "claim_id" => nil, "owner" => nil, "candidate" => nil, "stop_proof" => nil, "last_handoff" => handoff}
+    %{
+      record
+      | "state" => "AVAILABLE",
+        "head_version" => version,
+        "claim_id" => nil,
+        "owner" => nil,
+        "candidate" => nil,
+        "stop_proof" => nil,
+        "last_handoff" => handoff
+    }
   end
 
   defp assignment_data(record) do
@@ -219,10 +229,18 @@ defmodule SymphonyElixir.CodexCredentials.Record do
 
   defp valid_receipt?(receipt, record) do
     exact_fields?(receipt, @receipt_fields) and receipt["schema"] === 1 and receipt["admission"] == "sealed" and
-      valid_owner?(receipt["owner"], true) and receipt["owner"] == record["owner"] and
+      receipt_matches_assignment?(receipt, record) and same_secret?(receipt["secret_version"], record["head_version"]) and
+      valid_digest?(receipt["sha256"])
+  end
+
+  defp receipt_matches_assignment?(receipt, record) do
+    valid_owner?(receipt["owner"], true) and receipt["owner"] == record["owner"] and
       receipt["credential_id"] == record["credential_id"] and receipt["epoch"] === record["epoch"] and
-      receipt["claim_id"] == record["claim_id"] and same_secret?(receipt["secret_version"], record["head_version"]) and
-      is_binary(receipt["sha256"]) and Regex.match?(~r/\A[0-9a-f]{64}\z/, receipt["sha256"])
+      receipt["claim_id"] == record["claim_id"]
+  end
+
+  defp valid_digest?(digest) do
+    is_binary(digest) and Regex.match?(~r/\A[0-9a-f]{64}\z/, digest)
   end
 
   defp optional_proof?(%{"stop_proof" => nil}), do: true
@@ -250,7 +268,18 @@ defmodule SymphonyElixir.CodexCredentials.Record do
 
   defp valid_workstation?(name) when is_binary(name) do
     case String.split(name, "/") do
-      ["projects", project, "locations", location, "workstationClusters", cluster, "workstationConfigs", config, "workstations", workstation] ->
+      [
+        "projects",
+        project,
+        "locations",
+        location,
+        "workstationClusters",
+        cluster,
+        "workstationConfigs",
+        config,
+        "workstations",
+        workstation
+      ] ->
         Enum.all?([project, location, cluster, config, workstation], &resource_segment?/1)
 
       _ ->
@@ -262,8 +291,11 @@ defmodule SymphonyElixir.CodexCredentials.Record do
 
   defp correlated_operation?(operation, workstation) when is_binary(operation) do
     case {String.split(operation, "/"), String.split(workstation, "/")} do
-      {["projects", project, "locations", location, "operations", id], ["projects", project, "locations", location | _]} -> resource_segment?(id)
-      _ -> false
+      {["projects", project, "locations", location, "operations", id], ["projects", project, "locations", location | _]} ->
+        resource_segment?(id)
+
+      _ ->
+        false
     end
   end
 
@@ -277,7 +309,9 @@ defmodule SymphonyElixir.CodexCredentials.Record do
   defp secret_resource(version) when is_binary(version) do
     case String.split(version, "/") do
       ["projects", project, "secrets", secret, "versions", number] ->
-        if resource_segment?(project) and resource_segment?(secret) and Regex.match?(~r/\A[1-9][0-9]*\z/, number), do: {project, secret}, else: nil
+        if resource_segment?(project) and resource_segment?(secret) and Regex.match?(~r/\A[1-9][0-9]*\z/, number),
+          do: {project, secret},
+          else: nil
 
       _ ->
         nil
@@ -289,6 +323,9 @@ defmodule SymphonyElixir.CodexCredentials.Record do
   defp resource_segment?(value), do: value not in [".", ".."] and Regex.match?(~r/\A[A-Za-z0-9._~-]+\z/, value)
   defp valid_reason?(reason), do: is_binary(reason) and Regex.match?(~r/\A[a-z][a-z0-9_]{0,63}\z/, reason)
   defp nonblank?(value), do: is_binary(value) and String.valid?(value) and String.trim(value) != ""
-  defp exact_fields?(value, fields), do: is_map(value) and map_size(value) == length(fields) and Enum.all?(fields, &Map.has_key?(value, &1))
+
+  defp exact_fields?(value, fields),
+    do: is_map(value) and map_size(value) == length(fields) and Enum.all?(fields, &Map.has_key?(value, &1))
+
   defp recovery(reason), do: {:error, {:credential_recovery_required, reason}}
 end

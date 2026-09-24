@@ -71,8 +71,11 @@ defmodule SymphonyElixir.GitLab.LiveE2ETest do
                  max_turns: 3,
                  execution_context:
                    case SymphonyElixir.Config.settings!().worker.ssh_hosts do
-                     [] -> SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
-                     [host | _] -> SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, host)
+                     [] ->
+                       SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+
+                     [host | _] ->
+                       SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, host)
                    end
                )
 

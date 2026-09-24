@@ -5,14 +5,20 @@ defmodule SymphonyElixir.ManagedEnvironmentPermissionPolicyTest do
   alias SymphonyElixir.ManagedEnvironmentFixture.PermissionPolicy
 
   test "unknown policy never falls back to success" do
-    assert {:error, :invalid_metadata_policy} = PermissionPolicy.validate("google_workstations", %{"metadata_policy" => "allow_any"})
-    assert {:error, :invalid_metadata_policy} = PermissionPolicy.validate("google_workstations", %{"metadata_policy" => nil})
+    assert {:error, :invalid_metadata_policy} =
+             PermissionPolicy.validate("google_workstations", %{"metadata_policy" => "allow_any"})
+
+    assert {:error, :invalid_metadata_policy} =
+             PermissionPolicy.validate("google_workstations", %{"metadata_policy" => nil})
+
     assert {:ok, %{mode: "deny_all"}} = PermissionPolicy.validate("google_workstations", %{})
     assert {:ok, %{mode: "deny_all"}} = PermissionPolicy.validate("kubernetes", %{"metadata_policy" => "deny_all"})
   end
 
   test "scoped policy requires controls and Workstations" do
-    assert {:error, :permission_scope_required} = PermissionPolicy.validate("google_workstations", %{"metadata_policy" => "scoped_gcp"})
+    assert {:error, :permission_scope_required} =
+             PermissionPolicy.validate("google_workstations", %{"metadata_policy" => "scoped_gcp"})
+
     assert {:error, :scoped_gcp_requires_workstations} = PermissionPolicy.validate("kubernetes", profile())
     assert {:ok, _} = PermissionPolicy.validate("google_workstations", profile())
 
@@ -25,9 +31,19 @@ defmodule SymphonyElixir.ManagedEnvironmentPermissionPolicyTest do
   test "rejects executable fields, overlapping controls, mutable versions and inconsistent registry hosts" do
     for invalid <- [
           put_in(profile(), ["permission_scope", "url"], "https://evil.invalid"),
-          put_in(profile(), ["permission_scope", "allowed_secret_versions"], ["projects/qual/secrets/allowed/versions/latest"]),
-          put_in(profile(), ["permission_scope", "denied_secret_versions"], profile()["permission_scope"]["allowed_secret_versions"]),
-          put_in(profile(), ["permission_scope", "image_repository", "image"], "evil.invalid/qual/images/worker@sha256:" <> String.duplicate("a", 64)),
+          put_in(profile(), ["permission_scope", "allowed_secret_versions"], [
+            "projects/qual/secrets/allowed/versions/latest"
+          ]),
+          put_in(
+            profile(),
+            ["permission_scope", "denied_secret_versions"],
+            profile()["permission_scope"]["allowed_secret_versions"]
+          ),
+          put_in(
+            profile(),
+            ["permission_scope", "image_repository", "image"],
+            "evil.invalid/qual/images/worker@sha256:" <> String.duplicate("a", 64)
+          ),
           put_in(profile(), ["permission_scope", "image_repository", "executable"], "/tmp/probe"),
           put_in(profile(), ["permission_scope", "denied_backup_object", "generation"], "latest")
         ] do
@@ -41,9 +57,17 @@ defmodule SymphonyElixir.ManagedEnvironmentPermissionPolicyTest do
     assert :ok = PermissionPolicy.evaluate(policy, observations)
 
     for context <- ~w(ordinary root docker privileged_docker) do
-      assert {:error, :permission_evidence_incomplete} = PermissionPolicy.evaluate(policy, Map.delete(observations, context))
-      assert {:error, :permission_evidence_incomplete} = PermissionPolicy.evaluate(policy, put_in(observations, [context, "complete"], false))
-      assert {:error, :permission_evidence_incomplete} = PermissionPolicy.evaluate(policy, update_in(observations, [context, "checks"], &Map.delete(&1, "gateway_denied")))
+      assert {:error, :permission_evidence_incomplete} =
+               PermissionPolicy.evaluate(policy, Map.delete(observations, context))
+
+      assert {:error, :permission_evidence_incomplete} =
+               PermissionPolicy.evaluate(policy, put_in(observations, [context, "complete"], false))
+
+      assert {:error, :permission_evidence_incomplete} =
+               PermissionPolicy.evaluate(
+                 policy,
+                 update_in(observations, [context, "checks"], &Map.delete(&1, "gateway_denied"))
+               )
     end
   end
 
@@ -269,13 +293,21 @@ defmodule SymphonyElixir.ManagedEnvironmentPermissionPolicyTest do
         "service_account" => "worker@qual.iam.gserviceaccount.com",
         "allowed_secret_versions" => ["projects/qual/secrets/allowed/versions/1"],
         "denied_secret_versions" => ["projects/qual/secrets/denied/versions/2"],
-        "image_repository" => %{"name" => "projects/qual/locations/europe-west1/repositories/images", "image" => "europe-west1-docker.pkg.dev/qual/images/worker@sha256:" <> String.duplicate("a", 64)},
+        "image_repository" => %{
+          "name" => "projects/qual/locations/europe-west1/repositories/images",
+          "image" => "europe-west1-docker.pkg.dev/qual/images/worker@sha256:" <> String.duplicate("a", 64)
+        },
         "denied_image_repository" => %{
           "name" => "projects/qual/locations/europe-west1/repositories/control",
           "image" => "europe-west1-docker.pkg.dev/qual/control/control@sha256:" <> String.duplicate("b", 64)
         },
-        "denied_backup_object" => %{"bucket" => "qual-control", "object" => "harmless/control.txt", "generation" => "123"},
-        "denied_workstation" => "projects/qual/locations/europe-west1/workstationClusters/cluster/workstationConfigs/control/workstations/control",
+        "denied_backup_object" => %{
+          "bucket" => "qual-control",
+          "object" => "harmless/control.txt",
+          "generation" => "123"
+        },
+        "denied_workstation" =>
+          "projects/qual/locations/europe-west1/workstationClusters/cluster/workstationConfigs/control/workstations/control",
         "iam_review_reference" => "/private/qualification/iam-review.json"
       }
     }
@@ -283,6 +315,10 @@ defmodule SymphonyElixir.ManagedEnvironmentPermissionPolicyTest do
 
   defp observations(policy) do
     checks = Map.new(PermissionPolicy.checks(policy), fn {id, status} -> {id, %{"status" => status, "ok" => true}} end)
-    Map.new(~w(ordinary root docker privileged_docker), &{&1, %{"complete" => true, "identity" => policy.scope["service_account"], "checks" => checks}})
+
+    Map.new(
+      ~w(ordinary root docker privileged_docker),
+      &{&1, %{"complete" => true, "identity" => policy.scope["service_account"], "checks" => checks}}
+    )
   end
 end
