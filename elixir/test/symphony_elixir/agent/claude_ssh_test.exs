@@ -36,10 +36,6 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       previous_secret = System.get_env(secret_name)
       secret_capture = Path.join(tmp, "secret.txt")
 
-      File.mkdir_p!(workspace)
-      write_fake_ssh!(tmp, ssh_trace)
-      write_fake_claude!(fake_claude)
-
       on_exit(fn ->
         restore_env("PATH", previous_path)
         restore_env("CLAUDE_STDIN_CAPTURE", previous_stdin_capture)
@@ -50,6 +46,10 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
         File.rm_rf(tmp)
       end)
 
+      File.mkdir_p!(workspace)
+      write_fake_ssh!(tmp, ssh_trace)
+      write_fake_claude!(fake_claude)
+
       System.put_env("CLAUDE_STDIN_CAPTURE", stdin_capture)
       System.put_env("CLAUDE_ARGV_CAPTURE", argv_capture)
       System.put_env("CLAUDE_MCP_CONFIG_CAPTURE", mcp_config_capture)
@@ -59,11 +59,18 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
 
       target =
         case unquote(transport) do
-          :static -> "localhost"
-          :structured -> %SymphonyElixir.SSH.Target{executable: Path.join([tmp, "bin", "ssh"]), prefix: [], label: "fixture"}
+          :static ->
+            "localhost"
+
+          :structured ->
+            %SymphonyElixir.SSH.Target{executable: Path.join([tmp, "bin", "ssh"]), prefix: [], label: "fixture"}
         end
 
-      {:ok, session} = Claude.start_session(workspace, execution_context: SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, target))
+      {:ok, session} =
+        Claude.start_session(workspace,
+          execution_context:
+            SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, target)
+        )
 
       on_exit(fn ->
         _ = Claude.stop_session(session)
@@ -102,7 +109,10 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       assert "--strict-mcp-config" in args
       assert "--allowedTools" in args
       assert "--permission-prompt-tool" in args
-      assert Enum.at(args, Enum.find_index(args, &(&1 == "--permission-prompt-tool")) + 1) == "mcp__symphony__approval_prompt"
+
+      assert Enum.at(args, Enum.find_index(args, &(&1 == "--permission-prompt-tool")) + 1) ==
+               "mcp__symphony__approval_prompt"
+
       refute prompt in args
 
       allowed_tools = Enum.at(args, Enum.find_index(args, &(&1 == "--allowedTools")) + 1)
@@ -138,14 +148,15 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     workspace = Path.join(root, "workspace")
     kubeconfig = Path.join(root, "controller.kubeconfig")
     previous_path = System.get_env("PATH")
-    File.mkdir_p!(workspace)
-    File.write!(kubeconfig, "controller-only")
-    write_fake_ssh!(root, Path.join(root, "ssh.trace"))
 
     on_exit(fn ->
       restore_env("PATH", previous_path)
       File.rm_rf!(root)
     end)
+
+    File.mkdir_p!(workspace)
+    File.write!(kubeconfig, "controller-only")
+    write_fake_ssh!(root, Path.join(root, "ssh.trace"))
 
     provider = %{
       "kubeconfig" => kubeconfig,
@@ -170,7 +181,13 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
         }
       )
 
-    target = %SymphonyElixir.SSH.Target{executable: Path.join([root, "bin", "ssh"]), prefix: [], label: "fixture"}
+    target = %SymphonyElixir.SSH.Target{
+      executable: Path.join([root, "bin", "ssh"]),
+      prefix: [],
+      label: "fixture",
+      env: [{"BASH_ENV", Path.join(root, "fixture-bash-env")}]
+    }
+
     context = %ExecutionContext{mode: :managed, workspace_root: root, workspace_path: workspace, target: target}
     {:ok, session} = Claude.start_session(workspace, execution_context: context)
     on_exit(fn -> Claude.stop_session(session) end)
@@ -184,7 +201,10 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     LaneContext.install(%{entry | settings: settings, workflow: workflow})
     response = LinearServer.handle_request(%{"method" => "tools/list", "id" => 1})
     assert Enum.map(response["result"]["tools"], & &1["name"]) == ["approval_prompt"]
-    denied = LinearServer.handle_request(%{"method" => "tools/call", "id" => 2, "params" => %{"name" => "approval_prompt"}})
+
+    denied =
+      LinearServer.handle_request(%{"method" => "tools/call", "id" => 2, "params" => %{"name" => "approval_prompt"}})
+
     assert denied["result"]["isError"] == true
   end
 
@@ -193,6 +213,14 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     fake_ssh = Path.join(fake_bin_dir, "ssh")
 
     File.mkdir_p!(fake_bin_dir)
+
+    realpath =
+      System.find_executable("grealpath") || System.find_executable("realpath") ||
+        flunk("managed workspace fixtures require a real realpath executable supporting -m")
+
+    File.ln_s!(realpath, Path.join(fake_bin_dir, "realpath"))
+    escaped_bin = "'" <> String.replace(fake_bin_dir, "'", "'\"'\"'") <> "'"
+    File.write!(Path.join(test_root, "fixture-bash-env"), "export PATH=#{escaped_bin}:\"$PATH\"\n")
 
     File.write!(fake_ssh, """
     #!/bin/sh

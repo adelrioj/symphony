@@ -11,7 +11,11 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   @spec state(Conn.t(), map()) :: Conn.t()
   def state(conn, _params) do
     generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-    json(conn, %{generated_at: generated_at, lanes: Enum.map(Presenter.lanes(), &Presenter.lane_payload(&1, snapshot_timeout_ms()))})
+
+    json(conn, %{
+      generated_at: generated_at,
+      lanes: Enum.map(Presenter.lanes(), &Presenter.lane_payload(&1, snapshot_timeout_ms()))
+    })
   end
 
   @spec issue(Conn.t(), map()) :: Conn.t()

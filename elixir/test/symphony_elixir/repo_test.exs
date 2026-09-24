@@ -24,8 +24,14 @@ defmodule SymphonyElixir.RepoTest do
     isolated_repo()
     assert :ok = Repo.migrate()
 
-    Repo.query!("INSERT INTO lanes (id, slug, name, inserted_at, updated_at) VALUES (1, 'features', 'Features', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
-    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, 'tracker: {}', 'Build it', CURRENT_TIMESTAMP)")
+    Repo.query!(
+      "INSERT INTO lanes (id, slug, name, inserted_at, updated_at) VALUES (1, 'features', 'Features', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+
+    Repo.query!(
+      "INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, 'tracker: {}', 'Build it', CURRENT_TIMESTAMP)"
+    )
+
     Repo.query!("UPDATE lanes SET current_version_id = 1 WHERE id = 1")
 
     Repo.query!("""
@@ -33,7 +39,9 @@ defmodule SymphonyElixir.RepoTest do
     VALUES (1, 1, 1, 'issue-1', 'TEST-1', 'attempt-1', CURRENT_TIMESTAMP)
     """)
 
-    Repo.query!("INSERT INTO run_events (run_id, at, kind, payload) VALUES (1, CURRENT_TIMESTAMP, 'started', '{\"turn\":1}')")
+    Repo.query!(
+      "INSERT INTO run_events (run_id, at, kind, payload) VALUES (1, CURRENT_TIMESTAMP, 'started', '{\"turn\":1}')"
+    )
 
     assert :ok = Repo.migrate()
 
@@ -51,7 +59,9 @@ defmodule SymphonyElixir.RepoTest do
     isolated_repo()
     :ok = Repo.migrate()
 
-    insert = "INSERT INTO lanes (slug, name, executor, inserted_at, updated_at) VALUES (?, 'Features', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    insert =
+      "INSERT INTO lanes (slug, name, executor, inserted_at, updated_at) VALUES (?, 'Features', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+
     assert {:error, %Exqlite.Error{}} = Repo.query(insert, ["features", "kubernetes"])
     assert {:ok, _} = Repo.query(insert, ["features", "local"])
     assert {:error, %Exqlite.Error{}} = Repo.query(insert, ["features", "local"])
@@ -64,12 +74,21 @@ defmodule SymphonyElixir.RepoTest do
     :ok = Repo.migrate()
 
     assert {:error, %Exqlite.Error{}} =
-             Repo.query("INSERT INTO lane_versions (lane_id, front_matter, prompt, inserted_at) VALUES (999, '', '', CURRENT_TIMESTAMP)")
+             Repo.query(
+               "INSERT INTO lane_versions (lane_id, front_matter, prompt, inserted_at) VALUES (999, '', '', CURRENT_TIMESTAMP)"
+             )
 
-    Repo.query!("INSERT INTO lanes (id, slug, name, inserted_at, updated_at) VALUES (1, 'features', 'Features', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
-    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, '', '', CURRENT_TIMESTAMP)")
+    Repo.query!(
+      "INSERT INTO lanes (id, slug, name, inserted_at, updated_at) VALUES (1, 'features', 'Features', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
 
-    insert_run = "INSERT INTO runs (id, lane_id, lane_version_id, issue_id, issue_identifier, attempt_id, started_at) VALUES (?, 1, 1, 'issue-1', 'TEST-1', 'attempt-1', CURRENT_TIMESTAMP)"
+    Repo.query!(
+      "INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, '', '', CURRENT_TIMESTAMP)"
+    )
+
+    insert_run =
+      "INSERT INTO runs (id, lane_id, lane_version_id, issue_id, issue_identifier, attempt_id, started_at) VALUES (?, 1, 1, 'issue-1', 'TEST-1', 'attempt-1', CURRENT_TIMESTAMP)"
+
     Repo.query!(insert_run, [1])
     assert {:error, %Exqlite.Error{}} = Repo.query(insert_run, [2])
     Repo.query!("INSERT INTO run_events (run_id, at, kind) VALUES (1, CURRENT_TIMESTAMP, 'started')")

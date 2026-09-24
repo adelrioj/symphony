@@ -133,7 +133,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "managed workspaces retain their persisted path across issue renames" do
     root = Path.join(System.tmp_dir!(), "symphony-managed-path-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf(root) end)
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_after_create: "printf retained > retained")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_after_create: "printf retained > retained"
+    )
+
     target = managed_shell_target!(root)
 
     context = %ExecutionContext{
@@ -183,7 +188,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     on_exit(fn -> File.rm_rf(root) end)
     File.mkdir_p!(workspace)
     File.write!(Path.join(workspace, "keep"), "retained")
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root, hook_before_remove: "touch hook-ran; exit 9")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_before_remove: "touch hook-ran; exit 9"
+    )
+
     target = managed_shell_target!(root)
     context = %ExecutionContext{mode: :managed, workspace_root: root, workspace_path: workspace, target: target}
     assert :ok = Workspace.run_before_remove_hook(workspace, "RETAIN-1", context)
@@ -254,7 +264,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.rm_rf(root)
     end)
 
-    hook = "trap '' HUP; printf '%s' \"$$\" > '#{pidfile}'; printf started > '#{started}'; IFS= read -r token < '#{gate}'; printf finished > delayed"
+    hook =
+      "trap '' HUP; printf '%s' \"$$\" > '#{pidfile}'; printf started > '#{started}'; IFS= read -r token < '#{gate}'; printf finished > delayed"
+
     context = %ExecutionContext{mode: :managed, workspace_root: root, workspace_path: workspace, target: target}
 
     release = fn ->
@@ -281,7 +293,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   defp managed_shell_target!(root) do
-    realpath = System.find_executable("grealpath") || System.find_executable("realpath") || flunk("managed workspace fixtures require a real realpath executable supporting -m")
+    realpath =
+      System.find_executable("grealpath") || System.find_executable("realpath") ||
+        flunk("managed workspace fixtures require a real realpath executable supporting -m")
+
     bin = Path.join(root, "fixture-bin")
     File.mkdir_p!(bin)
     File.ln_s!(realpath, Path.join(bin, "realpath"))
@@ -317,7 +332,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         hook_after_create: "git clone --depth 1 #{template_repo} ."
       )
 
-      assert {:ok, workspace} = Workspace.create_for_issue("S-1", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, workspace} =
+               Workspace.create_for_issue(
+                 "S-1",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       assert File.exists?(Path.join(workspace, ".git"))
       assert File.read!(Path.join(workspace, "README.md")) == "hook clone\n"
       assert File.read!(Path.join([workspace, "keep", "file.txt"])) == "keep me"
@@ -335,8 +355,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
-    assert {:ok, first_workspace} = Workspace.create_for_issue("MT/Det", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
-    assert {:ok, second_workspace} = Workspace.create_for_issue("MT/Det", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+    assert {:ok, first_workspace} =
+             Workspace.create_for_issue(
+               "MT/Det",
+               SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+             )
+
+    assert {:ok, second_workspace} =
+             Workspace.create_for_issue(
+               "MT/Det",
+               SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+             )
 
     assert first_workspace == second_workspace
     assert Path.basename(first_workspace) == Workspace.workspace_key("MT/Det")
@@ -357,7 +386,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:ok, expected_workspace} =
                SymphonyElixir.PathSafety.canonicalize(Path.join([data_root, "relative-workspaces", "MT-REL"]))
 
-      assert {:ok, workspace} = Workspace.create_for_issue("MT-REL", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, workspace} =
+               Workspace.create_for_issue(
+                 "MT-REL",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       assert workspace == expected_workspace
       refute String.starts_with?(workspace, launcher_dir <> "/")
@@ -380,15 +413,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       slash_issue = %Issue{id: "dispatch-slash", identifier: "team/a-1"}
       underscore_issue = %Issue{id: "dispatch-underscore", identifier: "team_a-1"}
 
-      assert {:ok, slash_workspace} = Workspace.create_for_issue(slash_issue, SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
-      assert {:ok, ^slash_workspace} = Workspace.create_for_issue("team/a-1", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
-      assert {:ok, underscore_workspace} = Workspace.create_for_issue(underscore_issue, SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, slash_workspace} =
+               Workspace.create_for_issue(
+                 slash_issue,
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
+      assert {:ok, ^slash_workspace} =
+               Workspace.create_for_issue(
+                 "team/a-1",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
+      assert {:ok, underscore_workspace} =
+               Workspace.create_for_issue(
+                 underscore_issue,
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       refute slash_workspace == underscore_workspace
       assert Path.basename(underscore_workspace) == "team_a-1"
       assert String.starts_with?(Path.basename(slash_workspace), "team_a-1--")
 
-      assert :ok = Workspace.remove_issue_workspaces("team/a-1", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert :ok =
+               Workspace.remove_issue_workspaces(
+                 "team/a-1",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       refute File.exists?(slash_workspace)
       assert File.exists?(underscore_workspace)
     after
@@ -409,7 +461,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         hook_after_create: "echo first > README.md"
       )
 
-      assert {:ok, first_workspace} = Workspace.create_for_issue("MT-REUSE", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, first_workspace} =
+               Workspace.create_for_issue(
+                 "MT-REUSE",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       File.write!(Path.join(first_workspace, "README.md"), "changed\n")
       File.write!(Path.join(first_workspace, "local-progress.txt"), "in progress\n")
@@ -420,7 +476,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.write!(Path.join([first_workspace, "_build", "artifact.txt"]), "compiled artifact\n")
       File.write!(Path.join([first_workspace, "tmp", "scratch.txt"]), "remove me\n")
 
-      assert {:ok, second_workspace} = Workspace.create_for_issue("MT-REUSE", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, second_workspace} =
+               Workspace.create_for_issue(
+                 "MT-REUSE",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       assert second_workspace == first_workspace
       assert File.read!(Path.join(second_workspace, "README.md")) == "changed\n"
       assert File.read!(Path.join(second_workspace, "local-progress.txt")) == "in progress\n"
@@ -447,7 +508,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
       assert {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(stale_workspace)
-      assert {:ok, workspace} = Workspace.create_for_issue("MT-STALE", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+
+      assert {:ok, workspace} =
+               Workspace.create_for_issue(
+                 "MT-STALE",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       assert workspace == canonical_workspace
       assert File.dir?(workspace)
     after
@@ -477,7 +544,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:ok, canonical_workspace_root} = SymphonyElixir.PathSafety.canonicalize(workspace_root)
 
       assert {:error, {:workspace_outside_root, ^canonical_outside_root, ^canonical_workspace_root}} =
-               Workspace.create_for_issue("MT-SYM", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               Workspace.create_for_issue(
+                 "MT-SYM",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
     after
       File.rm_rf(test_root)
     end
@@ -510,7 +580,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                SymphonyElixir.PathSafety.canonicalize(recorded_root)
 
       assert {:error, {:workspace_symlink_escape, ^recorded_workspace, ^canonical_recorded_root}, ""} =
-               Workspace.remove_recorded(recorded_workspace, SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               Workspace.remove_recorded(
+                 recorded_workspace,
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
       refute File.exists?(hook_marker)
       assert File.exists?(outside_root)
@@ -538,7 +611,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:ok, canonical_workspace} =
                SymphonyElixir.PathSafety.canonicalize(Path.join(actual_root, "MT-LINK"))
 
-      assert {:ok, workspace} = Workspace.create_for_issue("MT-LINK", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, workspace} =
+               Workspace.create_for_issue(
+                 "MT-LINK",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       assert workspace == canonical_workspace
       assert File.dir?(workspace)
     after
@@ -561,7 +639,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                SymphonyElixir.PathSafety.canonicalize(workspace_root)
 
       assert {:error, {:workspace_equals_root, ^canonical_workspace_root, ^canonical_workspace_root}, ""} =
-               Workspace.remove(workspace_root, SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               Workspace.remove(
+                 workspace_root,
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
     after
       File.rm_rf(workspace_root)
     end
@@ -581,7 +662,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       )
 
       assert {:error, {:workspace_hook_failed, "after_create", 17, _output}} =
-               Workspace.create_for_issue("MT-FAIL", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               Workspace.create_for_issue(
+                 "MT-FAIL",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
     after
       File.rm_rf(workspace_root)
     end
@@ -609,9 +693,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       )
 
       assert {:error, {:workspace_hook_failed, "after_create", 17, _output}} =
-               Workspace.create_for_issue("MT-FAIL-RETRY", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               Workspace.create_for_issue(
+                 "MT-FAIL-RETRY",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
 
-      assert {:ok, workspace} = Workspace.create_for_issue("MT-FAIL-RETRY", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, workspace} =
+               Workspace.create_for_issue(
+                 "MT-FAIL-RETRY",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       assert File.read!(Path.join(workspace, "READY")) == "ready"
       assert String.split(String.trim(File.read!(attempt_log)), "\n") == ["attempt", "attempt"]
     after
@@ -634,7 +726,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       )
 
       assert {:error, {:workspace_hook_timeout, "after_create", 10}} =
-               Workspace.create_for_issue("MT-TIMEOUT", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               Workspace.create_for_issue(
+                 "MT-TIMEOUT",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
     after
       File.rm_rf(workspace_root)
     end
@@ -653,7 +748,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       workspace = Path.join(workspace_root, "MT-608")
       assert {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
 
-      assert {:ok, ^canonical_workspace} = Workspace.create_for_issue("MT-608", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, ^canonical_workspace} =
+               Workspace.create_for_issue(
+                 "MT-608",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       assert File.dir?(workspace)
       assert {:ok, []} = File.ls(workspace)
     after
@@ -679,7 +779,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
-      assert :ok = Workspace.remove_issue_workspaces("S_1", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert :ok =
+               Workspace.remove_issue_workspaces(
+                 "S_1",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       refute File.exists?(target_workspace)
       assert File.exists?(untouched_workspace)
     after
@@ -696,11 +801,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: missing_root)
 
-    assert :ok = Workspace.remove_issue_workspaces("S-2", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+    assert :ok =
+             Workspace.remove_issue_workspaces(
+               "S-2",
+               SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+             )
   end
 
   test "workspace cleanup ignores non-binary identifier" do
-    assert :ok = Workspace.remove_issue_workspaces(nil, SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+    assert :ok =
+             Workspace.remove_issue_workspaces(
+               nil,
+               SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+             )
   end
 
   test "tracker issue helpers" do
@@ -1103,7 +1216,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                end
              )
 
-    assert_receive {:bound_graphql_request, %{"query" => "query Viewer { viewer { id } }"}, [{"Authorization", "bound-token"}, {"Content-Type", "application/json"}]}
+    assert_receive {:bound_graphql_request, %{"query" => "query Viewer { viewer { id } }"},
+                    [{"Authorization", "bound-token"}, {"Content-Type", "application/json"}]}
   end
 
   test "orchestrator sorts dispatch by priority then oldest created_at" do
@@ -1286,7 +1400,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         "symphony-elixir-missing-#{System.unique_integer([:positive])}"
       )
 
-    assert {:ok, []} = Workspace.remove(random_path, SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+    assert {:ok, []} =
+             Workspace.remove(
+               random_path,
+               SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+             )
   end
 
   test "workspace hooks support multiline YAML scripts and run at lifecycle boundaries" do
@@ -1313,13 +1431,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert config.hooks.after_create =~ "echo after_create > after_create.log"
       assert config.hooks.before_remove =~ "echo before_remove >"
 
-      assert {:ok, workspace} = Workspace.create_for_issue("MT-HOOKS", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, workspace} =
+               Workspace.create_for_issue(
+                 "MT-HOOKS",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       assert File.read!(Path.join(workspace, "after_create.log")) == "after_create\n"
 
-      assert {:ok, _workspace} = Workspace.create_for_issue("MT-HOOKS", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, _workspace} =
+               Workspace.create_for_issue(
+                 "MT-HOOKS",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       assert length(String.split(String.trim(File.read!(after_create_counter)), "\n")) == 1
 
-      assert :ok = Workspace.remove_issue_workspaces("MT-HOOKS", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert :ok =
+               Workspace.remove_issue_workspaces(
+                 "MT-HOOKS",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       assert File.read!(before_remove_marker) == "before_remove\n"
       refute File.exists?(workspace)
     after
@@ -1344,8 +1477,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         hook_before_remove: "echo failure && exit 17"
       )
 
-      assert {:ok, workspace} = Workspace.create_for_issue("MT-HOOKS-FAIL", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
-      assert :ok = Workspace.remove_issue_workspaces("MT-HOOKS-FAIL", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, workspace} =
+               Workspace.create_for_issue(
+                 "MT-HOOKS-FAIL",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
+      assert :ok =
+               Workspace.remove_issue_workspaces(
+                 "MT-HOOKS-FAIL",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       refute File.exists?(workspace)
     after
       File.rm_rf(test_root)
@@ -1369,8 +1512,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         hook_before_remove: "i=0; while [ $i -lt 3000 ]; do printf a; i=$((i+1)); done; exit 17"
       )
 
-      assert {:ok, workspace} = Workspace.create_for_issue("MT-HOOKS-LARGE-FAIL", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
-      assert :ok = Workspace.remove_issue_workspaces("MT-HOOKS-LARGE-FAIL", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, workspace} =
+               Workspace.create_for_issue(
+                 "MT-HOOKS-LARGE-FAIL",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
+      assert :ok =
+               Workspace.remove_issue_workspaces(
+                 "MT-HOOKS-LARGE-FAIL",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       refute File.exists?(workspace)
     after
       File.rm_rf(test_root)
@@ -1406,8 +1559,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         hook_before_remove: "sleep 1"
       )
 
-      assert {:ok, workspace} = Workspace.create_for_issue("MT-HOOKS-TIMEOUT", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
-      assert :ok = Workspace.remove_issue_workspaces("MT-HOOKS-TIMEOUT", SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+      assert {:ok, workspace} =
+               Workspace.create_for_issue(
+                 "MT-HOOKS-TIMEOUT",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
+      assert :ok =
+               Workspace.remove_issue_workspaces(
+                 "MT-HOOKS-TIMEOUT",
+                 SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+               )
+
       refute File.exists?(workspace)
     after
       File.rm_rf(test_root)

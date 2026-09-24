@@ -35,7 +35,16 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   end
 
   def mount(_params, _session, socket) do
-    params = %{"slug" => "", "name" => "", "enabled" => false, "executor" => "local", "front_matter" => "", "prompt" => "", "note" => ""}
+    params = %{
+      "slug" => "",
+      "name" => "",
+      "enabled" => false,
+      "executor" => "local",
+      "front_matter" => "",
+      "prompt" => "",
+      "note" => ""
+    }
+
     {:ok, assign(socket, lane: nil, params: params, errors: [], warnings: [])}
   end
 
@@ -153,7 +162,9 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     lane_errors =
       (lane || %Lane{})
       |> Lane.changeset(Map.take(params, ~w(slug name enabled executor)))
-      |> Ecto.Changeset.traverse_errors(fn {message, opts} -> Enum.reduce(opts, message, fn {key, value}, acc -> String.replace(acc, "%{#{key}}", to_string(value)) end) end)
+      |> Ecto.Changeset.traverse_errors(fn {message, opts} ->
+        Enum.reduce(opts, message, fn {key, value}, acc -> String.replace(acc, "%{#{key}}", to_string(value)) end)
+      end)
       |> Enum.flat_map(fn {field, messages} -> Enum.map(messages, &%{path: to_string(field), message: &1}) end)
 
     case version_result do

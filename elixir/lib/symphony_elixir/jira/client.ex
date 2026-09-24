@@ -413,18 +413,27 @@ defmodule SymphonyElixir.Jira.Client do
   defp settings(tracker_settings, validation \\ :runtime) when is_map(tracker_settings) do
     provider = provider_settings(tracker_settings)
     base_url = resolve_setting(provider["base_url"], System.get_env("JIRA_BASE_URL"))
-    email = if validation == :runtime, do: resolve_setting(provider["email"], System.get_env("JIRA_EMAIL")), else: provider["email"]
-    api_token = if validation == :runtime, do: resolve_setting(provider["api_token"], System.get_env("JIRA_API_TOKEN")), else: provider["api_token"]
+
+    email =
+      if validation == :runtime,
+        do: resolve_setting(provider["email"], System.get_env("JIRA_EMAIL")),
+        else: provider["email"]
+
+    api_token =
+      if validation == :runtime,
+        do: resolve_setting(provider["api_token"], System.get_env("JIRA_API_TOKEN")),
+        else: provider["api_token"]
+
     project_key = resolve_setting(provider["project_key"], nil)
 
     cond do
       not valid_base_url?(base_url) ->
         {:error, :invalid_jira_base_url}
 
-      not present_string?(email) and (validation == :runtime or not is_nil(email)) ->
+      missing_credential?(email, validation) ->
         {:error, :missing_jira_email}
 
-      not present_string?(api_token) and (validation == :runtime or not is_nil(api_token)) ->
+      missing_credential?(api_token, validation) ->
         {:error, :missing_jira_api_token}
 
       not present_string?(project_key) ->
@@ -441,6 +450,9 @@ defmodule SymphonyElixir.Jira.Client do
          }}
     end
   end
+
+  defp missing_credential?(nil, validation), do: validation == :runtime
+  defp missing_credential?(value, _validation), do: not present_string?(value)
 
   defp provider_settings(%{provider: provider}) when is_map(provider), do: provider
   defp provider_settings(_tracker_settings), do: %{}

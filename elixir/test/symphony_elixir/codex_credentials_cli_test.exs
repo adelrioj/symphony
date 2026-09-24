@@ -17,7 +17,11 @@ defmodule SymphonyElixir.CodexCredentialsCLITest do
 
     assert :ok = CLI.evaluate(["credentials", "reconcile", "--data-root", "/data", "--workflow", "/workflow"], deps)
     assert_receive {:output, output}
-    assert Jason.decode!(output) == %{"ok" => true, "result" => %{"action" => "inspect", "authority" => nil, "resources" => [], "admission" => "maintenance"}}
+
+    assert Jason.decode!(output) == %{
+             "ok" => true,
+             "result" => %{"action" => "inspect", "authority" => nil, "resources" => [], "admission" => "maintenance"}
+           }
   end
 
   for action <- ["checkpoint", "reseed-stop", "reseed-commit"] do
@@ -62,7 +66,12 @@ defmodule SymphonyElixir.CodexCredentialsCLITest do
     base = ["credentials", "reconcile", "--data-root", "/data", "--workflow", "/workflow"]
     deps = deps(fn _ -> flunk("invalid recovery arguments reached provider") end, self())
 
-    for suffix <- [["--force"], ["--action", "reseed-stop"], ["--action", "inspect", "--action", "checkpoint"], ["--stop-proof", "forged"]] do
+    for suffix <- [
+          ["--force"],
+          ["--action", "reseed-stop"],
+          ["--action", "inspect", "--action", "checkpoint"],
+          ["--stop-proof", "forged"]
+        ] do
       assert {:error, error} = CLI.evaluate(base ++ suffix, deps)
       assert Jason.decode!(error)["ok"] == false
     end

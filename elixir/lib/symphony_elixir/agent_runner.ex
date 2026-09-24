@@ -21,7 +21,10 @@ defmodule SymphonyElixir.AgentRunner do
     with {:ok, context} <- execution_context(Config.settings!(), opts),
          :ok <- credential_admission(context) do
       opts = Keyword.put_new_lazy(opts, :attempt_id, &new_attempt_id/0)
-      Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(context.worker_host)}")
+
+      Logger.info(
+        "Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(context.worker_host)}"
+      )
 
       case run_on_worker_host(issue, codex_update_recipient, opts, context) do
         :ok ->
@@ -51,13 +54,19 @@ defmodule SymphonyElixir.AgentRunner do
   defp credential_admission(%ExecutionContext{mode: :managed, environment: %{record: record} = environment}) do
     credentials = SymphonyElixir.ExecutionEnvironment.Credentials
     enabled = credentials.enabled?(Map.get(environment, :config, %{}))
-    if credentials.ready?(record) and (not enabled or credentials.tracked?(record)), do: :ok, else: {:error, :credential_outcome_unknown}
+
+    if credentials.ready?(record) and (not enabled or credentials.tracked?(record)),
+      do: :ok,
+      else: {:error, :credential_outcome_unknown}
   end
 
   defp credential_admission(_context), do: :ok
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
-    Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host.worker_host)}")
+    Logger.info(
+      "Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host.worker_host)}"
+    )
+
     on_hook = agent_message_handler(codex_update_recipient, issue, opts[:attempt_id])
 
     case Workspace.create_for_issue(issue, worker_host, on_hook) do
@@ -200,21 +209,31 @@ defmodule SymphonyElixir.AgentRunner do
     turn_opts = Keyword.put(opts, :on_message, agent_message_handler(context.recipient, issue, opts[:attempt_id]))
 
     with {:ok, %Result{} = result} <- context.backend.run_turn(context.session, prompt, issue, turn_opts) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{result.session_id} workspace=#{context.workspace} turn=#{turn_number}/#{max_turns}")
+      Logger.info(
+        "Completed agent run for #{issue_context(issue)} session_id=#{result.session_id} workspace=#{context.workspace} turn=#{turn_number}/#{max_turns}"
+      )
 
       handle_turn_result(context, result, turn_number)
     end
   end
 
-  defp handle_turn_result(%{issue: issue, issue_state_fetcher: fetcher, max_turns: max_turns} = context, %Result{status: :done}, turn_number) do
+  defp handle_turn_result(
+         %{issue: issue, issue_state_fetcher: fetcher, max_turns: max_turns} = context,
+         %Result{status: :done},
+         turn_number
+       ) do
     case continue_with_issue?(issue, fetcher) do
       {:continue, refreshed_issue} when turn_number < max_turns ->
-        Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+        Logger.info(
+          "Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}"
+        )
 
         do_run_agent_turns(%{context | issue: refreshed_issue}, turn_number + 1)
 
       {:continue, refreshed_issue} ->
-        Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+        Logger.info(
+          "Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator"
+        )
 
         send_turns_exhausted(context.recipient, refreshed_issue, context.opts[:attempt_id])
 

@@ -23,16 +23,34 @@ defmodule SymphonyElixir.KubernetesCandidateEvidenceTest do
       Map.put(data, "evidence", %{
         "parentUID" => "parent-uid",
         "password" => "GUARD_SECRET_CANARY",
-        "controllerJournal" => %{"phase" => "Closed", "operations" => [%{"id" => "operation", "resource" => "pods", "objectUID" => "pod-uid", "credentials" => %{"token" => "JOURNAL_SECRET_CANARY"}}]},
+        "controllerJournal" => %{
+          "phase" => "Closed",
+          "operations" => [
+            %{
+              "id" => "operation",
+              "resource" => "pods",
+              "objectUID" => "pod-uid",
+              "credentials" => %{"token" => "JOURNAL_SECRET_CANARY"}
+            }
+          ]
+        },
         "volumes" => %{
-          "volume-uid" => %{"pv_uid" => "pv-uid", "claim_ref" => %{"uid" => "claim-uid", "password" => "CLAIM_SECRET_CANARY"}, "credentials" => %{"private_key" => "VOLUME_SECRET_CANARY"}}
+          "volume-uid" => %{
+            "pv_uid" => "pv-uid",
+            "claim_ref" => %{"uid" => "claim-uid", "password" => "CLAIM_SECRET_CANARY"},
+            "credentials" => %{"private_key" => "VOLUME_SECRET_CANARY"}
+          }
         }
       })
 
     object = put_in(object, ["data", "guard.json"], Jason.encode!(data))
     receipt = Evidence.guard(object, config)
     assert receipt["resource"]["uid"] == "guard-uid"
-    assert receipt["observed_receipt"]["evidence"]["controllerJournal"]["operations"] == [%{"id" => "operation", "resource" => "pods", "objectUID" => "pod-uid"}]
+
+    assert receipt["observed_receipt"]["evidence"]["controllerJournal"]["operations"] == [
+             %{"id" => "operation", "resource" => "pods", "objectUID" => "pod-uid"}
+           ]
+
     assert receipt["observed_receipt"]["evidence"]["volumes"]["volume-uid"]["claim_ref"] == %{"uid" => "claim-uid"}
     refute Jason.encode!(receipt) =~ "SECRET_CANARY"
   end
@@ -43,8 +61,16 @@ defmodule SymphonyElixir.KubernetesCandidateEvidenceTest do
     record = %{
       record
       | metadata: %{
-          "volumes" => %{"pvc" => %{"pv_uid" => "pv-uid", "pvc_name" => %{"password" => "NESTED_SECRET_CANARY"}, "claim_ref" => %{"uid" => "pvc-uid", "token" => "CLAIM_SECRET_CANARY"}}},
-          "termination_evidence" => %{"pod" => %{"uid" => "pod", "kind" => "kubelet_terminated", "password" => "TERMINATION_SECRET_CANARY"}}
+          "volumes" => %{
+            "pvc" => %{
+              "pv_uid" => "pv-uid",
+              "pvc_name" => %{"password" => "NESTED_SECRET_CANARY"},
+              "claim_ref" => %{"uid" => "pvc-uid", "token" => "CLAIM_SECRET_CANARY"}
+            }
+          },
+          "termination_evidence" => %{
+            "pod" => %{"uid" => "pod", "kind" => "kubelet_terminated", "password" => "TERMINATION_SECRET_CANARY"}
+          }
         },
         proof: {:quiescent, %{guard_uid: "guard-uid", credentials: %{token: "PROOF_SECRET_CANARY"}}}
     }
@@ -56,7 +82,12 @@ defmodule SymphonyElixir.KubernetesCandidateEvidenceTest do
   end
 
   defp fixture do
-    config = %{deployment_id: "candidate-run", kind: "kubernetes", tracker_kind: "memory", provider: %{"namespace" => "candidate", "context" => "unit", "kubeconfig" => "/private/config"}}
+    config = %{
+      deployment_id: "candidate-run",
+      kind: "kubernetes",
+      tracker_kind: "memory",
+      provider: %{"namespace" => "candidate", "context" => "unit", "kubeconfig" => "/private/config"}
+    }
 
     record = %Record{
       key: ExecutionEnvironment.resource_key(config.deployment_id, "memory", "probe"),

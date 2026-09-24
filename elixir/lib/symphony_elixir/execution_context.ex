@@ -109,7 +109,9 @@ defmodule SymphonyElixir.ExecutionContext do
   defp template_identity?(value) when is_map(value), do: map_size(value) > 0
   defp template_identity?(_value), do: false
 
-  defp environment_entry?({key, value}), do: nonblank?(key) and (is_nil(value) or transport_string?(value)) and not String.contains?(key, "=")
+  defp environment_entry?({key, value}),
+    do: nonblank?(key) and (is_nil(value) or transport_string?(value)) and not String.contains?(key, "=")
+
   defp environment_entry?(_entry), do: false
 
   defp nonblank?(value), do: transport_string?(value) and String.trim(value) != ""

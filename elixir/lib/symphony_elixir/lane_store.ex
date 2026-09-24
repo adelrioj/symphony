@@ -133,10 +133,12 @@ defmodule SymphonyElixir.LaneStore do
   def protect_environment(lane_id, identity), do: GenServer.call(__MODULE__, {:protect_environment, lane_id, identity})
 
   @spec protect_environment(lane_id(), binary() | nil, reference()) :: {:ok, reference()} | {:error, term()}
-  def protect_environment(lane_id, identity, token), do: GenServer.call(__MODULE__, {:protect_environment, lane_id, identity, token})
+  def protect_environment(lane_id, identity, token),
+    do: GenServer.call(__MODULE__, {:protect_environment, lane_id, identity, token})
 
   @spec release_environment(lane_id(), reference(), :empty_inventory) :: :ok | {:error, term()}
-  def release_environment(lane_id, token, :empty_inventory), do: GenServer.call(__MODULE__, {:release_environment, lane_id, token})
+  def release_environment(lane_id, token, :empty_inventory),
+    do: GenServer.call(__MODULE__, {:release_environment, lane_id, token})
 
   @doc false
   @spec preflight_result(Entry.t(), :ok | {:error, term()}, (-> :ok | {:ok, pid()} | {:error, term()})) :: :ok
@@ -213,7 +215,8 @@ defmodule SymphonyElixir.LaneStore do
     {:reply, :ok, state}
   end
 
-  def handle_call({:check_identity, id, identity}, _from, state), do: {:reply, identity_check(state, id, identity), state}
+  def handle_call({:check_identity, id, identity}, _from, state),
+    do: {:reply, identity_check(state, id, identity), state}
 
   def handle_call({:protect_environment, id, identity, token}, _from, state) do
     case Map.get(state.guards, id) do
@@ -419,7 +422,14 @@ defmodule SymphonyElixir.LaneStore do
 
   # Keep the effective version ID and raw content pinned to the usable settings.
   defp keep_last_known_good(%Entry{settings: nil} = entry, %Entry{settings: %Schema{}} = previous),
-    do: %{previous | enabled: entry.enabled, name: entry.name, slug: entry.slug, generation: entry.generation, error: entry.error}
+    do: %{
+      previous
+      | enabled: entry.enabled,
+        name: entry.name,
+        slug: entry.slug,
+        generation: entry.generation,
+        error: entry.error
+    }
 
   defp keep_last_known_good(entry, _previous), do: entry
 
@@ -469,7 +479,8 @@ defmodule SymphonyElixir.LaneStore do
     %{state | monitors: Map.put(state.monitors, ref, id)}
   end
 
-  defp tracker_changed?(%Entry{settings: %Schema{tracker: old}}, %Entry{settings: %Schema{tracker: new}}), do: old != new
+  defp tracker_changed?(%Entry{settings: %Schema{tracker: old}}, %Entry{settings: %Schema{tracker: new}}),
+    do: old != new
 
   defp notify_orchestrator(id) do
     if pid = LaneRegistry.whereis(id, :orchestrator), do: send(pid, {:lane_updated, id})
@@ -516,7 +527,9 @@ defmodule SymphonyElixir.LaneStore do
   end
 
   defp identity_allowed?(_state, %Entry{settings: nil}), do: true
-  defp identity_allowed?(state, entry), do: identity_check(state, entry.lane_id, EnvironmentConfig.identity(entry.settings)) == :ok
+
+  defp identity_allowed?(state, entry),
+    do: identity_check(state, entry.lane_id, EnvironmentConfig.identity(entry.settings)) == :ok
 
   defp ensure_guard(state, %Entry{settings: %Schema{} = settings, lane_id: id}) do
     case {EnvironmentConfig.identity(settings), Map.get(state.guards, id)} do
@@ -534,8 +547,13 @@ defmodule SymphonyElixir.LaneStore do
         :ok
 
       _ ->
-        Enum.each(entry.warnings, &Logger.warning("Lane configuration warning lane_id=#{entry.lane_id} lane=#{entry.slug} message=#{&1}"))
-        if entry.error, do: Logger.error("Lane configuration error lane_id=#{entry.lane_id} lane=#{entry.slug} reason=#{entry.error}")
+        Enum.each(
+          entry.warnings,
+          &Logger.warning("Lane configuration warning lane_id=#{entry.lane_id} lane=#{entry.slug} message=#{&1}")
+        )
+
+        if entry.error,
+          do: Logger.error("Lane configuration error lane_id=#{entry.lane_id} lane=#{entry.slug} reason=#{entry.error}")
     end
 
     :ets.insert(@table, {entry.lane_id, entry})

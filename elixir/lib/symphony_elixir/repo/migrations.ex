@@ -8,7 +8,13 @@ defmodule SymphonyElixir.Repo.Migrations.CreateLanesAndRuns do
       add(:slug, :string, null: false)
       add(:name, :string, null: false)
       add(:enabled, :boolean, null: false, default: false)
-      add(:executor, :string, null: false, default: "local", check: %{name: "lanes_executor_check", expr: "executor = 'local'"})
+
+      add(:executor, :string,
+        null: false,
+        default: "local",
+        check: %{name: "lanes_executor_check", expr: "executor = 'local'"}
+      )
+
       # Keep this integer to avoid a circular foreign key; lane activation owns this pointer.
       add(:current_version_id, :integer)
       add(:deleted_at, :utc_datetime)

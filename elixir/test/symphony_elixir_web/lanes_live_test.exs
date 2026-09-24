@@ -11,7 +11,12 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
   setup do
     previous = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
     on_exit(fn -> Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous) end)
-    endpoint_config = :symphony_elixir |> Application.get_env(SymphonyElixirWeb.Endpoint, []) |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
+    endpoint_config =
+      :symphony_elixir
+      |> Application.get_env(SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
     {:ok, conn: Plug.Test.init_test_session(build_conn(), %{"operator" => true})}
@@ -32,7 +37,13 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
   end
 
   test "the toggle enables and disables a lane and the card follows pubsub updates", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "qa", front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 60000\ncodex:\n  command: /bin/false", prompt: "q"})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "qa",
+        front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 60000\ncodex:\n  command: /bin/false",
+        prompt: "q"
+      })
+
     {:ok, view, _html} = live(conn, "/")
 
     view |> element("#lane-qa button[phx-click='toggle']") |> render_click()
@@ -65,7 +76,13 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
   end
 
   test "an unresponsive lane keeps its error and controls visible until snapshot counts recover", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "slow-snapshot", enabled: true, front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 60000"})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "slow-snapshot",
+        enabled: true,
+        front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 60000"
+      })
+
     wait_until(fn -> LaneSupervisor.running?(lane.id) end)
     {:ok, view, _html} = live(conn, "/")
     assert has_element?(view, "#lane-slow-snapshot .numeric", "running 0")

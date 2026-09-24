@@ -48,7 +48,14 @@ defmodule SymphonyElixir.LaneSupervisorTest do
     assert %{} = Orchestrator.snapshot(orchestrator, 1000)
     eventually(fn -> match?({:ok, %{runtime: %{started_at: %DateTime{}}}}, LaneStore.lookup(lane.id)) end)
     attempt_id = "disable-#{System.unique_integer([:positive])}"
-    Runs.started(%{lane_id: lane.id, issue: %Issue{id: "issue-disable", identifier: "TEAM-1", state: "Todo"}, attempt_id: attempt_id, owner_pid: orchestrator})
+
+    Runs.started(%{
+      lane_id: lane.id,
+      issue: %Issue{id: "issue-disable", identifier: "TEAM-1", state: "Todo"},
+      attempt_id: attempt_id,
+      owner_pid: orchestrator
+    })
+
     assert %{status: "running"} = Runs.get_by_attempt(attempt_id)
     assert :ok = Lanes.disable(lane.id, "explicit stop")
     refute LaneSupervisor.running?(lane.id)
@@ -109,7 +116,11 @@ defmodule SymphonyElixir.LaneSupervisorTest do
 
     try do
       assert {:ok, _} = Lanes.set_enabled(lane, true)
-      eventually(fn -> match?({:ok, %{enabled: false, error: error}} when is_binary(error), LaneStore.lookup(lane.id)) end)
+
+      eventually(fn ->
+        match?({:ok, %{enabled: false, error: error}} when is_binary(error), LaneStore.lookup(lane.id))
+      end)
+
       refute Lanes.get!(lane.id).enabled
       assert {:ok, %{error: message}} = LaneStore.lookup(lane.id)
       assert message =~ "runtime failed to start"
@@ -155,7 +166,11 @@ defmodule SymphonyElixir.LaneSupervisorTest do
     finish_preflight(prompt_worker, {:error, :replacement_tracker_unavailable})
     refute Lanes.get!(lane.id).enabled
     refute LaneSupervisor.running?(lane.id)
-    assert {:ok, %{version_id: version_id, name: "Renamed while checking", prompt: "Saved while checking", error: error}} = LaneStore.lookup(lane.id)
+
+    assert {:ok,
+            %{version_id: version_id, name: "Renamed while checking", prompt: "Saved while checking", error: error}} =
+             LaneStore.lookup(lane.id)
+
     assert version_id == current.current_version_id
     assert error =~ "replacement_tracker_unavailable"
   end
@@ -186,7 +201,9 @@ defmodule SymphonyElixir.LaneSupervisorTest do
     end)
 
     refute LaneSupervisor.running?(lane.id)
-    assert {:ok, %{enabled: false, runtime: %{started_at: nil, restarts: 0, last_crash: nil}}} = LaneStore.lookup(lane.id)
+
+    assert {:ok, %{enabled: false, runtime: %{started_at: nil, restarts: 0, last_crash: nil}}} =
+             LaneStore.lookup(lane.id)
 
     {:ok, _} = Lanes.set_enabled(lane, true)
     assert_receive {:preflight, replacement_worker}, 1000
@@ -270,7 +287,13 @@ defmodule SymphonyElixir.LaneSupervisorTest do
     eventually(fn -> LaneSupervisor.running?(lane.id) end)
     old_runtime = LaneRegistry.whereis(lane.id, :runtime)
     attempt_id = "orphan-#{System.unique_integer([:positive])}"
-    Runs.started(%{lane_id: lane.id, issue: %Issue{id: "issue-orphan", identifier: "TEAM-2", state: "Todo"}, attempt_id: attempt_id})
+
+    Runs.started(%{
+      lane_id: lane.id,
+      issue: %Issue{id: "issue-orphan", identifier: "TEAM-2", state: "Todo"},
+      attempt_id: attempt_id
+    })
+
     assert %{status: "running"} = Runs.get_by_attempt(attempt_id)
     assert {:ok, _} = Lanes.update(lane, %{front_matter: @linear})
     assert_receive {:preflight, old_worker}, 1000
@@ -394,7 +417,8 @@ defmodule SymphonyElixir.LaneSupervisorTest do
         handler,
         [:symphony_elixir, :repo, :query],
         fn _, _, metadata, _ ->
-          if self() != old_store and self() == Process.whereis(LaneStore) and metadata.params == [barrier_lane.current_version_id, barrier_lane.id] do
+          if self() != old_store and self() == Process.whereis(LaneStore) and
+               metadata.params == [barrier_lane.current_version_id, barrier_lane.id] do
             send(parent, {:restoring_remaining_lane, self()})
 
             receive do
@@ -516,7 +540,14 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   defp success do
-    {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"key" => "TEAM", "states" => %{"nodes" => [%{"name" => "Todo"}, %{"name" => "Done"}]}}]}}}}
+    {:ok,
+     %{
+       "data" => %{
+         "teams" => %{
+           "nodes" => [%{"key" => "TEAM", "states" => %{"nodes" => [%{"name" => "Todo"}, %{"name" => "Done"}]}}]
+         }
+       }
+     }}
   end
 
   defp finish_preflight(worker, result) do

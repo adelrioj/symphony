@@ -8,7 +8,9 @@ defmodule SymphonyElixir.GoogleCredentials do
 
   @spec options(keyword()) :: keyword()
   def options(opts) do
-    Keyword.put_new_lazy(opts, :deadline, fn -> System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, 30_000) end)
+    Keyword.put_new_lazy(opts, :deadline, fn ->
+      System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, 30_000)
+    end)
   end
 
   @spec remaining(keyword()) :: non_neg_integer()
@@ -53,7 +55,12 @@ defmodule SymphonyElixir.GoogleCredentials do
   @spec auth_args(identity()) :: [String.t()]
   def auth_args(identity) do
     configuration = ["--configuration=" <> identity["credential_configuration"]]
-    impersonation = if identity["impersonate_service_account"], do: ["--impersonate-service-account=" <> identity["impersonate_service_account"]], else: []
+
+    impersonation =
+      if identity["impersonate_service_account"],
+        do: ["--impersonate-service-account=" <> identity["impersonate_service_account"]],
+        else: []
+
     configuration ++ impersonation ++ ["--quiet"]
   end
 
@@ -79,7 +86,11 @@ defmodule SymphonyElixir.GoogleCredentials do
     command_opts =
       opts
       |> Keyword.merge(timeout_ms: remaining(opts), max_output_bytes: 16_384)
-      |> Keyword.update(:env, [{"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}], &List.keystore(&1, "CLOUDSDK_CORE_DISABLE_PROMPTS", 0, {"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}))
+      |> Keyword.update(
+        :env,
+        [{"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}],
+        &List.keystore(&1, "CLOUDSDK_CORE_DISABLE_PROMPTS", 0, {"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"})
+      )
 
     executable = Keyword.get_lazy(opts, :gcloud_executable, fn -> System.find_executable("gcloud") end)
     args = ["auth", "print-access-token", "--verbosity=error"] ++ auth_args(identity)
@@ -94,14 +105,19 @@ defmodule SymphonyElixir.GoogleCredentials do
     end
   end
 
-  defp cache_key(identity), do: {__MODULE__, :token, Map.take(identity, ["project", "credential_configuration", "impersonate_service_account"])}
+  defp cache_key(identity),
+    do: {__MODULE__, :token, Map.take(identity, ["project", "credential_configuration", "impersonate_service_account"])}
 
   defp valid_identity?(identity) when is_map(identity) do
     nonblank?(identity["credential_configuration"]) and
-      Enum.all?(["project", "impersonate_service_account"], fn key -> not Map.has_key?(identity, key) or nonblank?(identity[key]) end)
+      Enum.all?(["project", "impersonate_service_account"], fn key ->
+        not Map.has_key?(identity, key) or nonblank?(identity[key])
+      end)
   end
 
   defp valid_identity?(_identity), do: false
   defp nonblank?(value), do: is_binary(value) and String.valid?(value) and String.trim(value) != ""
-  defp valid_token?(value), do: is_binary(value) and byte_size(value) in 1..16_384 and String.valid?(value) and not Regex.match?(~r/\s/u, value)
+
+  defp valid_token?(value),
+    do: is_binary(value) and byte_size(value) in 1..16_384 and String.valid?(value) and not Regex.match?(~r/\s/u, value)
 end

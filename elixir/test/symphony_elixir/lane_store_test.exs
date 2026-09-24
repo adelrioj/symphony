@@ -17,7 +17,13 @@ defmodule SymphonyElixir.LaneStoreTest do
   test "registry isolates roles and lanes" do
     assert {:via, Registry, {LaneRegistry, {3, :orchestrator}}} = LaneRegistry.via(3, :orchestrator)
     assert is_nil(LaneRegistry.whereis(3, :orchestrator))
-    registered = start_supervised!(%{id: :registry_agent, start: {Agent, :start_link, [fn -> :healthy end, [name: LaneRegistry.via(3, :orchestrator)]]}})
+
+    registered =
+      start_supervised!(%{
+        id: :registry_agent,
+        start: {Agent, :start_link, [fn -> :healthy end, [name: LaneRegistry.via(3, :orchestrator)]]}
+      })
+
     assert LaneRegistry.whereis(3, :orchestrator) == registered
     assert Agent.get(registered, & &1) == :healthy
     assert is_nil(LaneRegistry.whereis(3, :runtime))
@@ -58,9 +64,14 @@ defmodule SymphonyElixir.LaneStoreTest do
     Process.flag(:trap_exit, true)
     assert {:error, {:workflow_parse_error, _}} = LaneStore.start_link(file: path)
 
-    assert {:ok, lane} = Lanes.create(%{slug: "offline", front_matter: "tracker:\n  kind: memory", prompt: "imported offline"})
+    assert {:ok, lane} =
+             Lanes.create(%{slug: "offline", front_matter: "tracker:\n  kind: memory", prompt: "imported offline"})
+
     assert {:ok, updated} = Lanes.update(lane, %{prompt: "\nsaved offline\n"})
-    assert {:error, [%{path: "front_matter"}]} = Lanes.update(updated, %{name: "must roll back", front_matter: "tracker: ["})
+
+    assert {:error, [%{path: "front_matter"}]} =
+             Lanes.update(updated, %{name: "must roll back", front_matter: "tracker: ["})
+
     assert Lanes.get!(lane.id).name == "offline"
     assert {:ok, "---\ntracker:\n  kind: memory\n---\n\nsaved offline\n"} = Lanes.export(Lanes.get!(lane.id))
     assert :error = LaneStore.lookup(lane.id)
@@ -128,11 +139,21 @@ defmodule SymphonyElixir.LaneStoreTest do
   end
 
   test "refresh keeps the effective last good version, and startup disables invalid DB lanes visibly" do
-    {:ok, lane} = Lanes.create(%{slug: "reload", enabled: true, front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 2000", prompt: "one"})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "reload",
+        enabled: true,
+        front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 2000",
+        prompt: "one"
+      })
+
     version = Lanes.current_version(lane)
     Repo.update!(Ecto.Changeset.change(version, front_matter: "polling:\n  interval_ms: nope"))
     assert :ok = LaneStore.refresh(lane.id)
-    assert {:ok, %Entry{settings: %Schema{polling: %{interval_ms: 2000}}, workflow: %{prompt: "one"}, error: error}} = LaneStore.lookup(lane.id)
+
+    assert {:ok, %Entry{settings: %Schema{polling: %{interval_ms: 2000}}, workflow: %{prompt: "one"}, error: error}} =
+             LaneStore.lookup(lane.id)
+
     assert error =~ "polling.interval_ms"
     replace_store([])
     assert {:ok, %Entry{settings: nil, enabled: false, error: error}} = LaneStore.lookup(lane.id)
@@ -149,7 +170,10 @@ defmodule SymphonyElixir.LaneStoreTest do
     on_exit(fn -> TestSupport.restore_env("LINEAR_API_KEY", previous_key) end)
 
     {:ok, lane} =
-      Lanes.create(%{slug: "missing-credential", front_matter: "tracker:\n  kind: linear\n  api_key: $LINEAR_API_KEY\n  project_slug: offline"})
+      Lanes.create(%{
+        slug: "missing-credential",
+        front_matter: "tracker:\n  kind: linear\n  api_key: $LINEAR_API_KEY\n  project_slug: offline"
+      })
 
     Repo.update!(Ecto.Changeset.change(lane, enabled: true))
     replace_store([])

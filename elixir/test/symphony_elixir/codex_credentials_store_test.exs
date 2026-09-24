@@ -28,7 +28,10 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
       request.(method, url, headers, body)
     end
 
-    tasks = for attempt <- ["attempt-a", "attempt-b"], do: Task.async(fn -> CodexCredentials.claim(config(), owner(attempt), request: synchronized) end)
+    tasks =
+      for attempt <- ["attempt-a", "attempt-b"],
+          do: Task.async(fn -> CodexCredentials.claim(config(), owner(attempt), request: synchronized) end)
+
     assert_receive {:write_ready, first}
     assert_receive {:write_ready, second}
     send(first, :write)
@@ -70,7 +73,11 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
   end
 
   test "unknown schemas and authority belonging to another credential or secret fail closed" do
-    for invalid <- [Map.put(seed(), "schema", 2), Map.put(seed(), "credential_id", "foreign"), Map.put(seed(), "head_version", "projects/foreign/secrets/other/versions/1")] do
+    for invalid <- [
+          Map.put(seed(), "schema", 2),
+          Map.put(seed(), "credential_id", "foreign"),
+          Map.put(seed(), "head_version", "projects/foreign/secrets/other/versions/1")
+        ] do
       {server, request} = store(invalid)
       assert {:error, :credential_outcome_unknown} = CodexCredentials.claim(config(), owner(), request: request)
       assert Agent.get(server, & &1.writes) == 0
@@ -81,27 +88,50 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
     {server, request} = store(seed())
     assert {:ok, snapshot} = ControlStore.read(config(), request: request)
     assert {:ok, next} = Record.transition(seed(), {:claim, "new-claim", owner()}, "new-transition")
-    assert {:error, :credential_outcome_unknown} = ControlStore.replace(config(), snapshot, Map.put(next, "epoch", 2), request: request)
-    assert {:error, :credential_outcome_unknown} = ControlStore.replace(config(), %{snapshot | generation: "0"}, next, request: request)
+
+    assert {:error, :credential_outcome_unknown} =
+             ControlStore.replace(config(), snapshot, Map.put(next, "epoch", 2), request: request)
+
+    assert {:error, :credential_outcome_unknown} =
+             ControlStore.replace(config(), %{snapshot | generation: "0"}, next, request: request)
+
     assert Agent.get(server, & &1.writes) == 0
   end
 
   test "current cloud ownership defeats stale local claims and foreign epoch receipts" do
     {server, request} = store(owned())
-    assert {:error, {:credential_recovery_required, :claim_mismatch}} = CodexCredentials.transition(config(), "stale-local-claim", {:bind_uid, "stale-local-claim", "uid-a"}, request: request)
-    assert {:error, {:credential_recovery_required, :checkpoint_mismatch}} = CodexCredentials.transition(config(), "claim-a", {:checkpoint, Map.put(receipt(), "epoch", 2)}, request: request)
+
+    assert {:error, {:credential_recovery_required, :claim_mismatch}} =
+             CodexCredentials.transition(config(), "stale-local-claim", {:bind_uid, "stale-local-claim", "uid-a"},
+               request: request
+             )
+
+    assert {:error, {:credential_recovery_required, :checkpoint_mismatch}} =
+             CodexCredentials.transition(config(), "claim-a", {:checkpoint, Map.put(receipt(), "epoch", 2)},
+               request: request
+             )
+
     assert Agent.get(server, & &1.writes) == 0
   end
 
   test "checkpoint requires enabled metadata for the exact numeric version before committing" do
     {server, request} = store(owned())
-    assert {:ok, checkpoint} = CodexCredentials.transition(config(), "claim-a", {:checkpoint, receipt()}, request: request)
+
+    assert {:ok, checkpoint} =
+             CodexCredentials.transition(config(), "claim-a", {:checkpoint, receipt()}, request: request)
+
     assert checkpoint.record["candidate"] == receipt()
     assert Agent.get(server, & &1.metadata_reads) == 1
 
-    for metadata <- [%{"name" => @secret <> "/versions/2", "state" => "DISABLED"}, %{"name" => @version, "state" => "ENABLED"}] do
+    for metadata <- [
+          %{"name" => @secret <> "/versions/2", "state" => "DISABLED"},
+          %{"name" => @version, "state" => "ENABLED"}
+        ] do
       {denied, request} = store(owned(), metadata: metadata)
-      assert {:error, :credential_outcome_unknown} = CodexCredentials.transition(config(), "claim-a", {:checkpoint, receipt()}, request: request)
+
+      assert {:error, :credential_outcome_unknown} =
+               CodexCredentials.transition(config(), "claim-a", {:checkpoint, receipt()}, request: request)
+
       assert Agent.get(denied, & &1.writes) == 0
     end
   end
@@ -113,8 +143,13 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
     assert {:ok, released} = CodexCredentials.transition(config(), "claim-a", {:release, "claim-a"}, request: request)
     assert released.record["last_handoff"]["resource_acknowledged"] == false
     assert {:error, :credential_busy} = CodexCredentials.claim(config(), owner("next-attempt"), request: request)
-    assert {:error, {:credential_recovery_required, :claim_mismatch}} = CodexCredentials.transition(config(), "foreign", {:acknowledge_handoff, "foreign"}, request: request)
-    assert {:ok, acknowledged} = CodexCredentials.transition(config(), "claim-a", {:acknowledge_handoff, "claim-a"}, request: request)
+
+    assert {:error, {:credential_recovery_required, :claim_mismatch}} =
+             CodexCredentials.transition(config(), "foreign", {:acknowledge_handoff, "foreign"}, request: request)
+
+    assert {:ok, acknowledged} =
+             CodexCredentials.transition(config(), "claim-a", {:acknowledge_handoff, "claim-a"}, request: request)
+
     assert acknowledged.record["last_handoff"]["resource_acknowledged"]
     assert {:ok, next} = CodexCredentials.claim(config(), owner("next-attempt"), request: request)
     refute next.record["claim_id"] == "claim-a"
@@ -151,8 +186,16 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
       {:ok, %{status: 200, headers: %{}, body: response}}
     end
 
-    assert {:ok, %{"name" => @version, "state" => "ENABLED"}} = GoogleClient.version_metadata(config(), @version, token_fun: token_fun, request_fun: request_fun, timeout_ms: 2_000)
-    assert {:ok, %{record: record}} = ControlStore.read(config(), token_fun: token_fun, request_fun: request_fun, timeout_ms: 2_000)
+    assert {:ok, %{"name" => @version, "state" => "ENABLED"}} =
+             GoogleClient.version_metadata(config(), @version,
+               token_fun: token_fun,
+               request_fun: request_fun,
+               timeout_ms: 2_000
+             )
+
+    assert {:ok, %{record: record}} =
+             ControlStore.read(config(), token_fun: token_fun, request_fun: request_fun, timeout_ms: 2_000)
+
     assert record == seed()
     assert_receive {:identity, %{"credential_configuration" => "symphony-codex"} = identity}
     refute Map.has_key?(identity, "impersonate_service_account")
@@ -163,7 +206,12 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
   test "metadata rejects aliases, foreign secrets and payload endpoints before any request" do
     request = fn _, _, _, _ -> flunk("invalid version reached transport") end
 
-    for version <- [@secret <> "/versions/latest", @secret <> "/versions/0", @version <> ":access", "projects/foreign/secrets/other/versions/1"] do
+    for version <- [
+          @secret <> "/versions/latest",
+          @secret <> "/versions/0",
+          @version <> ":access",
+          "projects/foreign/secrets/other/versions/1"
+        ] do
       assert {:error, :credential_outcome_unknown} = GoogleClient.version_metadata(config(), version, request: request)
     end
   end
@@ -171,8 +219,19 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
   test "Google client refuses endpoint passthrough and redacts uncertain writes without replay" do
     request = fn _ -> flunk("unapproved host reached transport") end
     opts = [request_fun: request, token_fun: fn _, _ -> {:ok, "fixture-token"} end]
-    assert {:error, :credential_outcome_unknown} = GoogleClient.request(config(), :post, "https://attacker.invalid/upload", [], "{}", opts)
-    assert {:error, :credential_outcome_unknown} = GoogleClient.request(config(), :get, "https://secretmanager.googleapis.com/v1/" <> @version <> ":access", [], nil, opts)
+
+    assert {:error, :credential_outcome_unknown} =
+             GoogleClient.request(config(), :post, "https://attacker.invalid/upload", [], "{}", opts)
+
+    assert {:error, :credential_outcome_unknown} =
+             GoogleClient.request(
+               config(),
+               :get,
+               "https://secretmanager.googleapis.com/v1/" <> @version <> ":access",
+               [],
+               nil,
+               opts
+             )
 
     parent = self()
 
@@ -181,8 +240,19 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
       {:error, {:timeout, "private response"}}
     end
 
-    url = "https://storage.googleapis.com/upload/storage/v1/b/fixture-codex-control/o?uploadType=media&name=features%2Fauthority.json&ifGenerationMatch=123"
-    assert {:error, :credential_outcome_unknown} = GoogleClient.request(config(), :post, url, [{"content-type", "application/json"}], "{}", Keyword.put(opts, :request_fun, failing))
+    url =
+      "https://storage.googleapis.com/upload/storage/v1/b/fixture-codex-control/o?uploadType=media&name=features%2Fauthority.json&ifGenerationMatch=123"
+
+    assert {:error, :credential_outcome_unknown} =
+             GoogleClient.request(
+               config(),
+               :post,
+               url,
+               [{"content-type", "application/json"}],
+               "{}",
+               Keyword.put(opts, :request_fun, failing)
+             )
+
     assert_receive :write
     refute_receive :write
   end
@@ -205,7 +275,10 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
     assert {:ok, _} = GoogleClient.version_metadata(config(), @version, opts)
     assert Process.get(:controller_tokens) == 2
     denied = fn _ -> {:ok, %{status: 401, headers: %{}, body: %{}}} end
-    assert {:error, :credential_outcome_unknown} = GoogleClient.version_metadata(config(), @version, Keyword.put(opts, :request_fun, denied))
+
+    assert {:error, :credential_outcome_unknown} =
+             GoogleClient.version_metadata(config(), @version, Keyword.put(opts, :request_fun, denied))
+
     assert Process.get(:controller_tokens) == 2
   end
 
@@ -213,7 +286,13 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
     identity = %{"project" => "fixture-workers", "credential_configuration" => "symphony-codex"}
     opts = [token_fun: fn _, _ -> {:ok, "fixture-token"} end, timeout_ms: 1_000]
     assert {:ok, "fixture-token"} = GoogleCredentials.token(identity, opts)
-    expired = Keyword.merge(opts, deadline: System.monotonic_time(:millisecond) - 1, token_fun: fn _, _ -> flunk("expired token acquisition") end)
+
+    expired =
+      Keyword.merge(opts,
+        deadline: System.monotonic_time(:millisecond) - 1,
+        token_fun: fn _, _ -> flunk("expired token acquisition") end
+      )
+
     assert {:error, {:unknown, :google_deadline}} = GoogleCredentials.token(identity, expired)
   end
 
@@ -245,13 +324,29 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
       {:ok, %{status: 200, body: %{"name" => @version, "state" => "ENABLED"}}}
     end
 
-    assert {:ok, _} = GoogleClient.version_metadata(config(), @version, gcloud_executable: executable, task_supervisor: supervisor, authority: self(), request_fun: request, timeout_ms: 5_000)
+    assert {:ok, _} =
+             GoogleClient.version_metadata(config(), @version,
+               gcloud_executable: executable,
+               task_supervisor: supervisor,
+               authority: self(),
+               request_fun: request,
+               timeout_ms: 5_000
+             )
   end
 
   defp config do
     %{
-      provider: %{"project" => "lifecycle-project", "credential_configuration" => "symphony-lifecycle", "impersonate_service_account" => "lifecycle@example.invalid"},
-      codex_credentials: %{"credential_id" => "features-personal-codex", "secret" => @secret, "control_bucket" => "fixture-codex-control", "control_object" => "features/authority.json"}
+      provider: %{
+        "project" => "lifecycle-project",
+        "credential_configuration" => "symphony-lifecycle",
+        "impersonate_service_account" => "lifecycle@example.invalid"
+      },
+      codex_credentials: %{
+        "credential_id" => "features-personal-codex",
+        "secret" => @secret,
+        "control_bucket" => "fixture-codex-control",
+        "control_object" => "features/authority.json"
+      }
     }
   end
 
@@ -261,7 +356,8 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
     %{
       "deployment_id" => "deployment-a",
       "lane" => "features",
-      "workstation_name" => "projects/fixture-workers/locations/europe-west1/workstationClusters/fixture/workstationConfigs/features/workstations/ticket-1",
+      "workstation_name" =>
+        "projects/fixture-workers/locations/europe-west1/workstationClusters/fixture/workstationConfigs/features/workstations/ticket-1",
       "workstation_uid" => nil,
       "attempt_id" => attempt
     }
@@ -286,7 +382,12 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
     }
   end
 
-  defp proof, do: %{"uid" => "uid-a", "operation" => "projects/fixture-workers/locations/europe-west1/operations/stop-1", "attempt_id" => "attempt-a"}
+  defp proof,
+    do: %{
+      "uid" => "uid-a",
+      "operation" => "projects/fixture-workers/locations/europe-west1/operations/stop-1",
+      "attempt_id" => "attempt-a"
+    }
 
   defp store(record, opts \\ []) do
     server =
@@ -349,7 +450,13 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
   defp read_object(state, %{"alt" => "media", "generation" => generation}) do
     cond do
       state.race_record != nil ->
-        updated = %{state | generation: increment(state.generation), bytes: Jason.encode!(state.race_record), race_record: nil}
+        updated = %{
+          state
+          | generation: increment(state.generation),
+            bytes: Jason.encode!(state.race_record),
+            race_record: nil
+        }
+
         {{:ok, 404, [], %{}}, updated}
 
       generation == state.generation ->
@@ -373,10 +480,18 @@ defmodule SymphonyElixir.CodexCredentialsStoreTest do
       updated = %{state | generation: increment(state.generation), bytes: body, mode: nil}
 
       case state.mode do
-        :lose_response -> {{:error, :timeout}, updated}
-        :lose_and_hide -> {{:error, :timeout}, %{updated | mode: :hidden}}
-        :lose_and_swap -> {{:error, :timeout}, %{updated | bytes: Jason.encode!(put_in(record, ["owner", "attempt_id"], "foreign-attempt"))}}
-        _ -> {{:ok, 200, [], %{"generation" => updated.generation}}, updated}
+        :lose_response ->
+          {{:error, :timeout}, updated}
+
+        :lose_and_hide ->
+          {{:error, :timeout}, %{updated | mode: :hidden}}
+
+        :lose_and_swap ->
+          {{:error, :timeout},
+           %{updated | bytes: Jason.encode!(put_in(record, ["owner", "attempt_id"], "foreign-attempt"))}}
+
+        _ ->
+          {{:ok, 200, [], %{"generation" => updated.generation}}, updated}
       end
     else
       {{:ok, 412, [], %{}}, state}

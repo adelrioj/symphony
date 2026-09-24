@@ -93,7 +93,8 @@ defmodule SymphonyElixir.Tracker do
 
   @doc "Structural validation retains provider checks without resolving or requiring runtime credentials."
   @spec validate_config(map(), :runtime | :structure) :: :ok | {:error, term()}
-  def validate_config(%{kind: kind} = tracker_settings, validation \\ :runtime) when validation in [:runtime, :structure] do
+  def validate_config(%{kind: kind} = tracker_settings, validation \\ :runtime)
+      when validation in [:runtime, :structure] do
     with {:ok, adapter} <- adapter_for_kind(kind) do
       if Code.ensure_loaded?(adapter) and function_exported?(adapter, :validate_config, 2) do
         adapter.validate_config(tracker_settings, validation)

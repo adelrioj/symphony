@@ -53,7 +53,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   @spec step(Entry.t(), term(), integer()) :: {Entry.t(), [term()]}
   def step(%Entry{phase: :reserved} = entry, :prepare, _now), do: operation(entry, :prepare, :preparing)
 
-  def step(%Entry{} = entry, {:reconcile, operation}, _now) when operation in [:stop, :destroy, :inspect, :metadata, :cleanup_hook] do
+  def step(%Entry{} = entry, {:reconcile, operation}, _now)
+      when operation in [:stop, :destroy, :inspect, :metadata, :cleanup_hook] do
     phase =
       case operation do
         :stop -> :stopping
@@ -72,12 +73,24 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
     {%{entry | attempt_id: id, purpose: purpose, phase: :reserved, completion: nil, context: nil, last_error: nil}, []}
   end
 
-  def step(%Entry{phase: :preparing, operation_id: id} = entry, {:prepared, id, %Record{phase: :running} = record}, _now) when not is_nil(id) do
+  def step(
+        %Entry{phase: :preparing, operation_id: id} = entry,
+        {:prepared, id, %Record{phase: :running} = record},
+        _now
+      )
+      when not is_nil(id) do
     {%{entry | record: record, operation_id: nil}, []}
   end
 
-  def step(%Entry{phase: :preparing, operation_id: nil, operation_seq: seq, record: %Record{phase: :running}} = entry, :launch, _now) when seq > 0 do
-    if Credentials.ready?(entry.record), do: {%{entry | phase: :running}, [{:launch_agent, entry.attempt_id}]}, else: {entry, []}
+  def step(
+        %Entry{phase: :preparing, operation_id: nil, operation_seq: seq, record: %Record{phase: :running}} = entry,
+        :launch,
+        _now
+      )
+      when seq > 0 do
+    if Credentials.ready?(entry.record),
+      do: {%{entry | phase: :running}, [{:launch_agent, entry.attempt_id}]},
+      else: {entry, []}
   end
 
   def step(%Entry{phase: :running, attempt_id: id} = entry, {:agent_exited, id, completion}, _now) do
@@ -88,9 +101,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
     operation(%{entry | completion: completion}, :stop, :stopping)
   end
 
-  def step(%Entry{phase: :unknown, record: %Record{desired: :absent}} = entry, {:stopped, _id, _record}, _now), do: {entry, []}
+  def step(%Entry{phase: :unknown, record: %Record{desired: :absent}} = entry, {:stopped, _id, _record}, _now),
+    do: {entry, []}
 
-  def step(%Entry{phase: phase, operation_id: id} = entry, {:stopped, id, %Record{} = record}, _now) when phase in [:stopping, :unknown] and not is_nil(id) do
+  def step(%Entry{phase: phase, operation_id: id} = entry, {:stopped, id, %Record{} = record}, _now)
+      when phase in [:stopping, :unknown] and not is_nil(id) do
     record = invalidate_start_proof(record)
 
     if quiescent?(record) and not unresolved?(record) and Credentials.resolved?(record) do
@@ -106,10 +121,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   end
 
   def step(%Entry{phase: :stopped} = entry, :destroy, _now) do
-    if quiescent?(entry.record) and not unresolved?(entry.record) and Credentials.resolved?(entry.record), do: operation(entry, :destroy, :deleting), else: {entry, []}
+    if quiescent?(entry.record) and not unresolved?(entry.record) and Credentials.resolved?(entry.record),
+      do: operation(entry, :destroy, :deleting),
+      else: {entry, []}
   end
 
-  def step(%Entry{phase: phase, operation_id: id} = entry, {:destroyed, id, %Record{absent?: true} = record}, _now) when phase in [:deleting, :unknown] and not is_nil(id) do
+  def step(%Entry{phase: phase, operation_id: id} = entry, {:destroyed, id, %Record{absent?: true} = record}, _now)
+      when phase in [:deleting, :unknown] and not is_nil(id) do
     if unresolved?(record) or not Credentials.resolved?(record) do
       {entry, []}
     else
@@ -134,7 +152,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
 
   @type terminal_observation :: :terminal | :nonterminal | :missing | :error
   @spec deletion_due?(Record.t(), terminal_observation(), non_neg_integer(), integer()) :: boolean()
-  def deletion_due?(%Record{terminal_observed_at: timestamp}, :terminal, retention_ms, now) when is_integer(timestamp) and is_integer(retention_ms) and retention_ms >= 0 do
+  def deletion_due?(%Record{terminal_observed_at: timestamp}, :terminal, retention_ms, now)
+      when is_integer(timestamp) and is_integer(retention_ms) and retention_ms >= 0 do
     now >= timestamp and now - timestamp >= retention_ms
   end
 
@@ -149,7 +168,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   defp quiescent?(%Record{proof: {:quiescent, evidence}}), do: is_map(evidence) and map_size(evidence) > 0
   defp quiescent?(_record), do: false
   defp unresolved?(record), do: Enum.any?(record.pending, &(&1.outcome in [:pending, :unknown]))
-  defp unresolved_start?(record), do: Enum.any?(record.pending, &(&1.verb in [:create, :start] and &1.outcome in [:pending, :unknown]))
+
+  defp unresolved_start?(record),
+    do: Enum.any?(record.pending, &(&1.verb in [:create, :start] and &1.outcome in [:pending, :unknown]))
+
   defp invalidate_start_proof(%Record{proof: {:compute_unknown, _}} = record), do: record
   defp invalidate_start_proof(record), do: if(unresolved_start?(record), do: %{record | proof: :unknown}, else: record)
 

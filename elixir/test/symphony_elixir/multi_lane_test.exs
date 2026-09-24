@@ -11,7 +11,11 @@ defmodule SymphonyElixir.MultiLaneTest do
     def call(conn, parent) do
       {:ok, body, conn} = Plug.Conn.read_body(conn)
       send(parent, {:new_tracker_request, Jason.decode!(body)})
-      response = %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}
+
+      response = %{
+        "data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}
+      }
+
       conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(response))
     end
   end
@@ -27,7 +31,9 @@ defmodule SymphonyElixir.MultiLaneTest do
 
       receive do
         {:respond, response} ->
-          conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(response))
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(200, Jason.encode!(response))
       end
     end
   end
@@ -146,7 +152,11 @@ defmodule SymphonyElixir.MultiLaneTest do
     wait_until(fn -> Orchestrator.snapshot(owner, 5_000).running == [] end)
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue("next", "Queue New")])
     send(owner, :run_poll_cycle)
-    assert_receive {:attempt, "next", next_worker, next_attempt, {3, "New prompt", "echo hook-3 > hook-version", ["Queue New"]}}, 5_000
+
+    assert_receive {:attempt, "next", next_worker, next_attempt,
+                    {3, "New prompt", "echo hook-3 > hook-version", ["Queue New"]}},
+                   5_000
+
     assert %{polling: %{poll_interval_ms: 45_000}} = Orchestrator.snapshot(owner, 5_000)
     assert Runs.get_by_attempt(first_attempt).lane_version_id == old_entry.version_id
     assert Runs.get_by_attempt(next_attempt).lane_version_id == new_entry.version_id
@@ -254,7 +264,10 @@ defmodule SymphonyElixir.MultiLaneTest do
 
     assert_receive {:retry_refresh, request, %{"query" => query}}, 5_000
     assert query =~ "SymphonyLinearIssuesById"
-    replacement = front |> String.replace("backend: codex", "backend: claude") |> String.replace(root, root <> "-replacement")
+
+    replacement =
+      front |> String.replace("backend: codex", "backend: claude") |> String.replace(root, root <> "-replacement")
+
     {:ok, _} = Lanes.update(Lanes.get!(a.id), %{front_matter: replacement, prompt: "Replacement retry prompt"})
 
     send(

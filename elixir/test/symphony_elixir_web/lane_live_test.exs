@@ -10,7 +10,13 @@ defmodule SymphonyElixirWeb.LaneLiveTest do
 
   setup do
     previous = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
-    Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, Keyword.merge(previous, server: false, secret_key_base: String.duplicate("s", 64)))
+
+    Application.put_env(
+      :symphony_elixir,
+      SymphonyElixirWeb.Endpoint,
+      Keyword.merge(previous, server: false, secret_key_base: String.duplicate("s", 64))
+    )
+
     on_exit(fn -> Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous) end)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
     {:ok, conn: Plug.Test.init_test_session(build_conn(), %{"operator" => true})}
@@ -39,7 +45,15 @@ defmodule SymphonyElixirWeb.LaneLiveTest do
     :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "new-run"})
     :ok = Runs.flush()
     wait_until(fn -> has_element?(view, "#run-new-run", "running") end)
-    :ok = Runs.event("new-run", %{event: :turn_completed, message: "completed"}, %{input_tokens: 3, output_tokens: 4, total_tokens: 7}, 1)
+
+    :ok =
+      Runs.event(
+        "new-run",
+        %{event: :turn_completed, message: "completed"},
+        %{input_tokens: 3, output_tokens: 4, total_tokens: 7},
+        1
+      )
+
     :ok = Runs.finished("new-run", "done")
     :ok = Runs.flush()
     wait_until(fn -> has_element?(view, "#run-new-run .state-badge", "done") end)

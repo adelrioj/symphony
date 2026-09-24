@@ -24,7 +24,11 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
 
   setup context do
     root_owned_pvc? = Map.get(context, :root_owned_pvc, false)
-    root = if root_owned_pvc?, do: System.fetch_env!("SYMPHONY_TEST_ROOT_OWNED_PVC"), else: Path.join(System.tmp_dir!(), "codex-recovery-#{System.unique_integer([:positive])}")
+
+    root =
+      if root_owned_pvc?,
+        do: System.fetch_env!("SYMPHONY_TEST_ROOT_OWNED_PVC"),
+        else: Path.join(System.tmp_dir!(), "codex-recovery-#{System.unique_integer([:positive])}")
 
     if root_owned_pvc? do
       refute File.exists?(Path.join(root, "symphony.sqlite3"))
@@ -37,13 +41,21 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
 
     on_exit(fn ->
       if root_owned_pvc? do
-        Enum.each(~w(symphony.sqlite3 symphony.sqlite3-wal symphony.sqlite3-shm WORKFLOW.md), &File.rm(Path.join(root, &1)))
+        Enum.each(
+          ~w(symphony.sqlite3 symphony.sqlite3-wal symphony.sqlite3-shm WORKFLOW.md),
+          &File.rm(Path.join(root, &1))
+        )
       else
         File.rm_rf!(root)
       end
     end)
 
-    refs = %{"credential_id" => "features-codex", "secret" => "projects/123456/secrets/features-codex", "control_bucket" => "fixture-control", "control_object" => "authority.json"}
+    refs = %{
+      "credential_id" => "features-codex",
+      "secret" => "projects/123456/secrets/features-codex",
+      "control_bucket" => "fixture-control",
+      "control_object" => "authority.json"
+    }
 
     environment = %{
       "kind" => "google_workstations",
@@ -62,7 +74,13 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
       }
     }
 
-    front = Jason.encode!(%{"tracker" => %{"kind" => "memory"}, "workspace" => %{"root" => "/state/workspaces"}, "worker" => %{"environment" => environment}})
+    front =
+      Jason.encode!(%{
+        "tracker" => %{"kind" => "memory"},
+        "workspace" => %{"root" => "/state/workspaces"},
+        "worker" => %{"environment" => environment}
+      })
+
     workflow = Path.join(root, "WORKFLOW.md")
     File.write!(workflow, SymphonyElixir.Workflow.render(front, "Current Features prompt"))
     database = Path.join(root, "symphony.sqlite3")
@@ -81,11 +99,32 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
     :ok = Sqlite3.close(db)
     key = SymphonyElixir.ExecutionEnvironment.resource_key("deployment", "memory", "ticket")
     name = "projects/p/locations/l/workstationClusters/c/workstationConfigs/features/workstations/" <> key
-    owner = %{"deployment_id" => "deployment", "lane" => "features", "workstation_name" => name, "workstation_uid" => nil, "attempt_id" => "original-attempt"}
-    {:ok, claimed} = Record.transition(Record.initial(refs["credential_id"], 1, refs["secret"] <> "/versions/1"), {:claim, "original-claim", owner}, "claim-transition")
+
+    owner = %{
+      "deployment_id" => "deployment",
+      "lane" => "features",
+      "workstation_name" => name,
+      "workstation_uid" => nil,
+      "attempt_id" => "original-attempt"
+    }
+
+    {:ok, claimed} =
+      Record.transition(
+        Record.initial(refs["credential_id"], 1, refs["secret"] <> "/versions/1"),
+        {:claim, "original-claim", owner},
+        "claim-transition"
+      )
+
     {:ok, owned} = Record.transition(claimed, {:bind_uid, "original-claim", "uid-1"}, "bound-transition")
     {:ok, assignment} = Record.assignment(owned)
-    receipt = Map.merge(assignment, %{"secret_version" => refs["secret"] <> "/versions/2", "sha256" => String.duplicate("a", 64), "admission" => "sealed"})
+
+    receipt =
+      Map.merge(assignment, %{
+        "secret_version" => refs["secret"] <> "/versions/2",
+        "sha256" => String.duplicate("a", 64),
+        "admission" => "sealed"
+      })
+
     {:ok, checkpointed} = Record.transition(owned, {:checkpoint, receipt}, "checkpoint-transition")
 
     resource = %Resource{
@@ -104,8 +143,17 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
       proof: {:quiescent, %{uid: "uid-1", operation: "projects/p/locations/l/operations/stop-1"}}
     }
 
-    resource = Credentials.put(resource, %{"assignment" => assignment, "stage" => "checkpointed", "mode" => "recover", "disposition" => nil})
-    cloud = start_supervised!({Agent, fn -> %{record: checkpointed, generation: 8, writes: [], fail: nil} end}, id: :cloud)
+    resource =
+      Credentials.put(resource, %{
+        "assignment" => assignment,
+        "stage" => "checkpointed",
+        "mode" => "recover",
+        "disposition" => nil
+      })
+
+    cloud =
+      start_supervised!({Agent, fn -> %{record: checkpointed, generation: 8, writes: [], fail: nil} end}, id: :cloud)
+
     remote = start_supervised!({Agent, fn -> %{records: [resource], writes: [], fail: nil} end}, id: :remote)
 
     request = fn method, url, _headers, body ->
@@ -130,8 +178,18 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
             {{:ok, 412, [], %{}}, state}
 
           method == :post ->
-            next = %{state | record: Jason.decode!(body), generation: state.generation + 1, writes: state.writes ++ [Jason.decode!(body)]}
-            reply = if state.fail == :lost_write, do: {:error, :timeout}, else: {:ok, 200, [], %{"generation" => to_string(next.generation)}}
+            next = %{
+              state
+              | record: Jason.decode!(body),
+                generation: state.generation + 1,
+                writes: state.writes ++ [Jason.decode!(body)]
+            }
+
+            reply =
+              if state.fail == :lost_write,
+                do: {:error, :timeout},
+                else: {:ok, 200, [], %{"generation" => to_string(next.generation)}}
+
             {reply, next}
         end
       end)
@@ -180,7 +238,9 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
 
       result =
         if String.contains?(text, "codex_guard.py checkpoint") do
-          if Agent.get(remote, & &1.fail) == :receipt_mismatch, do: Map.put(receipt, "sha256", String.duplicate("b", 64)), else: receipt
+          if Agent.get(remote, & &1.fail) == :receipt_mismatch,
+            do: Map.put(receipt, "sha256", String.duplicate("b", 64)),
+            else: receipt
         else
           %{"assignment" => assignment, "state" => "CHECKPOINTED", "admission" => "sealed", "reason" => nil}
         end
@@ -197,7 +257,19 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
       operation_options: [provider: provider, request: request, command_fun: command]
     ]
 
-    %{root: root, database: database, workflow: workflow, options: options, deps: deps, cloud: cloud, remote: remote, resource: resource, receipt: receipt, owned: owned, name: name}
+    %{
+      root: root,
+      database: database,
+      workflow: workflow,
+      options: options,
+      deps: deps,
+      cloud: cloud,
+      remote: remote,
+      resource: resource,
+      receipt: receipt,
+      owned: owned,
+      name: name
+    }
   end
 
   @tag :root_owned_pvc
@@ -271,7 +343,8 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
 
   test "stale epoch and generation reject before physical stop or authority write", c do
     for override <- [[expected_epoch: 2], [expected_generation: "7"]] do
-      assert {:error, :authority_changed} = Recovery.reconcile(Keyword.merge(mutation(c, "reseed-stop"), override), c.deps)
+      assert {:error, :authority_changed} =
+               Recovery.reconcile(Keyword.merge(mutation(c, "reseed-stop"), override), c.deps)
     end
 
     assert Agent.get(c.remote, & &1.writes) == []
@@ -279,7 +352,10 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
   end
 
   test "UID mismatch and pending inventory cannot authorize reseed", c do
-    for resource <- [%{c.resource | provider_ref: %{name: c.name, uid: "replacement"}}, %{c.resource | pending: [%{id: "projects/p/locations/l/operations/start", verb: :start, outcome: :pending}]}] do
+    for resource <- [
+          %{c.resource | provider_ref: %{name: c.name, uid: "replacement"}},
+          %{c.resource | pending: [%{id: "projects/p/locations/l/operations/start", verb: :start, outcome: :pending}]}
+        ] do
       Agent.update(c.remote, &%{&1 | records: [resource]})
       assert {:error, _} = Recovery.reconcile(mutation(c, "reseed-stop"), c.deps)
     end
@@ -310,7 +386,10 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
   end
 
   test "known authoritative checkpoint explicitly resolves quarantine and acknowledges original owner", c do
-    Agent.update(c.cloud, fn state -> %{state | record: Map.merge(state.record, %{"state" => "RECOVERY_REQUIRED", "reason" => "checkpoint_failed"})} end)
+    Agent.update(c.cloud, fn state ->
+      %{state | record: Map.merge(state.record, %{"state" => "RECOVERY_REQUIRED", "reason" => "checkpoint_failed"})}
+    end)
+
     options = receipt_options(c, c.receipt)
     assert {:ok, result} = Recovery.reconcile(options, c.deps)
     assert result.authority.record["state"] == "AVAILABLE"
@@ -356,14 +435,25 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
       assert current.record["last_handoff"]["resource_acknowledged"] == (unquote(failure) == :final_metadata)
       Agent.update(c.remote, &%{&1 | fail: nil})
       options = Keyword.put(options, :expected_generation, to_string(current.generation))
-      assert {:ok, %{resources: [%{assignment: assignment, disposition: disposition}]}} = Recovery.reconcile(options, c.deps)
+
+      assert {:ok, %{resources: [%{assignment: assignment, disposition: disposition}]}} =
+               Recovery.reconcile(options, c.deps)
+
       assert assignment["epoch"] == 1 and assignment["owner"]["attempt_id"] == "original-attempt"
       assert disposition["epoch"] == 1 and disposition["resolved_epoch"] == 2 and disposition["resource_acknowledged"]
     end
   end
 
   test "epoch advancement without matching handoff never resolves an old claim", c do
-    Agent.update(c.cloud, &%{&1 | record: Record.initial("features-codex", 2, "projects/123456/secrets/features-codex/versions/2"), generation: 9})
+    Agent.update(
+      c.cloud,
+      &%{
+        &1
+        | record: Record.initial("features-codex", 2, "projects/123456/secrets/features-codex/versions/2"),
+          generation: 9
+      }
+    )
+
     options = Keyword.merge(mutation(c, "reseed-commit"), expected_epoch: 2, expected_generation: "9")
     assert {:error, _} = Recovery.reconcile(options, c.deps)
     assert Agent.get(c.remote, & &1.writes) == []
@@ -373,7 +463,10 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
     unbound = put_in(c.owned, ["owner", "workstation_uid"], nil)
     Agent.update(c.cloud, &%{&1 | record: unbound})
     Agent.update(c.remote, &%{&1 | records: []})
-    assert {:ok, %{authority: %{record: ^unbound}, resources: []}} = Recovery.reconcile(mutation(c, "reseed-stop"), c.deps)
+
+    assert {:ok, %{authority: %{record: ^unbound}, resources: []}} =
+             Recovery.reconcile(mutation(c, "reseed-stop"), c.deps)
+
     assert Agent.get(c.cloud, & &1.writes) == []
   end
 
@@ -405,12 +498,20 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
       |> put_in(["stop_proof", "uid"], "historical-uid")
 
     historical =
-      %{committed | key: "historical", provider_ref: %{name: name, uid: "historical-uid"}, proof: {:quiescent, %{uid: "historical-uid", operation: "projects/p/locations/l/operations/stop-1"}}}
+      %{
+        committed
+        | key: "historical",
+          provider_ref: %{name: name, uid: "historical-uid"},
+          proof: {:quiescent, %{uid: "historical-uid", operation: "projects/p/locations/l/operations/stop-1"}}
+      }
       |> Credentials.put(%{"assignment" => assignment, "disposition" => disposition})
 
     Agent.update(c.cloud, &%{&1 | record: c.owned, generation: 8, writes: []})
     Agent.update(c.remote, &%{&1 | records: [c.resource, historical], writes: []})
-    assert {:error, :resource_mismatch} = Recovery.reconcile(Keyword.put(mutation(c, "reseed-stop"), :resource, name), c.deps)
+
+    assert {:error, :resource_mismatch} =
+             Recovery.reconcile(Keyword.put(mutation(c, "reseed-stop"), :resource, name), c.deps)
+
     assert Agent.get(c.cloud, & &1.writes) == []
     assert Agent.get(c.remote, & &1.writes) == []
   end
@@ -432,7 +533,19 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
     invoke = fn action, extra ->
       snapshot = Agent.get(c.cloud, & &1)
       base = ["credentials", "reconcile", "--data-root", c.root, "--workflow", c.workflow, "--action", action]
-      mutation = if action == "inspect", do: [], else: ["--resource", c.name, "--expected-epoch", to_string(snapshot.record["epoch"]), "--expected-generation", to_string(snapshot.generation)]
+
+      mutation =
+        if action == "inspect",
+          do: [],
+          else: [
+            "--resource",
+            c.name,
+            "--expected-epoch",
+            to_string(snapshot.record["epoch"]),
+            "--expected-generation",
+            to_string(snapshot.generation)
+          ]
+
       assert :ok = SymphonyElixir.CLI.evaluate(base ++ mutation ++ extra, deps)
       assert_receive {:cli_output, %{"ok" => true, "result" => result}}
       assert result["action"] == action and result["admission"] == "maintenance"
@@ -441,7 +554,11 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
 
     assert invoke.("inspect", [])["authority"]["record"]["state"] == "CHECKPOINTED"
     receipt = receipt_options(c, c.receipt)[:receipt_file]
-    assert invoke.("checkpoint", ["--receipt-file", receipt])["authority"]["record"]["last_handoff"]["resource_acknowledged"]
+
+    assert invoke.("checkpoint", ["--receipt-file", receipt])["authority"]["record"]["last_handoff"][
+             "resource_acknowledged"
+           ]
+
     before = Agent.get(c.cloud, & &1)
     assert invoke.("reseed-stop", [])["authority"]["generation"] == to_string(before.generation)
     Agent.update(c.cloud, &%{&1 | record: reseed(c), generation: &1.generation + 1})
@@ -453,7 +570,8 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
     assert resource["disposition"]["resolved_epoch"] == 2
   end
 
-  defp mutation(c, action), do: Keyword.merge(c.options, action: action, resource: c.name, expected_epoch: 1, expected_generation: "8")
+  defp mutation(c, action),
+    do: Keyword.merge(c.options, action: action, resource: c.name, expected_epoch: 1, expected_generation: "8")
 
   defp receipt_options(c, receipt) do
     path = Path.join(c.root, "receipt.json")
@@ -471,7 +589,11 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
         "claim_id" => "original-claim",
         "owner" => c.owned["owner"],
         "secret_version" => record["head_version"],
-        "stop_proof" => %{"uid" => "uid-1", "operation" => "projects/p/locations/l/operations/stop-1", "attempt_id" => "original-attempt"},
+        "stop_proof" => %{
+          "uid" => "uid-1",
+          "operation" => "projects/p/locations/l/operations/stop-1",
+          "attempt_id" => "original-attempt"
+        },
         "resource_acknowledged" => false
       }
     })

@@ -27,7 +27,9 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
       assert {:error, :credential_busy} = Record.transition(owned, {:claim, claim, owner()}, "competing")
     end
 
-    assert {:error, {:credential_recovery_required, :checkpoint_missing}} = Record.transition(owned, {:release, "claim-a"}, "release")
+    assert {:error, {:credential_recovery_required, :checkpoint_missing}} =
+             Record.transition(owned, {:release, "claim-a"}, "release")
+
     assert {:error, _} = Record.transition(owned, {:stopped, "claim-a", proof()}, "premature-stop")
     assert {:error, _} = Record.assignment(initial())
   end
@@ -106,7 +108,9 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
 
   test "checkpoint cannot release until matching correlated physical stop proof is recorded" do
     checkpointed = checkpointed()
-    assert {:error, {:credential_recovery_required, :stop_missing}} = Record.transition(checkpointed, {:release, "claim-a"}, "release")
+
+    assert {:error, {:credential_recovery_required, :stop_missing}} =
+             Record.transition(checkpointed, {:release, "claim-a"}, "release")
 
     for bad_proof <- [
           %{"process_exit" => 0},
@@ -143,7 +147,14 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
     assert {:error, _} = Record.transition(released, {:acknowledge_handoff, "claim-b"}, "wrong-ack")
     assert {:ok, acknowledged} = Record.transition(released, {:acknowledge_handoff, "claim-a"}, "ack")
     assert {:error, _} = Record.transition(acknowledged, {:claim, "claim-a", owner()}, "reused-claim")
-    assert {:ok, next_owner} = Record.transition(acknowledged, {:claim, "claim-b", Map.put(owner(), "attempt_id", "attempt-b")}, "next-claim")
+
+    assert {:ok, next_owner} =
+             Record.transition(
+               acknowledged,
+               {:claim, "claim-b", Map.put(owner(), "attempt_id", "attempt-b")},
+               "next-claim"
+             )
+
     assert {:ok, next_bound} = Record.transition(next_owner, {:bind_uid, "claim-b", "uid-b"}, "next-bind")
     assert {:ok, assignment} = Record.assignment(next_bound)
     assert assignment["secret_version"] == @next
@@ -154,7 +165,10 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
   test "quarantine retains the original identity and evidence and cannot be escaped by ordinary events" do
     for record <- [owned(), bound(), checkpointed(), stopped()] do
       assert {:error, _} = Record.transition(record, {:quarantine, "claim-b", "outcome_unknown"}, "wrong-quarantine")
-      assert {:error, _} = Record.transition(record, {:quarantine, "claim-a", "unbounded reason with payload"}, "unsafe-reason")
+
+      assert {:error, _} =
+               Record.transition(record, {:quarantine, "claim-a", "unbounded reason with payload"}, "unsafe-reason")
+
       assert {:ok, quarantined} = Record.transition(record, {:quarantine, "claim-a", "outcome_unknown"}, "quarantine")
       assert :ok = Record.validate(quarantined)
       assert quarantined["owner"] == record["owner"]
@@ -208,7 +222,9 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
         ] do
       assert {:error, :credential_outcome_unknown} = Record.validate(invalid)
       assert {:error, :credential_outcome_unknown} = Record.assignment(invalid)
-      assert {:error, :credential_outcome_unknown} = Record.transition(invalid, {:claim, "claim-b", owner()}, "no-repair")
+
+      assert {:error, :credential_outcome_unknown} =
+               Record.transition(invalid, {:claim, "claim-b", owner()}, "no-repair")
     end
   end
 
@@ -222,7 +238,9 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
           Map.put(released(), "last_handoff", %{})
         ] do
       assert {:error, :credential_outcome_unknown} = Record.validate(invalid)
-      assert {:error, :credential_outcome_unknown} = Record.transition(invalid, {:acknowledge_handoff, "claim-a"}, "no-repair")
+
+      assert {:error, :credential_outcome_unknown} =
+               Record.transition(invalid, {:acknowledge_handoff, "claim-a"}, "no-repair")
     end
   end
 
@@ -246,7 +264,13 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
   defp initial, do: Record.initial("features", 1, @head)
 
   defp owner(uid \\ nil) do
-    %{"deployment_id" => "deployment-a", "lane" => "features", "workstation_name" => @workstation, "workstation_uid" => uid, "attempt_id" => "attempt-a"}
+    %{
+      "deployment_id" => "deployment-a",
+      "lane" => "features",
+      "workstation_name" => @workstation,
+      "workstation_uid" => uid,
+      "attempt_id" => "attempt-a"
+    }
   end
 
   defp receipt(version \\ @next) do
@@ -263,7 +287,11 @@ defmodule SymphonyElixir.CodexCredentials.RecordTest do
   end
 
   defp proof do
-    %{"uid" => "uid-a", "attempt_id" => "attempt-a", "operation" => "projects/fixture-workers/locations/europe-west1/operations/stop-1"}
+    %{
+      "uid" => "uid-a",
+      "attempt_id" => "attempt-a",
+      "operation" => "projects/fixture-workers/locations/europe-west1/operations/stop-1"
+    }
   end
 
   defp owned do

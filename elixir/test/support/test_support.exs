@@ -74,7 +74,8 @@ defmodule SymphonyElixir.TestSupport do
     task_name = Module.concat(name, TaskSupervisor)
 
     ExUnit.Callbacks.start_supervised!(
-      {SymphonyElixir.AgentRuntimeSupervisor, Keyword.merge(opts, name: runtime_name, task_supervisor_name: task_name, orchestrator_name: name)},
+      {SymphonyElixir.AgentRuntimeSupervisor,
+       Keyword.merge(opts, name: runtime_name, task_supervisor_name: task_name, orchestrator_name: name)},
       id: runtime_name
     )
 

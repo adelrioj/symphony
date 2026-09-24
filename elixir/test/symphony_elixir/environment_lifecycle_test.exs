@@ -68,7 +68,10 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
 
   test "new physical obligations invalidate an older stop proof across repeated cleanup failures" do
     stopped = %{record() | phase: :stopped, proof: {:quiescent, %{uid: "earlier-worker"}}}
-    {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(%{Lifecycle.new(stopped, "a", :cleanup) | phase: :stopped}, :destroy, 0)
+
+    {deleting, [{:provider, :destroy, id}]} =
+      Lifecycle.step(%{Lifecycle.new(stopped, "a", :cleanup) | phase: :stopped}, :destroy, 0)
+
     unresolved = %{stopped | phase: :unknown, proof: {:compute_unknown, %{worker_uid: "late-worker"}}}
     {retained, []} = Lifecycle.step(deleting, {:failed, id, {:unknown, :physical_outcome}, unresolved}, 1)
     assert Lifecycle.occupied?(retained)
@@ -89,7 +92,10 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
 
   test "later authoritative absence supersedes unknown deletion with an outstanding start" do
     proof = %{record() | phase: :stopped, proof: {:quiescent, %{uid: "pod"}}}
-    {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(%{Lifecycle.new(proof, "a", :cleanup) | phase: :stopped}, :destroy, 0)
+
+    {deleting, [{:provider, :destroy, id}]} =
+      Lifecycle.step(%{Lifecycle.new(proof, "a", :cleanup) | phase: :stopped}, :destroy, 0)
+
     late_start = %{proof | phase: :unknown, pending: [%{verb: :start, id: "late-start", outcome: :unknown}]}
     {unknown, []} = Lifecycle.step(deleting, {:failed, id, {:unknown, :timeout}, late_start}, 1)
     assert Lifecycle.occupied?(unknown)
@@ -146,10 +152,23 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
   test "physical stop and synthetic inspection cannot release an unresolved Codex assignment" do
     assignment = credential_assignment()
     credential = %{"assignment" => assignment, "stage" => "recovery_required", "reason" => "checkpoint_failed"}
-    record = %{record() | kind: "google_workstations", provider_ref: %{name: assignment["owner"]["workstation_name"], uid: "ws-uid"}, metadata: %{"codex_credentials" => credential}}
+
+    record = %{
+      record()
+      | kind: "google_workstations",
+        provider_ref: %{name: assignment["owner"]["workstation_name"], uid: "ws-uid"},
+        metadata: %{"codex_credentials" => credential}
+    }
+
     entry = %{Lifecycle.new(record, "new-recovery-attempt", :agent) | phase: :running}
     {stopping, [{:provider, :stop, id}]} = Lifecycle.step(entry, {:agent_exited, "new-recovery-attempt", :done}, 0)
-    physical = %{record | phase: :stopped, proof: {:quiescent, %{uid: "ws-uid", operation: "projects/p/locations/r/operations/stop"}}}
+
+    physical = %{
+      record
+      | phase: :stopped,
+        proof: {:quiescent, %{uid: "ws-uid", operation: "projects/p/locations/r/operations/stop"}}
+    }
+
     {blocked, effects} = Lifecycle.step(stopping, {:stopped, id, physical}, 1)
     assert effects == []
     assert Lifecycle.occupied?(blocked)
@@ -159,11 +178,20 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
 
   test "credential release requires an acknowledged exact disposition not a cleanup hook marker" do
     assignment = credential_assignment()
-    proof = %{"uid" => "ws-uid", "operation" => "projects/p/locations/r/operations/stop", "attempt_id" => "original-attempt"}
+
+    proof = %{
+      "uid" => "ws-uid",
+      "operation" => "projects/p/locations/r/operations/stop",
+      "attempt_id" => "original-attempt"
+    }
 
     disposition =
       Map.take(assignment, ["schema", "credential_id", "epoch", "claim_id", "owner"])
-      |> Map.merge(%{"secret_version" => "projects/123456/secrets/features-codex/versions/2", "stop_proof" => proof, "resource_acknowledged" => true})
+      |> Map.merge(%{
+        "secret_version" => "projects/123456/secrets/features-codex/versions/2",
+        "stop_proof" => proof,
+        "resource_acknowledged" => true
+      })
 
     credential = %{"assignment" => assignment, "stage" => "committed", "disposition" => disposition}
 
@@ -176,7 +204,8 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
         phase: :stopped
     }
 
-    {stopping, _} = Lifecycle.step(%{Lifecycle.new(record, "recovery-attempt", :agent) | phase: :running}, {:cancel, :done}, 0)
+    {stopping, _} =
+      Lifecycle.step(%{Lifecycle.new(record, "recovery-attempt", :agent) | phase: :running}, {:cancel, :done}, 0)
 
     for changed <- [
           put_in(record.metadata, ["codex_credentials", "disposition", "resource_acknowledged"], false),
@@ -204,7 +233,8 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
       "owner" => %{
         "deployment_id" => "deployment",
         "lane" => "features",
-        "workstation_name" => "projects/p/locations/r/workstationClusters/c/workstationConfigs/features/workstations/se-ticket",
+        "workstation_name" =>
+          "projects/p/locations/r/workstationClusters/c/workstationConfigs/features/workstations/se-ticket",
         "workstation_uid" => "ws-uid",
         "attempt_id" => "original-attempt"
       }

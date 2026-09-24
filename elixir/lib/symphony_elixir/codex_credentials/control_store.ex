@@ -25,7 +25,9 @@ defmodule SymphonyElixir.CodexCredentials.ControlStore do
          true <- decimal?(generation),
          :ok <- validate_record(record, refs),
          :ok <- validate_record(next_record, refs),
-         true <- record["epoch"] == next_record["epoch"] and is_binary(next_record["transition_id"]) and next_record["transition_id"] != record["transition_id"],
+         true <-
+           record["epoch"] == next_record["epoch"] and is_binary(next_record["transition_id"]) and
+             next_record["transition_id"] != record["transition_id"],
          {:ok, body} <- Jason.encode(next_record) do
       url = upload_url(refs, generation)
 
@@ -36,18 +38,25 @@ defmodule SymphonyElixir.CodexCredentials.ControlStore do
     end
   end
 
-  defp resolve_replacement({:ok, status, _headers, response}, config, snapshot, next_record, opts) when status in 200..299 do
+  defp resolve_replacement({:ok, status, _headers, response}, config, snapshot, next_record, opts)
+       when status in 200..299 do
     case generation(response) do
-      {:ok, next_generation} when next_generation != snapshot.generation -> {:ok, %{generation: next_generation, record: next_record}}
-      _ -> reconcile(config, snapshot, next_record, opts)
+      {:ok, next_generation} when next_generation != snapshot.generation ->
+        {:ok, %{generation: next_generation, record: next_record}}
+
+      _ ->
+        reconcile(config, snapshot, next_record, opts)
     end
   end
 
-  defp resolve_replacement({:ok, 412, _headers, _body}, _config, _snapshot, _next_record, _opts), do: {:error, :credential_busy}
+  defp resolve_replacement({:ok, 412, _headers, _body}, _config, _snapshot, _next_record, _opts),
+    do: {:error, :credential_busy}
 
-  defp resolve_replacement({:ok, status, _headers, _body}, _config, _snapshot, _next_record, _opts) when status in 400..499 and status != 408, do: unknown()
+  defp resolve_replacement({:ok, status, _headers, _body}, _config, _snapshot, _next_record, _opts)
+       when status in 400..499 and status != 408, do: unknown()
 
-  defp resolve_replacement(_result, config, snapshot, next_record, opts), do: reconcile(config, snapshot, next_record, opts)
+  defp resolve_replacement(_result, config, snapshot, next_record, opts),
+    do: reconcile(config, snapshot, next_record, opts)
 
   defp read_current(config, refs, opts, retry_raced_read?) do
     url = object_url(refs)
@@ -82,24 +91,34 @@ defmodule SymphonyElixir.CodexCredentials.ControlStore do
 
   defp reconcile(config, previous, expected, opts) do
     case read(config, opts) do
-      {:ok, %{record: ^expected, generation: generation} = current} when generation != previous.generation -> {:ok, current}
-      _ -> unknown()
+      {:ok, %{record: ^expected, generation: generation} = current} when generation != previous.generation ->
+        {:ok, current}
+
+      _ ->
+        unknown()
     end
   end
 
   defp validate_record(record, refs) do
     with :ok <- Record.validate(record),
-         true <- record["credential_id"] == refs["credential_id"] and String.starts_with?(record["head_version"], refs["secret"] <> "/versions/") do
+         true <-
+           record["credential_id"] == refs["credential_id"] and
+             String.starts_with?(record["head_version"], refs["secret"] <> "/versions/") do
       :ok
     else
       _ -> unknown()
     end
   end
 
-  defp object_url(refs), do: "https://storage.googleapis.com/storage/v1/b/" <> encode(refs["control_bucket"]) <> "/o/" <> encode(refs["control_object"])
+  defp object_url(refs),
+    do:
+      "https://storage.googleapis.com/storage/v1/b/" <>
+        encode(refs["control_bucket"]) <> "/o/" <> encode(refs["control_object"])
 
   defp upload_url(refs, generation) do
-    query = URI.encode_query([{"uploadType", "media"}, {"name", refs["control_object"]}, {"ifGenerationMatch", generation}])
+    query =
+      URI.encode_query([{"uploadType", "media"}, {"name", refs["control_object"]}, {"ifGenerationMatch", generation}])
+
     "https://storage.googleapis.com/upload/storage/v1/b/" <> encode(refs["control_bucket"]) <> "/o?" <> query
   end
 

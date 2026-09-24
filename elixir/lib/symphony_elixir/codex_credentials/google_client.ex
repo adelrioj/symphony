@@ -13,7 +13,8 @@ defmodule SymphonyElixir.CodexCredentials.GoogleClient do
     refs = Map.get(config, :codex_credentials)
 
     if is_map(refs) and map_size(refs) == length(@fields) and Enum.all?(@fields, &nonblank?(refs[&1])) and
-         valid_secret?(refs["secret"]) and refs["control_bucket"] not in [".", ".."] and refs["control_object"] not in [".", ".."] do
+         valid_secret?(refs["secret"]) and refs["control_bucket"] not in [".", ".."] and
+         refs["control_object"] not in [".", ".."] do
       {:ok, refs}
     else
       unknown()
@@ -41,7 +42,8 @@ defmodule SymphonyElixir.CodexCredentials.GoogleClient do
   def version_metadata(config, version, opts \\ []) do
     with {:ok, refs} <- configuration(config),
          true <- numeric_version?(version, refs["secret"]),
-         {:ok, 200, _headers, body} <- request(config, :get, "https://secretmanager.googleapis.com/v1/" <> version, [], nil, opts),
+         {:ok, 200, _headers, body} <-
+           request(config, :get, "https://secretmanager.googleapis.com/v1/" <> version, [], nil, opts),
          {:ok, %{"name" => ^version, "state" => "ENABLED"}} <- json(body) do
       {:ok, %{"name" => version, "state" => "ENABLED"}}
     else
@@ -92,8 +94,11 @@ defmodule SymphonyElixir.CodexCredentials.GoogleClient do
       request = Keyword.get(opts, :request_fun, &Req.request/1)
 
       case request.(request_opts) do
-        {:ok, %{status: status, body: response} = result} -> normalize({:ok, status, Map.get(result, :headers, []), response})
-        _ -> unknown()
+        {:ok, %{status: status, body: response} = result} ->
+          normalize({:ok, status, Map.get(result, :headers, []), response})
+
+        _ ->
+          unknown()
       end
     else
       unknown()
@@ -123,11 +128,13 @@ defmodule SymphonyElixir.CodexCredentials.GoogleClient do
     bucket = URI.encode(refs["control_bucket"], &URI.char_unreserved?/1)
 
     path == "/upload/storage/v1/b/" <> bucket <> "/o" and map_size(query) == 3 and
-      query["uploadType"] == "media" and query["name"] == refs["control_object"] and decimal?(query["ifGenerationMatch"])
+      query["uploadType"] == "media" and query["name"] == refs["control_object"] and
+      decimal?(query["ifGenerationMatch"])
   end
 
   defp permitted_operation?(refs, :get, %URI{host: "secretmanager.googleapis.com", path: path}, query) do
-    query == %{} and is_binary(path) and String.starts_with?(path, "/v1/") and numeric_version?(String.replace_prefix(path, "/v1/", ""), refs["secret"])
+    query == %{} and is_binary(path) and String.starts_with?(path, "/v1/") and
+      numeric_version?(String.replace_prefix(path, "/v1/", ""), refs["secret"])
   end
 
   defp permitted_operation?(_refs, _method, _uri, _query), do: false
@@ -141,8 +148,11 @@ defmodule SymphonyElixir.CodexCredentials.GoogleClient do
 
   defp valid_secret?(secret) do
     case String.split(secret, "/") do
-      ["projects", project, "secrets", name] -> Enum.all?([project, name], &(&1 not in [".", ".."] and Regex.match?(~r/\A[A-Za-z0-9._~-]+\z/, &1)))
-      _ -> false
+      ["projects", project, "secrets", name] ->
+        Enum.all?([project, name], &(&1 not in [".", ".."] and Regex.match?(~r/\A[A-Za-z0-9._~-]+\z/, &1)))
+
+      _ ->
+        false
     end
   end
 

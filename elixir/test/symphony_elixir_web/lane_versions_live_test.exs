@@ -11,23 +11,42 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
   setup do
     previous = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
     on_exit(fn -> Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous) end)
-    endpoint_config = :symphony_elixir |> Application.get_env(SymphonyElixirWeb.Endpoint, []) |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
+    endpoint_config =
+      :symphony_elixir
+      |> Application.get_env(SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
     {:ok, conn: Plug.Test.init_test_session(build_conn(), %{"operator" => true})}
   end
 
   test "lists versions newest first, marks the current one, and make-current rolls back live", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "vers", front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 1000", prompt: "v1", note: "one"})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "vers",
+        front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 1000",
+        prompt: "v1",
+        note: "one"
+      })
+
     v1 = lane.current_version_id
-    {:ok, lane} = Lanes.update(lane, %{front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 2000", note: "two"})
+
+    {:ok, lane} =
+      Lanes.update(lane, %{front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 2000", note: "two"})
+
     v2 = lane.current_version_id
 
     {:ok, view, html} = live(conn, "/lanes/vers/versions")
     assert html =~ "two"
     assert has_element?(view, "#version-#{v2} .state-badge", "current")
     refute has_element?(view, "#version-#{v1} .state-badge")
-    assert Floki.find(Floki.parse_document!(html), "#versions tbody tr") |> Enum.map(&Floki.attribute(&1, "id")) == [["version-#{v2}"], ["version-#{v1}"]]
+
+    assert Floki.find(Floki.parse_document!(html), "#versions tbody tr") |> Enum.map(&Floki.attribute(&1, "id")) == [
+             ["version-#{v2}"],
+             ["version-#{v1}"]
+           ]
 
     view |> element("#version-#{v1} button[phx-click='activate']") |> render_click()
     assert has_element?(view, "#version-#{v1} .state-badge", "current")

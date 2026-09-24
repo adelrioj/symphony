@@ -12,7 +12,12 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   setup do
     previous = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
     on_exit(fn -> Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous) end)
-    endpoint_config = :symphony_elixir |> Application.get_env(SymphonyElixirWeb.Endpoint, []) |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
+    endpoint_config =
+      :symphony_elixir
+      |> Application.get_env(SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
     previous_key = System.get_env("LINEAR_API_KEY")
@@ -24,16 +29,33 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   test "validation errors show inline with the field path and nothing is saved", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/lanes/new")
 
-    html = view |> form("#lane-form", lane: %{slug: "Bad Slug", front_matter: "polling:\n  interval_ms: nope", prompt: ""}) |> render_change()
+    html =
+      view
+      |> form("#lane-form", lane: %{slug: "Bad Slug", front_matter: "polling:\n  interval_ms: nope", prompt: ""})
+      |> render_change()
+
     assert html =~ "polling.interval_ms"
     assert has_element?(view, "#lane-errors li", "slug:")
 
-    html = view |> form("#lane-form", lane: %{slug: "Bad Slug", front_matter: "polling:\n  interval_ms: nope", prompt: ""}) |> render_submit()
+    html =
+      view
+      |> form("#lane-form", lane: %{slug: "Bad Slug", front_matter: "polling:\n  interval_ms: nope", prompt: ""})
+      |> render_submit()
+
     assert html =~ "polling.interval_ms"
     assert has_element?(view, "#lane-errors li", "slug:")
     assert Lanes.list() |> Enum.map(& &1.slug) == ["default"]
 
-    view |> form("#lane-form", lane: %{slug: "yaml-draft", front_matter: "tracker:\n  kind: memory\nserver:\n  port: 4000", prompt: "keep this draft"}) |> render_change()
+    view
+    |> form("#lane-form",
+      lane: %{
+        slug: "yaml-draft",
+        front_matter: "tracker:\n  kind: memory\nserver:\n  port: 4000",
+        prompt: "keep this draft"
+      }
+    )
+    |> render_change()
+
     assert has_element?(view, "#lane-warnings", "server")
     view |> form("#lane-form", lane: %{front_matter: "tracker: ["}) |> render_submit()
     assert has_element?(view, "#lane-errors li", "front_matter:")
@@ -47,7 +69,15 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     {:ok, view, _html} = live(conn, "/lanes/new")
 
     view
-    |> form("#lane-form", lane: %{slug: "features", name: "Features", front_matter: "tracker:\n  kind: memory\nserver:\n  port: 1", prompt: "Do it", note: "first"})
+    |> form("#lane-form",
+      lane: %{
+        slug: "features",
+        name: "Features",
+        front_matter: "tracker:\n  kind: memory\nserver:\n  port: 1",
+        prompt: "Do it",
+        note: "first"
+      }
+    )
     |> render_submit()
 
     assert_redirect(view, "/lanes/features")
@@ -62,7 +92,9 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     {:ok, view, _html} = live(conn, "/lanes/new")
 
     view
-    |> form("#lane-form", lane: %{slug: "new", name: "New work", front_matter: "tracker:\n  kind: memory", prompt: "Keep this draft"})
+    |> form("#lane-form",
+      lane: %{slug: "new", name: "New work", front_matter: "tracker:\n  kind: memory", prompt: "Keep this draft"}
+    )
     |> render_submit()
 
     assert has_element?(view, "#lane-errors li", "slug:")
@@ -113,7 +145,10 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
     # LiveViewTest's form defaults strip a second LF after HTML5 parsing.
     # Submit the actual browser-equivalent DOM values, not the original inputs.
-    render_submit(view, "save", %{"lane" => %{"front_matter" => rendered_front_matter, "prompt" => rendered_prompt, "note" => "unchanged"}})
+    render_submit(view, "save", %{
+      "lane" => %{"front_matter" => rendered_front_matter, "prompt" => rendered_prompt, "note" => "unchanged"}
+    })
+
     assert_redirect(view, "/lanes/newlines")
     version = Lanes.current_version(Lanes.get!(lane.id))
     assert version.front_matter == front_matter
@@ -122,7 +157,11 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "malformed text fields report errors without discarding the current draft", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/lanes/new")
-    render_change(view, "validate", %{"lane" => %{"slug" => "draft", "front_matter" => "tracker:\n  kind: memory", "prompt" => "keep this draft"}})
+
+    render_change(view, "validate", %{
+      "lane" => %{"slug" => "draft", "front_matter" => "tracker:\n  kind: memory", "prompt" => "keep this draft"}
+    })
+
     render_change(view, "validate", %{"lane" => %{"front_matter" => %{"nested" => "invalid"}, "prompt" => ["invalid"]}})
 
     assert has_element?(view, "#lane-errors li", "front_matter:")
@@ -140,7 +179,9 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   end
 
   test "partial edit events retain enabled state and unsaved input during external updates", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "partial", name: "Partial", front_matter: "tracker:\n  kind: memory", prompt: "initial"})
+    {:ok, lane} =
+      Lanes.create(%{slug: "partial", name: "Partial", front_matter: "tracker:\n  kind: memory", prompt: "initial"})
+
     {:ok, view, _html} = live(conn, "/lanes/partial/edit")
     render_change(view, "validate", %{"lane" => %{"prompt" => "unsaved", "enabled" => "on"}})
     assert has_element?(view, "input[name='lane[enabled]'][checked]")
@@ -161,7 +202,13 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "duplicate slugs show errors without losing the submitted prompt", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/lanes/new")
-    view |> form("#lane-form", lane: %{slug: "default", name: "Duplicate", front_matter: "tracker:\n  kind: memory", prompt: "preserve me"}) |> render_submit()
+
+    view
+    |> form("#lane-form",
+      lane: %{slug: "default", name: "Duplicate", front_matter: "tracker:\n  kind: memory", prompt: "preserve me"}
+    )
+    |> render_submit()
+
     assert has_element?(view, "#lane-errors li", "slug:")
     assert has_element?(view, "textarea[name='lane[prompt]']", "preserve me")
   end

@@ -24,7 +24,11 @@ defmodule SymphonyElixir.KubernetesCandidateLiveTest do
     if model_run? do
       sessions = Enum.filter(evidence["events"], &(&1["event"] == "model_session"))
       assert length(sessions) == expected_sessions
-      assert Enum.all?(sessions, &(&1["artifact_matched"] == true and &1["dispatch"] == "ok" and &1["backend"] == config["backend"]))
+
+      assert Enum.all?(
+               sessions,
+               &(&1["artifact_matched"] == true and &1["dispatch"] == "ok" and &1["backend"] == config["backend"])
+             )
     end
 
     assert evidence["cleanup"] == "complete"

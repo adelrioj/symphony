@@ -99,7 +99,9 @@ defmodule SymphonyElixir.Workflow do
   """
   @spec render(String.t(), String.t()) :: String.t()
   def render("", prompt) when is_binary(prompt), do: prompt
-  def render(front_matter, prompt) when is_binary(front_matter) and is_binary(prompt), do: "---\n" <> front_matter <> "\n---\n" <> prompt
+
+  def render(front_matter, prompt) when is_binary(front_matter) and is_binary(prompt),
+    do: "---\n" <> front_matter <> "\n---\n" <> prompt
 
   @spec parse(String.t()) :: {:ok, loaded_workflow()} | {:error, term()}
   def parse(content) when is_binary(content) do

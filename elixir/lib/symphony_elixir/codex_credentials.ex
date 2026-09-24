@@ -35,7 +35,8 @@ defmodule SymphonyElixir.CodexCredentials do
   end
 
   defp matching_claim(record, claim_id) do
-    current_claim = if record["state"] == "AVAILABLE", do: get_in(record, ["last_handoff", "claim_id"]), else: record["claim_id"]
+    current_claim =
+      if record["state"] == "AVAILABLE", do: get_in(record, ["last_handoff", "claim_id"]), else: record["claim_id"]
 
     if is_binary(claim_id) and claim_id == current_claim,
       do: :ok,

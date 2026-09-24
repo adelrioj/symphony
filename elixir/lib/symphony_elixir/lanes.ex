@@ -17,14 +17,18 @@ defmodule SymphonyElixir.Lanes do
   def list, do: Repo.all(from(l in Lane, where: is_nil(l.deleted_at), order_by: l.id))
 
   @spec get(term()) :: Lane.t() | nil
-  def get(id) when is_integer(id) and id > 0 and id <= @max_sqlite_id, do: Repo.one(from(l in Lane, where: l.id == ^id and is_nil(l.deleted_at)))
+  def get(id) when is_integer(id) and id > 0 and id <= @max_sqlite_id,
+    do: Repo.one(from(l in Lane, where: l.id == ^id and is_nil(l.deleted_at)))
+
   def get(_id), do: nil
 
   @spec get!(integer()) :: Lane.t()
   def get!(id), do: get(id) || raise(Ecto.NoResultsError, queryable: Lane)
 
   @spec get_by_slug(term()) :: Lane.t() | nil
-  def get_by_slug(slug) when is_binary(slug), do: Repo.one(from(l in Lane, where: l.slug == ^slug and is_nil(l.deleted_at)))
+  def get_by_slug(slug) when is_binary(slug),
+    do: Repo.one(from(l in Lane, where: l.slug == ^slug and is_nil(l.deleted_at)))
+
   def get_by_slug(_slug), do: nil
 
   @spec versions(Lane.t()) :: [LaneVersion.t()]
@@ -32,15 +36,20 @@ defmodule SymphonyElixir.Lanes do
 
   @spec current_version(Lane.t()) :: LaneVersion.t() | nil
   def current_version(%Lane{current_version_id: nil}), do: nil
-  def current_version(%Lane{id: lane_id, current_version_id: id}), do: Repo.one(from(v in LaneVersion, where: v.id == ^id and v.lane_id == ^lane_id))
+
+  def current_version(%Lane{id: lane_id, current_version_id: id}),
+    do: Repo.one(from(v in LaneVersion, where: v.id == ^id and v.lane_id == ^lane_id))
 
   @doc "Validates runtime readiness by default; structural validation is only for disabled configuration writes."
-  @spec validate_version(integer() | nil, term(), term(), :runtime | :structure) :: {:ok, validated()} | {:error, [error()]}
+  @spec validate_version(integer() | nil, term(), term(), :runtime | :structure) ::
+          {:ok, validated()} | {:error, [error()]}
   def validate_version(lane_id, front_matter, prompt, validation \\ :runtime)
 
-  def validate_version(lane_id, front_matter, prompt, validation) when is_binary(front_matter) and is_binary(prompt) and validation in [:runtime, :structure] do
+  def validate_version(lane_id, front_matter, prompt, validation)
+      when is_binary(front_matter) and is_binary(prompt) and validation in [:runtime, :structure] do
     with {:ok, workflow} <- Workflow.parse_parts(front_matter, prompt),
-         {:ok, settings} <- Schema.parse(Map.delete(workflow.config, "server"), errors: :list, resolve_secrets: validation == :runtime),
+         {:ok, settings} <-
+           Schema.parse(Map.delete(workflow.config, "server"), errors: :list, resolve_secrets: validation == :runtime),
          :ok <- Config.validate_settings(settings, validation),
          :ok <- LaneStore.check_identity(lane_id, settings) do
       {:ok, %{settings: settings, workflow: workflow, warnings: config_warnings(workflow.config)}}
@@ -81,17 +90,20 @@ defmodule SymphonyElixir.Lanes do
   def update(%Lane{}, _attrs), do: invalid_object()
 
   @spec activate_version(Lane.t(), term()) :: {:ok, Lane.t()} | {:error, [error()]}
-  def activate_version(%Lane{id: id}, version_id) when is_integer(version_id) and version_id > 0 and version_id <= @max_sqlite_id do
+  def activate_version(%Lane{id: id}, version_id)
+      when is_integer(version_id) and version_id > 0 and version_id <= @max_sqlite_id do
     mutate(id, &activate_lane_version(id, version_id, &1))
   end
 
-  def activate_version(%Lane{}, _version_id), do: {:error, [%{path: "version", message: "must be an integer between 1 and 9223372036854775807"}]}
+  def activate_version(%Lane{}, _version_id),
+    do: {:error, [%{path: "version", message: "must be an integer between 1 and 9223372036854775807"}]}
 
   @spec set_enabled(Lane.t(), term()) :: {:ok, Lane.t()} | {:error, [error()]}
   def set_enabled(%Lane{} = lane, enabled), do: update(lane, %{enabled: enabled})
 
   @spec disable(integer(), String.t()) :: :ok
-  def disable(lane_id, reason) when is_integer(lane_id) and lane_id > 0 and lane_id <= @max_sqlite_id and is_binary(reason) do
+  def disable(lane_id, reason)
+      when is_integer(lane_id) and lane_id > 0 and lane_id <= @max_sqlite_id and is_binary(reason) do
     {:ok, _lane} = mutate(lane_id, fn _check -> disable_lane(lane_id) end, reason)
     :ok
   end
@@ -136,7 +148,8 @@ defmodule SymphonyElixir.Lanes do
     |> Enum.flat_map(fn {field, messages} -> Enum.map(messages, &%{path: to_string(field), message: &1}) end)
   end
 
-  def errors_for({:invalid_workflow_config, errors}) when is_list(errors), do: Enum.map(errors, fn {path, message} -> %{path: path, message: message} end)
+  def errors_for({:invalid_workflow_config, errors}) when is_list(errors),
+    do: Enum.map(errors, fn {path, message} -> %{path: path, message: message} end)
 
   def errors_for({:invalid_workflow_config, message}) when is_binary(message) do
     case Regex.run(@path_pattern, message, capture: :all_but_first) do
@@ -145,12 +158,27 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  def errors_for(:environment_identity_in_use), do: [%{path: "worker.environment", message: "cannot change a guarded field while the lane owns environments or has unresolved operations"}]
+  def errors_for(:environment_identity_in_use),
+    do: [
+      %{
+        path: "worker.environment",
+        message: "cannot change a guarded field while the lane owns environments or has unresolved operations"
+      }
+    ]
+
   def errors_for(:missing_tracker_kind), do: [%{path: "tracker.kind", message: "can't be blank"}]
-  def errors_for({:unsupported_tracker_kind, kind}), do: [%{path: "tracker.kind", message: "unsupported tracker kind: #{inspect(kind)}"}]
+
+  def errors_for({:unsupported_tracker_kind, kind}),
+    do: [%{path: "tracker.kind", message: "unsupported tracker kind: #{inspect(kind)}"}]
+
   def errors_for(:workflow_front_matter_not_a_map), do: [%{path: "front_matter", message: "YAML must decode to a map"}]
-  def errors_for({:workflow_parse_error, reason}), do: [%{path: "front_matter", message: "YAML parse error: #{inspect(reason)}"}]
-  def errors_for(reason) when is_atom(reason), do: [%{path: "tracker", message: reason |> Atom.to_string() |> String.replace("_", " ")}]
+
+  def errors_for({:workflow_parse_error, reason}),
+    do: [%{path: "front_matter", message: "YAML parse error: #{inspect(reason)}"}]
+
+  def errors_for(reason) when is_atom(reason),
+    do: [%{path: "tracker", message: reason |> Atom.to_string() |> String.replace("_", " ")}]
+
   def errors_for(reason), do: [%{path: "front_matter", message: inspect(reason)}]
 
   @spec format_errors([error()]) :: String.t()
@@ -225,7 +253,12 @@ defmodule SymphonyElixir.Lanes do
 
   defp import_content(content, path, opts) do
     %{front_matter: front_matter, prompt: prompt} = Workflow.split(content)
-    attrs = %{front_matter: front_matter, prompt: prompt, note: Keyword.get(opts, :note, "import #{Path.basename(path)}")}
+
+    attrs = %{
+      front_matter: front_matter,
+      prompt: prompt,
+      note: Keyword.get(opts, :note, "import #{Path.basename(path)}")
+    }
 
     with {:ok, lane} <- import_lane(Keyword.get(opts, :slug), attrs, opts) do
       {:ok, lane, warnings(front_matter)}
@@ -269,7 +302,9 @@ defmodule SymphonyElixir.Lanes do
   end
 
   defp validate_update(false, _current, _new?, _front, _prompt, _check, _enabled?), do: :ok
-  defp validate_update(true, nil, false, _front, _prompt, _check, _enabled?), do: {:error, [%{path: "version", message: "lane has no version"}]}
+
+  defp validate_update(true, nil, false, _front, _prompt, _check, _enabled?),
+    do: {:error, [%{path: "version", message: "lane has no version"}]}
 
   defp validate_update(true, _current, _new?, front, prompt, check, enabled?) do
     with {:ok, _} <- validate_candidate(nil, front, prompt, check, enabled?), do: :ok
@@ -285,7 +320,14 @@ defmodule SymphonyElixir.Lanes do
   end
 
   defp add_version(lane, front_matter, prompt, note) do
-    with {:ok, version} <- Repo.insert(LaneVersion.changeset(%LaneVersion{lane_id: lane.id}, %{front_matter: front_matter, prompt: prompt, note: note})) do
+    with {:ok, version} <-
+           Repo.insert(
+             LaneVersion.changeset(%LaneVersion{lane_id: lane.id}, %{
+               front_matter: front_matter,
+               prompt: prompt,
+               note: note
+             })
+           ) do
       lane |> Ecto.Changeset.change(current_version_id: version.id) |> Repo.update()
     end
   end
@@ -317,6 +359,8 @@ defmodule SymphonyElixir.Lanes do
   defp invalid_object, do: {:error, [%{path: "lane", message: "must be an object"}]}
 
   defp config_warnings(config) do
-    if Map.has_key?(config, "server"), do: ["server is configured per installation now (symphony serve --port/--host); the section is ignored"], else: []
+    if Map.has_key?(config, "server"),
+      do: ["server is configured per installation now (symphony serve --port/--host); the section is ignored"],
+      else: []
   end
 end

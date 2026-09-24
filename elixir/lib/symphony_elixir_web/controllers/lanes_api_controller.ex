@@ -58,8 +58,18 @@ defmodule SymphonyElixirWeb.LanesApiController do
   def delete(conn, _params) do
     with_lane(conn, fn lane ->
       case Lanes.delete(lane) do
-        :ok -> send_resp(conn, 204, "")
-        {:error, :lane_active} -> conn |> put_status(409) |> json(%{error: %{code: "lane_active", message: "Disable the lane and wait for its agents to stop before deleting it"}})
+        :ok ->
+          send_resp(conn, 204, "")
+
+        {:error, :lane_active} ->
+          conn
+          |> put_status(409)
+          |> json(%{
+            error: %{
+              code: "lane_active",
+              message: "Disable the lane and wait for its agents to stop before deleting it"
+            }
+          })
       end
     end)
   end

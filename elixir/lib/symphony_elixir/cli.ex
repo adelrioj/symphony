@@ -18,13 +18,23 @@ defmodule SymphonyElixir.CLI do
   @import_switches [slug: :string, name: :string, note: :string, data_root: :string]
   @export_switches [data_root: :string]
   @mcp_switches [linear_mcp: :boolean, workflow: :string]
-  @credential_switches [data_root: :string, workflow: :string, action: :string, resource: :string, expected_epoch: :integer, expected_generation: :string, receipt_file: :string]
+  @credential_switches [
+    data_root: :string,
+    workflow: :string,
+    action: :string,
+    resource: :string,
+    expected_epoch: :integer,
+    expected_generation: :string,
+    receipt_file: :string
+  ]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
           required(:ensure_all_started) => (-> ensure_started_result()),
           required(:start_repo) => (-> :ok | {:error, term()}),
-          required(:import_lane) => (Path.t(), keyword() -> {:ok, SymphonyElixir.Lanes.Lane.t(), [String.t()]} | {:error, [SymphonyElixir.Lanes.error()]}),
+          required(:import_lane) => (Path.t(), keyword() ->
+                                       {:ok, SymphonyElixir.Lanes.Lane.t(), [String.t()]}
+                                       | {:error, [SymphonyElixir.Lanes.error()]}),
           required(:export_lane) => (String.t() -> {:ok, String.t()} | {:error, :not_found | :no_version}),
           required(:operator_token) => (-> String.t() | nil),
           required(:write_output) => (String.t() -> :ok),
@@ -94,7 +104,8 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp evaluate_credentials(args, deps) do
-    switches = args |> Enum.filter(&String.starts_with?(&1, "--")) |> Enum.map(&(&1 |> String.split("=", parts: 2) |> hd()))
+    switches =
+      args |> Enum.filter(&String.starts_with?(&1, "--")) |> Enum.map(&(&1 |> String.split("=", parts: 2) |> hd()))
 
     with true <- length(switches) == length(Enum.uniq(switches)),
          {options, [], []} <- OptionParser.parse(args, strict: @credential_switches),
@@ -149,11 +160,15 @@ defmodule SymphonyElixir.CLI do
          :ok <- start_repo(opts, deps) do
       case deps.import_lane.(Path.expand(path), Keyword.take(opts, [:name, :note]) |> Keyword.put(:slug, slug)) do
         {:ok, lane, warnings} ->
-          lines = ["imported lane #{lane.slug} version #{lane.current_version_id}" | Enum.map(warnings, &("warning: " <> &1))]
+          lines = [
+            "imported lane #{lane.slug} version #{lane.current_version_id}" | Enum.map(warnings, &("warning: " <> &1))
+          ]
+
           deps.write_output.(Enum.join(lines, "\n") <> "\n")
 
         {:error, errors} ->
-          {:error, "Invalid lane configuration in #{path}:\n" <> Enum.map_join(errors, "\n", &"  #{&1.path}: #{&1.message}")}
+          {:error,
+           "Invalid lane configuration in #{path}:\n" <> Enum.map_join(errors, "\n", &"  #{&1.path}: #{&1.message}")}
       end
     end
   end

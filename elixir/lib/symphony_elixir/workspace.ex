@@ -37,7 +37,10 @@ defmodule SymphonyElixir.Workspace do
       end
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
-        Logger.error("Workspace creation failed #{issue_log_context(issue_context)} worker_host=#{worker_host_for_log(worker_host)} error=#{Exception.message(error)}")
+        Logger.error(
+          "Workspace creation failed #{issue_log_context(issue_context)} worker_host=#{worker_host_for_log(worker_host)} error=#{Exception.message(error)}"
+        )
+
         {:error, error}
     end
   end
@@ -167,7 +170,8 @@ defmodule SymphonyElixir.Workspace do
   end
 
   @spec remove_issue_workspaces(term(), ExecutionContext.t()) :: :ok | {:error, {:managed_execution_unknown, term()}}
-  def remove_issue_workspaces(issue_or_identifier, %ExecutionContext{} = context) when is_map(issue_or_identifier) or is_binary(issue_or_identifier) do
+  def remove_issue_workspaces(issue_or_identifier, %ExecutionContext{} = context)
+      when is_map(issue_or_identifier) or is_binary(issue_or_identifier) do
     case workspace_path_for_issue(workspace_key(issue_or_identifier), context) do
       {:ok, workspace} ->
         case remove(workspace, context) do
@@ -184,7 +188,8 @@ defmodule SymphonyElixir.Workspace do
 
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t(), hook_observer()) ::
           :ok | {:error, term()}
-  def run_before_run_hook(workspace, issue_or_identifier, %ExecutionContext{} = worker_host, on_hook \\ nil) when is_binary(workspace) do
+  def run_before_run_hook(workspace, issue_or_identifier, %ExecutionContext{} = worker_host, on_hook \\ nil)
+      when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
 
@@ -198,7 +203,8 @@ defmodule SymphonyElixir.Workspace do
   end
 
   @spec run_after_run_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t(), hook_observer()) :: hook_result()
-  def run_after_run_hook(workspace, issue_or_identifier, %ExecutionContext{} = worker_host, on_hook \\ nil) when is_binary(workspace) do
+  def run_after_run_hook(workspace, issue_or_identifier, %ExecutionContext{} = worker_host, on_hook \\ nil)
+      when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
 
@@ -212,9 +218,11 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp workspace_path_for_issue(_safe_id, %ExecutionContext{mode: :managed, workspace_path: path}) when is_binary(path), do: {:ok, path}
+  defp workspace_path_for_issue(_safe_id, %ExecutionContext{mode: :managed, workspace_path: path}) when is_binary(path),
+    do: {:ok, path}
 
-  defp workspace_path_for_issue(safe_id, %ExecutionContext{mode: :local, workspace_root: root}) when is_binary(safe_id) do
+  defp workspace_path_for_issue(safe_id, %ExecutionContext{mode: :local, workspace_root: root})
+       when is_binary(safe_id) do
     root
     |> Path.join(safe_id)
     |> PathSafety.canonicalize()
@@ -297,7 +305,9 @@ defmodule SymphonyElixir.Workspace do
         unknown
 
       result ->
-        Logger.warning("Failed to remove partial workspace worker_host=#{worker_host_for_log(worker_host)} result=#{inspect(result)}")
+        Logger.warning(
+          "Failed to remove partial workspace worker_host=#{worker_host_for_log(worker_host)} result=#{inspect(result)}"
+        )
     end
   end
 
@@ -353,7 +363,10 @@ defmodule SymphonyElixir.Workspace do
         on_hook.(event)
       catch
         kind, reason ->
-          Logger.warning("Hook observer failed hook=#{hook_name} #{issue_log_context(issue_context)} reason=#{Exception.format_banner(kind, reason)}")
+          Logger.warning(
+            "Hook observer failed hook=#{hook_name} #{issue_log_context(issue_context)} reason=#{Exception.format_banner(kind, reason)}"
+          )
+
           :ok
       end
     end
@@ -373,7 +386,9 @@ defmodule SymphonyElixir.Workspace do
   defp execute_hook(command, workspace, issue_context, hook_name, %ExecutionContext{mode: :local} = context, on_hook) do
     timeout_ms = Config.settings!().hooks.timeout_ms
 
-    Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
+    Logger.info(
+      "Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local"
+    )
 
     with :ok <- validate_workspace_path(workspace, context) do
       run_command = fn -> System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true) end
@@ -385,7 +400,11 @@ defmodule SymphonyElixir.Workspace do
 
         nil ->
           Task.shutdown(task, :brutal_kill)
-          Logger.warning("Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local timeout_ms=#{timeout_ms}")
+
+          Logger.warning(
+            "Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local timeout_ms=#{timeout_ms}"
+          )
+
           {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
       end
     end
@@ -394,7 +413,9 @@ defmodule SymphonyElixir.Workspace do
   defp execute_hook(command, workspace, issue_context, hook_name, %ExecutionContext{} = worker_host, on_hook) do
     timeout_ms = Config.settings!().hooks.timeout_ms
 
-    Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
+    Logger.info(
+      "Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}"
+    )
 
     script = remote_workspace_guard(workspace, worker_host) <> "\ncd \"$workspace\"\n" <> command
 
@@ -417,7 +438,9 @@ defmodule SymphonyElixir.Workspace do
   defp handle_hook_command_result({output, status}, workspace, issue_context, hook_name) do
     sanitized_output = sanitize_hook_output_for_log(output)
 
-    Logger.warning("Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} status=#{status} output=#{inspect(sanitized_output)}")
+    Logger.warning(
+      "Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} status=#{status} output=#{inspect(sanitized_output)}"
+    )
 
     {:error, {:workspace_hook_failed, hook_name, status, output}}
   end
@@ -435,7 +458,8 @@ defmodule SymphonyElixir.Workspace do
   end
 
   @spec validate_workspace_path(Path.t(), ExecutionContext.t()) :: :ok | {:error, term()}
-  def validate_workspace_path(workspace, %ExecutionContext{mode: :local, workspace_root: root}) when is_binary(workspace) do
+  def validate_workspace_path(workspace, %ExecutionContext{mode: :local, workspace_root: root})
+      when is_binary(workspace) do
     validate_local_workspace_path(workspace, root)
   end
 
@@ -565,7 +589,13 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp run_remote_command(%ExecutionContext{target: target} = context, script, timeout_ms, operation \\ :remote_command, on_hook \\ nil)
+  defp run_remote_command(
+         %ExecutionContext{target: target} = context,
+         script,
+         timeout_ms,
+         operation \\ :remote_command,
+         on_hook \\ nil
+       )
        when is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
     task =
       Task.async(fn ->

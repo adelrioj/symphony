@@ -1258,6 +1258,15 @@ workflow versions. Live views subscribe to lane/run updates.
 make all
 ```
 
+Both `make all` coverage runs require at least 80% coverage. The second run
+sets `SYMPHONY_COVER_REVIEW_MODULES=1` to include the review modules; it does
+not replace the first run.
+
+The formatter and strict Credo checks use a 120-column line limit. Run `mix format`
+before `mix lint`. Public function specs must be adjacent to the first declaration,
+including a bodyless declaration with default arguments. A later clause does not
+supply a missing declaration spec.
+
 The suite uses a shared in-memory SQLite database and runs serially. The test harness resets lane
 state between tests; `TestSupport.write_workflow_file!/2` updates the current test lane immediately,
 not a file watcher. Do not point tests at an installation's persistent data root.
