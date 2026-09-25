@@ -4,30 +4,23 @@ defmodule SymphonyElixirWeb.LanesApiController do
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
-  alias SymphonyElixir.{Lanes, LaneStore, LaneSupervisor}
+  alias SymphonyElixir.ExecutionProfiles.Configuration
+  alias SymphonyElixir.{Lanes, LaneStore, LaneSupervisor, Workflow}
   alias SymphonyElixir.Lanes.Lane
+  alias SymphonyElixirWeb.ConfigurationFields
 
-  @lane_params ~w(slug name enabled executor front_matter prompt note)
+  @lane_params ~w(slug name enabled execution_profile_id workspace_subdir config prompt note front_matter executor)
 
   @spec index(Conn.t(), map()) :: Conn.t()
   def index(conn, _params), do: json(conn, %{lanes: Enum.map(Lanes.list(), &lane_json/1)})
 
   @spec create(Conn.t(), map()) :: Conn.t()
-  def create(conn, _params) do
-    with_attributes(conn, fn attrs ->
-      case Lanes.create(attrs) do
-        {:ok, lane} -> conn |> put_status(201) |> json(lane_json(lane))
-        {:error, errors} -> errors_response(conn, errors)
-      end
-    end)
-  end
+  def create(conn, _params), do: with_attributes(conn, &create_lane(conn, &1))
 
   @spec update(Conn.t(), map()) :: Conn.t()
   def update(conn, _params) do
     with_lane(conn, fn lane ->
-      with_attributes(conn, fn attrs ->
-        lane_response(conn, Lanes.update(lane, attrs))
-      end)
+      with_attributes(conn, &update_lane(conn, lane, &1))
     end)
   end
 
@@ -60,6 +53,7 @@ defmodule SymphonyElixirWeb.LanesApiController do
       case Lanes.delete(lane) do
         :ok -> send_resp(conn, 204, "")
         {:error, :lane_active} -> conn |> put_status(409) |> json(%{error: %{code: "lane_active", message: "Disable the lane and wait for its agents to stop before deleting it"}})
+        {:error, errors} -> errors_response(conn, errors)
       end
     end)
   end
@@ -74,18 +68,43 @@ defmodule SymphonyElixirWeb.LanesApiController do
 
   defp with_attributes(conn, fun) do
     case conn.body_params do
-      %{"_json" => _} -> errors_response(conn, [%{path: "body", message: "must be a JSON object"}])
-      %{} = attrs -> fun.(Map.take(attrs, @lane_params))
+      %{"_json" => _} ->
+        errors_response(conn, [%{path: "body", message: "must be a JSON object"}])
+
+      %{} = attrs ->
+        forbidden =
+          ["worker", "workspace", "workspace_base"]
+          |> Enum.filter(&Map.has_key?(attrs, &1))
+          |> Enum.map(&%{path: &1, message: "is owned by the execution profile"})
+
+        if forbidden == [], do: fun.(Map.take(attrs, @lane_params)), else: errors_response(conn, forbidden)
     end
   end
 
   defp lane_response(conn, {:ok, lane}), do: json(conn, lane_json(lane))
   defp lane_response(conn, {:error, errors}), do: errors_response(conn, errors)
 
+  defp create_lane(conn, attrs) do
+    with {:ok, attrs} <- restore_config(attrs, %{}),
+         {:ok, lane} <- Lanes.create(attrs) do
+      conn |> put_status(201) |> json(lane_json(lane))
+    else
+      {:error, errors} -> errors_response(conn, errors)
+    end
+  end
+
+  defp update_lane(conn, lane, attrs) do
+    case restore_config(attrs, lane_config(lane)) do
+      {:ok, attrs} -> lane_response(conn, Lanes.update(lane, attrs))
+      {:error, errors} -> errors_response(conn, errors)
+    end
+  end
+
   defp errors_response(conn, errors), do: conn |> put_status(422) |> json(%{errors: errors})
 
   defp lane_json(%Lane{} = lane) do
     {:ok, entry} = LaneStore.lookup(lane.id)
+    config = lane_config(lane)
 
     %{
       id: lane.id,
@@ -93,6 +112,10 @@ defmodule SymphonyElixirWeb.LanesApiController do
       name: lane.name,
       enabled: lane.enabled,
       executor: lane.executor,
+      execution_profile_id: lane.execution_profile_id,
+      execution_profile_name: entry.profile_name,
+      workspace_subdir: lane.workspace_subdir,
+      config: ConfigurationFields.safe_value(config),
       current_version_id: lane.current_version_id,
       running: LaneSupervisor.running?(lane.id),
       updated_at: lane.updated_at,
@@ -101,5 +124,35 @@ defmodule SymphonyElixirWeb.LanesApiController do
       last_crash: entry.runtime.last_crash && entry.runtime.last_crash.reason,
       warnings: entry.warnings
     }
+  end
+
+  defp lane_config(%Lane{} = lane) do
+    case Lanes.current_version(lane) do
+      nil ->
+        %{}
+
+      version ->
+        case Workflow.parse_parts(version.front_matter, "") do
+          {:ok, %{config: config}} ->
+            {_profile, config} = Configuration.split(config)
+            config
+
+          _ ->
+            %{}
+        end
+    end
+  end
+
+  defp restore_config(attrs, original) do
+    case Map.fetch(attrs, "config") do
+      {:ok, config} ->
+        case Configuration.restore_redacted(config, original, "config") do
+          {:ok, restored} -> {:ok, Map.put(attrs, "config", restored)}
+          error -> error
+        end
+
+      :error ->
+        {:ok, attrs}
+    end
   end
 end

@@ -13,10 +13,11 @@ defmodule SymphonyElixir.ExecutionContext do
 
   @enforce_keys [:mode, :workspace_root]
   @derive {Inspect, only: [:mode, :worker_host]}
-  defstruct [:mode, :workspace_root, :workspace_path, :target, :connection, :worker_host, :environment]
+  defstruct [:mode, :workspace_base, :workspace_root, :workspace_path, :target, :connection, :worker_host, :environment]
 
   @type t :: %__MODULE__{
           mode: :local | :ssh | :managed,
+          workspace_base: String.t() | nil,
           workspace_root: String.t(),
           workspace_path: String.t() | nil,
           target: Target.t() | String.t() | nil,
@@ -26,16 +27,18 @@ defmodule SymphonyElixir.ExecutionContext do
         }
 
   @spec local(String.t()) :: t()
-  def local(root), do: %__MODULE__{mode: :local, workspace_root: root}
+  def local(root), do: local(root, root)
+
+  @spec local(String.t(), String.t()) :: t()
+  def local(root, base), do: %__MODULE__{mode: :local, workspace_base: base, workspace_root: root}
 
   @spec ssh(String.t(), Target.t() | String.t()) :: t()
-  def ssh(root, %Target{label: label} = target) do
-    %__MODULE__{mode: :ssh, workspace_root: root, target: target, worker_host: label}
-  end
+  def ssh(root, target), do: ssh(root, target, root)
 
-  def ssh(root, target) when is_binary(target) do
-    %__MODULE__{mode: :ssh, workspace_root: root, target: target, worker_host: target}
-  end
+  @spec ssh(String.t(), Target.t() | String.t(), String.t()) :: t()
+  def ssh(root, %Target{label: label} = target, base), do: %__MODULE__{mode: :ssh, workspace_base: base, workspace_root: root, target: target, worker_host: label}
+
+  def ssh(root, target, base) when is_binary(target), do: %__MODULE__{mode: :ssh, workspace_base: base, workspace_root: root, target: target, worker_host: target}
 
   @spec managed(map(), Record.t(), Connection.t()) :: t()
   def managed(config, record, connection) do
@@ -45,6 +48,7 @@ defmodule SymphonyElixir.ExecutionContext do
 
     %__MODULE__{
       mode: :managed,
+      workspace_base: config.workspace_root,
       workspace_root: config.workspace_root,
       workspace_path: record.workspace_path,
       target: connection.target,

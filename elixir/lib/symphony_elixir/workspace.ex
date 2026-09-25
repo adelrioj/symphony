@@ -5,10 +5,137 @@ defmodule SymphonyElixir.Workspace do
 
   require Logger
   alias SymphonyElixir.{Config, ExecutionContext, PathSafety, SSH}
+  alias SymphonyElixir.Config.Schema
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @type hook_result :: :ok | {:error, {:managed_execution_unknown, term()}}
   @type hook_observer :: (%{event: :hook, timestamp: DateTime.t(), payload: String.t()} -> term()) | nil
+
+  @doc false
+  @spec location_inventory(Schema.t()) :: :empty | :retained | {:error, term()}
+  def location_inventory(%Schema{} = settings) do
+    worker = settings.worker
+
+    case worker.ssh_hosts do
+      [] -> local_inventory(settings.workspace.root)
+      hosts -> remote_inventories(hosts, settings.workspace.root)
+    end
+  end
+
+  @doc false
+  @spec remote_effective_root([String.t()], Path.t(), Path.t()) :: {:ok, Path.t()} | {:error, term()}
+  def remote_effective_root(hosts, base, subdir) when is_list(hosts) and is_binary(base) and is_binary(subdir) do
+    effective = Path.join(base, subdir)
+
+    hosts
+    |> Enum.reduce_while([], fn host, roots ->
+      case contained_remote_root(host, base, effective) do
+        {:ok, canonical_effective} ->
+          {:cont, [canonical_effective | roots]}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      [root | roots] -> if(Enum.all?(roots, &(&1 == root)), do: {:ok, root}, else: {:error, :remote_workspace_roots_differ})
+      {:error, reason} -> {:error, reason}
+      [] -> {:error, :missing_ssh_host}
+    end
+  end
+
+  defp contained_remote_root(host, base, effective) do
+    with {:ok, canonical_base, canonical_effective} <- remote_canonical_paths(host, base, effective) do
+      base_parts = Path.split(canonical_base)
+      effective_parts = Path.split(canonical_effective)
+
+      if Enum.take(effective_parts, length(base_parts)) == base_parts,
+        do: {:ok, canonical_effective},
+        else: {:error, :remote_workspace_outside_base}
+    end
+  end
+
+  defp local_inventory(root) do
+    case PathSafety.canonicalize(root) do
+      {:ok, canonical_root} ->
+        case File.ls(canonical_root) do
+          {:ok, []} -> :empty
+          {:ok, _entries} -> :retained
+          {:error, :enoent} -> :empty
+          {:error, reason} -> {:error, {:workspace_inventory_unverifiable, :local, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:workspace_inventory_unverifiable, :local, reason}}
+    end
+  end
+
+  defp remote_inventories(hosts, root) do
+    Enum.reduce_while(hosts, :empty, fn host, _acc ->
+      case remote_inventory(host, root) do
+        :empty -> {:cont, :empty}
+        result -> {:halt, result}
+      end
+    end)
+  end
+
+  defp remote_inventory(host, root) do
+    command =
+      [
+        remote_shell_assign("workspace_root", root),
+        "if [ -L \"$workspace_root\" ]; then exit 1; fi",
+        "if [ -d \"$workspace_root\" ]; then find \"$workspace_root\" -mindepth 1 -maxdepth 1 -exec printf retained ';' -quit; exit $?; fi",
+        "if [ -e \"$workspace_root\" ] || [ -L \"$workspace_root\" ]; then exit 1; fi",
+        "ancestor=$workspace_root",
+        "while [ ! -e \"$ancestor\" ] && [ ! -L \"$ancestor\" ] && [ \"$ancestor\" != / ]; do ancestor=${ancestor%/*}; [ -n \"$ancestor\" ] || ancestor=/; done",
+        "[ -d \"$ancestor\" ] && [ -x \"$ancestor\" ]"
+      ]
+      |> Enum.join("\n")
+
+    task = Task.async(fn -> SSH.run(host, command, stderr_to_stdout: true) end)
+
+    case Task.yield(task, 2_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:ok, {output, 0}}} -> if(String.trim(output) == "", do: :empty, else: :retained)
+      {:ok, {:ok, {output, status}}} -> {:error, {:workspace_inventory_unverifiable, host, status, output}}
+      {:ok, {:error, reason}} -> {:error, {:workspace_inventory_unverifiable, host, reason}}
+      {:exit, reason} -> {:error, {:workspace_inventory_unverifiable, host, reason}}
+      nil -> {:error, {:workspace_inventory_unverifiable, host, :timeout}}
+    end
+  end
+
+  defp remote_canonical_paths(host, base, effective) do
+    command =
+      [
+        "set -eu",
+        remote_shell_assign("workspace_root", base),
+        remote_shell_assign("workspace", effective),
+        "printf '%s\\t%s\\n' \"$(realpath -m -- \"$workspace_root\")\" \"$(realpath -m -- \"$workspace\")\""
+      ]
+      |> Enum.join("\n")
+
+    task = Task.async(fn -> SSH.run(host, command, stderr_to_stdout: true) end)
+
+    case Task.yield(task, 2_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:ok, {output, 0}}} ->
+        case String.split(String.trim(output), "\t", parts: 2) do
+          [canonical_base, canonical_effective]
+          when canonical_base != "" and canonical_effective != "" ->
+            {:ok, canonical_base, canonical_effective}
+
+          _ ->
+            {:error, {:remote_path_canonicalize_failed, host}}
+        end
+
+      {:ok, {:ok, {output, status}}} ->
+        {:error, {:remote_path_canonicalize_failed, host, status, output}}
+
+      {:ok, {:error, reason}} ->
+        {:error, {:remote_path_canonicalize_failed, host, reason}}
+
+      nil ->
+        {:error, {:remote_path_canonicalize_failed, host, :timeout}}
+    end
+  end
 
   @spec create_for_issue(map() | String.t() | nil, ExecutionContext.t(), hook_observer()) ::
           {:ok, Path.t()} | {:error, term()}
@@ -21,24 +148,28 @@ defmodule SymphonyElixir.Workspace do
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host) do
-        case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, on_hook) do
-          :ok ->
-            {:ok, workspace}
-
-          {:error, {:managed_execution_unknown, _detail}} = error ->
-            error
-
-          {:error, _reason} = error ->
-            case cleanup_failed_new_workspace(workspace, created?, worker_host) do
-              {:error, {:managed_execution_unknown, _detail}} = unknown -> unknown
-              _ -> error
-            end
-        end
+        finish_workspace_creation(workspace, issue_context, created?, worker_host, on_hook)
       end
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
         Logger.error("Workspace creation failed #{issue_log_context(issue_context)} worker_host=#{worker_host_for_log(worker_host)} error=#{Exception.message(error)}")
         {:error, error}
+    end
+  end
+
+  defp finish_workspace_creation(workspace, issue_context, created?, worker_host, on_hook) do
+    case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, on_hook) do
+      :ok ->
+        {:ok, workspace}
+
+      {:error, {:managed_execution_unknown, _detail}} = error ->
+        error
+
+      {:error, _reason} = error ->
+        case cleanup_failed_new_workspace(workspace, created?, worker_host) do
+          {:error, {:managed_execution_unknown, _detail}} = unknown -> unknown
+          _ -> error
+        end
     end
   end
 
@@ -141,9 +272,9 @@ defmodule SymphonyElixir.Workspace do
   @spec remove_recorded(Path.t(), ExecutionContext.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove_recorded(workspace, %ExecutionContext{mode: :local} = context) when is_binary(workspace) do
     if Path.type(workspace) == :absolute do
-      case validate_recorded_workspace_path(workspace) do
+      case validate_workspace_path(workspace, context) do
         :ok ->
-          remove_local_workspace(workspace, %{context | workspace_root: Path.dirname(workspace)})
+          remove_local_workspace(workspace, context)
 
         {:error, reason} ->
           {:error, reason, ""}
@@ -439,8 +570,8 @@ defmodule SymphonyElixir.Workspace do
   end
 
   @spec validate_workspace_path(Path.t(), ExecutionContext.t()) :: :ok | {:error, term()}
-  def validate_workspace_path(workspace, %ExecutionContext{mode: :local, workspace_root: root}) when is_binary(workspace) do
-    validate_local_workspace_path(workspace, root)
+  def validate_workspace_path(workspace, %ExecutionContext{mode: :local, workspace_root: root, workspace_base: base}) when is_binary(workspace) do
+    validate_local_workspace_path(workspace, root, base || root)
   end
 
   def validate_workspace_path(workspace, %ExecutionContext{} = context) when is_binary(workspace) do
@@ -448,7 +579,8 @@ defmodule SymphonyElixir.Workspace do
       String.trim(workspace) == "" ->
         {:error, {:workspace_path_unreadable, workspace, :empty}}
 
-      invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root) ->
+      invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root) or
+          invalid_remote_path?(context.workspace_base || context.workspace_root) ->
         {:error, {:workspace_path_unreadable, workspace, :invalid_characters}}
 
       true ->
@@ -476,18 +608,30 @@ defmodule SymphonyElixir.Workspace do
   defp invalid_remote_path?(path) when is_binary(path), do: String.match?(path, ~r/[\x00-\x1f\x7f]/)
   defp invalid_remote_path?(_path), do: true
 
-  defp remote_workspace_guard(workspace, %ExecutionContext{mode: :managed} = context) do
-    invalid_path? = invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root)
+  defp remote_workspace_guard(workspace, %ExecutionContext{} = context) do
+    base = context.workspace_base || context.workspace_root
 
-    if invalid_path? or workspace != context.workspace_path do
+    invalid_path? =
+      invalid_remote_path?(workspace) or invalid_remote_path?(context.workspace_root) or
+        invalid_remote_path?(base)
+
+    identity_mismatch? = context.mode == :managed and workspace != context.workspace_path
+
+    if invalid_path? or identity_mismatch? do
       "exit 64"
     else
       [
         "set -eu",
+        remote_shell_assign("workspace_base", base),
         remote_shell_assign("workspace_root", context.workspace_root),
         remote_shell_assign("workspace", workspace),
+        "base_real=$(realpath -m -- \"$workspace_base\")",
         "root_real=$(realpath -m -- \"$workspace_root\")",
         "workspace_real=$(realpath -m -- \"$workspace\")",
+        "case \"$root_real\" in",
+        "  \"$base_real\"|\"$base_real\"/*) ;;",
+        "  *) exit 64 ;;",
+        "esac",
         "case \"$workspace_real\" in",
         "  \"$root_real\"/*) test \"$workspace_real\" != \"$root_real\" ;;",
         "  *) exit 64 ;;",
@@ -497,25 +641,23 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp remote_workspace_guard(workspace, %ExecutionContext{}) do
-    if invalid_remote_path?(workspace), do: "exit 64", else: "set -eu\n" <> remote_shell_assign("workspace", workspace)
-  end
-
-  defp validate_recorded_workspace_path(workspace) when is_binary(workspace) do
-    validate_local_workspace_path(workspace, Path.dirname(workspace))
-  end
-
-  defp validate_local_workspace_path(workspace, workspace_root)
-       when is_binary(workspace) and is_binary(workspace_root) do
+  defp validate_local_workspace_path(workspace, workspace_root, workspace_base)
+       when is_binary(workspace) and is_binary(workspace_root) and is_binary(workspace_base) do
     expanded_workspace = Path.expand(workspace)
     expanded_root = Path.expand(workspace_root)
+    expanded_base = Path.expand(workspace_base)
     expanded_root_prefix = expanded_root <> "/"
 
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
-         {:ok, canonical_root} <- PathSafety.canonicalize(expanded_root) do
+         {:ok, canonical_root} <- PathSafety.canonicalize(expanded_root),
+         {:ok, canonical_base} <- PathSafety.canonicalize(expanded_base),
+         {:ok, root_contained?} <- PathSafety.contained?(canonical_root, canonical_base) do
       canonical_root_prefix = canonical_root <> "/"
 
       cond do
+        not root_contained? ->
+          {:error, {:workspace_root_outside_base, canonical_root, canonical_base}}
+
         canonical_workspace == canonical_root ->
           {:error, {:workspace_equals_root, canonical_workspace, canonical_root}}
 

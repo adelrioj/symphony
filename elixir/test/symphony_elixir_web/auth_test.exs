@@ -5,6 +5,7 @@ defmodule SymphonyElixirWeb.AuthTest do
   import Phoenix.LiveViewTest
   import Plug.Conn
 
+  alias SymphonyElixir.ExecutionProfiles
   alias SymphonyElixirWeb.{LiveAuth, ObservabilityPubSub}
   alias SymphonyElixirWeb.Plugs.Authenticate
 
@@ -28,7 +29,7 @@ defmodule SymphonyElixirWeb.AuthTest do
   end
 
   test "all API routes including method and path fallbacks require authentication" do
-    for path <- ["/api/v1/state", "/api/v1/lanes", "/api/v1/refresh", "/api/v1/unknown/deeper"] do
+    for path <- ["/api/v1/state", "/api/v1/lanes", "/api/v1/execution-profiles", "/api/v1/refresh", "/api/v1/unknown/deeper"] do
       assert %{"error" => %{"code" => "unauthorized"}} = json_response(get(build_conn(), path), 401)
       assert %{"error" => %{"code" => "unauthorized"}} = json_response(post(build_conn(), path, %{}), 401)
     end
@@ -74,7 +75,16 @@ defmodule SymphonyElixirWeb.AuthTest do
   test "cookie API mutations reject missing or invalid CSRF, while valid CSRF or explicit bearer works" do
     {conn, csrf} = login_form()
     logged_in = post(conn, "/login", %{"token" => "test-token", "_csrf_token" => csrf})
-    attrs = %{"slug" => "csrf-lane", "front_matter" => "tracker:\n  kind: memory", "prompt" => "hi"}
+
+    {:ok, profile} = ExecutionProfiles.create(%{name: "CSRF profile", workspace_base: Path.join(System.tmp_dir!(), "csrf-profile"), worker: %{}})
+
+    attrs = %{
+      "slug" => "csrf-lane",
+      "execution_profile_id" => profile.id,
+      "workspace_subdir" => ".",
+      "config" => %{"tracker" => %{"kind" => "memory"}},
+      "prompt" => "hi"
+    }
 
     cookie_conn = logged_in |> recycle() |> put_private(:plug_skip_csrf_protection, false)
     assert %{"error" => %{"code" => "invalid_csrf_token"}} = json_response(post(cookie_conn, "/api/v1/lanes", attrs), 403)

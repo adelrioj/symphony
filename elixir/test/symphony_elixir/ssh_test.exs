@@ -56,7 +56,7 @@ defmodule SymphonyElixir.SSHTest do
              SSH.run("root@[::1]:2200", "printf ok", stderr_to_stdout: true)
 
     trace = File.read!(trace_file)
-    assert trace =~ "-T -p 2200 root@[::1] bash -lc"
+    assert trace =~ "-T -p 2200 root@[::1] bash --noprofile --norc -c"
     assert trace =~ "printf ok"
   end
 
@@ -76,7 +76,7 @@ defmodule SymphonyElixir.SSHTest do
              SSH.run("::1:2200", "printf ok", stderr_to_stdout: true)
 
     trace = File.read!(trace_file)
-    assert trace =~ "-T ::1:2200 bash -lc"
+    assert trace =~ "-T ::1:2200 bash --noprofile --norc -c"
     refute trace =~ "-p 2200"
   end
 
@@ -100,7 +100,7 @@ defmodule SymphonyElixir.SSHTest do
 
     trace = File.read!(trace_file)
     assert trace =~ "-F /tmp/symphony-test-ssh-config"
-    assert trace =~ "-T -p 2222 localhost bash -lc"
+    assert trace =~ "-T -p 2222 localhost bash --noprofile --norc -c"
     assert trace =~ "echo ready"
   end
 
@@ -120,7 +120,7 @@ defmodule SymphonyElixir.SSHTest do
              SSH.run("root@127.0.0.1:2200", "printf ok", stderr_to_stdout: true)
 
     trace = File.read!(trace_file)
-    assert trace =~ "-T -p 2200 root@127.0.0.1 bash -lc"
+    assert trace =~ "-T -p 2200 root@127.0.0.1 bash --noprofile --norc -c"
     assert trace =~ "printf ok"
   end
 

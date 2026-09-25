@@ -12,7 +12,8 @@ defmodule SymphonyElixir.Repo do
 
   @migrations [
     {20_260_912_000_001, SymphonyElixir.Repo.Migrations.CreateLanesAndRuns},
-    {20_260_919_000_001, SymphonyElixir.Repo.Migrations.CreateHostLossAlarms}
+    {20_260_919_000_001, SymphonyElixir.Repo.Migrations.CreateHostLossAlarms},
+    {20_260_920_000_001, SymphonyElixir.Repo.Migrations.AddExecutionProfiles}
   ]
 
   @impl true

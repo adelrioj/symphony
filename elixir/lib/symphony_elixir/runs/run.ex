@@ -11,6 +11,8 @@ defmodule SymphonyElixir.Runs.Run do
   schema "runs" do
     field(:lane_id, :integer)
     field(:lane_version_id, :integer)
+    field(:execution_profile_id, :integer)
+    field(:config_identity, :binary)
     field(:issue_id, :string)
     field(:issue_identifier, :string)
     field(:issue_state, :string)
@@ -36,6 +38,8 @@ defmodule SymphonyElixir.Runs.Run do
     |> cast(attrs, [
       :lane_id,
       :lane_version_id,
+      :execution_profile_id,
+      :config_identity,
       :issue_id,
       :issue_identifier,
       :issue_state,
@@ -56,5 +60,6 @@ defmodule SymphonyElixir.Runs.Run do
     |> unique_constraint(:attempt_id)
     |> foreign_key_constraint(:lane_id)
     |> foreign_key_constraint(:lane_version_id)
+    |> foreign_key_constraint(:execution_profile_id)
   end
 end

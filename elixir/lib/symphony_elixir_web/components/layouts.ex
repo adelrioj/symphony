@@ -57,6 +57,7 @@ defmodule SymphonyElixirWeb.Layouts do
     <main class="app-shell">
       <nav class="app-nav" aria-label="Main navigation">
         <a class="issue-link" href="/">Lanes</a>
+        <a class="issue-link" href="/execution-profiles">Execution profiles</a>
       </nav>
       <p :if={Phoenix.Flash.get(@flash, :error)} id="flash-error" class="error-card" role="alert">{Phoenix.Flash.get(@flash, :error)}</p>
       <p :if={Phoenix.Flash.get(@flash, :info)} id="flash-info" class="section-card" role="status">{Phoenix.Flash.get(@flash, :info)}</p>

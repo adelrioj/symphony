@@ -34,7 +34,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "a persisted lane without an active version cannot supply agent or MCP prompts" do
-    lane = Repo.insert!(%SymphonyElixir.Lanes.Lane{slug: "never-configured", name: "Never configured"})
+    {:ok, profile} = SymphonyElixir.ExecutionProfiles.create(%{name: "Never configured", workspace_base: System.tmp_dir!(), worker: %{}})
+    lane = Repo.insert!(%SymphonyElixir.Lanes.Lane{slug: "never-configured", name: "Never configured", execution_profile_id: profile.id})
     LaneContext.put(lane.id)
     assert :ok = LaneStore.refresh(lane.id)
 
@@ -196,6 +197,98 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert File.read!(Path.join(outside, "keep")) == "safe"
     refute File.exists?(Path.join(outside, "hook-ran"))
+  end
+
+  test "static SSH safety rechecks canonical containment before create hooks and deletion" do
+    root = Path.join(System.tmp_dir!(), "symphony-ssh-safety-#{System.unique_integer([:positive])}")
+    outside = root <> "-outside"
+
+    on_exit(fn ->
+      File.rm_rf(root)
+      File.rm_rf(outside)
+    end)
+
+    File.mkdir_p!(root)
+    File.mkdir_p!(outside)
+    File.write!(Path.join(outside, "keep"), "safe")
+    File.ln_s!(outside, Path.join(root, "escape"))
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: root,
+      hook_before_run: "touch hook-ran",
+      hook_before_remove: "touch hook-ran"
+    )
+
+    context = ExecutionContext.ssh(root, managed_shell_target!(root))
+    escaped = Path.join(root, "escape")
+
+    assert {:error, _} = Workspace.create_for_issue("escape", context)
+    assert {:error, _} = Workspace.run_before_run_hook(escaped, "SSH-1", context)
+    assert {:error, _, _} = Workspace.remove(escaped, context)
+    assert {:error, _, _} = Workspace.remove(root, context)
+    assert File.read!(Path.join(outside, "keep")) == "safe"
+    refute File.exists?(Path.join(outside, "hook-ran"))
+  end
+
+  test "static SSH inventory treats a confirmed missing root as empty" do
+    root = Path.join(System.tmp_dir!(), "symphony-missing-ssh-root-#{System.unique_integer([:positive])}")
+    bin = Path.join(root <> "-bin", "ssh")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(root <> "-bin")
+    end)
+
+    File.mkdir_p!(Path.dirname(bin))
+
+    File.write!(bin, """
+    #!/bin/sh
+    for argument in "$@"; do command=$argument; done
+    exec /bin/sh -c "$command"
+    """)
+
+    File.chmod!(bin, 0o700)
+    System.put_env("PATH", Path.dirname(bin) <> ":" <> previous_path)
+
+    settings = %Schema{workspace: %Schema.Workspace{root: root}, worker: %Schema.Worker{ssh_hosts: ["fixture"]}}
+    assert Workspace.location_inventory(settings) == :empty
+  end
+
+  @tag :remediation
+  @tag :tmp_dir
+  test "remediation: a retained SSH root replaced by a stable symlink cannot be inventoried as empty", %{tmp_dir: fixture} do
+    root = Path.join(fixture, "lane")
+    moved_root = Path.join(fixture, "lane-real")
+    bin = Path.join(fixture, "bin/ssh")
+    previous_path = System.get_env("PATH")
+    on_exit(fn -> restore_env("PATH", previous_path) end)
+    File.mkdir_p!(Path.dirname(bin))
+
+    File.write!(bin, """
+    #!/bin/sh
+    for argument in "$@"; do command=$argument; done
+    exec /bin/sh -c "$command"
+    """)
+
+    File.chmod!(bin, 0o700)
+    System.put_env("PATH", Path.dirname(bin) <> ":" <> previous_path)
+    File.mkdir_p!(Path.join(root, "checkout"))
+    File.write!(Path.join(root, "checkout/work"), "keep")
+    settings = %Schema{workspace: %Schema.Workspace{root: root}, worker: %Schema.Worker{ssh_hosts: ["fixture"]}}
+    assert Workspace.location_inventory(settings) == :retained
+
+    File.rename!(root, moved_root)
+    File.ln_s!(moved_root, root)
+
+    result = Workspace.location_inventory(settings)
+    assert result == :retained or match?({:error, _}, result)
+    assert File.read!(Path.join(moved_root, "checkout/work")) == "keep"
+
+    File.rm!(root)
+    File.rename!(moved_root, root)
+    File.rm_rf!(Path.join(root, "checkout"))
+    assert Workspace.location_inventory(settings) == :empty
   end
 
   test "before-remove hook can run without deleting retained managed data" do
@@ -531,13 +624,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                SymphonyElixir.PathSafety.canonicalize(recorded_root)
 
       assert {:error, {:workspace_symlink_escape, ^recorded_workspace, ^canonical_recorded_root}, ""} =
-               Workspace.remove_recorded(recorded_workspace, SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()))
+               Workspace.remove_recorded(recorded_workspace, SymphonyElixir.ExecutionContext.local(recorded_root))
 
       refute File.exists?(hook_marker)
       assert File.exists?(outside_root)
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "captured profile base rejects a lane root replaced by a symlink" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-profile-base-swap-#{System.unique_integer([:positive])}")
+    base = Path.join(test_root, "base")
+    lane_root = Path.join(base, "lane")
+    outside = Path.join(test_root, "outside")
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+    File.mkdir_p!(base)
+    File.mkdir_p!(outside)
+    File.ln_s!(outside, lane_root)
+
+    context = ExecutionContext.local(lane_root, base)
+    assert {:error, {:workspace_root_outside_base, _, _}} = Workspace.create_for_issue("ESCAPE-1", context)
+    refute File.exists?(Path.join(outside, "ESCAPE-1"))
+
+    remote = ExecutionContext.ssh(lane_root, managed_shell_target!(test_root), base)
+    assert {:error, _} = Workspace.create_for_issue("ESCAPE-SSH", remote)
+    refute File.exists?(Path.join(outside, "ESCAPE-SSH"))
   end
 
   test "workspace canonicalizes symlinked workspace roots before creating issue directories" do
@@ -1459,7 +1572,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.api_key == nil
     assert config.tracker.project_slug == nil
     assert config.tracker.required_labels == []
-    assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
+
+    assert {:ok, default_workspace_root} =
+             SymphonyElixir.PathSafety.canonicalize(Path.join(System.tmp_dir!(), "symphony_workspaces"))
+
+    assert config.workspace.root == default_workspace_root
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
     assert config.codex.command == "codex app-server"
@@ -1498,17 +1615,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().codex.command ==
              "codex --config 'model=\"gpt-5.5\"' app-server"
 
-    explicit_root =
+    explicit_root = config.workspace.root
+
+    explicit_workspace =
       Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-explicit-sandbox-root-#{System.unique_integer([:positive])}"
+        explicit_root,
+        "MT-EXPLICIT-#{System.unique_integer([:positive])}"
       )
 
-    explicit_workspace = Path.join(explicit_root, "MT-EXPLICIT")
     explicit_cache = Path.join(explicit_workspace, "cache")
     File.mkdir_p!(explicit_cache)
 
-    on_exit(fn -> File.rm_rf(explicit_root) end)
+    on_exit(fn -> File.rm_rf(explicit_workspace) end)
 
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: explicit_root,
@@ -1621,7 +1739,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.api_key == api_key
     assert config.tracker.provider["api_key"] == "$#{api_key_env_var}"
     assert config.tracker.secret_environment_names == ["LINEAR_API_KEY", api_key_env_var]
-    assert config.workspace.root == Path.expand(workspace_root)
+    assert {:ok, canonical_workspace_root} = SymphonyElixir.PathSafety.canonicalize(workspace_root)
+    assert config.workspace.root == canonical_workspace_root
     assert config.codex.command == "#{codex_bin} app-server"
   end
 
@@ -1722,7 +1841,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     config = Config.settings!()
     assert config.tracker.api_key == "env:#{api_key_env_var}"
-    assert config.workspace.root == "env:#{workspace_env_var}"
+
+    assert {:ok, canonical_legacy_root} =
+             SymphonyElixir.PathSafety.canonicalize(Path.join(Config.data_root(), "env:#{workspace_env_var}"))
+
+    assert config.workspace.root == canonical_legacy_root
   end
 
   test "config supports per-state max concurrent agent overrides" do
@@ -2060,6 +2183,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         *"__SYMPHONY_WORKSPACE__"*)
           printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
           ;;
+        *"realpath -m"*)
+          printf '%s\\t%s\\n' '/remote/home/.symphony-remote-workspaces' '/remote/home/.symphony-remote-workspaces'
+          ;;
       esac
 
       exit 0
@@ -2076,7 +2202,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       )
 
       assert Config.settings!().worker.ssh_hosts == ["worker-01:2200"]
-      assert Config.settings!().workspace.root == workspace_root
+      assert Config.settings!().workspace.root == "/remote/home/.symphony-remote-workspaces"
       context = SymphonyElixir.ExecutionContext.ssh(workspace_root, "worker-01:2200")
       assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WS", context)
       assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WS", context)
@@ -2084,7 +2210,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", context)
 
       trace = File.read!(trace_file)
-      assert trace =~ "-p 2200 worker-01 bash -lc"
+      assert trace =~ "-p 2200 worker-01 bash --noprofile --norc -c"
       assert trace =~ "__SYMPHONY_WORKSPACE__"
       assert trace =~ "~/.symphony-remote-workspaces/MT-SSH-WS"
       assert trace =~ "${workspace#\\~/}"
@@ -2096,5 +2222,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "path containment compares canonical path components" do
+    root = Path.join(System.tmp_dir!(), "symphony-path-containment-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(root, "nested"))
+    on_exit(fn -> File.rm_rf(root) end)
+
+    assert {:ok, true} = SymphonyElixir.PathSafety.contained?(Path.join(root, "nested"), root)
+    assert {:ok, false} = SymphonyElixir.PathSafety.contained?(root <> "-sibling", root)
   end
 end

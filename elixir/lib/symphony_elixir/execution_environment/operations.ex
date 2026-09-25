@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   @moduledoc "Bounded provider work and authority-owned transport leases, independent of scheduler state."
-  alias SymphonyElixir.ExecutionContext
+  alias SymphonyElixir.{ExecutionContext, LaneContext}
   alias SymphonyElixir.ExecutionEnvironment.{Command, Connection, Lifecycle, Record}
   alias SymphonyElixir.SSH
   alias SymphonyElixir.SSH.Target
@@ -9,7 +9,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   def start(supervisor, adapter, config, entry, operation, opts) do
     opts = Keyword.put(opts, :task_supervisor, supervisor)
     operation_fun = Keyword.get(opts, :operation_fun, &run/5)
-    run = fn -> {entry.operation_id, operation_fun.(adapter, config, entry, operation, opts)} end
+
+    run = fn ->
+      if entry.lane_snapshot, do: LaneContext.install(entry.lane_snapshot)
+      {entry.operation_id, operation_fun.(adapter, config, entry, operation, opts)}
+    end
+
     task = Task.Supervisor.async_nolink(supervisor, run)
     {:ok, task}
   end

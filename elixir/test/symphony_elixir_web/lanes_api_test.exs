@@ -4,10 +4,10 @@ defmodule SymphonyElixirWeb.LanesApiTest do
   import Phoenix.ConnTest
   import Plug.Conn
 
-  alias SymphonyElixir.{Lanes, LaneStore, Repo}
+  alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, Repo, Workflow}
 
   @endpoint SymphonyElixirWeb.Endpoint
-  @front_matter "tracker:\n  kind: memory\npolling:\n  interval_ms: 60000\ncodex:\n  command: /bin/false"
+  @config %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 60_000}, "codex" => %{"command" => "/bin/false"}}
 
   setup do
     original = Application.get_env(:symphony_elixir, @endpoint, [])
@@ -21,7 +21,9 @@ defmodule SymphonyElixirWeb.LanesApiTest do
   test "CRUD preserves workflow versions, exports active content, and reserves deleted slugs" do
     lane = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs("api-lane"))), 201)
     v1 = lane["current_version_id"]
-    assert %{"slug" => "api-lane", "enabled" => false, "executor" => "local"} = lane
+    assert %{"slug" => "api-lane", "enabled" => false, "executor" => "local", "workspace_subdir" => "."} = lane
+    assert lane["execution_profile_id"] > 0
+    assert is_binary(lane["execution_profile_name"])
     assert Enum.any?(json_response(get(api_conn(), "/api/v1/lanes"), 200)["lanes"], &(&1["slug"] == "api-lane"))
 
     renamed = json_response(put(api_conn(), "/api/v1/lanes/api-lane", Jason.encode!(%{name: "Renamed"})), 200)
@@ -34,7 +36,9 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     assert activated["current_version_id"] == v1
     export = get(api_conn(), "/api/v1/lanes/api-lane/export")
     assert get_resp_header(export, "content-type") == ["text/markdown; charset=utf-8"]
-    assert response(export, 200) == "---\n" <> @front_matter <> "\n---\nhi"
+    assert {:ok, exported} = Workflow.parse(response(export, 200))
+    assert exported.config["tracker"] == %{"kind" => "memory"}
+    assert exported.prompt == "hi"
 
     assert response(delete(api_conn(), "/api/v1/lanes/api-lane"), 204) == ""
     assert json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs("api-lane"))), 422)["errors"] != []
@@ -49,19 +53,49 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     end
   end
 
-  test "route slug identifies the target independently of a submitted replacement slug" do
+  test "lane slugs are immutable and route identity cannot be replaced" do
     assert %{"slug" => "before-name"} = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs("before-name"))), 201)
-    assert %{"slug" => "after-name"} = json_response(put(api_conn(), "/api/v1/lanes/before-name", Jason.encode!(%{slug: "after-name"})), 200)
-    refute Lanes.get_by_slug("before-name")
-    assert Lanes.get_by_slug("after-name")
-    assert %{"error" => %{"code" => "lane_not_found"}} = json_response(put(api_conn(), "/api/v1/lanes/missing", Jason.encode!(%{slug: "after-name", name: "wrong target"})), 404)
-    refute Lanes.get_by_slug("after-name").name == "wrong target"
+    assert Enum.any?(json_response(put(api_conn(), "/api/v1/lanes/before-name", Jason.encode!(%{slug: "after-name"})), 422)["errors"], &(&1["path"] == "slug"))
+    assert Lanes.get_by_slug("before-name")
+    assert is_nil(Lanes.get_by_slug("after-name"))
+    assert %{"error" => %{"code" => "lane_not_found"}} = json_response(put(api_conn(), "/api/v1/lanes/missing", Jason.encode!(%{name: "wrong target"})), 404)
+  end
+
+  test "lane responses redact literal tracker credentials and preserve references" do
+    attrs =
+      attrs("secret-safe-lane")
+      |> Map.put(:config, %{
+        "tracker" => %{"kind" => "memory", "api_key" => "literal-tracker-secret"},
+        "extension" => %{"token" => "$EXTENSION_TOKEN"}
+      })
+
+    created = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs)), 201)
+    assert created["config"]["tracker"]["api_key"] == "$REDACTED"
+    assert created["config"]["extension"]["token"] == "$EXTENSION_TOKEN"
+    refute Jason.encode!(json_response(get(api_conn(), "/api/v1/lanes"), 200)) =~ "literal-tracker-secret"
+
+    round_tripped =
+      json_response(
+        put(api_conn(), "/api/v1/lanes/secret-safe-lane", Jason.encode!(%{"config" => created["config"], "name" => "Round tripped"})),
+        200
+      )
+
+    assert round_tripped["config"]["tracker"]["api_key"] == "$REDACTED"
+    assert {:ok, stored} = Workflow.parse_parts(Lanes.current_version(Lanes.get_by_slug("secret-safe-lane")).front_matter, "")
+    assert stored.config["tracker"]["api_key"] == "literal-tracker-secret"
+
+    bad_attrs = attrs("unmatched-redaction") |> Map.put(:config, %{"tracker" => %{"kind" => "memory", "api_key" => "$REDACTED"}})
+    errors = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(bad_attrs)), 422)["errors"]
+    assert Enum.any?(errors, &(&1["path"] == "config.tracker.api_key"))
+    update_errors = json_response(put(api_conn(), "/api/v1/lanes/secret-safe-lane", Jason.encode!(%{config: %{extension: %{new_token: "$REDACTED"}}})), 422)["errors"]
+    assert Enum.any?(update_errors, &(&1["path"] == "config.extension.new_token"))
+    assert Lanes.get_by_slug("secret-safe-lane").current_version_id == round_tripped["current_version_id"]
   end
 
   test "invalid JSON field types and nonobject bodies are rejected without persisting changes" do
     assert %{"current_version_id" => version} = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs("typed-lane"))), 201)
 
-    for {field, value} <- [{"slug", nil}, {"name", []}, {"enabled", "yes"}, {"executor", %{}}, {"front_matter", nil}, {"prompt", ["bad"]}, {"note", false}] do
+    for {field, value} <- [{"slug", nil}, {"name", []}, {"enabled", "yes"}, {"execution_profile_id", %{}}, {"workspace_subdir", nil}, {"config", []}, {"prompt", ["bad"]}, {"note", false}] do
       conn = put(api_conn(), "/api/v1/lanes/typed-lane", Jason.encode!(%{field => value}))
       errors = json_response(conn, 422)["errors"]
       assert Enum.any?(errors, &(&1["path"] == field))
@@ -73,7 +107,7 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     end
 
     conn = put(api_conn(), "/api/v1/lanes/typed-lane", Jason.encode!(%{front_matter: "polling:\n  interval_ms: nope"}))
-    assert Enum.any?(json_response(conn, 422)["errors"], &(&1["path"] == "polling.interval_ms"))
+    assert Enum.any?(json_response(conn, 422)["errors"], &(&1["path"] == "front_matter"))
     assert Lanes.get_by_slug("typed-lane").current_version_id == version
   end
 
@@ -90,7 +124,7 @@ defmodule SymphonyElixirWeb.LanesApiTest do
   test "export without a version returns a structured error" do
     {:ok, lane} = Lanes.create(attrs("no-version"))
     lane |> Ecto.Changeset.change(current_version_id: nil) |> Repo.update!()
-    assert %{"errors" => [%{"path" => "version", "message" => "lane has no version"}]} = json_response(get(api_conn(), "/api/v1/lanes/no-version/export"), 422)
+    assert %{"errors" => [%{"path" => "version"}]} = json_response(get(api_conn(), "/api/v1/lanes/no-version/export"), 422)
   end
 
   test "enabled lanes cannot be deleted, and disable allows deletion" do
@@ -99,6 +133,48 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     assert %{"error" => %{"code" => "lane_active"}} = json_response(delete(api_conn(), "/api/v1/lanes/active-lane"), 409)
     assert %{"enabled" => false} = json_response(put(api_conn(), "/api/v1/lanes/active-lane", Jason.encode!(%{enabled: false})), 200)
     assert response(delete(api_conn(), "/api/v1/lanes/active-lane"), 204) == ""
+  end
+
+  @tag :tmp_dir
+  test "deletion refuses retained workspaces without discarding their lane", %{tmp_dir: root} do
+    {:ok, profile} = ExecutionProfiles.create(%{name: "Retained API", workspace_base: root, worker: %{}})
+    {:ok, lane} = Lanes.create(%{slug: "retained-api", execution_profile_id: profile.id, config: @config})
+    {:ok, settings} = LaneStore.settings(lane.id)
+    retained = Path.join(settings.workspace.root, "RETAIN-1")
+    File.mkdir_p!(retained)
+    File.write!(Path.join(retained, "kept"), "retained data")
+
+    assert json_response(delete(api_conn(), "/api/v1/lanes/#{lane.slug}"), 422)["errors"] != []
+    assert Lanes.get!(lane.id).deleted_at == nil
+    assert File.read!(Path.join(retained, "kept")) == "retained data"
+  end
+
+  test "lane infrastructure cannot be replaced through top-level API keys" do
+    {:ok, lane} = Lanes.create(attrs("owner-api"))
+    profile = ExecutionProfiles.get(lane.execution_profile_id)
+    errors = json_response(put(api_conn(), "/api/v1/lanes/#{lane.slug}", Jason.encode!(%{worker: %{ssh_hosts: ["replacement"]}})), 422)["errors"]
+    assert Enum.any?(errors, &(&1["path"] == "worker"))
+    assert ExecutionProfiles.get(profile.id).worker == profile.worker
+    assert Lanes.get!(lane.id).current_version_id == lane.current_version_id
+  end
+
+  test "missing or malformed historical configuration stays visible as a repairable lane" do
+    {:ok, lane} = Lanes.create(attrs("repair-api"))
+    version = Lanes.current_version(lane)
+    Repo.update!(Ecto.Changeset.change(version, front_matter: "tracker: [\n  literal-secret"))
+    assert :ok = LaneStore.refresh(lane.id)
+    lanes = json_response(get(api_conn(), "/api/v1/lanes"), 200)["lanes"]
+    malformed = Enum.find(lanes, &(&1["id"] == lane.id))
+    assert malformed["error"]
+    assert malformed["config"] == %{}
+    refute Jason.encode!(lanes) =~ "literal-secret"
+
+    Repo.update!(Ecto.Changeset.change(Lanes.get!(lane.id), current_version_id: nil))
+    assert :ok = LaneStore.refresh(lane.id)
+    missing = json_response(get(api_conn(), "/api/v1/lanes"), 200)["lanes"] |> Enum.find(&(&1["id"] == lane.id))
+    assert missing["error"]
+    assert missing["current_version_id"] == nil
+    assert missing["config"] == %{}
   end
 
   test "state enumerates unavailable lanes and refresh returns 503 when none can accept work" do
@@ -114,8 +190,10 @@ defmodule SymphonyElixirWeb.LanesApiTest do
   end
 
   test "state and refresh preserve an available lane when another lane is unavailable" do
-    assert %{"enabled" => true} =
+    assert %{"enabled" => false} =
              json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(Map.put(attrs("live-lane"), :enabled, true))), 201)
+
+    assert %{"enabled" => true} = json_response(put(api_conn(), "/api/v1/lanes/live-lane", Jason.encode!(%{enabled: true})), 200)
 
     live_payload = await_snapshot("live-lane", 100)
     assert live_payload["counts"] == %{"running" => 0, "retrying" => 0, "blocked" => 0}
@@ -138,5 +216,15 @@ defmodule SymphonyElixirWeb.LanesApiTest do
   end
 
   defp api_conn, do: build_conn() |> put_req_header("authorization", "Bearer test-token") |> put_req_header("content-type", "application/json")
-  defp attrs(slug), do: %{slug: slug, name: "API", front_matter: @front_matter, prompt: "hi", note: "via api"}
+
+  defp attrs(slug) do
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "API #{slug} #{System.unique_integer([:positive])}",
+        workspace_base: Path.join(System.tmp_dir!(), "symphony-api-#{slug}-#{System.unique_integer([:positive])}"),
+        worker: %{}
+      })
+
+    %{slug: slug, name: "API", execution_profile_id: profile.id, workspace_subdir: ".", config: @config, prompt: "hi", note: "via api"}
+  end
 end

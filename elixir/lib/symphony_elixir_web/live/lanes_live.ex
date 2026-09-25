@@ -63,7 +63,8 @@ defmodule SymphonyElixirWeb.LanesLive do
           </p>
           <p class="metric-detail">
             <span class={"state-badge " <> badge_class(lane)}>{status_label(lane)}</span>
-            <span class="muted">executor {lane.entry.executor}</span>
+            <a :if={lane.entry.profile_id} class="issue-link" href={"/execution-profiles/#{lane.entry.profile_id}"}>profile: {lane.entry.profile_name || lane.entry.profile_id}</a>
+            <span class="muted mono">workspace {lane.entry.workspace_subdir}</span>
           </p>
           <p :if={lane.counts} class="metric-detail numeric">
             running {lane.counts.running} · claimed {lane.counts.claimed} · blocked {lane.counts.blocked} · next poll {format_ms(lane.counts.next_poll_in_ms)}

@@ -18,10 +18,12 @@ Stops drain accepted supervisor start requests before resolving and terminating 
 requests from a dead store authority. A monitored `:shutdown` is a failure; administrative stops flush monitors.
 Crash-window counters are in memory; the disabled flag is durable.
 
-`LaneStore` owns the validated ETS entries, serialized lane mutations/publication, managed-environment
-identity guards, asynchronous preflight generations, and runtime monitoring. A pending tracker check
-is replaced after any newer publication, even a metadata/prompt-only edit; stale results cannot start,
-disable, or attach a runtime. Successful runtime start and monitor attachment share that authority.
+`ExecutionProfiles` persists reusable worker, credential-reference, and workspace-base settings.
+`LaneStore` owns validated ETS entries plus serialized lane/profile mutation and atomic batch
+publication. It reserves dispatch locations before workspace creation and guards local, SSH, and
+managed identities until authoritative cleanup. Startup validates all restored locations together and
+keeps legacy overlaps disabled for repair. It also owns asynchronous preflight generations and runtime
+monitoring; stale checks cannot start, disable, or attach a runtime.
 
 `LaneContext.put/1` tags long-lived lane processes. Ordinary lane reads use the current store entry;
 the orchestrator captures a complete immutable entry before each dispatch, including retries, and
@@ -39,7 +41,7 @@ Request/work flow:
 4. **`AgentRunner`** (`lib/symphony_elixir/agent_runner.ex`) — runs one issue end-to-end: selects a worker host from `worker.ssh_hosts`, creates the workspace, runs `before_run`/`after_run` hooks, and drives turns (`max_turns` cap per invocation). It owns the multi-turn continuation loop; backends only execute single turns. When it hits that cap with the issue still active it sends `{:agent_turns_exhausted, issue_id, state}` to the orchestrator, which owns the cross-run give-up policy. One worker lifetime never hops machines — the orchestrator owns host retries.
 5. **`Workspace`** (`lib/symphony_elixir/workspace.ex`) — creates/cleans per-issue workspaces and runs lifecycle hooks (`after_create`, `before_remove`). **Safety-critical:** workspaces must stay under the configured workspace root, and a turn's cwd must never be the source repo. Path checks live in `path_safety.ex`. `elixir/WORKFLOW.md` wires `mix workspace.before_remove` into the `before_remove` hook to close the branch's open PRs; that task defaults to the hardcoded repo `openai/symphony`, so any other deployment must pass `--repo`.
 6. **`Codex.AppServer`** (`lib/symphony_elixir/codex/app_server.ex`) — JSON-RPC 2.0 client over the Codex app-server stdio stream. Manages session/thread/turn lifecycle and sandbox/approval policy, and serves client-side tools via `codex/dynamic_tool.ex`. **That dispatcher is tracker-agnostic** — it forwards to whichever adapter is configured; `linear_graphql` is simply the tool Linear's adapter exposes (`linear/agent_tool.ex`). Workers may be local or remote over SSH (`ssh.ex`).
-7. **`SymphonyElixirWeb`** (`lib/symphony_elixir_web/`) — Phoenix/Bandit with `LanesLive` (`/`), `LaneEditorLive` (`/lanes/new`, `/lanes/:slug/edit`), `LaneLive` (`/lanes/:slug`), `LaneVersionsLive` (`/lanes/:slug/versions`), and `RunLive` (`/runs/:attempt_id`). `Plugs.Authenticate` protects browser/API requests, `LiveAuth` gates LiveView sessions, and `/login` exchanges the operator credential for a signed session. Cookie writes/login require CSRF; explicit bearer API calls do not. `serve` starts HTTP on port 4000 by default.
+7. **`SymphonyElixirWeb`** (`lib/symphony_elixir_web/`) — Phoenix/Bandit with lane list/detail/editor/history views, execution-profile list/detail/editor views under `/execution-profiles`, `RunLive`, and authenticated lane/profile JSON APIs. `Plugs.Authenticate` protects browser/API requests, `LiveAuth` gates LiveView sessions, and `/login` exchanges the operator credential for a signed session. Cookie writes/login require CSRF; explicit bearer API calls do not. `serve` starts HTTP on port 4000 by default.
 8. **`Runs`** (`lib/symphony_elixir/runs.ex`) — ordered asynchronous writes persist attempts and events without blocking the scheduler. Attempts capture lane version/executor at dispatch. Disable finalizes running attempts as stopped; abnormal runtime death as failed. Database failures are logged and pending writes are volatile, not retried. `Runs.Retention` prunes only old events (first pass after one minute, then daily); run summaries and versions remain.
 
 ## Repo-local Codex skills

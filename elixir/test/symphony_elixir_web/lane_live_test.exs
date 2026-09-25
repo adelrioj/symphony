@@ -4,7 +4,7 @@ defmodule SymphonyElixirWeb.LaneLiveTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.{Lanes, Runs}
+  alias SymphonyElixir.{ExecutionProfiles, Lanes, Runs}
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -17,8 +17,9 @@ defmodule SymphonyElixirWeb.LaneLiveTest do
   end
 
   test "disabled lanes retain scoped history even without an available runtime", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "history", name: "History", front_matter: "tracker:\n  kind: memory"})
-    {:ok, other} = Lanes.create(%{slug: "other", front_matter: "tracker:\n  kind: memory"})
+    profile_id = new_profile!().id
+    {:ok, lane} = Lanes.create(%{slug: "history", name: "History", execution_profile_id: profile_id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, other} = Lanes.create(%{slug: "other", execution_profile_id: profile_id, config: %{"tracker" => %{"kind" => "memory"}}})
     record_run(lane.id, "mine", "SAME-1")
     record_run(other.id, "theirs", "SAME-1")
 
@@ -32,7 +33,7 @@ defmodule SymphonyElixirWeb.LaneLiveTest do
   end
 
   test "new attempts and completion update recent history from the Runs producer", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "live-history", front_matter: "tracker:\n  kind: memory"})
+    {:ok, lane} = Lanes.create(%{slug: "live-history", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}})
     {:ok, view, _html} = live(conn, "/lanes/live-history")
     assert has_element?(view, "#recent-runs .empty-state")
     issue = %Issue{id: "new", identifier: "NEW-1", title: "New", state: "Todo"}
@@ -53,6 +54,13 @@ defmodule SymphonyElixirWeb.LaneLiveTest do
     :ok = Runs.started(%{lane_id: lane_id, issue: issue, attempt_id: attempt_id})
     :ok = Runs.finished(attempt_id, "done")
     :ok = Runs.flush()
+  end
+
+  defp new_profile! do
+    {:ok, profile} =
+      ExecutionProfiles.create(%{name: "Lane live #{System.unique_integer([:positive])}", workspace_base: Path.join(System.tmp_dir!(), "lane-live-#{System.unique_integer([:positive])}"), worker: %{}})
+
+    profile
   end
 
   defp wait_until(fun, attempts \\ 200) do
