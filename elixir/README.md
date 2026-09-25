@@ -132,8 +132,10 @@ above, which leaves you in `symphony/elixir`.
    ```
 3. **Edit `workflows/example.md`** before import: set the tracker scope and `hooks.after_create`
    clone URL. Keep `workspace.root: /workspaces` to match the volume. Any `server` section is ignored.
-4. **Import offline, then launch:**
+4. **Import offline, then launch** (build from a clean checkout so the labels identify the image's source):
    ```bash
+   export SOURCE_REVISION="$(git rev-parse HEAD)"
+   export SOURCE_ARCHIVE_SHA256="$(git archive --format=tar "$SOURCE_REVISION" elixir | sha256sum | cut -d' ' -f1)"
    docker compose build
    docker compose run --rm symphony-example lanes import /config/example.md --slug example --data-root /data
    docker compose up -d

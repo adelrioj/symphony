@@ -58,9 +58,11 @@ The container binds `0.0.0.0` via `serve --host`, while the host publishes only 
 The UI/API are authenticated, but remote use still needs a TLS reverse proxy or SSH tunnel:
 do not expose bearer credentials over public HTTP.
 
-For a new root development installation, export both required credentials, then:
+For a new root development installation, export both required credentials and build provenance from a clean checkout, then:
 
 ```bash
+export SOURCE_REVISION="$(git rev-parse HEAD)"
+export SOURCE_ARCHIVE_SHA256="$(git archive --format=tar "$SOURCE_REVISION" elixir | sha256sum | cut -d' ' -f1)"
 docker compose build
 docker compose run --rm symphony-example lanes import /config/example.md --slug example --data-root /data
 docker compose up -d

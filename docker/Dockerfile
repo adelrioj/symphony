@@ -10,9 +10,11 @@ ARG HELPER_IMAGE=ghcr.io/trazadera/agent-sandbox-symphony-helper@sha256:52e055ca
 
 FROM node:20-bookworm-slim AS runtime
 
-# Supply these from the reviewed commit; the archive covers elixir/ only, not this recipe.
+# CI derives these from the checked-out commit; local builds must supply them explicitly.
+# The archive covers elixir/ only, not this recipe.
 ARG SOURCE_REVISION
 ARG SOURCE_ARCHIVE_SHA256
+RUN test -n "$SOURCE_REVISION" && test -n "$SOURCE_ARCHIVE_SHA256"
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.trazadera.symphony.source-archive-sha256="${SOURCE_ARCHIVE_SHA256}"
 
@@ -70,7 +72,8 @@ ENTRYPOINT ["mix", "symphony"]
 # `if Mix.env() == :test`, and it needs .git, because the runner compares `git rev-parse HEAD`
 # against pins.consumer_source_commit before it will run.
 #
-# Build it explicitly:  docker build --target candidate -f docker/Dockerfile .
+# Build explicitly with --target candidate -f docker/Dockerfile and the same provenance
+# build args as for `runtime`.
 # `runtime` stays the default target for docker-publish.yml.
 #
 # Why this stage exists: the image used through 2026-09-18,

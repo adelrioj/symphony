@@ -38,6 +38,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Source provenance
+        id: source
+        run: |
+          revision=$(git rev-parse HEAD)
+          archive_sha256=$(git archive --format=tar "$revision" elixir | sha256sum | cut -d' ' -f1)
+          printf 'revision=%s\narchive_sha256=%s\n' "$revision" "$archive_sha256" >> "$GITHUB_OUTPUT"
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -58,6 +65,9 @@ jobs:
           # file and would otherwise become the default target and get published as production.
           target: runtime
           platforms: ${{ matrix.platform }}
+          build-args: |
+            SOURCE_REVISION=${{ steps.source.outputs.revision }}
+            SOURCE_ARCHIVE_SHA256=${{ steps.source.outputs.archive_sha256 }}
           cache-from: type=gha,scope=${{ matrix.slug }}
           cache-to: type=gha,mode=max,scope=${{ matrix.slug }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true

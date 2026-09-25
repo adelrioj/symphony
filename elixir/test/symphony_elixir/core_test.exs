@@ -1991,8 +1991,8 @@ defmodule SymphonyElixir.CoreTest do
       end
 
       trace = File.read!(trace_file)
-      assert trace =~ "worker-a bash --noprofile --norc -c"
-      refute trace =~ "worker-b bash --noprofile --norc -c"
+      assert trace =~ "worker-a "
+      refute trace =~ "worker-b "
     after
       File.rm_rf(test_root)
     end

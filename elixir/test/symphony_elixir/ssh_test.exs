@@ -10,6 +10,18 @@ defmodule SymphonyElixir.SSHTest do
              SSH.run(target, "printf '%s\\n' \"literal ' quote\"")
   end
 
+  test "remote commands inherit the guest login profile" do
+    home = Path.join(System.tmp_dir!(), "symphony-ssh-profile-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(home)
+    File.write!(Path.join(home, ".bash_profile"), "export SYMPHONY_PROFILE_VALUE=profile-ready\n")
+    on_exit(fn -> File.rm_rf(home) end)
+
+    target = %SSH.Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture", env: [{"HOME", home}]}
+
+    assert {:ok, {"profile-ready:literal ' quote", 0}} =
+             SSH.run(target, ~s(printf '%s:%s' "$SYMPHONY_PROFILE_VALUE" "literal ' quote"))
+  end
+
   test "structured target environment is process scoped and ignores global SSH configuration" do
     previous = System.get_env("SYMPHONY_SSH_CONFIG")
     on_exit(fn -> restore_env("SYMPHONY_SSH_CONFIG", previous) end)
@@ -56,7 +68,7 @@ defmodule SymphonyElixir.SSHTest do
              SSH.run("root@[::1]:2200", "printf ok", stderr_to_stdout: true)
 
     trace = File.read!(trace_file)
-    assert trace =~ "-T -p 2200 root@[::1] bash --noprofile --norc -c"
+    assert trace =~ "-T -p 2200 root@[::1] "
     assert trace =~ "printf ok"
   end
 
@@ -76,7 +88,7 @@ defmodule SymphonyElixir.SSHTest do
              SSH.run("::1:2200", "printf ok", stderr_to_stdout: true)
 
     trace = File.read!(trace_file)
-    assert trace =~ "-T ::1:2200 bash --noprofile --norc -c"
+    assert trace =~ "-T ::1:2200 "
     refute trace =~ "-p 2200"
   end
 
@@ -100,7 +112,7 @@ defmodule SymphonyElixir.SSHTest do
 
     trace = File.read!(trace_file)
     assert trace =~ "-F /tmp/symphony-test-ssh-config"
-    assert trace =~ "-T -p 2222 localhost bash --noprofile --norc -c"
+    assert trace =~ "-T -p 2222 localhost "
     assert trace =~ "echo ready"
   end
 
@@ -120,7 +132,7 @@ defmodule SymphonyElixir.SSHTest do
              SSH.run("root@127.0.0.1:2200", "printf ok", stderr_to_stdout: true)
 
     trace = File.read!(trace_file)
-    assert trace =~ "-T -p 2200 root@127.0.0.1 bash --noprofile --norc -c"
+    assert trace =~ "-T -p 2200 root@127.0.0.1 "
     assert trace =~ "printf ok"
   end
 

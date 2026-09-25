@@ -2210,7 +2210,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", context)
 
       trace = File.read!(trace_file)
-      assert trace =~ "-p 2200 worker-01 bash --noprofile --norc -c"
+      assert trace =~ "-p 2200 worker-01 "
       assert trace =~ "__SYMPHONY_WORKSPACE__"
       assert trace =~ "~/.symphony-remote-workspaces/MT-SSH-WS"
       assert trace =~ "${workspace#\\~/}"

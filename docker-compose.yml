@@ -4,6 +4,8 @@
 #
 #   export LINEAR_API_KEY=...
 #   export SYMPHONY_OPERATOR_TOKEN="$(openssl rand -hex 32)"
+#   export SOURCE_REVISION="$(git rev-parse HEAD)"
+#   export SOURCE_ARCHIVE_SHA256="$(git archive --format=tar "$SOURCE_REVISION" elixir | sha256sum | cut -d' ' -f1)"
 #   docker compose build
 #   docker compose run --rm symphony-example lanes import /config/example.md --slug example --data-root /data
 #   docker compose up -d               # then log in at http://localhost:4000 and enable example
@@ -16,6 +18,10 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      target: runtime
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?export SOURCE_REVISION from git rev-parse HEAD}
+        SOURCE_ARCHIVE_SHA256: ${SOURCE_ARCHIVE_SHA256:?export SOURCE_ARCHIVE_SHA256 from git archive}
     image: symphony:latest
     environment:
       LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY in your shell}
