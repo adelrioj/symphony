@@ -30,6 +30,7 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
 
     orchestrator_name = Keyword.get(opts, :orchestrator_name, SymphonyElixir.Orchestrator)
     lane_id = Keyword.fetch!(opts, :lane_id)
+    reconciler_opts = [lane_id: lane_id, name: nil, task_supervisor: task_supervisor_name]
 
     [
       Supervisor.child_spec(
@@ -43,7 +44,7 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
       # Resolves its own environment each pass and idles unless this lane runs on Kubernetes, so
       # it costs a sleeping process on lanes that do not.
       Supervisor.child_spec(
-        {SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler, [lane_id: lane_id, name: nil, task_supervisor: task_supervisor_name]},
+        {SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler, reconciler_opts},
         id: SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler
       )
     ]
