@@ -10,6 +10,12 @@ ARG HELPER_IMAGE=ghcr.io/trazadera/agent-sandbox-symphony-helper@sha256:52e055ca
 
 FROM node:20-bookworm-slim AS runtime
 
+# Supply these from the reviewed commit; the archive covers elixir/ only, not this recipe.
+ARG SOURCE_REVISION
+ARG SOURCE_ARCHIVE_SHA256
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.trazadera.symphony.source-archive-sha256="${SOURCE_ARCHIVE_SHA256}"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git ripgrep unzip \
       build-essential autoconf m4 libncurses-dev libssl-dev \
