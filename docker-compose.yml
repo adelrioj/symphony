@@ -20,8 +20,8 @@ services:
       dockerfile: docker/Dockerfile
       target: runtime
       args:
-        SOURCE_REVISION: ${SOURCE_REVISION:?export SOURCE_REVISION from git rev-parse HEAD}
-        SOURCE_ARCHIVE_SHA256: ${SOURCE_ARCHIVE_SHA256:?export SOURCE_ARCHIVE_SHA256 from git archive}
+        SOURCE_REVISION: ${SOURCE_REVISION:-}
+        SOURCE_ARCHIVE_SHA256: ${SOURCE_ARCHIVE_SHA256:-}
     image: symphony:latest
     environment:
       LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY in your shell}
