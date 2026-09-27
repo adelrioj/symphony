@@ -166,7 +166,9 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   end
 
   defp log_discarded_error(%__MODULE__{result_status: {:error, subtype}, session_id: session_id}) do
-    Logger.warning("Claude run blocked; discarding coexisting error subtype=#{subtype} session_id=#{session_id || "unknown"}")
+    Logger.warning(
+      "Claude run blocked; discarding coexisting error subtype=#{subtype} session_id=#{session_id || "unknown"}"
+    )
   end
 
   defp log_discarded_error(_acc), do: :ok

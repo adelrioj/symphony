@@ -10,14 +10,6 @@ ARG HELPER_IMAGE=ghcr.io/trazadera/agent-sandbox-symphony-helper@sha256:52e055ca
 
 FROM node:20-bookworm-slim AS runtime
 
-# CI derives these from the checked-out commit; local builds must supply them explicitly.
-# The archive covers elixir/ only, not this recipe.
-ARG SOURCE_REVISION
-ARG SOURCE_ARCHIVE_SHA256
-RUN test -n "$SOURCE_REVISION" && test -n "$SOURCE_ARCHIVE_SHA256"
-LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
-      org.trazadera.symphony.source-archive-sha256="${SOURCE_ARCHIVE_SHA256}"
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git ripgrep unzip \
       build-essential autoconf m4 libncurses-dev libssl-dev \
@@ -56,6 +48,16 @@ COPY elixir/ ./
 # escript.build also compiles the project and dependencies on disk. Keep _build here so the
 # Mix daemon can load SQLite's NIF; a second mix compile adds no packaging effect.
 RUN mix escript.build
+
+# Provenance goes last: an ARG leaks into every later RUN's cache key, and SOURCE_REVISION
+# changes on every commit, so declaring it above the toolchain layers would redo the OTP build.
+# CI derives these from the checked-out commit; local builds must supply them explicitly.
+# The archive covers elixir/ only, not this recipe.
+ARG SOURCE_REVISION
+ARG SOURCE_ARCHIVE_SHA256
+RUN test -n "$SOURCE_REVISION" && test -n "$SOURCE_ARCHIVE_SHA256"
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.trazadera.symphony.source-archive-sha256="${SOURCE_ARCHIVE_SHA256}"
 
 ENV PATH="/app/elixir/bin:${PATH}"
 

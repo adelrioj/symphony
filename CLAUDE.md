@@ -33,9 +33,9 @@ mix build                 # escript.build -> bin/symphony (agent-side MCP only)
 mix test                  # full suite
 mix test path/to/file_test.exs            # single file
 mix test path/to/file_test.exs:42         # single test by line number
-mix test --cover          # coverage (threshold is 100% — see mix.exs)
+mix test --cover          # coverage (threshold is 80% — see mix.exs)
 mix lint                  # specs.check + credo --strict
-mix format                # apply formatting (line_length: 200)
+mix format                # apply formatting (line_length: 120)
 mix specs.check           # enforce @spec on public functions (see rule below)
 ```
 
@@ -70,5 +70,5 @@ Use the same writable `--data-root <dir>` for import/export and serve (default: 
 - Every public function (`def`) in `lib/` needs an adjacent `@spec`. `defp` and `@impl` callbacks are exempt. Enforced by `mix specs.check`.
 - Keep changes narrowly scoped; avoid unrelated refactors. Match existing patterns in `lib/symphony_elixir/*`.
 - Follow `docs/logging.md` (under `elixir/`): include `issue_id` + `issue_identifier` for issue events and `session_id` for agent lifecycle events.
-- Coverage threshold is 100% (`mix.exs` lists explicitly ignored modules — prefer adding tests over expanding that list).
+- Coverage threshold is 80% (`mix.exs` lists explicitly ignored modules — prefer adding tests over expanding that list).
 - When behavior/config changes, update docs in the same PR: root `README.md` (concept), `elixir/README.md` (run instructions), `elixir/WORKFLOW.md` (workflow/config contract).

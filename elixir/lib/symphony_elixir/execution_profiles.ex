@@ -115,7 +115,10 @@ defmodule SymphonyElixir.ExecutionProfiles do
 
   defp linked_lane_ids(%Profile{} = profile), do: linked_lanes(profile) |> Enum.map(& &1.id)
 
-  defp profile_attrs(profile), do: Map.take(Map.from_struct(profile), [:name, :description, :workspace_base, :worker]) |> Map.new(fn {key, value} -> {to_string(key), value} end)
+  defp profile_attrs(profile),
+    do:
+      Map.take(Map.from_struct(profile), [:name, :description, :workspace_base, :worker])
+      |> Map.new(fn {key, value} -> {to_string(key), value} end)
 
   defp normalize(attrs) do
     if Enum.all?(Map.keys(attrs), &(is_binary(&1) or is_atom(&1))) do

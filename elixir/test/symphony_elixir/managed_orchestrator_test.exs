@@ -308,7 +308,10 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
           poll(owner)
 
         :stall ->
-          :sys.replace_state(owner, fn state -> put_in(state.running["first"].started_at, DateTime.add(DateTime.utc_now(), -600, :second)) end)
+          :sys.replace_state(owner, fn state ->
+            put_in(state.running["first"].started_at, DateTime.add(DateTime.utc_now(), -600, :second))
+          end)
+
           poll(owner)
       end
 
@@ -548,7 +551,12 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     {:ok, updated_entry} = LaneStore.lookup(LaneContext.current!())
     :ok = LaneStore.put_entry(%{updated_entry | enabled: true})
     poll(owner)
-    wait_state(owner, &(&1.environment_config.deployment_id == "next-deployment" and &1.environment_discovery == :pending))
+
+    wait_state(
+      owner,
+      &(&1.environment_config.deployment_id == "next-deployment" and &1.environment_discovery == :pending)
+    )
+
     discover([])
     wait_state(owner, &(&1.environment_discovery == :ready))
     issues([issue("first", 1)])
@@ -638,9 +646,15 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     send(task, {:complete_operation, {:error, {:denied, %{authorization: secret, body: secret}}}})
     wait_state(owner, &match?({:error, _}, &1.environment_discovery))
     payload = Presenter.state_payload(owner, 1_000)
-    assert payload.environment_discovery == %{provider_kind: "google_workstations", status: :blocked, error_code: :denied}
+
+    assert payload.environment_discovery == %{
+             provider_kind: "google_workstations",
+             status: :blocked,
+             error_code: :denied
+           }
+
     assert payload.environments == []
-    assert payload.counts == %{running: 0, retrying: 0, blocked: 0}
+    assert payload.counts == %{running: 0, retrying: 0, blocked: 0, queued: 0}
     snapshot = Orchestrator.snapshot(owner, 1_000)
     rendered = StatusDashboard.format_snapshot_content_for_test({:ok, snapshot}, 0, 160)
     assert rendered =~ "Managed discovery"
@@ -789,7 +803,13 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     {config, cleanup, prepare} = operation(:prepare)
     ready(config, cleanup, prepare, owner, tasks)
     {_, hook, task} = operation(:cleanup_hook)
-    send(task, {:complete_operation, {:error, {:managed_execution_unknown, {:remote_command_timeout, "before_remove", 10}}, hook.record}})
+
+    send(
+      task,
+      {:complete_operation,
+       {:error, {:managed_execution_unknown, {:remote_command_timeout, "before_remove", 10}}, hook.record}}
+    )
+
     {_, stopping, stop} = operation(:stop)
     refute stopping.record.metadata["symphony_cleanup_hook_completed"]
     refute_receive {:environment_operation, :metadata, _, _, _, _}, 0
@@ -873,8 +893,17 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
 
   test "OTP state diagnostics cannot inspect captured provider config or raw failure terms" do
     sentinel = "PRIVATE-CONNECTION-MATERIAL"
-    entry = %{Lifecycle.new(record("first"), "attempt", :agent) | last_error: {:stop, {:unknown, %{authorization: sentinel}}}}
-    state = %Orchestrator.State{environment_config: %{provider: %{"token" => sentinel}}, environment_entries: %{"first" => entry}}
+
+    entry = %{
+      Lifecycle.new(record("first"), "attempt", :agent)
+      | last_error: {:stop, {:unknown, %{authorization: sentinel}}}
+    }
+
+    state = %Orchestrator.State{
+      environment_config: %{provider: %{"token" => sentinel}},
+      environment_entries: %{"first" => entry}
+    }
+
     refute inspect(state) =~ sentinel
     refute inspect(entry) =~ sentinel
   end
@@ -889,7 +918,15 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     send(stop, {:complete_operation, {:error, {:invalid, :missing_captured_identity}, stopping.record}})
     wait_state(owner, &(&1.environment_entries["first"].phase == :unknown))
     Orchestrator.request_refresh(owner)
-    recovered = %{entry.record | template_identity: "created-template", provider_ref: %{name: "safe-created-resource", uid: "created-uid"}, version: "recovered-version", phase: :running}
+
+    recovered = %{
+      entry.record
+      | template_identity: "created-template",
+        provider_ref: %{name: "safe-created-resource", uid: "created-uid"},
+        version: "recovered-version",
+        phase: :running
+    }
+
     discover([recovered])
     {_, inspection, inspect_task} = operation(:inspect)
     send(inspect_task, {:complete_operation, {:ok, inspection.record}})
@@ -897,7 +934,8 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     # The provider only accepts the recovered ownership and version preconditions.
     refute_receive {:agent_started, _, _, _}, 0
 
-    if stopping.record.provider_ref == recovered.provider_ref and stopping.record.version == recovered.version and stopping.record.template_identity == recovered.template_identity do
+    if stopping.record.provider_ref == recovered.provider_ref and stopping.record.version == recovered.version and
+         stopping.record.template_identity == recovered.template_identity do
       stopped(stop, stopping)
     else
       send(stop, {:complete_operation, {:error, {:invalid, :ownership_unproven}, stopping.record}})
@@ -966,6 +1004,129 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     end
   end
 
+  test "restored physically stopped Codex owner remains occupied and keeps the original credential attempt" do
+    issues([issue("first", 1)])
+    {owner, _tasks} = scheduler()
+    retained = unresolved_codex_record("orphan")
+    discover([retained])
+    {_, recovery, stop} = operation(:stop)
+    refute recovery.attempt_id == "credential-original-attempt"
+
+    assert recovery.record.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] ==
+             "credential-original-attempt"
+
+    stopped(stop, recovery)
+    wait_state(owner, &(&1.environment_entries["orphan"].phase == :unknown))
+    assert Lifecycle.occupied?(:sys.get_state(owner).environment_entries["orphan"])
+    refute_receive {:environment_operation, :prepare, _, _, _, _}, 0
+    refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+  end
+
+  test "cancellation during credential prepare retains the late assignment for controller stop without launch" do
+    issues([issue("first", 1)])
+    {owner, tasks} = scheduler()
+    discover([])
+    {config, entry, prepare} = operation(:prepare)
+    :ok = set_issue_state("first", "In Review")
+    poll(owner)
+    latest = unresolved_codex_record("first")
+
+    ready(
+      config,
+      %{entry | record: %{entry.record | metadata: latest.metadata, provider_ref: latest.provider_ref}},
+      prepare,
+      owner,
+      tasks
+    )
+
+    {_, stopping, stop} = operation(:stop)
+    assert stopping.record.provider_ref.uid == "codex-uid"
+
+    assert stopping.record.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] ==
+             "credential-original-attempt"
+
+    refute_receive {:agent_started, _, _, _}, 0
+    stopped(stop, stopping)
+    wait_state(owner, &(&1.environment_entries["first"].phase == :unknown))
+    assert Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
+  end
+
+  test "definite preclaim busy reservations retry and cancellation drops only the unallocated reservation" do
+    issues([issue("first", 1)])
+    {owner, _tasks} = scheduler()
+    discover([])
+    {_config, entry, prepare} = operation(:prepare)
+    send(prepare, {:complete_operation, {:error, {:retryable, :credential_busy}, entry.record}})
+    wait_state(owner, &(&1.environment_entries["first"].phase == :reserved))
+    refute_receive {:environment_operation, :stop, _, _, _, _}, 0
+    poll(owner)
+    {_config, retry, prepare} = operation(:prepare)
+    assert retry.attempt_id == entry.attempt_id
+    assert [%{phase: :preparing, unresolved: nil}] = Orchestrator.snapshot(owner, 1_000).environments
+    send(prepare, {:complete_operation, {:error, {:retryable, :credential_busy}, retry.record}})
+    wait_state(owner, &(&1.environment_entries["first"].phase == :reserved))
+    :ok = set_issue_state("first", "In Review")
+    poll(owner)
+    wait_state(owner, &(not Map.has_key?(&1.environment_entries, "first")))
+    refute_receive {:environment_operation, :stop, _, _, _, _}, 0
+    refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+  end
+
+  test "busy-shaped failure cannot discard retained unbound credential ownership" do
+    issues([issue("first", 1)])
+    {owner, _tasks} = scheduler()
+    discover([])
+    {_config, entry, prepare} = operation(:prepare)
+
+    assignment =
+      unresolved_codex_record("first").metadata["codex_credentials"]["assignment"]
+      |> put_in(["owner", "workstation_uid"], nil)
+      |> put_in(["owner", "attempt_id"], entry.attempt_id)
+
+    retained = %{entry.record | metadata: %{"codex_credentials" => %{"stage" => "claimed", "assignment" => assignment}}}
+    send(prepare, {:complete_operation, {:error, {:retryable, :credential_busy}, retained}})
+    {_, stopping, stop} = operation(:stop)
+    assert stopping.record.metadata["codex_credentials"]["assignment"] == assignment
+    :ok = set_issue_state("first", "In Review")
+    stopped(stop, stopping)
+    wait_state(owner, &(&1.environment_entries["first"].phase == :unknown))
+    assert Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
+  end
+
+  defp unresolved_codex_record(id) do
+    record = record(id)
+    name = "projects/p/locations/l/workstationClusters/c/workstationConfigs/cfg/workstations/" <> record.key
+
+    assignment = %{
+      "schema" => 1,
+      "credential_id" => "features-personal-codex",
+      "epoch" => 1,
+      "claim_id" => "original-claim",
+      "secret_version" => "projects/123456/secrets/features-codex/versions/1",
+      "owner" => %{
+        "deployment_id" => record.deployment_id,
+        "lane" => "features",
+        "workstation_name" => name,
+        "workstation_uid" => "codex-uid",
+        "attempt_id" => "credential-original-attempt"
+      }
+    }
+
+    %{
+      record
+      | phase: :stopped,
+        proof: {:quiescent, %{uid: "codex-uid", operation: "projects/p/locations/l/operations/stop"}},
+        provider_ref: %{name: name, uid: "codex-uid"},
+        metadata: %{
+          "codex_credentials" => %{
+            "assignment" => assignment,
+            "stage" => "recovery_required",
+            "reason" => "checkpoint_failed"
+          }
+        }
+    }
+  end
+
   defp restart_store do
     previous_store = Process.whereis(LaneStore)
 
@@ -985,7 +1146,11 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     lane_id = LaneContext.current!()
     {:ok, entry} = LaneStore.lookup(lane_id)
     :ok = LaneStore.put_entry(%{entry | enabled: true})
-    tasks = if mode == :registered, do: LaneRegistry.via(lane_id, :tasks), else: start_supervised!({Task.Supervisor, []}, id: make_ref())
+
+    tasks =
+      if mode == :registered,
+        do: LaneRegistry.via(lane_id, :tasks),
+        else: start_supervised!({Task.Supervisor, []}, id: make_ref())
 
     operation_fun = fn _adapter, config, entry, operation, opts ->
       send(parent, {:environment_operation, operation, config, entry, self(), opts})
@@ -1095,7 +1260,11 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   end
 
   defp stopped(task, entry) do
-    send(task, {:complete_operation, {:ok, %{entry.record | phase: :stopped, desired: :stopped, pending: [], proof: {:quiescent, %{fixture: true}}}}})
+    send(
+      task,
+      {:complete_operation,
+       {:ok, %{entry.record | phase: :stopped, desired: :stopped, pending: [], proof: {:quiescent, %{fixture: true}}}}}
+    )
   end
 
   defp poll(owner) do
@@ -1111,7 +1280,15 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     :ok
   end
 
-  defp issue(id, priority), do: %Issue{id: id, identifier: "TEST-#{id}", title: id, state: "In Progress", priority: priority, dispatchable: true}
+  defp issue(id, priority),
+    do: %Issue{
+      id: id,
+      identifier: "TEST-#{id}",
+      title: id,
+      state: "In Progress",
+      priority: priority,
+      dispatchable: true
+    }
 
   defp record(id) do
     key = ExecutionEnvironment.resource_key("deployment", "memory", id)

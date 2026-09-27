@@ -104,7 +104,13 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
       proof: {:quiescent, %{guard_uid: "guard-uid", parent_uid: "parent-uid", protocol: "symphony-create-drain-v1"}}
     }
 
-    active = %{record | absent?: false, proof: :unknown, metadata: %{"guard" => %{"kind" => "ConfigMap", "uid" => "guard-uid", "namespace" => "workers"}}}
+    active = %{
+      record
+      | absent?: false,
+        proof: :unknown,
+        metadata: %{"guard" => %{"kind" => "ConfigMap", "uid" => "guard-uid", "namespace" => "workers"}}
+    }
+
     :ok = inventory(control, {:ok, %{records: [active], live_worker_counts: %{"se-ticket" => 0}}})
     :ok = GenServer.call(control, {:check, "absence", %{status: :passed}})
     refute Control.qualified?(GenServer.call(control, :snapshot))
@@ -115,7 +121,13 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
     assert receipt["namespace"] == "workers"
     assert state.observed_resources == []
     refute Enum.any?(state.captured_resources, &(&1["uid"] == "guard-uid"))
-    :ok = GenServer.call(control, {:interrupted, Jason.decode!(Jason.encode!(%{retained_guards: state.retained_guards, events: []}))})
+
+    :ok =
+      GenServer.call(
+        control,
+        {:interrupted, Jason.decode!(Jason.encode!(%{retained_guards: state.retained_guards, events: []}))}
+      )
+
     assert GenServer.call(control, :snapshot).retained_guards == state.retained_guards
     refute Control.qualified?(GenServer.call(control, :snapshot))
   end
@@ -175,7 +187,14 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
     {config, context, issue} = managed_context()
     control = start_supervised!({Control, checks: ["final_absence"], session_limit: 3, config: config})
     :ok = GenServer.call(control, {:issues, [issue]})
-    opts = [attempt: nil, execution_context: context, attempt_id: context.environment.record.attempt_id, backend_module: Codex]
+
+    opts = [
+      attempt: nil,
+      execution_context: context,
+      attempt_id: context.environment.record.attempt_id,
+      backend_module: Codex
+    ]
+
     valid = %{event: :runner_invocation, issue_id: issue.id, options: opts}
     assert :ok = GenServer.call(control, {:event, valid})
     [invocation] = GenServer.call(control, :snapshot).events
@@ -202,7 +221,11 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
 
   test "negative control fingerprints survive interruption and legacy UID-only baselines fail closed" do
     control = start_supervised!({Control, checks: [], session_limit: 0})
-    baseline = [%{path: "/v1/projects/p/locations/r/resources/unrelated", uid: "uid-1", fingerprint: String.duplicate("a", 64)}]
+
+    baseline = [
+      %{path: "/v1/projects/p/locations/r/resources/unrelated", uid: "uid-1", fingerprint: String.duplicate("a", 64)}
+    ]
+
     :ok = GenServer.call(control, {:baseline, baseline})
     persisted = Jason.decode!(Jason.encode!(%{unrelated_baseline: GenServer.call(control, :snapshot).baseline}))
     :ok = GenServer.call(control, {:interrupted, persisted})
@@ -259,5 +282,6 @@ defmodule SymphonyElixir.ManagedEnvironmentQualificationStateTest do
     {config, ExecutionContext.managed(config, record, connection), issue}
   end
 
-  defp inventory(control, result), do: GenServer.call(control, {:event, %{event: :inventory_observation, result: result}})
+  defp inventory(control, result),
+    do: GenServer.call(control, {:event, %{event: :inventory_observation, result: result}})
 end

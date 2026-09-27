@@ -11,7 +11,12 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
   setup do
     previous = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
     on_exit(fn -> Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous) end)
-    endpoint_config = :symphony_elixir |> Application.get_env(SymphonyElixirWeb.Endpoint, []) |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
+    endpoint_config =
+      :symphony_elixir
+      |> Application.get_env(SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
     {:ok, conn: Plug.Test.init_test_session(build_conn(), %{"operator" => true})}
@@ -19,17 +24,33 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
 
   test "lists versions newest first, marks the current one, and make-current rolls back live", %{conn: conn} do
     {:ok, lane} =
-      Lanes.create(%{slug: "vers", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 1000}}, prompt: "v1", note: "one"})
+      Lanes.create(%{
+        slug: "vers",
+        execution_profile_id: new_profile!().id,
+        config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 1000}},
+        prompt: "v1",
+        note: "one"
+      })
 
     v1 = lane.current_version_id
-    {:ok, lane} = Lanes.update(lane, %{config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 2000}}, note: "two"})
+
+    {:ok, lane} =
+      Lanes.update(lane, %{
+        config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 2000}},
+        note: "two"
+      })
+
     v2 = lane.current_version_id
 
     {:ok, view, html} = live(conn, "/lanes/vers/versions")
     assert html =~ "two"
     assert has_element?(view, "#version-#{v2} .state-badge", "current")
     refute has_element?(view, "#version-#{v1} .state-badge")
-    assert Floki.find(Floki.parse_document!(html), "#versions tbody tr") |> Enum.map(&Floki.attribute(&1, "id")) == [["version-#{v2}"], ["version-#{v1}"]]
+
+    assert Floki.find(Floki.parse_document!(html), "#versions tbody tr") |> Enum.map(&Floki.attribute(&1, "id")) == [
+             ["version-#{v2}"],
+             ["version-#{v1}"]
+           ]
 
     view |> element("#version-#{v1} button[phx-click='activate']") |> render_click()
     assert has_element?(view, "#version-#{v1} .state-badge", "current")
@@ -39,8 +60,22 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
   end
 
   test "rejects malformed IDs and versions belonging to another lane", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "mine", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}, prompt: "mine"})
-    {:ok, other} = Lanes.create(%{slug: "other", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}, prompt: "other"})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "mine",
+        execution_profile_id: new_profile!().id,
+        config: %{"tracker" => %{"kind" => "memory"}},
+        prompt: "mine"
+      })
+
+    {:ok, other} =
+      Lanes.create(%{
+        slug: "other",
+        execution_profile_id: new_profile!().id,
+        config: %{"tracker" => %{"kind" => "memory"}},
+        prompt: "other"
+      })
+
     {:ok, view, _html} = live(conn, "/lanes/mine/versions")
 
     render_click(view, "activate", %{"id" => [Integer.to_string(other.current_version_id)]})
@@ -57,7 +92,14 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
   end
 
   test "external saves and activations update an open history page", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "external", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}, prompt: "first"})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "external",
+        execution_profile_id: new_profile!().id,
+        config: %{"tracker" => %{"kind" => "memory"}},
+        prompt: "first"
+      })
+
     {:ok, view, _html} = live(conn, "/lanes/external/versions")
     {:ok, updated} = Lanes.update(lane, %{prompt: "second", note: "external save"})
     assert has_element?(view, "#version-#{updated.current_version_id} .state-badge", "current")
@@ -85,7 +127,14 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
 
   @tag :remediation
   test "invalid historical source stays stored without disclosing multiline credentials", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "unsafe-history", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}, prompt: "repair prompt"})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "unsafe-history",
+        execution_profile_id: new_profile!().id,
+        config: %{"tracker" => %{"kind" => "memory"}},
+        prompt: "repair prompt"
+      })
+
     version = Lanes.current_version(lane)
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/versions")
 
@@ -114,7 +163,11 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
 
   defp new_profile! do
     {:ok, profile} =
-      ExecutionProfiles.create(%{name: "Versions #{System.unique_integer([:positive])}", workspace_base: Path.join(System.tmp_dir!(), "versions-#{System.unique_integer([:positive])}"), worker: %{}})
+      ExecutionProfiles.create(%{
+        name: "Versions #{System.unique_integer([:positive])}",
+        workspace_base: Path.join(System.tmp_dir!(), "versions-#{System.unique_integer([:positive])}"),
+        worker: %{}
+      })
 
     profile
   end

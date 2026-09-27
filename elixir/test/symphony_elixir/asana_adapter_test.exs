@@ -84,7 +84,10 @@ defmodule SymphonyElixir.Asana.AdapterTest do
     assert {:error, :invalid_asana_endpoint} =
              AsanaClient.validate_settings(tracker_settings(%{"endpoint" => "http://app.asana.com/api/1.0"}))
 
-    assert AsanaClient.secret_environment_names(tracker_settings(%{"api_key" => "$SYMPHONY_ASANA_PAT"})) == ["ASANA_PAT", "SYMPHONY_ASANA_PAT"]
+    assert AsanaClient.secret_environment_names(tracker_settings(%{"api_key" => "$SYMPHONY_ASANA_PAT"})) == [
+             "ASANA_PAT",
+             "SYMPHONY_ASANA_PAT"
+           ]
 
     assert {:ok, []} =
              AsanaClient.fetch_issues_by_states_for_test(

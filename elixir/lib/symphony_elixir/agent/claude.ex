@@ -492,7 +492,8 @@ defmodule SymphonyElixir.Agent.Claude do
   end
 
   defp write_private_file(path, contents) do
-    with {:ok, result} <- File.open(path, [:write, :binary, :exclusive], &write_private_file_contents(&1, path, contents)) do
+    with {:ok, result} <-
+           File.open(path, [:write, :binary, :exclusive], &write_private_file_contents(&1, path, contents)) do
       result
     end
   end
@@ -696,7 +697,10 @@ defmodule SymphonyElixir.Agent.Claude do
       _decode_error ->
         # Log (without the line body, which may carry secrets) so a truncated or
         # oversized event is diagnosable instead of silently downgrading the run.
-        Logger.warning("Claude stream line dropped (undecodable) session_id=#{acc.session_id || "unknown"} bytes=#{byte_size(line)}")
+        Logger.warning(
+          "Claude stream line dropped (undecodable) session_id=#{acc.session_id || "unknown"} bytes=#{byte_size(line)}"
+        )
+
         acc
     end
   end

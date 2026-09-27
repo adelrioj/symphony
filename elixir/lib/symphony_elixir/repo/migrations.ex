@@ -8,7 +8,13 @@ defmodule SymphonyElixir.Repo.Migrations.CreateLanesAndRuns do
       add(:slug, :string, null: false)
       add(:name, :string, null: false)
       add(:enabled, :boolean, null: false, default: false)
-      add(:executor, :string, null: false, default: "local", check: %{name: "lanes_executor_check", expr: "executor = 'local'"})
+
+      add(:executor, :string,
+        null: false,
+        default: "local",
+        check: %{name: "lanes_executor_check", expr: "executor = 'local'"}
+      )
+
       # Keep this integer to avoid a circular foreign key; lane activation owns this pointer.
       add(:current_version_id, :integer)
       add(:deleted_at, :utc_datetime)
@@ -112,7 +118,10 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
 
     execute("ALTER TABLE runs ADD COLUMN execution_profile_id INTEGER REFERENCES execution_profiles(id)")
     execute("ALTER TABLE runs ADD COLUMN config_identity BLOB")
-    execute("UPDATE runs SET execution_profile_id = (SELECT execution_profile_id FROM lanes WHERE lanes.id = runs.lane_id)")
+
+    execute(
+      "UPDATE runs SET execution_profile_id = (SELECT execution_profile_id FROM lanes WHERE lanes.id = runs.lane_id)"
+    )
 
     # SQLite cannot express a NOT NULL column while adding it to populated tables.
     # The trigger keeps the required relationship enforced for direct SQL writers too.
@@ -135,7 +144,11 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
   end
 
   @spec down() :: no_return()
-  def down, do: raise("AddExecutionProfiles is irreversible because existing lane and run ownership data cannot be reconstructed safely")
+  def down,
+    do:
+      raise(
+        "AddExecutionProfiles is irreversible because existing lane and run ownership data cannot be reconstructed safely"
+      )
 
   defp backfill_profiles do
     %{rows: rows} =
@@ -150,7 +163,11 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
       {profile, repair_error} = legacy_profile(front_matter, prompt)
       name = legacy_name(slug, lane_id)
       profile_id = insert_profile(name, profile, repair_error)
-      repo().query!("UPDATE lanes SET execution_profile_id = ?, workspace_subdir = '.' WHERE id = ?", [profile_id, lane_id])
+
+      repo().query!("UPDATE lanes SET execution_profile_id = ?, workspace_subdir = '.' WHERE id = ?", [
+        profile_id,
+        lane_id
+      ])
 
       if repair_error do
         repo().query!("UPDATE lanes SET enabled = 0 WHERE id = ?", [lane_id])
@@ -219,5 +236,17 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
   defp legacy_name(slug, lane_id) do
     slug = if is_binary(slug) and String.trim(slug) != "", do: slug, else: "lane-#{lane_id}"
     "Legacy #{slug}"
+  end
+end
+
+defmodule SymphonyElixir.Repo.Migrations.AddRunIssueTitle do
+  @moduledoc false
+  use Ecto.Migration
+
+  @spec change() :: term()
+  def change do
+    alter table(:runs) do
+      add(:issue_title, :string)
+    end
   end
 end

@@ -5,7 +5,7 @@ defmodule SymphonyElixirWeb.RunLive do
 
   alias SymphonyElixir.{LaneStore, Runs}
   alias SymphonyElixir.Runs.Event
-  alias SymphonyElixirWeb.ObservabilityPubSub
+  alias SymphonyElixirWeb.{Console, ObservabilityPubSub}
 
   @impl true
   def mount(%{"attempt_id" => attempt_id}, _session, socket) do
@@ -30,7 +30,12 @@ defmodule SymphonyElixirWeb.RunLive do
 
         {:ok,
          socket
-         |> assign(run: run, lane_slug: lane_slug, now: DateTime.utc_now(), last_event_id: Enum.reduce(events, 0, &max(&1.id, &2)))
+         |> assign(
+           run: run,
+           lane_slug: lane_slug,
+           now: DateTime.utc_now(),
+           last_event_id: Enum.reduce(events, 0, &max(&1.id, &2))
+         )
          |> stream(:events, events)}
     end
   end
@@ -85,7 +90,7 @@ defmodule SymphonyElixirWeb.RunLive do
           <li :for={{dom_id, event} <- @streams.events} id={dom_id}>
             <time class="muted" datetime={DateTime.to_iso8601(event.at)}>{DateTime.to_iso8601(event.at)}</time>
             <strong>{event.kind}</strong>
-            <span>{describe(event.payload)}</span>
+            <span>{Console.describe_event(event.payload)}</span>
           </li>
         </ol>
       </section>
@@ -102,9 +107,4 @@ defmodule SymphonyElixirWeb.RunLive do
 
   defp missing_run(socket), do: socket |> put_flash(:error, "Run no longer exists") |> push_navigate(to: "/")
   defp schedule_tick, do: Process.send_after(self(), :runtime_tick, 1_000)
-
-  defp describe(%{"message" => message}) when is_binary(message) and message != "", do: message
-  defp describe(%{"total_tokens" => total} = payload), do: "in #{payload["input_tokens"]} / out #{payload["output_tokens"]} / cached #{payload["cached_tokens"] || 0} / total #{total}"
-  defp describe(%{"event" => event}) when is_binary(event), do: event
-  defp describe(payload), do: Jason.encode!(payload)
 end

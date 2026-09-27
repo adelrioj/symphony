@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   @moduledoc "Bounded provider work and authority-owned transport leases, independent of scheduler state."
   alias SymphonyElixir.{ExecutionContext, LaneContext}
-  alias SymphonyElixir.ExecutionEnvironment.{Command, Connection, Lifecycle, Record}
+  alias SymphonyElixir.ExecutionEnvironment.{Command, Connection, Credentials, Lifecycle, Record}
   alias SymphonyElixir.SSH
   alias SymphonyElixir.SSH.Target
 
@@ -33,8 +33,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   def run(adapter, config, nil, :discover, opts) do
     opts = deadline_options(config, :discover, opts)
 
-    with :ok <- invoke(adapter, :preflight, [config], opts) do
-      invoke(adapter, :discover, [config], opts)
+    with :ok <- invoke(adapter, :preflight, [config], opts),
+         {:ok, records} <- invoke(adapter, :discover, [config], opts) do
+      if Keyword.get(opts, :credential_reconcile, true) do
+        {:ok,
+         Enum.map(records, fn record ->
+           case reconcile_credentials(adapter, config, record, opts) do
+             {:ok, current} -> current
+             {:error, _, current} -> current
+           end
+         end)}
+      else
+        {:ok, records}
+      end
     end
   end
 
@@ -42,12 +53,26 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     opts = deadline_options(config, :prepare, opts)
     record = %{entry.record | attempt_id: entry.attempt_id}
 
-    with {:ok, ensured} <- mutate(adapter, :ensure, config, record, opts),
-         ensured = %{ensured | attempt_id: entry.attempt_id, issue_state: entry.record.issue_state, issue_identifier: entry.record.issue_identifier},
-         {:ok, intended} <- intent(adapter, config, ensured, :running, opts),
+    with :ok <- credential_preflight(adapter, config, opts),
+         {:ok, reconciled} <- reconcile_credentials(adapter, config, record, opts),
+         {:ok, claimed} <- Credentials.claim(config, reconciled, entry.purpose, opts),
+         {:ok, ensured} <- mutate(adapter, :ensure, config, claimed, opts),
+         ensured = %{
+           ensured
+           | attempt_id: entry.attempt_id,
+             issue_state: entry.record.issue_state,
+             issue_identifier: entry.record.issue_identifier
+         },
+         ensured =
+           if(Credentials.enabled?(config), do: Credentials.put(ensured, Credentials.data(claimed)), else: ensured),
+         {:ok, bound} <- Credentials.bind(config, ensured, entry.purpose, opts),
+         {:ok, intended} <- intent(adapter, config, bound, :running, opts),
          {:ok, started} <- mutate(adapter, :start, config, intended, opts),
          {:ok, running} <- poll(adapter, config, started, :running, opts) do
       prepare_connection(adapter, config, entry.purpose, running, opts)
+    else
+      {:error, _, _} = error -> error
+      {:error, failure} -> {:error, failure, record}
     end
   end
 
@@ -55,10 +80,21 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     opts = deadline_options(config, :stop, opts)
 
     try do
-      with {:ok, intended} <- intent(adapter, config, entry.record, :stopped, opts),
-           {:ok, stopped} <- mutate(adapter, :stop, config, intended, opts) do
-        poll(adapter, config, stopped, :stopped, opts)
+      if Credentials.enabled?(config) or Credentials.tracked?(entry.record) do
+        credential_stop(adapter, config, entry, opts)
+      else
+        physical_stop(adapter, config, entry.record, opts)
       end
+    after
+      close_entry_connection(entry)
+    end
+  end
+
+  def run(adapter, config, %Lifecycle.Entry{} = entry, :credential_safety_stop, opts) do
+    opts = deadline_options(config, :stop, opts)
+
+    try do
+      physical_stop(adapter, config, entry.record, opts)
     after
       close_entry_connection(entry)
     end
@@ -67,14 +103,25 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   def run(adapter, config, %Lifecycle.Entry{} = entry, :destroy, opts) do
     opts = deadline_options(config, :destroy, opts)
 
-    with {:ok, intended} <- intent(adapter, config, entry.record, :absent, opts),
+    with {:ok, reconciled} <- reconcile_credentials(adapter, config, entry.record, opts),
+         :ok <- Credentials.authorize_destroy(config, reconciled, opts),
+         {:ok, intended} <- intent(adapter, config, reconciled, :absent, opts),
          {:ok, deleting} <- mutate(adapter, :destroy, config, intended, opts) do
       poll(adapter, config, deleting, :absent, opts)
+    else
+      {:error, :credential_outcome_unknown} -> Credentials.failure(entry.record, "cloud_authority")
+      {:error, _, _} = error -> error
     end
   end
 
   def run(adapter, config, %Lifecycle.Entry{} = entry, :inspect, opts) do
-    mutate(adapter, :inspect, config, entry.record, deadline_options(config, :inspect, opts))
+    opts = deadline_options(config, :inspect, opts)
+
+    with {:ok, record} <- mutate(adapter, :inspect, config, entry.record, opts) do
+      if Keyword.get(opts, :credential_reconcile, true),
+        do: reconcile_credentials(adapter, config, record, opts),
+        else: {:ok, record}
+    end
   end
 
   def run(adapter, config, %Lifecycle.Entry{} = entry, :metadata, opts) do
@@ -88,19 +135,26 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   end
 
   def run(_adapter, _config, %Lifecycle.Entry{context: %ExecutionContext{} = context} = entry, :cleanup_hook, _opts) do
-    case SymphonyElixir.Workspace.run_before_remove_hook(entry.record.workspace_path, entry.issue || entry.record.issue_identifier, context) do
+    case SymphonyElixir.Workspace.run_before_remove_hook(
+           entry.record.workspace_path,
+           entry.issue || entry.record.issue_identifier,
+           context
+         ) do
       :ok -> {:ok, entry.record}
       {:error, failure} -> {:error, failure, entry.record}
     end
   end
 
-  def run(_adapter, _config, %Lifecycle.Entry{record: record}, _operation, _opts), do: {:error, {:invalid, :environment_operation}, record}
+  def run(_adapter, _config, %Lifecycle.Entry{record: record}, _operation, _opts),
+    do: {:error, {:invalid, :environment_operation}, record}
+
   def run(_adapter, _config, nil, _operation, _opts), do: {:error, {:invalid, :environment_operation}}
 
   @opaque staged_paths :: {:staged_paths, pid(), reference()}
 
   @spec stage_private_paths(pid() | atom(), pid(), pid(), [String.t()]) :: {:ok, staged_paths()} | {:error, term()}
-  def stage_private_paths(supervisor, authority, donor, paths) when is_pid(authority) and is_pid(donor) and is_list(paths) do
+  def stage_private_paths(supervisor, authority, donor, paths)
+      when is_pid(authority) and is_pid(donor) and is_list(paths) do
     if node(authority) == node() and node(donor) == node() and Process.alive?(authority) and Process.alive?(donor) do
       id = make_ref()
 
@@ -395,8 +449,21 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   end
 
   defp start_owned_port(executable, args, opts) do
-    env = Enum.map(Keyword.get(opts, :env, []), fn {key, value} -> {String.to_charlist(key), if(is_nil(value), do: false, else: String.to_charlist(value))} end)
-    {:ok, Port.open({:spawn_executable, executable}, [:binary, :exit_status, :use_stdio, :stderr_to_stdout, :hide, args: args, env: env])}
+    env =
+      Enum.map(Keyword.get(opts, :env, []), fn {key, value} ->
+        {String.to_charlist(key), if(is_nil(value), do: false, else: String.to_charlist(value))}
+      end)
+
+    {:ok,
+     Port.open({:spawn_executable, executable}, [
+       :binary,
+       :exit_status,
+       :use_stdio,
+       :stderr_to_stdout,
+       :hide,
+       args: args,
+       env: env
+     ])}
   rescue
     _ -> {:error, {:unknown, :staged_port_failed}}
   end
@@ -420,26 +487,38 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
         try do
           context = ExecutionContext.managed(config, record, connection)
 
-          case readiness(context, purpose, opts) do
-            :ok ->
-              {:ok, context}
+          result =
+            with :ok <- readiness(context, purpose, opts) do
+              credential_readiness(config, record, context, purpose, opts)
+            end
+
+          case result do
+            {:ok, ready} ->
+              {:ok, %{context | environment: Map.put(context.environment, :record, ready)}}
 
             {:error, failure} ->
-              close_connection(connection)
-              {:error, failure, record}
+              failed_connection(connection, failure, record)
+
+            {:error, failure, latest} ->
+              failed_connection(connection, failure, latest)
           end
         rescue
           _ ->
-            close_connection(connection)
-            {:error, {:invalid, :managed_execution_context}, record}
+            failed_connection(connection, {:invalid, :managed_execution_context}, record)
         catch
           :exit, _ ->
-            close_connection(connection)
-            {:error, {:unknown, :connection_closed}, record}
+            failed_connection(connection, {:unknown, :connection_closed}, record)
         end
 
       {:error, failure} ->
         {:error, failure, record}
+    end
+  end
+
+  defp failed_connection(connection, failure, record) do
+    case close_connection(connection) do
+      :ok -> {:error, failure, record}
+      {:error, _} -> {:error, {:unknown, :local_cleanup_unconfirmed}, record}
     end
   end
 
@@ -450,7 +529,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
       {:error, {:invalid, :agent_executable}}
     else
       target = context.target
-      command = readiness_command(context.workspace_root, executable, purpose)
+
+      command =
+        if purpose == :cleanup and Credentials.enabled?(context.environment.config),
+          do: "test -x /opt/symphony/tools/bin/python3 && test -r /opt/symphony/codex_guard.py",
+          else: readiness_command(context.workspace_root, executable, purpose)
+
       command_fun = Keyword.get(opts, :command_fun, &Command.run/3)
       command_opts = Keyword.merge(remaining_options(opts), env: target.env)
 
@@ -466,6 +550,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     case command_fun.(target.executable, target.prefix ++ [SSH.remote_shell_command(command)], opts) do
       {:ok, %{status: 0}} -> :ok
       {:ok, %{status: _}} -> {:error, {:invalid, :worker_readiness}}
+      {:error, {:unknown, :local_cleanup_unconfirmed}} = error -> error
       {:error, {:unknown, _}} -> {:error, {:unknown, :readiness_timeout_or_transport}}
       {:error, _} -> {:error, {:unknown, :readiness_transport}}
     end
@@ -487,16 +572,274 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
         "test \"${DOCKER_HOST:-unix:///var/run/docker.sock}\" = unix:///var/run/docker.sock",
         "test -S /var/run/docker.sock",
         "docker_root=$(docker --host unix:///var/run/docker.sock info --format '{{.DockerRootDir}}')",
-        "test -n \"$docker_root\" && test -d \"$docker_root\" && test -w \"$docker_root\"",
+        "test -n \"$docker_root\" && test -d \"$docker_root\"",
         "docker_mount=$(findmnt -n -o TARGET -T \"$docker_root\"); test -n \"$docker_mount\" && test \"$docker_mount\" != /"
       ],
       "; "
     )
   end
 
+  @doc "Reconciles current authority and persists resource disposition before acknowledging its handoff."
+  @spec reconcile_credentials(module(), map(), Record.t(), keyword()) :: SymphonyElixir.ExecutionEnvironment.result()
+  def reconcile_credentials(adapter, config, record, opts) do
+    opts = deadline_options(config, :inspect, opts)
+
+    with {:ok, current} <- Credentials.reconcile(config, record, opts) do
+      reconcile_credential_disposition(adapter, config, record, current, opts)
+    end
+  end
+
+  defp reconcile_credential_disposition(adapter, config, previous_record, current, opts) do
+    if Credentials.enabled?(config) and Credentials.data(current)["stage"] == "committed" do
+      previous = Credentials.data(previous_record)["disposition"]
+      selected = Credentials.data(current)["disposition"]
+
+      if previous == selected and selected["resource_acknowledged"] == true do
+        {:ok, current}
+      else
+        acknowledge_credential_disposition(adapter, config, current, opts)
+      end
+    else
+      {:ok, current}
+    end
+  end
+
+  defp acknowledge_credential_disposition(adapter, config, current, opts) do
+    with {:ok, durable} <- credential_disposition(adapter, config, current, opts),
+         {:ok, acknowledged} <- Credentials.acknowledge(config, durable, opts) do
+      if Credentials.data(durable) == Credentials.data(acknowledged) do
+        {:ok, durable}
+      else
+        credential_disposition(adapter, config, acknowledged, opts)
+      end
+    end
+  end
+
+  defp credential_disposition(
+         _adapter,
+         _config,
+         %Record{absent?: true, proof: {:quiescent, %{backing_absent: true}}} = record,
+         _opts
+       ),
+       do: {:ok, record}
+
+  defp credential_disposition(adapter, config, record, opts) do
+    case invoke(adapter, :put_intent, [config, record, %{}], opts) do
+      {:ok, durable} ->
+        if Credentials.data(durable)["disposition"] == Credentials.data(record)["disposition"],
+          do: {:ok, durable},
+          else: Credentials.failure(durable, "disposition_unconfirmed")
+
+      {:error, _, latest} ->
+        Credentials.failure(latest, "disposition_unconfirmed")
+
+      {:error, _} ->
+        Credentials.failure(record, "disposition_unconfirmed")
+    end
+  end
+
+  defp credential_preflight(adapter, config, opts) do
+    if Credentials.enabled?(config), do: invoke(adapter, :preflight, [config], opts), else: :ok
+  end
+
+  defp credential_readiness(config, record, context, purpose, opts) do
+    if Credentials.enabled?(config) do
+      credential_worker_readiness(record, context, purpose, opts)
+    else
+      {:ok, record}
+    end
+  end
+
+  defp credential_worker_readiness(record, context, purpose, opts) do
+    with {:ok, result} <- credential_command(context, "prepare", opts),
+         true <- valid_status?(result, Credentials.assignment(record)),
+         true <- credential_ready_for_purpose?(result, purpose) do
+      if purpose == :agent,
+        do: {:ok, Credentials.put(record, %{"stage" => "ready", "reason" => nil})},
+        else: {:ok, record}
+    else
+      _ -> Credentials.failure(record, "worker_readiness")
+    end
+  end
+
+  defp credential_ready_for_purpose?(result, :agent), do: result["state"] == "READY" and result["admission"] == "open"
+
+  defp credential_ready_for_purpose?(result, _purpose),
+    do: result["state"] in ["SEALED", "CHECKPOINTED", "RECOVERY_REQUIRED"] and result["admission"] == "sealed"
+
+  defp credential_stop(adapter, config, entry, opts) do
+    credential_opts =
+      Keyword.put(opts, :deadline, Keyword.fetch!(opts, :clock).() + min(45_000, div(remaining(opts), 2)))
+
+    progress = checkpoint_before_stop(adapter, config, entry, credential_opts)
+
+    current =
+      case progress do
+        {:ok, record} -> record
+        {:error, _, record} -> record
+      end
+
+    with {:ok, stopped} <- physical_stop(adapter, config, current, opts) do
+      finish_credential_stop(adapter, config, stopped, progress, opts)
+    end
+  end
+
+  defp checkpoint_before_stop(adapter, config, entry, opts) do
+    with {:ok, current} <- reconcile_credentials(adapter, config, entry.record, opts) do
+      cond do
+        Credentials.data(current)["stage"] in ["committed", "checkpointed"] -> {:ok, current}
+        Credentials.data(current)["stage"] == "recovery_required" -> Credentials.failure(current, "checkpoint_failed")
+        true -> credential_checkpoint(adapter, config, %{entry | record: current}, opts)
+      end
+    end
+  rescue
+    _ -> Credentials.failure(entry.record, "checkpoint_failed")
+  catch
+    _kind, _reason -> Credentials.failure(entry.record, "checkpoint_failed")
+  end
+
+  defp finish_credential_stop(_adapter, config, stopped, {:error, _, _}, opts),
+    do: Credentials.quarantine(config, stopped, opts)
+
+  defp finish_credential_stop(adapter, config, stopped, {:ok, _}, opts) do
+    if Credentials.resolved?(stopped) do
+      {:ok, stopped}
+    else
+      release_credential_disposition(adapter, config, stopped, opts)
+    end
+  end
+
+  defp release_credential_disposition(adapter, config, stopped, opts) do
+    with {:ok, released} <- Credentials.release(config, stopped, opts),
+         {:ok, durable} <- credential_disposition(adapter, config, released, opts),
+         {:ok, acknowledged} <- Credentials.acknowledge(config, durable, opts) do
+      credential_disposition(adapter, config, acknowledged, opts)
+    end
+  end
+
+  defp physical_stop(adapter, config, record, opts) do
+    # Reserve time for safety stop even if credential metadata persistence times out.
+    credential_stop? = Credentials.enabled?(config) or Credentials.tracked?(record)
+
+    intent_opts =
+      if credential_stop? do
+        Keyword.put(opts, :deadline, opts[:clock].() + div(remaining(opts), 2))
+      else
+        opts
+      end
+
+    intended = intent(adapter, config, record, :stopped, intent_opts)
+
+    case intended do
+      {:ok, current} ->
+        stop_and_poll(adapter, config, current, opts)
+
+      {:error, _, current} = error ->
+        if credential_stop? do
+          stop_and_poll(adapter, config, current, opts)
+        else
+          error
+        end
+    end
+  end
+
+  defp stop_and_poll(adapter, config, current, opts) do
+    with {:ok, stopped} <- mutate(adapter, :stop, config, current, opts),
+         do: poll(adapter, config, stopped, :stopped, opts)
+  end
+
+  defp credential_checkpoint(adapter, config, entry, opts) do
+    case checkpoint_context(adapter, config, entry, opts) do
+      {:ok, context, temporary?} ->
+        try do
+          seal_opts = Keyword.put(opts, :deadline, min(opts[:deadline], opts[:clock].() + 30_000))
+
+          with {:ok, sealed} <- credential_command(context, "seal", seal_opts),
+               true <- valid_status?(sealed, Credentials.assignment(entry.record)) and sealed["admission"] == "sealed",
+               {:ok, receipt} <- credential_command(context, "checkpoint", opts) do
+            Credentials.checkpoint(config, entry.record, receipt, opts)
+          else
+            _ -> Credentials.failure(entry.record, "checkpoint_failed")
+          end
+        after
+          if temporary?, do: close_connection(context.connection)
+        end
+
+      {:error, _, latest} ->
+        Credentials.failure(latest, "checkpoint_failed")
+
+      {:error, _} ->
+        Credentials.failure(entry.record, "checkpoint_failed")
+    end
+  end
+
+  defp checkpoint_context(_adapter, _config, %{context: %ExecutionContext{} = context}, _opts),
+    do: {:ok, context, false}
+
+  defp checkpoint_context(adapter, config, entry, opts) do
+    with {:ok, observed} <- mutate(adapter, :inspect, config, entry.record, opts) do
+      open_checkpoint_context(adapter, config, %{entry | record: observed}, opts)
+    end
+  end
+
+  defp open_checkpoint_context(adapter, config, %{record: %{phase: :running} = observed}, opts) do
+    case invoke(adapter, :connect, [config, observed], opts) do
+      {:ok, connection} -> {:ok, ExecutionContext.managed(config, observed, connection), true}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp open_checkpoint_context(adapter, config, entry, opts) do
+    case run(adapter, config, %{entry | purpose: :cleanup}, :prepare, opts) do
+      {:ok, context} -> {:ok, context, true}
+      error -> error
+    end
+  end
+
+  @doc "Reads the sealed checkpoint through the authenticated recovery connection; never changes cloud authority."
+  @spec checkpoint_receipt(ExecutionContext.t(), keyword()) :: {:ok, map()} | {:error, atom()}
+  def checkpoint_receipt(%ExecutionContext{} = context, opts) do
+    opts = deadline_options(context.environment.config, :inspect, opts)
+    credential_command(context, "checkpoint", opts)
+  end
+
+  defp credential_command(context, action, opts) do
+    target = context.target
+    command = "/opt/symphony/tools/bin/python3 /opt/symphony/codex_guard.py " <> action
+    command_fun = Keyword.get(opts, :command_fun, &Command.run/3)
+    command_opts = Keyword.merge(remaining_options(opts), env: target.env, max_output_bytes: 16_384)
+
+    with true <- command_opts[:timeout_ms] > 0,
+         {:ok, %{status: 0, output: output}} when is_binary(output) and byte_size(output) <= 16_384 <-
+           command_fun.(target.executable, target.prefix ++ [SSH.remote_shell_command(command)], command_opts),
+         {:ok, %{"ok" => true, "result" => result} = envelope} <- Jason.decode(output),
+         true <- map_size(envelope) == 2 and is_map(result) do
+      {:ok, result}
+    else
+      _ -> {:error, :credential_outcome_unknown}
+    end
+  rescue
+    _ -> {:error, :credential_outcome_unknown}
+  catch
+    :exit, _ -> {:error, :credential_outcome_unknown}
+  end
+
+  defp valid_status?(result, assignment) do
+    map_size(result) == 4 and Enum.all?(~w(assignment state admission reason), &Map.has_key?(result, &1)) and
+      result["assignment"] == assignment and
+      result["state"] in ["READY", "SEALED", "CHECKPOINTED", "RECOVERY_REQUIRED"] and
+      result["admission"] in ["open", "sealed"] and
+      (is_nil(result["reason"]) or
+         (is_binary(result["reason"]) and Regex.match?(~r/\A[a-z][a-z0-9_]{0,63}\z/, result["reason"])))
+  end
+
   defp intent(adapter, config, record, desired, opts) do
     intent = %{desired: desired}
-    intent = if record.terminal_observed_at, do: Map.put(intent, :terminal_observed_at, record.terminal_observed_at), else: intent
+
+    intent =
+      if record.terminal_observed_at,
+        do: Map.put(intent, :terminal_observed_at, record.terminal_observed_at),
+        else: intent
 
     case invoke(adapter, :put_intent, [config, record, intent], opts) do
       {:ok, latest} -> {:ok, latest}
@@ -537,9 +880,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     end
   end
 
-  defp reached?(%Record{phase: :running, pending: pending}, :running), do: not Enum.any?(pending, &(&1.outcome in [:pending, :unknown]))
-  defp reached?(%Record{proof: {:quiescent, evidence}, pending: pending}, :stopped), do: is_map(evidence) and map_size(evidence) > 0 and not Enum.any?(pending, &(&1.outcome in [:pending, :unknown]))
-  defp reached?(%Record{absent?: true, pending: pending}, :absent), do: not Enum.any?(pending, &(&1.outcome in [:pending, :unknown]))
+  defp reached?(%Record{phase: :running, pending: pending}, :running),
+    do: not Enum.any?(pending, &(&1.outcome in [:pending, :unknown]))
+
+  defp reached?(%Record{proof: {:quiescent, evidence}, pending: pending}, :stopped),
+    do: is_map(evidence) and map_size(evidence) > 0 and not Enum.any?(pending, &(&1.outcome in [:pending, :unknown]))
+
+  defp reached?(%Record{absent?: true, pending: pending}, :absent),
+    do: not Enum.any?(pending, &(&1.outcome in [:pending, :unknown]))
+
   defp reached?(_record, _expected), do: false
 
   defp invoke(adapter, operation, args, opts) do
@@ -551,14 +900,24 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   end
 
   defp deadline_options(config, operation, opts) do
-    timeout = if operation in [:stop, :destroy], do: Map.get(config, :shutdown_timeout_ms, 60_000), else: Map.get(config, :startup_timeout_ms, 300_000)
+    timeout =
+      if operation in [:stop, :destroy],
+        do: Map.get(config, :shutdown_timeout_ms, 60_000),
+        else: Map.get(config, :startup_timeout_ms, 300_000)
+
     clock = Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
-    opts |> Keyword.put_new(:clock, clock) |> Keyword.put_new(:deadline, clock.() + Keyword.get(opts, :timeout_ms, timeout))
+
+    opts
+    |> Keyword.put_new(:clock, clock)
+    |> Keyword.put_new(:deadline, clock.() + Keyword.get(opts, :timeout_ms, timeout))
   end
 
   defp remaining_options(opts), do: Keyword.put(opts, :timeout_ms, remaining(opts))
   defp remaining(opts), do: max(Keyword.fetch!(opts, :deadline) - Keyword.fetch!(opts, :clock).(), 0)
-  defp close_entry_connection(%Lifecycle.Entry{context: %{connection: %Connection{} = connection}}), do: close_connection(connection)
+
+  defp close_entry_connection(%Lifecycle.Entry{context: %{connection: %Connection{} = connection}}),
+    do: close_connection(connection)
+
   defp close_entry_connection(_entry), do: :ok
   defp quote_shell(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
 end

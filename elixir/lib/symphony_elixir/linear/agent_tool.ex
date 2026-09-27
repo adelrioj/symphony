@@ -222,7 +222,8 @@ defmodule SymphonyElixir.Linear.AgentTool do
   defp tool_error_payload(:invalid_arguments) do
     %{
       "error" => %{
-        "message" => "`linear_graphql` expects either a GraphQL query string or an object with `query` and optional `variables`."
+        "message" =>
+          "`linear_graphql` expects either a GraphQL query string or an object with `query` and optional `variables`."
       }
     }
   end
@@ -238,7 +239,8 @@ defmodule SymphonyElixir.Linear.AgentTool do
   defp tool_error_payload(:missing_linear_api_token) do
     %{
       "error" => %{
-        "message" => "Symphony is missing Linear auth. Set `tracker.provider.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`."
+        "message" =>
+          "Symphony is missing Linear auth. Set `tracker.provider.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`."
       }
     }
   end
@@ -254,7 +256,8 @@ defmodule SymphonyElixir.Linear.AgentTool do
   defp tool_error_payload(:invalid_attachment_url) do
     %{
       "error" => %{
-        "message" => "`linear_fetch_attachment` only downloads Linear attachment URLs (https://#{@attachment_upload_host}/...)."
+        "message" =>
+          "`linear_fetch_attachment` only downloads Linear attachment URLs (https://#{@attachment_upload_host}/...)."
       }
     }
   end

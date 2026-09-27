@@ -21,6 +21,16 @@ Local workspaces and static SSH workers are supported. Managed cloud environment
 not production-qualified; production Kubernetes allocation is blocked.
 See [managed environments and limitations](docs/managed-environments.md).
 
+Features Workstations can optionally coordinate one personal Codex login through
+generation-checked cloud ownership and sealed worker checkpoints. Physical stop alone
+does not release that credential or authorize disk deletion. The option is disabled
+when omitted; it does not change Bugs, QA, static workers, or Claude authentication.
+See [personal Codex credentials](elixir/README.md#personal-codex-credentials) for the
+explicit configuration and recovery-required outcomes. Recovery uses the isolated
+`credentials reconcile` command under the real controller-volume maintenance lock;
+it never starts scheduling or treats physical stop alone as credential release.
+No production enablement or credential/model qualification is implied.
+
 ## Install
 
 **Docker is the primary deployment path.** The supplied image uses Codex; the template uses Linear.
@@ -40,7 +50,8 @@ and a Linear API key. Agents run unattended: use a trusted environment and scope
    docker compose up -d
    ```
 
-Open <http://localhost:4000>, sign in with the operator token, and enable `main`.
+Open <http://localhost:4000>, sign in with the operator token, and enable `main` from **Lanes**.
+The console at `/` then shows its agents and tickets.
 New lanes start disabled. Use the structured lane editor and `/execution-profiles` for live
 changes; the imported file is flattened interchange only, not a watched runtime configuration.
 Editors preserve omitted settings and explicit disabling values during unrelated changes.
@@ -49,6 +60,8 @@ snapshot, and workspace/target identity changes are rejected while retained work
 Invalid lanes retain workspace ownership; failed credential validation does not free their resources.
 Version inspection redacts credentials, including nested values. Invalid historical configuration
 remains in storage for recovery but is hidden from the browser rather than exposed unsafely.
+Offline imports into disabled lanes need no tracker or operator secrets; runtime credentials are
+required when enabling and running lanes.
 
 [Full deployment guide](deploy/client-template/README.md) ·
 [Run from source](elixir/README.md#run) ·

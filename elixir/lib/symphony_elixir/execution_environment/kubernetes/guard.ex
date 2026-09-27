@@ -8,7 +8,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
 
   @spec name(map()) :: String.t()
   def name(record) do
-    hash = :crypto.hash(:sha256, Jason.encode!([record.deployment_id, record.scope, record.key])) |> Base.encode16(case: :lower)
+    hash =
+      :crypto.hash(:sha256, Jason.encode!([record.deployment_id, record.scope, record.key]))
+      |> Base.encode16(case: :lower)
+
     "symphony-guard-" <> binary_part(hash, 0, 40)
   end
 
@@ -196,7 +199,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
     with {:ok, guard} <- fetch(config, record, opts),
          true <- guard.data["phase"] in ["Open", "Closing"],
          true <- guard.data["phase"] == "Open" or record.desired == :absent do
-      update(config, record, guard, Map.put(guard.data, "record", retain_evidence(guard.data["record"], Jason.decode!(encoded))), opts)
+      update(
+        config,
+        record,
+        guard,
+        Map.put(guard.data, "record", retain_evidence(guard.data["record"], Jason.decode!(encoded))),
+        opts
+      )
     else
       false -> unknown(:kubernetes_issuance_closed)
       error -> error
@@ -207,7 +216,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
   def close(config, record, encoded, opts) do
     with {:ok, guard} <- fetch(config, record, opts) do
       if guard.data["phase"] == "Open" do
-        target = Map.merge(guard.data, %{"phase" => "Closing", "closeRequestId" => random_id(), "record" => retain_evidence(guard.data["record"], Jason.decode!(encoded))})
+        target =
+          Map.merge(guard.data, %{
+            "phase" => "Closing",
+            "closeRequestId" => random_id(),
+            "record" => retain_evidence(guard.data["record"], Jason.decode!(encoded))
+          })
+
         update(config, record, guard, target, opts)
       else
         {:ok, guard}
@@ -258,7 +273,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
 
   @spec drained(map()) :: :ok | {:error, term()}
   def drained(guard) do
-    if guard.data["phase"] != "Open" and Enum.all?(guard.data["operations"], &(&1["state"] == "Committed")), do: :ok, else: unknown(:kubernetes_provider_issuance_unresolved)
+    if guard.data["phase"] != "Open" and Enum.all?(guard.data["operations"], &(&1["state"] == "Committed")),
+      do: :ok,
+      else: unknown(:kubernetes_provider_issuance_unresolved)
   end
 
   @spec transition(map(), map(), map(), String.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -314,7 +331,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
   end
 
   defp unused_name(config, guard, resource, body, opts) do
-    prior = Enum.filter(guard.data["operations"], &(&1["resource"] == resource and &1["name"] == get_in(body, ["metadata", "name"])))
+    prior =
+      Enum.filter(
+        guard.data["operations"],
+        &(&1["resource"] == resource and &1["name"] == get_in(body, ["metadata", "name"]))
+      )
 
     cond do
       Enum.any?(prior, &(&1["state"] == "Issued")) ->
@@ -396,12 +417,32 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
     metadata = Map.merge(old, current["metadata"] || %{})
 
     metadata =
-      Enum.reduce(~w(authorized_pods termination_evidence pod_safety volumes controller_pod_operations), metadata, fn key, acc ->
-        Map.put(acc, key, Map.merge(old[key] || %{}, metadata[key] || %{}, fn _, previous, next -> merge_evidence(key, previous, next) end))
-      end)
+      Enum.reduce(
+        ~w(authorized_pods termination_evidence pod_safety volumes controller_pod_operations),
+        metadata,
+        fn key, acc ->
+          Map.put(
+            acc,
+            key,
+            Map.merge(old[key] || %{}, metadata[key] || %{}, fn _, previous, next ->
+              merge_evidence(key, previous, next)
+            end)
+          )
+        end
+      )
 
-    metadata = Map.put(metadata, "authorized_pod_uids", Enum.uniq((old["authorized_pod_uids"] || []) ++ (metadata["authorized_pod_uids"] || [])))
-    metadata = if old["creation_journal"] == nil, do: metadata, else: Map.put(metadata, "creation_journal", old["creation_journal"])
+    metadata =
+      Map.put(
+        metadata,
+        "authorized_pod_uids",
+        Enum.uniq((old["authorized_pod_uids"] || []) ++ (metadata["authorized_pod_uids"] || []))
+      )
+
+    metadata =
+      if old["creation_journal"] == nil,
+        do: metadata,
+        else: Map.put(metadata, "creation_journal", old["creation_journal"])
+
     Map.put(current, "metadata", metadata)
   end
 
@@ -424,13 +465,24 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
   defp close_binding?(data), do: nonempty?(data["closeRequestId"]) and data["record"]["desired"] == "absent"
 
   defp attribution(op) do
-    fields = %{"symphony.dev/create-protocol" => @protocol, "symphony.dev/create-guard-uid" => op["guardUID"], "symphony.dev/create-attempt-id" => op["id"]}
+    fields = %{
+      "symphony.dev/create-protocol" => @protocol,
+      "symphony.dev/create-guard-uid" => op["guardUID"],
+      "symphony.dev/create-attempt-id" => op["id"]
+    }
+
     if op["resource"] == "secrets", do: Map.put(fields, "symphony.dev/create-parent-uid", op["parentUID"]), else: fields
   end
 
-  defp identity(record), do: %{"deploymentID" => record.deployment_id, "environmentKey" => record.key, "scope" => record.scope}
-  defp resource_collection(config, "sandboxes"), do: "/apis/agents.x-k8s.io/v1beta1/namespaces/#{URI.encode_www_form(config.provider["namespace"])}/sandboxes"
-  defp resource_collection(config, resource), do: "/api/v1/namespaces/#{URI.encode_www_form(config.provider["namespace"])}/#{resource}"
+  defp identity(record),
+    do: %{"deploymentID" => record.deployment_id, "environmentKey" => record.key, "scope" => record.scope}
+
+  defp resource_collection(config, "sandboxes"),
+    do: "/apis/agents.x-k8s.io/v1beta1/namespaces/#{URI.encode_www_form(config.provider["namespace"])}/sandboxes"
+
+  defp resource_collection(config, resource),
+    do: "/api/v1/namespaces/#{URI.encode_www_form(config.provider["namespace"])}/#{resource}"
+
   defp collection(config), do: resource_collection(config, "configmaps")
   defp uid(object), do: get_in(object || %{}, ["metadata", "uid"])
   defp version(object), do: get_in(object || %{}, ["metadata", "resourceVersion"])
@@ -496,7 +548,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Guard do
   end
 
   defp template_collection(config),
-    do: "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/#{URI.encode_www_form(config.provider["namespace"])}/sandboxtemplates"
+    do:
+      "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/#{URI.encode_www_form(config.provider["namespace"])}/sandboxtemplates"
 
   @spec valid_host_binding?(term()) :: boolean()
   def valid_host_binding?(binding) do

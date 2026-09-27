@@ -31,19 +31,33 @@ if Mix.env() == :test do
       q = pins["contract"]
 
       with true <- exact_keys?(pins, @fields) and is_map(q) and exact_keys?(q, @contract_fields),
-           true <- Enum.all?(@fields -- ~w(contract schema_digests storage_class_digests controller_authorization), &nonblank?(pins[&1])),
+           true <-
+             Enum.all?(
+               @fields -- ~w(contract schema_digests storage_class_digests controller_authorization),
+               &nonblank?(pins[&1])
+             ),
            true <- authorization_pins?(pins["controller_authorization"]),
            true <- Enum.all?(@contract_fields -- ~w(qualified storage_class_uids), &nonblank?(q[&1])),
            true <- q["qualified"] == false and q["stage"] == "candidate-unqualified",
            true <- q["termination_contract"] == "candidate-unqualified-kubelet-all-containers-v1",
-           true <- pins["namespace"] == get_in(config, [:provider, "namespace"]) and pins["deployment_id"] == config[:deployment_id],
+           true <-
+             pins["namespace"] == get_in(config, [:provider, "namespace"]) and
+               pins["deployment_id"] == config[:deployment_id],
            true <- q["controller_namespace"] != pins["namespace"],
            true <- hex?(pins["consumer_source_commit"], 40) and hex?(q["controller_source_commit"], 40),
            true <- image?(q["controller_image"]) and image?(q["worker_image"]),
-           true <- exact_keys?(pins["schema_digests"], @schemas) and Enum.all?(pins["schema_digests"], fn {_, hash} -> hex?(hash, 40) end),
-           true <- hex?(pins["controller_spec_digest"], 40) and hex?(q["template_digest"], 40) and hex?(pins["runtime_class_spec_digest"], 40) and hex?(pins["network_policy_spec_digest"], 40),
-           true <- is_list(q["storage_class_uids"]) and q["storage_class_uids"] != [] and Enum.all?(q["storage_class_uids"], &nonblank?/1),
-           true <- exact_keys?(pins["storage_class_digests"], q["storage_class_uids"]) and Enum.all?(pins["storage_class_digests"], fn {_, hash} -> hex?(hash, 40) end),
+           true <-
+             exact_keys?(pins["schema_digests"], @schemas) and
+               Enum.all?(pins["schema_digests"], fn {_, hash} -> hex?(hash, 40) end),
+           true <-
+             hex?(pins["controller_spec_digest"], 40) and hex?(q["template_digest"], 40) and
+               hex?(pins["runtime_class_spec_digest"], 40) and hex?(pins["network_policy_spec_digest"], 40),
+           true <-
+             is_list(q["storage_class_uids"]) and q["storage_class_uids"] != [] and
+               Enum.all?(q["storage_class_uids"], &nonblank?/1),
+           true <-
+             exact_keys?(pins["storage_class_digests"], q["storage_class_uids"]) and
+               Enum.all?(pins["storage_class_digests"], fn {_, hash} -> hex?(hash, 40) end),
            true <- hex?(pins["helper_sha256"], 64) and pins["consumer_artifact_sha256"] == artifact_identity().sha256,
            helper when is_binary(helper) <- System.find_executable("symphony-kubernetes-create"),
            {:ok, bytes} <- File.read(helper),
@@ -83,7 +97,12 @@ if Mix.env() == :test do
                class = Enum.find(classes, &(uid(&1) == uid))
                is_map(class) and digest(Map.drop(class, ["metadata", "apiVersion", "kind"])) == expected
              end),
-           {:ok, controllers} <- Client.list(config, "/apis/apps/v1/namespaces/#{URI.encode(q["controller_namespace"], &URI.char_unreserved?/1)}/deployments", opts),
+           {:ok, controllers} <-
+             Client.list(
+               config,
+               "/apis/apps/v1/namespaces/#{URI.encode(q["controller_namespace"], &URI.char_unreserved?/1)}/deployments",
+               opts
+             ),
            controller when is_map(controller) <- Enum.find(controllers, &(uid(&1) == q["controller_uid"])),
            true <- digest(controller["spec"]) == pins["controller_spec_digest"],
            true <- scoped_controller?(controller, q["controller_image"], pins["namespace"], q["controller_namespace"]),
@@ -151,7 +170,8 @@ if Mix.env() == :test do
     defp authorization_pins?(pins) do
       exact_keys?(pins, @authorization_fields) and
         Enum.all?(pins, fn {_, pin} ->
-          exact_keys?(pin, ~w(name namespace uid digest)) and Enum.all?(~w(name namespace uid), &nonblank?(pin[&1])) and hex?(pin["digest"], 40)
+          exact_keys?(pin, ~w(name namespace uid digest)) and Enum.all?(~w(name namespace uid), &nonblank?(pin[&1])) and
+            hex?(pin["digest"], 40)
         end)
     end
 
@@ -161,15 +181,40 @@ if Mix.env() == :test do
       management = pins["contract"]["controller_namespace"]
       rbac = "/apis/rbac.authorization.k8s.io/v1/"
 
-      with true <- sa["namespace"] == management and get_in(controller, ["spec", "template", "spec", "serviceAccountName"]) == sa["name"],
-           {:ok, accounts} <- Client.list(config, "/api/v1/namespaces/#{URI.encode(management, &URI.char_unreserved?/1)}/serviceaccounts", opts),
+      with true <-
+             sa["namespace"] == management and
+               get_in(controller, ["spec", "template", "spec", "serviceAccountName"]) == sa["name"],
+           {:ok, accounts} <-
+             Client.list(
+               config,
+               "/api/v1/namespaces/#{URI.encode(management, &URI.char_unreserved?/1)}/serviceaccounts",
+               opts
+             ),
            true <- Enum.any?(accounts, &pinned_authorization?(&1, sa)),
            {:ok, roles} <- Client.list(config, rbac <> "roles", opts),
            {:ok, bindings} <- Client.list(config, rbac <> "rolebindings", opts),
            {:ok, cluster_roles} <- Client.list(config, rbac <> "clusterroles", opts),
            {:ok, cluster_bindings} <- Client.list(config, rbac <> "clusterrolebindings", opts),
-           true <- pinned_role_pair?(roles, bindings, auth["workload_role"], auth["workload_binding"], sa, pins["namespace"], :workload),
-           true <- pinned_role_pair?(roles, bindings, auth["management_role"], auth["management_binding"], sa, management, :lease),
+           true <-
+             pinned_role_pair?(
+               roles,
+               bindings,
+               auth["workload_role"],
+               auth["workload_binding"],
+               sa,
+               pins["namespace"],
+               :workload
+             ),
+           true <-
+             pinned_role_pair?(
+               roles,
+               bindings,
+               auth["management_role"],
+               auth["management_binding"],
+               sa,
+               management,
+               :lease
+             ),
            true <- Enum.all?(bindings, &bounded_binding?(&1, false, sa, auth, roles, cluster_roles)),
            true <- Enum.all?(cluster_bindings, &bounded_binding?(&1, true, sa, auth, roles, cluster_roles)) do
         :ok
@@ -200,7 +245,8 @@ if Mix.env() == :test do
       verbs = rule["verbs"]
 
       is_list(groups) and groups != [] and is_list(resources) and resources != [] and is_list(verbs) and verbs != [] and
-        rule["nonResourceURLs"] in [nil, []] and Enum.all?(verbs, &(&1 in ~w(get list watch create update patch delete))) and
+        rule["nonResourceURLs"] in [nil, []] and
+        Enum.all?(verbs, &(&1 in ~w(get list watch create update patch delete))) and
         Enum.all?(groups, fn group -> Enum.all?(resources, &scoped_resource?(kind, group, &1)) end)
     end
 
@@ -217,7 +263,9 @@ if Mix.env() == :test do
       subjects = binding["subjects"] || []
 
       if Enum.any?(subjects, &controller_subject?(&1, binding, cluster?, sa)) do
-        pinned = not cluster? and Enum.any?(~w(workload_binding management_binding), &pinned_authorization?(binding, auth[&1]))
+        pinned =
+          not cluster? and Enum.any?(~w(workload_binding management_binding), &pinned_authorization?(binding, auth[&1]))
+
         ref = binding["roleRef"] || %{}
 
         role =
@@ -229,7 +277,11 @@ if Mix.env() == :test do
               Enum.find(cluster_roles, &(get_in(&1, ["metadata", "name"]) == ref["name"]))
 
             ref["kind"] == "Role" and not cluster? ->
-              Enum.find(roles, &(get_in(&1, ["metadata", "name"]) == ref["name"] and get_in(&1, ["metadata", "namespace"]) == get_in(binding, ["metadata", "namespace"])))
+              Enum.find(
+                roles,
+                &(get_in(&1, ["metadata", "name"]) == ref["name"] and
+                    get_in(&1, ["metadata", "namespace"]) == get_in(binding, ["metadata", "namespace"]))
+              )
 
             true ->
               nil
@@ -245,13 +297,18 @@ if Mix.env() == :test do
       case subject["kind"] do
         "ServiceAccount" ->
           subject["name"] == sa["name"] and
-            (subject["namespace"] || if(not cluster?, do: get_in(binding, ["metadata", "namespace"]))) == sa["namespace"]
+            (subject["namespace"] || if(not cluster?, do: get_in(binding, ["metadata", "namespace"]))) ==
+              sa["namespace"]
 
         "User" ->
           subject["name"] == "system:serviceaccount:#{sa["namespace"]}:#{sa["name"]}"
 
         "Group" ->
-          subject["name"] in ["system:authenticated", "system:serviceaccounts", "system:serviceaccounts:#{sa["namespace"]}"]
+          subject["name"] in [
+            "system:authenticated",
+            "system:serviceaccounts",
+            "system:serviceaccounts:#{sa["namespace"]}"
+          ]
 
         _ ->
           false
@@ -271,7 +328,8 @@ if Mix.env() == :test do
 
       self_review =
         verbs == ["create"] and rule["nonResourceURLs"] in [nil, []] and resources != [] and
-          ((groups == ["authorization.k8s.io"] and Enum.all?(resources, &(&1 in ~w(selfsubjectaccessreviews selfsubjectrulesreviews)))) or
+          ((groups == ["authorization.k8s.io"] and
+              Enum.all?(resources, &(&1 in ~w(selfsubjectaccessreviews selfsubjectrulesreviews)))) or
              (groups == ["authentication.k8s.io"] and resources == ["selfsubjectreviews"]))
 
       read_only or self_review
@@ -282,13 +340,21 @@ if Mix.env() == :test do
     def digest(value), do: sha256(Jason.encode!(canonical(value))) |> binary_part(0, 40)
     @spec sha256(iodata()) :: String.t()
     def sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
-    defp canonical(map) when is_map(map), do: map |> Enum.map(fn {key, value} -> [key, canonical(value)] end) |> Enum.sort()
+
+    defp canonical(map) when is_map(map),
+      do: map |> Enum.map(fn {key, value} -> [key, canonical(value)] end) |> Enum.sort()
+
     defp canonical(list) when is_list(list), do: Enum.map(list, &canonical/1)
     defp canonical(value), do: value
     defp uid(object), do: get_in(object, ["metadata", "uid"])
     defp exact_keys?(map, keys), do: is_map(map) and Enum.sort(Map.keys(map)) == Enum.sort(keys)
-    defp nonblank?(value), do: is_binary(value) and String.trim(value) != "" and not String.contains?(value, ["\n", "\r", <<0>>])
-    defp hex?(value, length), do: is_binary(value) and byte_size(value) == length and Regex.match?(~r/\A[0-9a-f]+\z/, value)
+
+    defp nonblank?(value),
+      do: is_binary(value) and String.trim(value) != "" and not String.contains?(value, ["\n", "\r", <<0>>])
+
+    defp hex?(value, length),
+      do: is_binary(value) and byte_size(value) == length and Regex.match?(~r/\A[0-9a-f]+\z/, value)
+
     defp image?(value), do: is_binary(value) and Regex.match?(~r/\A[^\s@]+@sha256:[0-9a-f]{64}\z/, value)
   end
 end

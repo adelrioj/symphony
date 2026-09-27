@@ -14,11 +14,20 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     def init({id, target}), do: {:ok, %{id: id, target: target, mode: :ready}}
 
     @impl true
-    def handle_call({:validate_connection, id, target}, _from, %{mode: :ready, id: id, target: target} = state), do: {:reply, :ok, state}
+    def handle_call({:validate_connection, id, target}, _from, %{mode: :ready, id: id, target: target} = state),
+      do: {:reply, :ok, state}
+
     def handle_call({:validate_connection, _id, _target}, _from, %{mode: :unresponsive} = state), do: {:noreply, state}
     def handle_call({:validate_connection, _id, _target}, _from, %{mode: :exiting} = state), do: {:stop, :normal, state}
     def handle_call({:validate_connection, _id, _target}, _from, state), do: {:reply, {:error, :invalid_lease}, state}
     def handle_call({:mode, mode}, _from, state), do: {:reply, :ok, %{state | mode: mode}}
+  end
+
+  test "resource keys fit the Workstations ID length and character constraints" do
+    key = Environment.resource_key("Deployment:/α", "linear", String.duplicate("Issue:/β", 100))
+
+    assert byte_size(key) <= 56
+    assert String.match?(key, ~r/\A[a-z][a-z0-9-]*[a-z0-9]\z/)
   end
 
   test "opaque issue keys cannot collide through separator or display-name changes" do
@@ -26,8 +35,9 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     right = Environment.resource_key("deployment", "a:linear", "b")
     refute left == right
     assert left == Environment.resource_key("deployment:a", "linear", "b")
-    assert String.match?(left, ~r/^se-[0-9a-f]{56}$/)
     refute left == Environment.resource_key("deployment:a", "linear", "B")
+    refute left == Environment.resource_key("deployment:b", "linear", "b")
+    refute left == Environment.resource_key("deployment:a", "github", "b")
   end
 
   test "managed startup cannot have a zero deadline" do
@@ -68,7 +78,9 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     assert config.provider == %{}
     assert config.terminal_retention_ms == 0
 
-    assert {:ok, config} = Config.parse(Map.put(attributes(), "provider", %{opaque: %{"not_an_atom_80913" => [%{nested: "value"}]}}))
+    assert {:ok, config} =
+             Config.parse(Map.put(attributes(), "provider", %{opaque: %{"not_an_atom_80913" => [%{nested: "value"}]}}))
+
     assert config.provider == %{"opaque" => %{"not_an_atom_80913" => [%{"nested" => "value"}]}}
   end
 
@@ -100,7 +112,15 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
 
     assert Config.identity(changed) == identity
 
-    for field <- ["project", "location", "cluster", "config", "credential_configuration", "impersonate_service_account", "ssh_user"] do
+    for field <- [
+          "project",
+          "location",
+          "cluster",
+          "config",
+          "credential_configuration",
+          "impersonate_service_account",
+          "ssh_user"
+        ] do
       refute Config.identity(put_in(settings, [:worker, :environment, "provider", field], "changed")) == identity
     end
 
@@ -111,9 +131,18 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
   test "identity canonicalizes nested reference maps without confusing maps and lists" do
     settings = settings()
     left = put_in(settings, [:worker, :environment, "provider", "config"], %{"b" => [%{"z" => 1, "a" => 2}], "a" => 3})
-    right = put_in(settings, [:worker, :environment, "provider", "config"], Map.new([{"a", 3}, {"b", [Map.new([{"a", 2}, {"z", 1}])]}]))
+
+    right =
+      put_in(
+        settings,
+        [:worker, :environment, "provider", "config"],
+        Map.new([{"a", 3}, {"b", [Map.new([{"a", 2}, {"z", 1}])]}])
+      )
+
     assert Config.identity(left) == Config.identity(right)
-    refute Config.identity(left) == Config.identity(put_in(right, [:worker, :environment, "provider", "config"], [{"a", 3}, {"b", []}]))
+
+    refute Config.identity(left) ==
+             Config.identity(put_in(right, [:worker, :environment, "provider", "config"], [{"a", 3}, {"b", []}]))
   end
 
   @tag :tmp_dir
@@ -131,7 +160,13 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
   end
 
   test "Kubernetes identity includes cluster credentials namespace and template references" do
-    settings = put_in(settings(), [:worker, :environment], Map.merge(attributes(), %{"kind" => "kubernetes", "provider" => kubernetes_provider()}))
+    settings =
+      put_in(
+        settings(),
+        [:worker, :environment],
+        Map.merge(attributes(), %{"kind" => "kubernetes", "provider" => kubernetes_provider()})
+      )
+
     identity = Config.identity(settings)
 
     for field <- ["kubeconfig", "context", "namespace", "template", "ssh_auth_volume", "ssh_user"] do
@@ -245,6 +280,56 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
     end
   end
 
+  test "Codex credentials remain optional but capture every authority reference in reload identity" do
+    assert {:ok, _} = Config.parse(attributes())
+
+    references = %{
+      "credential_id" => "features-personal-codex",
+      "secret" => "projects/123456/secrets/features-codex",
+      "control_bucket" => "fixture-codex-control",
+      "control_object" => "features/authority.json"
+    }
+
+    enabled = put_in(settings(), [:worker, :environment, "codex_credentials"], references)
+    assert Config.runtime(enabled).codex_credentials == references
+    refute Config.identity(enabled) == Config.identity(settings())
+
+    for {field, changed} <- [
+          {"credential_id", "another-credential"},
+          {"secret", "projects/123456/secrets/another-secret"},
+          {"control_bucket", "another-control-bucket"},
+          {"control_object", "features/another-authority.json"}
+        ] do
+      refute Config.identity(put_in(enabled, [:worker, :environment, "codex_credentials", field], changed)) ==
+               Config.identity(enabled)
+    end
+  end
+
+  test "Codex credentials reject partial references aliases extra fields and non Workstations environments" do
+    references = %{
+      "credential_id" => "features-personal-codex",
+      "secret" => "projects/123456/secrets/features-codex",
+      "control_bucket" => "fixture-codex-control",
+      "control_object" => "features/authority.json"
+    }
+
+    for invalid <- [
+          %{},
+          Map.delete(references, "control_object"),
+          Map.put(references, "secret", "projects/project-id/secrets/features-codex"),
+          Map.put(references, "secret", references["secret"] <> "/versions/latest"),
+          Map.put(references, "control_object", "../authority.json"),
+          Map.put(references, "token", "not-a-reference")
+        ] do
+      assert {:error, {:invalid_environment_config, _}} =
+               Config.parse(Map.put(attributes(), "codex_credentials", invalid))
+    end
+
+    non_workstations = attributes() |> Map.put("kind", "kubernetes") |> Map.put("codex_credentials", references)
+    assert {:error, {:invalid_environment_config, _}} = Config.parse(non_workstations)
+    assert {:error, {:invalid_workflow_config, _}} = Schema.parse(%{"worker" => %{"environment" => non_workstations}})
+  end
+
   defp attributes do
     %{
       "kind" => "google_workstations",
@@ -295,7 +380,13 @@ defmodule SymphonyElixir.ExecutionEnvironmentTest do
   end
 
   defp connection do
-    target = %Target{executable: "/usr/bin/ssh", prefix: ["-i", "transport-secret", "worker@localhost"], label: "managed-worker", env: [{"SECRET", "transport-secret"}]}
+    target = %Target{
+      executable: "/usr/bin/ssh",
+      prefix: ["-i", "transport-secret", "worker@localhost"],
+      label: "managed-worker",
+      env: [{"SECRET", "transport-secret"}]
+    }
+
     id = make_ref()
     child = %{id: id, start: {GenServer, :start_link, [ConnectionHolder, {id, target}]}, restart: :temporary}
     owner = start_supervised!(child)
