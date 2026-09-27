@@ -20,9 +20,9 @@ defmodule SymphonyElixir.Jira.Client do
     "issuelinks"
   ]
 
-  @spec validate_settings(map()) :: :ok | {:error, term()}
-  def validate_settings(tracker_settings) do
-    with {:ok, _settings} <- settings(tracker_settings), do: :ok
+  @spec validate_settings(map(), :runtime | :structure) :: :ok | {:error, term()}
+  def validate_settings(tracker_settings, validation \\ :runtime) when validation in [:runtime, :structure] do
+    with {:ok, _settings} <- settings(tracker_settings, validation), do: :ok
   end
 
   @spec secret_environment_names(map()) :: [String.t()]
@@ -410,21 +410,30 @@ defmodule SymphonyElixir.Jira.Client do
     end
   end
 
-  defp settings(tracker_settings) when is_map(tracker_settings) do
+  defp settings(tracker_settings, validation \\ :runtime) when is_map(tracker_settings) do
     provider = provider_settings(tracker_settings)
     base_url = resolve_setting(provider["base_url"], System.get_env("JIRA_BASE_URL"))
-    email = resolve_setting(provider["email"], System.get_env("JIRA_EMAIL"))
-    api_token = resolve_setting(provider["api_token"], System.get_env("JIRA_API_TOKEN"))
+
+    email =
+      if validation == :runtime,
+        do: resolve_setting(provider["email"], System.get_env("JIRA_EMAIL")),
+        else: provider["email"]
+
+    api_token =
+      if validation == :runtime,
+        do: resolve_setting(provider["api_token"], System.get_env("JIRA_API_TOKEN")),
+        else: provider["api_token"]
+
     project_key = resolve_setting(provider["project_key"], nil)
 
     cond do
       not valid_base_url?(base_url) ->
         {:error, :invalid_jira_base_url}
 
-      not present_string?(email) ->
+      missing_credential?(email, validation) ->
         {:error, :missing_jira_email}
 
-      not present_string?(api_token) ->
+      missing_credential?(api_token, validation) ->
         {:error, :missing_jira_api_token}
 
       not present_string?(project_key) ->
@@ -441,6 +450,9 @@ defmodule SymphonyElixir.Jira.Client do
          }}
     end
   end
+
+  defp missing_credential?(nil, validation), do: validation == :runtime
+  defp missing_credential?(value, _validation), do: not present_string?(value)
 
   defp provider_settings(%{provider: provider}) when is_map(provider), do: provider
   defp provider_settings(_tracker_settings), do: %{}

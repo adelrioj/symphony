@@ -14,7 +14,14 @@ defmodule SymphonyElixir.SSHTest do
     previous = System.get_env("SYMPHONY_SSH_CONFIG")
     on_exit(fn -> restore_env("SYMPHONY_SSH_CONFIG", previous) end)
     System.put_env("SYMPHONY_SSH_CONFIG", "/nonexistent/global-config")
-    target = %SSH.Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture", env: [{"SYMPHONY_TARGET_VALUE", "private"}]}
+
+    target = %SSH.Target{
+      executable: "/bin/sh",
+      prefix: ["-c"],
+      label: "fixture",
+      env: [{"SYMPHONY_TARGET_VALUE", "private"}]
+    }
+
     assert {:ok, {"private", 0}} = SSH.run(target, "printf '%s' \"$SYMPHONY_TARGET_VALUE\"")
     assert System.get_env("SYMPHONY_TARGET_VALUE") == nil
   end
@@ -147,8 +154,16 @@ defmodule SymphonyElixir.SSHTest do
   end
 
   test "start_port/3 carries line-mode stdin and target environment" do
-    target = %SSH.Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture", env: [{"SYMPHONY_TARGET_VALUE", "remote"}]}
-    assert {:ok, port} = SSH.start_port(target, "read -r value; printf '%s:%s\\n' \"$SYMPHONY_TARGET_VALUE\" \"$value\"", line: 256)
+    target = %SSH.Target{
+      executable: "/bin/sh",
+      prefix: ["-c"],
+      label: "fixture",
+      env: [{"SYMPHONY_TARGET_VALUE", "remote"}]
+    }
+
+    assert {:ok, port} =
+             SSH.start_port(target, "read -r value; printf '%s:%s\\n' \"$SYMPHONY_TARGET_VALUE\" \"$value\"", line: 256)
+
     assert :ok = SSH.write_stdin(port, "literal ' quote\n")
     assert_receive {^port, {:data, {:eol, "remote:literal ' quote"}}}, 5_000
     assert_receive {^port, {:exit_status, 0}}, 5_000

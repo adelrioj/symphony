@@ -15,8 +15,13 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
   @tag :tmp_dir
   test "shared profile validation is all or nothing", %{tmp_dir: root} do
     {:ok, profile} = ExecutionProfiles.create(%{name: "Shared", workspace_base: root, worker: %{}})
-    {:ok, first} = Lanes.create(%{slug: "first", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
-    {:ok, second} = Lanes.create(%{slug: "second", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, first} =
+      Lanes.create(%{slug: "first", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, second} =
+      Lanes.create(%{slug: "second", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
     assert {:ok, updated} = ExecutionProfiles.update(profile, %{worker: %{"max_concurrent_agents_per_host" => 2}})
     assert updated.worker == %{"max_concurrent_agents_per_host" => 2}
     assert {:ok, %{settings: %{worker: %{max_concurrent_agents_per_host: 2}}}} = LaneStore.lookup(first.id)
@@ -25,8 +30,17 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
     {:ok, before_invalid_second} = LaneStore.lookup(second.id)
 
     conflict_root = Path.join(root, "conflict")
-    {:ok, blocker_profile} = ExecutionProfiles.create(%{name: "Blocker", workspace_base: Path.join(conflict_root, "first"), worker: %{}})
-    {:ok, _blocker} = Lanes.create(%{slug: "blocker", execution_profile_id: blocker_profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, blocker_profile} =
+      ExecutionProfiles.create(%{name: "Blocker", workspace_base: Path.join(conflict_root, "first"), worker: %{}})
+
+    {:ok, _blocker} =
+      Lanes.create(%{
+        slug: "blocker",
+        execution_profile_id: blocker_profile.id,
+        workspace_subdir: ".",
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
 
     assert {:error, errors} = ExecutionProfiles.update(updated, %{workspace_base: conflict_root})
     assert errors != []
@@ -179,7 +193,12 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
     assert {%{}, %{"tracker" => %{"kind" => "memory"}}} = Configuration.split(%{"tracker" => %{"kind" => "memory"}})
 
     assert {:error, errors} =
-             Configuration.resolve(%{"workspace_base" => nil, "worker" => %{}}, %{"tracker" => %{"kind" => "memory"}}, ".", "work")
+             Configuration.resolve(
+               %{"workspace_base" => nil, "worker" => %{}},
+               %{"tracker" => %{"kind" => "memory"}},
+               ".",
+               "work"
+             )
 
     assert Enum.any?(errors, &(&1.path == "profile.workspace_base"))
   end
@@ -187,7 +206,13 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
   @tag :tmp_dir
   test "location changes fail closed when the new SSH target cannot be inventoried", %{tmp_dir: root} do
     {:ok, profile} = ExecutionProfiles.create(%{name: "SSH target", workspace_base: root, worker: %{}})
-    {:ok, _lane} = Lanes.create(%{slug: "ssh-target", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, _lane} =
+      Lanes.create(%{
+        slug: "ssh-target",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
 
     assert {:error, errors} =
              ExecutionProfiles.update(profile, %{
@@ -203,18 +228,34 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
   test "disabled lanes still prevent overlapping effective workspaces", %{tmp_dir: root} do
     {:ok, first_profile} = ExecutionProfiles.create(%{name: "First", workspace_base: root, worker: %{}})
     {:ok, second_profile} = ExecutionProfiles.create(%{name: "Second", workspace_base: root, worker: %{}})
-    {:ok, _first} = Lanes.create(%{slug: "first", execution_profile_id: first_profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, _first} =
+      Lanes.create(%{
+        slug: "first",
+        execution_profile_id: first_profile.id,
+        workspace_subdir: ".",
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
 
     assert {:error, errors} =
-             Lanes.create(%{slug: "second", execution_profile_id: second_profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+             Lanes.create(%{
+               slug: "second",
+               execution_profile_id: second_profile.id,
+               workspace_subdir: ".",
+               config: %{"tracker" => %{"kind" => "memory"}}
+             })
 
     assert errors != []
   end
 
   test "managed workspace overlaps use provider ownership scope instead of lane identity" do
     worker = managed_worker()
-    {:ok, first_profile} = ExecutionProfiles.create(%{name: "Managed first", workspace_base: "/managed/root", worker: worker})
-    {:ok, second_profile} = ExecutionProfiles.create(%{name: "Managed second", workspace_base: "/managed/root/nested", worker: worker})
+
+    {:ok, first_profile} =
+      ExecutionProfiles.create(%{name: "Managed first", workspace_base: "/managed/root", worker: worker})
+
+    {:ok, second_profile} =
+      ExecutionProfiles.create(%{name: "Managed second", workspace_base: "/managed/root/nested", worker: worker})
 
     assert {:ok, _lane} =
              Lanes.create(%{
@@ -317,7 +358,14 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
   @tag :tmp_dir
   test "deletion refuses retained local workspaces", %{tmp_dir: root} do
     {:ok, profile} = ExecutionProfiles.create(%{name: "Delete guard", workspace_base: root, worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "delete-guard", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "delete-guard",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, entry} = LaneStore.lookup(lane.id)
     File.mkdir_p!(entry.settings.workspace.root)
     File.write!(Path.join(entry.settings.workspace.root, "retained"), "owned")
@@ -331,8 +379,16 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
   end
 
   test "managed lanes can be deleted after authoritative empty inventory release" do
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Managed delete", workspace_base: "/managed/delete", worker: managed_worker()})
-    {:ok, lane} = Lanes.create(%{slug: "managed-delete", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, profile} =
+      ExecutionProfiles.create(%{name: "Managed delete", workspace_base: "/managed/delete", worker: managed_worker()})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "managed-delete",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, %{settings: settings}} = LaneStore.lookup(lane.id)
 
     assert {:error, _errors} = Lanes.delete(lane)
@@ -346,7 +402,14 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
   @tag :tmp_dir
   test "repair markers clear only after every linked lane validates", %{tmp_dir: root} do
     {:ok, profile} = ExecutionProfiles.create(%{name: "Repair", workspace_base: root, worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "repair-lane", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "repair-lane",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     version = Lanes.current_version(lane)
     Repo.update!(Ecto.Changeset.change(profile, repair_error: "repair required"))
     Repo.update!(Ecto.Changeset.change(version, front_matter: "tracker: ["))
@@ -369,8 +432,16 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
     System.put_env("PATH", root <> ":" <> (previous_path || ""))
     on_exit(fn -> if previous_path, do: System.put_env("PATH", previous_path), else: System.delete_env("PATH") end)
 
-    {:ok, profile} = ExecutionProfiles.create(%{name: "SSH cached", workspace_base: "/remote/base", worker: %{"ssh_hosts" => ["host-a"]}})
-    {:ok, lane} = Lanes.create(%{slug: "lane", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "SSH cached",
+        workspace_base: "/remote/base",
+        worker: %{"ssh_hosts" => ["host-a"]}
+      })
+
+    {:ok, lane} =
+      Lanes.create(%{slug: "lane", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
     File.rm!(fake_ssh)
 
     assert {:ok, updated} = ExecutionProfiles.update(profile, %{description: "host is down"})
@@ -383,7 +454,10 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
   @tag :tmp_dir
   test "dispatch reservations survive owner death until explicitly released", %{tmp_dir: root} do
     {:ok, profile} = ExecutionProfiles.create(%{name: "Reserved", workspace_base: Path.join(root, "one"), worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "reserved", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{slug: "reserved", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
     {:ok, lane} = Lanes.set_enabled(lane, true)
     parent = self()
 
@@ -420,7 +494,14 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
   test "a preparing dispatch retains its profile after an equivalent-infrastructure relink", %{tmp_dir: root} do
     {:ok, captured} = ExecutionProfiles.create(%{name: "Captured", workspace_base: root, worker: %{}})
     {:ok, replacement} = ExecutionProfiles.create(%{name: "Replacement", workspace_base: root, worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "preparing", execution_profile_id: captured.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "preparing",
+        execution_profile_id: captured.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, lane} = Lanes.set_enabled(lane, true)
     {:ok, token, _snapshot} = LaneStore.reserve_dispatch(lane.id)
 
@@ -438,7 +519,14 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
     test "#{mode} profile deletion waits for queued history after a dispatch releases its reservation", %{tmp_dir: root} do
       {:ok, captured} = ExecutionProfiles.create(%{name: "Queued history", workspace_base: root, worker: %{}})
       {:ok, replacement} = ExecutionProfiles.create(%{name: "Replacement", workspace_base: root, worker: %{}})
-      {:ok, lane} = Lanes.create(%{slug: "queued-history", execution_profile_id: captured.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+      {:ok, lane} =
+        Lanes.create(%{
+          slug: "queued-history",
+          execution_profile_id: captured.id,
+          config: %{"tracker" => %{"kind" => "memory"}}
+        })
+
       {:ok, lane} = Lanes.set_enabled(lane, true)
       {:ok, token, _snapshot} = LaneStore.reserve_dispatch(lane.id)
       issue = %SymphonyElixir.Tracker.Issue{id: "queued-issue", identifier: "QUEUED-1", state: "Todo"}
@@ -464,10 +552,33 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
 
   @tag :tmp_dir
   test "concurrent profile edits, relinking and deletion leave complete results", %{tmp_dir: root} do
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Concurrent", workspace_base: root, worker: %{"max_concurrent_agents_per_host" => 2}})
-    {:ok, other} = ExecutionProfiles.create(%{name: "Other", workspace_base: Path.join(root, "other"), worker: %{"max_concurrent_agents_per_host" => 7}})
-    {:ok, first} = Lanes.create(%{slug: "concurrent-first", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
-    {:ok, second} = Lanes.create(%{slug: "concurrent-second", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Concurrent",
+        workspace_base: root,
+        worker: %{"max_concurrent_agents_per_host" => 2}
+      })
+
+    {:ok, other} =
+      ExecutionProfiles.create(%{
+        name: "Other",
+        workspace_base: Path.join(root, "other"),
+        worker: %{"max_concurrent_agents_per_host" => 7}
+      })
+
+    {:ok, first} =
+      Lanes.create(%{
+        slug: "concurrent-first",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
+    {:ok, second} =
+      Lanes.create(%{
+        slug: "concurrent-second",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
 
     results =
       [
@@ -490,13 +601,31 @@ defmodule SymphonyElixir.ExecutionProfilesTest do
   @tag :tmp_dir
   @tag :remediation
   test "remediation: historical runs prevent profile deletion after safe lane relinking", %{tmp_dir: root} do
-    {:ok, original} = ExecutionProfiles.create(%{name: "Historical", workspace_base: Path.join(root, "original"), worker: %{}})
-    {:ok, replacement} = ExecutionProfiles.create(%{name: "Replacement", workspace_base: Path.join(root, "replacement"), worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "historical-profile", execution_profile_id: original.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, original} =
+      ExecutionProfiles.create(%{name: "Historical", workspace_base: Path.join(root, "original"), worker: %{}})
+
+    {:ok, replacement} =
+      ExecutionProfiles.create(%{name: "Replacement", workspace_base: Path.join(root, "replacement"), worker: %{}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "historical-profile",
+        execution_profile_id: original.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     issue = %SymphonyElixir.Tracker.Issue{id: "historical-issue", identifier: "HIST-1", state: "Todo"}
 
     assert :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "historical-profile-attempt"})
-    assert :ok = Runs.event("historical-profile-attempt", %{event: :turn_completed, message: "retained"}, %{input_tokens: 7}, 1)
+
+    assert :ok =
+             Runs.event(
+               "historical-profile-attempt",
+               %{event: :turn_completed, message: "retained"},
+               %{input_tokens: 7},
+               1
+             )
+
     assert :ok = Runs.finished("historical-profile-attempt", "done")
     run = Runs.get_by_attempt("historical-profile-attempt")
     assert run.execution_profile_id == original.id

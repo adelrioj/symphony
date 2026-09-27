@@ -10,7 +10,13 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
 
   setup do
     original = Application.get_env(:symphony_elixir, @endpoint, [])
-    Application.put_env(:symphony_elixir, @endpoint, Keyword.merge(original, server: false, secret_key_base: Config.operator_session_secret()))
+
+    Application.put_env(
+      :symphony_elixir,
+      @endpoint,
+      Keyword.merge(original, server: false, secret_key_base: Config.operator_session_secret())
+    )
+
     on_exit(fn -> Application.put_env(:symphony_elixir, @endpoint, original) end)
     start_supervised!({@endpoint, []})
     :ok
@@ -18,7 +24,15 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
 
   test "profile routes use the API authentication plug" do
     assert json_response(get(build_conn(), "/api/v1/execution-profiles"), 401)["error"]["code"] == "unauthorized"
-    assert json_response(post(build_conn() |> put_req_header("content-type", "application/json"), "/api/v1/execution-profiles", Jason.encode!(%{})), 401)["error"]["code"] == "unauthorized"
+
+    assert json_response(
+             post(
+               build_conn() |> put_req_header("content-type", "application/json"),
+               "/api/v1/execution-profiles",
+               Jason.encode!(%{})
+             ),
+             401
+           )["error"]["code"] == "unauthorized"
   end
 
   test "create, read and update preserve raw worker references" do
@@ -26,7 +40,12 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
     System.put_env("WORKER_API_KEY", "distinct-worker-test-secret")
     on_exit(fn -> SymphonyElixir.TestSupport.restore_env("WORKER_API_KEY", previous_secret) end)
 
-    attrs = %{name: "API profile", workspace_base: "/tmp/api-profile", worker: %{ssh_hosts: ["worker-1"], api_key: "$WORKER_API_KEY"}}
+    attrs = %{
+      name: "API profile",
+      workspace_base: "/tmp/api-profile",
+      worker: %{ssh_hosts: ["worker-1"], api_key: "$WORKER_API_KEY"}
+    }
+
     profile = json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(attrs)), 201)
 
     assert profile["name"] == "API profile"
@@ -37,7 +56,12 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
     assert shown["id"] == profile["id"]
     refute Jason.encode!([shown, listed]) =~ "distinct-worker-test-secret"
 
-    updated = json_response(put(api_conn(), "/api/v1/execution-profiles/#{profile["id"]}", Jason.encode!(%{description: "Updated"})), 200)
+    updated =
+      json_response(
+        put(api_conn(), "/api/v1/execution-profiles/#{profile["id"]}", Jason.encode!(%{description: "Updated"})),
+        200
+      )
+
     assert updated["description"] == "Updated"
     assert updated["worker"] == profile["worker"]
     refute Jason.encode!(updated) =~ "distinct-worker-test-secret"
@@ -73,7 +97,16 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
     assert updated["worker"]["api_key"] == "$REDACTED"
     assert ExecutionProfiles.get(created["id"]).worker["api_key"] == "literal-worker-secret"
 
-    errors = json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "No source", worker: %{api_key: "$REDACTED"}})), 422)["errors"]
+    errors =
+      json_response(
+        post(
+          api_conn(),
+          "/api/v1/execution-profiles",
+          Jason.encode!(%{name: "No source", worker: %{api_key: "$REDACTED"}})
+        ),
+        422
+      )["errors"]
+
     assert Enum.any?(errors, &(&1["path"] == "worker.api_key"))
   end
 
@@ -85,7 +118,12 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
       "extension" => %{"keep" => [1, false]}
     }
 
-    created = json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "Collection secrets", worker: worker})), 201)
+    created =
+      json_response(
+        post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "Collection secrets", worker: worker})),
+        201
+      )
+
     shown = json_response(get(api_conn(), "/api/v1/execution-profiles/#{created["id"]}"), 200)
 
     for secret <- ["collection-secret", "array-secret", "nested-secret"] do
@@ -96,7 +134,16 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
     assert Enum.at(shown["worker"]["tokens"], 1) == "$WORKER_TOKEN"
     assert shown["worker"]["extension"] == worker["extension"]
 
-    updated = json_response(put(api_conn(), "/api/v1/execution-profiles/#{created["id"]}", Jason.encode!(Map.put(shown, "description", "Unrelated edit"))), 200)
+    updated =
+      json_response(
+        put(
+          api_conn(),
+          "/api/v1/execution-profiles/#{created["id"]}",
+          Jason.encode!(Map.put(shown, "description", "Unrelated edit"))
+        ),
+        200
+      )
+
     assert updated["description"] == "Unrelated edit"
     assert ExecutionProfiles.get(created["id"]).worker == worker
   end
@@ -115,10 +162,22 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
       "extension" => %{"keep" => true}
     }
 
-    created = json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "Dollar literal secrets", worker: worker})), 201)
+    created =
+      json_response(
+        post(
+          api_conn(),
+          "/api/v1/execution-profiles",
+          Jason.encode!(%{name: "Dollar literal secrets", worker: worker})
+        ),
+        201
+      )
+
     path = "/api/v1/execution-profiles/#{created["id"]}"
     shown = json_response(get(api_conn(), path), 200)
-    listed = json_response(get(api_conn(), "/api/v1/execution-profiles"), 200)["execution_profiles"] |> Enum.find(&(&1["id"] == created["id"]))
+
+    listed =
+      json_response(get(api_conn(), "/api/v1/execution-profiles"), 200)["execution_profiles"]
+      |> Enum.find(&(&1["id"] == created["id"]))
 
     assert created["worker"] == expected_worker
     assert shown["worker"] == expected_worker
@@ -133,16 +192,30 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
 
   test "duplicate names and invalid profile maps return field errors" do
     assert json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "Duplicate"})), 201)
-    errors = json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "Duplicate"})), 422)["errors"]
+
+    errors =
+      json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "Duplicate"})), 422)["errors"]
+
     assert Enum.any?(errors, &(&1["path"] == "name"))
 
-    errors = json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "Bad", worker: []})), 422)["errors"]
+    errors =
+      json_response(post(api_conn(), "/api/v1/execution-profiles", Jason.encode!(%{name: "Bad", worker: []})), 422)[
+        "errors"
+      ]
+
     assert Enum.any?(errors, &(&1["path"] == "worker"))
   end
 
   test "referenced profile deletion is rejected and lane remains linked" do
     {:ok, profile} = ExecutionProfiles.create(%{name: "Referenced", workspace_base: "/tmp/referenced", worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "profile-api-lane", execution_profile_id: profile.id, workspace_subdir: "profile-api-lane", config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "profile-api-lane",
+        execution_profile_id: profile.id,
+        workspace_subdir: "profile-api-lane",
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
 
     response = delete(api_conn(), "/api/v1/execution-profiles/#{profile.id}")
     assert response.status == 422
@@ -183,7 +256,14 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
 
   test "a migrated profile with an unknown base remains inspectable but cannot dispatch" do
     {:ok, profile} = ExecutionProfiles.create(%{name: "Repair base", workspace_base: "/tmp/profile-repair-base"})
-    {:ok, lane} = Lanes.create(%{slug: "repair-profile-base", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "repair-profile-base",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     Repo.update!(Ecto.Changeset.change(profile, workspace_base: nil, repair_error: "Invalid legacy workspace base"))
     assert :ok = LaneStore.refresh(lane.id)
 
@@ -191,13 +271,18 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiTest do
     assert repair["workspace_base"] == nil
     assert repair["repair_error"]
     assert {:error, {:lane_invalid, _}} = LaneStore.reserve_dispatch(lane.id)
-    assert %{"error" => error} = json_response(get(api_conn(), "/api/v1/lanes"), 200)["lanes"] |> Enum.find(&(&1["id"] == lane.id))
+
+    assert %{"error" => error} =
+             json_response(get(api_conn(), "/api/v1/lanes"), 200)["lanes"] |> Enum.find(&(&1["id"] == lane.id))
+
     assert error
   end
 
   test "bounded profile ids keep 404 and validation semantics" do
     assert json_response(get(api_conn(), "/api/v1/execution-profiles/999999999999999999999"), 422)["errors"]
-    assert json_response(get(api_conn(), "/api/v1/execution-profiles/999999"), 404)["error"]["code"] == "execution_profile_not_found"
+
+    assert json_response(get(api_conn(), "/api/v1/execution-profiles/999999"), 404)["error"]["code"] ==
+             "execution_profile_not_found"
   end
 
   defp api_conn do

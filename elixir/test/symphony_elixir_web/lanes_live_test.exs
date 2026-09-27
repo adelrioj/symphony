@@ -11,14 +11,27 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
   setup do
     previous = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
     on_exit(fn -> Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous) end)
-    endpoint_config = :symphony_elixir |> Application.get_env(SymphonyElixirWeb.Endpoint, []) |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
+    endpoint_config =
+      :symphony_elixir
+      |> Application.get_env(SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
     {:ok, conn: Plug.Test.init_test_session(build_conn(), %{"operator" => true})}
   end
 
   test "renders one card per lane with state, links, and last error", %{conn: conn} do
-    {:ok, bugs} = Lanes.create(%{slug: "bugs", name: "Bugs", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}, prompt: "b"})
+    {:ok, bugs} =
+      Lanes.create(%{
+        slug: "bugs",
+        name: "Bugs",
+        execution_profile_id: new_profile!().id,
+        config: %{"tracker" => %{"kind" => "memory"}},
+        prompt: "b"
+      })
+
     :ok = LaneStore.mark_error(bugs.id, "Tracker preflight failed: unknown team")
 
     {:ok, view, html} = live(conn, "/")
@@ -36,7 +49,11 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
       Lanes.create(%{
         slug: "qa",
         execution_profile_id: new_profile!().id,
-        config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 60_000}, "codex" => %{"command" => "/bin/false"}},
+        config: %{
+          "tracker" => %{"kind" => "memory"},
+          "polling" => %{"interval_ms" => 60_000},
+          "codex" => %{"command" => "/bin/false"}
+        },
         prompt: "q"
       })
 
@@ -63,7 +80,14 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
 
   test "external store changes add and remove cards without an injected broadcast", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/")
-    {:ok, lane} = Lanes.create(%{slug: "external", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "external",
+        execution_profile_id: new_profile!().id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     wait_until(fn -> has_element?(view, "#lane-external") end)
     :ok = LaneStore.mark_error(lane.id, "Tracker preflight failed")
     wait_until(fn -> has_element?(view, "#lane-external", "Tracker preflight failed") end)
@@ -72,7 +96,13 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
   end
 
   test "an unresponsive lane keeps its error and controls visible until snapshot counts recover", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "slow-snapshot", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 60_000}}})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "slow-snapshot",
+        execution_profile_id: new_profile!().id,
+        config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 60_000}}
+      })
+
     {:ok, lane} = Lanes.set_enabled(lane, true)
     wait_until(fn -> LaneSupervisor.running?(lane.id) end)
     {:ok, view, _html} = live(conn, "/")
@@ -101,7 +131,13 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
   end
 
   test "invalid and deleted toggle IDs show an error without mutating another lane", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "removed", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "removed",
+        execution_profile_id: new_profile!().id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, view, _html} = live(conn, "/")
     render_click(view, "toggle", %{})
     assert has_element?(view, "#flash-error", "lane:")
@@ -114,7 +150,13 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
   end
 
   test "bearer authentication supports the connected landing view and mutations" do
-    {:ok, lane} = Lanes.create(%{slug: "bearer", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "bearer",
+        execution_profile_id: new_profile!().id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     conn = Plug.Conn.put_req_header(build_conn(), "authorization", "Bearer test-token")
     {:ok, view, _html} = live(conn, "/")
     view |> element("#lane-bearer button[phx-click='toggle']") |> render_click()
@@ -123,7 +165,13 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
   end
 
   test "a lane whose scheduler is restarting keeps controls visible and recovers counts", %{conn: conn} do
-    {:ok, lane} = Lanes.create(%{slug: "restarting", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "restarting",
+        execution_profile_id: new_profile!().id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, lane} = Lanes.set_enabled(lane, true)
     wait_until(fn -> is_pid(LaneRegistry.whereis(lane.id, :orchestrator)) end)
     runtime = LaneRegistry.whereis(lane.id, :runtime)

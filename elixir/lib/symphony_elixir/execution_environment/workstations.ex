@@ -3,8 +3,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   @behaviour SymphonyElixir.ExecutionEnvironment
 
   alias SymphonyElixir.ExecutionEnvironment
-  alias SymphonyElixir.ExecutionEnvironment.{Command, Config, Operations, Record}
+  alias SymphonyElixir.ExecutionEnvironment.{Command, Config, Credentials, Operations, Record}
   alias SymphonyElixir.ExecutionEnvironment.Workstations.Client
+  alias SymphonyElixir.GoogleCredentials
   alias SymphonyElixir.SSH.Target
 
   @required ~w(project location cluster config credential_configuration impersonate_service_account ssh_user)
@@ -16,7 +17,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   @impl true
   @spec validate_config(term()) :: :ok | {:error, term()}
   def validate_config(provider) do
-    if is_map(provider) and Enum.all?(@required, &(is_binary(provider[&1]) and String.trim(provider[&1]) != "")), do: :ok, else: {:error, {:invalid, :workstations_config}}
+    if is_map(provider) and Enum.all?(@required, &(is_binary(provider[&1]) and String.trim(provider[&1]) != "")),
+      do: :ok,
+      else: {:error, {:invalid, :workstations_config}}
   end
 
   @impl true
@@ -27,6 +30,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     with :ok <- validate_config(config.provider),
          {:ok, template} <- get(config, parent(config), opts),
          :ok <- compatible(template),
+         :ok <- credential_profile(config, template),
          {:ok, _} <- discover(config, opts) do
       :ok
     end
@@ -40,12 +44,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     with {:ok, templates} <- pages(config, cluster(config) <> "/workstationConfigs", "workstationConfigs", opts),
          {:ok, operations} <- operation_inventory(config, opts),
          {:ok, workstations} <- list_templates(config, templates, opts),
+         :ok <- credential_inventory(config, templates, workstations, operations, opts),
          {:ok, records} <- decode_owned(config, workstations, operations),
          {:ok, backing} <- backing_inventory(config, opts) do
       keys = MapSet.new(records, & &1.key)
-      owned_backing = Enum.filter(backing, &(get_in(&1, ["labels", "symphony-deployment"]) == deployment_hash(config.deployment_id)))
+
+      owned_backing =
+        Enum.filter(backing, &(get_in(&1, ["labels", "symphony-deployment"]) == deployment_hash(config.deployment_id)))
+
       orphans = Enum.reject(owned_backing, &MapSet.member?(keys, get_in(&1, ["labels", "symphony-ticket"])))
-      if orphans == [], do: {:ok, Enum.map(records, &capture_backing(&1, backing))}, else: {:error, {:unknown, {:orphan_backing_resources, safe_ids(orphans)}}}
+
+      if orphans == [],
+        do: {:ok, Enum.map(records, &capture_backing(&1, backing))},
+        else: {:error, {:unknown, {:orphan_backing_resources, safe_ids(orphans)}}}
     end
   end
 
@@ -54,7 +65,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   def ensure(config, record, opts) do
     opts = Client.options(config, opts)
 
-    with :ok <- identity(config, record),
+    with :ok <- credential_create_authority(config, record, opts),
+         :ok <- identity(config, record),
          {:ok, workstation} <- get(config, resource_name(config, record), opts) do
       ensure_existing(config, record, workstation, opts)
     else
@@ -85,7 +97,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     opts = Client.options(config, opts)
 
     updated =
-      Enum.reduce([:desired, :attempt_id, :terminal_observed_at, :issue_state, :issue_identifier], record, fn field, acc ->
+      Enum.reduce([:desired, :attempt_id, :terminal_observed_at, :issue_state, :issue_identifier], record, fn field,
+                                                                                                              acc ->
         if Map.has_key?(intent, field), do: Map.put(acc, field, intent[field]), else: acc
       end)
 
@@ -107,13 +120,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   def start(config, record, opts) do
     opts = Client.options(config, opts)
 
-    with {:ok, observed} <- ensure(config, record, opts),
-         {:ok, settled} <- settle(config, observed, opts) do
+    with :ok <- Credentials.authorize_start(config, record, opts),
+         {:ok, observed} <- ensure(config, record, opts),
+         {:ok, settled} <- settle(config, observed, opts),
+         :ok <- credential_start_guard(config, settled, opts) do
       cond do
         settled.phase == :running -> qualify_running(config, settled, opts)
         settled.desired != :running -> fail(settled, {:invalid, :workstations_intent})
         true -> mutate(config, settled, :start, opts)
       end
+    else
+      {:error, reason} when is_atom(reason) -> Credentials.failure(record, "cloud_authority")
+      {:error, failure} -> fail(record, failure)
+      {:error, _, _} = error -> error
     end
   end
 
@@ -137,12 +156,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   def destroy(config, record, opts) do
     opts = Client.options(config, opts)
 
-    with :ok <- identity(config, record),
+    with {:ok, record} <- Operations.reconcile_credentials(__MODULE__, config, record, opts),
+         :ok <- Credentials.authorize_destroy(config, record, opts),
+         :ok <- identity(config, record),
          {:ok, workstation} <- get(config, resource_name(config, record), opts),
          {:ok, owned} <- observe_owned(config, record, workstation) do
       destroy_owned(config, owned, opts)
     else
       {:error, :not_found} -> inspect_absence(config, record, opts)
+      {:error, :credential_outcome_unknown} -> Credentials.failure(record, "cloud_authority")
+      {:error, _, _} = error -> error
       {:error, failure} -> fail(record, failure)
     end
   end
@@ -238,11 +261,18 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp create(config, record, opts) do
     with {:ok, template} <- get(config, parent(config), opts),
-         :ok <- compatible(template) do
+         :ok <- compatible(template),
+         :ok <- credential_profile(config, template) do
       captured = %{
         record
         | template_identity: template["uid"],
-          metadata: Map.merge(record.metadata, %{"config_name" => parent(config), "config_fingerprint" => fingerprint(template), "disk_reclaim_policy" => "DELETE", "disk_archive_timeout" => "0s"})
+          metadata:
+            Map.merge(record.metadata, %{
+              "config_name" => parent(config),
+              "config_fingerprint" => fingerprint(template),
+              "disk_reclaim_policy" => "DELETE",
+              "disk_archive_timeout" => "0s"
+            })
       }
 
       pending = marker(:create, opts)
@@ -284,20 +314,46 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     with {:ok, durable} <- persist(config, candidate, opts),
          {:ok, workstation} <- get(config, resource_name(config, durable), opts),
          {:ok, fresh} <- observe_owned(config, durable, workstation) do
-      {method, suffix, query, body} =
-        if verb == :delete,
-          do: {:delete, "", [etag: fresh.version], nil},
-          else: {:post, ":" <> Atom.to_string(verb), [], %{"etag" => fresh.version}}
+      case credential_mutation_guard(config, fresh, verb, opts) do
+        :ok ->
+          submit_mutation(config, fresh, verb, opts)
 
-      case api(config, method, resource_name(config, fresh) <> suffix, query, body, opts) do
-        {:ok, operation} -> finish_mutation(config, fresh, verb, operation, opts)
-        {:error, failure} -> mutation_failure(config, fresh, verb, failure, opts)
+        {:error, failure} ->
+          reject_unsubmitted_mutation(config, fresh, pending, failure, opts)
       end
     else
       {:error, _, _} = error -> error
       {:error, failure} -> fail(candidate, failure)
     end
   end
+
+  defp submit_mutation(config, record, verb, opts) do
+    {method, suffix, query, body} =
+      if verb == :delete,
+        do: {:delete, "", [etag: record.version], nil},
+        else: {:post, ":" <> Atom.to_string(verb), [], %{"etag" => record.version}}
+
+    case api(config, method, resource_name(config, record) <> suffix, query, body, opts) do
+      {:ok, operation} -> finish_mutation(config, record, verb, operation, opts)
+      {:error, failure} -> mutation_failure(config, record, verb, failure, opts)
+    end
+  end
+
+  defp reject_unsubmitted_mutation(config, record, pending, failure, opts) do
+    rejected = %{pending | outcome: :failed}
+    candidate = replace_marker(record, pending, rejected)
+
+    case persist(config, candidate, opts) do
+      {:ok, durable} ->
+        fail(durable, failure)
+
+      {:error, correction_failure, uncertain} ->
+        fail(replace_marker(uncertain, rejected, pending), correction_failure)
+    end
+  end
+
+  defp replace_marker(record, pending, replacement),
+    do: %{record | pending: Enum.map(record.pending, &if(&1 == pending, do: replacement, else: &1))}
 
   defp finish_mutation(config, record, verb, operation, opts) do
     if valid_operation?(config, operation, resource_name(config, record), verb) do
@@ -377,26 +433,36 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       "labels" => Map.merge(Map.get(workstation, "labels", %{}), expected["labels"])
     }
 
-    case api(config, :patch, resource_name(config, owned), [updateMask: "annotations,labels"], body, opts) do
-      {:ok, operation} -> finish_metadata(config, candidate, operation, annotation, opts)
-      {:error, failure} -> mutation_failure(config, candidate, :update, failure, opts)
+    case credential_environment(config, record, workstation) do
+      {:ok, environment} ->
+        body = if environment, do: Map.put(body, "env", environment), else: body
+        mask = if environment, do: "annotations,labels,env", else: "annotations,labels"
+
+        case api(config, :patch, resource_name(config, owned), [updateMask: mask], body, opts) do
+          {:ok, operation} -> finish_metadata(config, candidate, operation, annotation, environment, opts)
+          {:error, failure} -> mutation_failure(config, candidate, :update, failure, opts)
+        end
+
+      {:error, _} ->
+        Credentials.failure(candidate, "identity_mismatch")
     end
   end
 
-  defp finish_metadata(config, record, operation, annotation, opts) do
+  defp finish_metadata(config, record, operation, annotation, environment, opts) do
     if valid_operation?(config, operation, resource_name(config, record), :update) do
       known = replace_last(record, :update, %{id: operation["name"], outcome: :pending})
-      verify_metadata(config, known, operation, annotation, opts)
+      verify_metadata(config, known, operation, annotation, environment, opts)
     else
       fail(record, {:unknown, :invalid_operation_evidence})
     end
   end
 
-  defp verify_metadata(config, record, operation, annotation, opts) do
+  defp verify_metadata(config, record, operation, annotation, environment, opts) do
     with {:ok, terminal} <- await_operation(config, operation, opts),
          false <- Map.has_key?(terminal, "error"),
          {:ok, readback} <- get(config, resource_name(config, record), opts),
          true <- get_in(readback, ["annotations", @annotation]) == annotation,
+         true <- is_nil(environment) or readback["env"] == environment,
          {:ok, verified} <- observe_owned(config, record, readback) do
       {:ok, verified}
     else
@@ -502,14 +568,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     end
   end
 
-  defp mutation_failure(_config, record, verb, {:denied, _} = failure, _opts), do: fail(replace_last(record, verb, %{outcome: :failed}), failure)
+  defp mutation_failure(_config, record, verb, {:denied, _} = failure, _opts),
+    do: fail(replace_last(record, verb, %{outcome: :failed}), failure)
+
   defp mutation_failure(_config, record, _verb, failure, _opts), do: fail(record, failure)
 
   defp observed_pending(pending, operations, target) do
     resolved = Enum.map(pending, &resolve(&1, operations, target))
 
     Enum.reduce(operations, resolved, fn operation, acc ->
-      if operation["done"] != true and get_in(operation, ["metadata", "target"]) == target and not Enum.any?(acc, &(&1.id == operation["name"])) do
+      if operation["done"] != true and get_in(operation, ["metadata", "target"]) == target and
+           not Enum.any?(acc, &(&1.id == operation["name"])) do
         acc ++ [unlisted_operation(operation)]
       else
         acc
@@ -563,7 +632,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp valid_operation?(config, operation, target, verb) do
     operation_name?(config, operation["name"]) and
-      get_in(operation, ["metadata", "target"]) == target and get_in(operation, ["metadata", "verb"]) == Atom.to_string(verb)
+      get_in(operation, ["metadata", "target"]) == target and
+      get_in(operation, ["metadata", "verb"]) == Atom.to_string(verb)
   end
 
   defp operation_name?(config, name), do: operation_name_in_scope?(config.provider, name)
@@ -608,8 +678,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
       cond do
         leftovers != [] -> fail(captured, {:unknown, {:backing_resources_remaining, safe_ids(leftovers)}})
-        deleted?(settled) -> absent(captured, %{deleted_uid: ref_uid(record), backing_absent: true})
-        never_created?(settled) -> absent(captured, %{create_rejected: true, backing_absent: true})
+        deleted?(settled) -> absent(config, captured, %{deleted_uid: ref_uid(record), backing_absent: true}, opts)
+        never_created?(settled) -> absent(config, captured, %{create_rejected: true, backing_absent: true}, opts)
         true -> fail(captured, {:unknown, :absence_without_delete_evidence})
       end
     else
@@ -626,13 +696,24 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       Map.get(record.metadata, "backing_resources", []) == []
   end
 
-  defp absent(record, evidence),
-    do: {:ok, %{record | absent?: true, phase: :stopped, proof: {:quiescent, evidence}}}
+  defp absent(config, record, evidence, opts) do
+    absent = %{record | absent?: true, phase: :stopped, proof: {:quiescent, evidence}}
+
+    with {:ok, reconciled} <- Operations.reconcile_credentials(__MODULE__, config, absent, opts),
+         :ok <- Credentials.authorize_destroy(config, reconciled, opts) do
+      {:ok, reconciled}
+    else
+      {:error, _, _} = error -> error
+      {:error, _} -> Credentials.failure(absent, "cloud_authority")
+    end
+  end
 
   defp observe_owned(config, record, workstation) do
     with :ok <- identity(config, record),
          {:ok, durable} <- decode(config, workstation),
-         true <- durable.key == record.key and durable.issue_id == record.issue_id and durable.tracker_kind == record.tracker_kind and durable.workspace_path == record.workspace_path,
+         true <-
+           durable.key == record.key and durable.issue_id == record.issue_id and
+             durable.tracker_kind == record.tracker_kind and durable.workspace_path == record.workspace_path,
          true <- is_nil(record.provider_ref) or ref_uid(record) == workstation["uid"],
          true <- nonblank?(record.template_identity) and record.template_identity == durable.template_identity,
          true <- workstation["name"] == resource_name(config, record),
@@ -646,7 +727,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
          | provider_ref: %{name: workstation["name"], uid: workstation["uid"]},
            version: workstation["etag"],
            template_identity: durable.template_identity,
-           metadata: Map.merge(durable.metadata, record.metadata),
+           metadata: Credentials.merge_metadata(durable.metadata, record.metadata),
            pending: pending
        }}
     else
@@ -676,18 +757,23 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   # The proof type is shared across adapters, but an operator loss declaration is specific to
   # the Kubernetes host model. Reaching Workstations means a record was routed to the wrong
   # adapter; fail loudly rather than fall through as merely "not quiescent".
-  defp identity(_config, %Record{proof: {:operator_declared_lost, _}}), do: {:error, {:invalid, :workstations_proof_unsupported}}
+  defp identity(_config, %Record{proof: {:operator_declared_lost, _}}),
+    do: {:error, {:invalid, :workstations_proof_unsupported}}
 
   defp identity(config, record) do
     valid =
-      record.kind == "google_workstations" and record.deployment_id == config.deployment_id and record.scope == Config.scope(config) and
-        record.key == ExecutionEnvironment.resource_key(record.deployment_id, record.tracker_kind, record.issue_id) and valid_config_name?(config, config_name(config, record))
+      record.kind == "google_workstations" and record.deployment_id == config.deployment_id and
+        record.scope == Config.scope(config) and
+        record.key == ExecutionEnvironment.resource_key(record.deployment_id, record.tracker_kind, record.issue_id) and
+        valid_config_name?(config, config_name(config, record))
 
     if valid, do: :ok, else: {:error, {:invalid, :workstations_ownership}}
   end
 
   defp valid_config_name?(config, name),
-    do: is_binary(name) and String.starts_with?(name, cluster(config) <> "/workstationConfigs/") and length(String.split(name, "/")) == 8 and not String.contains?(name, ["?", "#", ".."])
+    do:
+      is_binary(name) and String.starts_with?(name, cluster(config) <> "/workstationConfigs/") and
+        length(String.split(name, "/")) == 8 and not String.contains?(name, ["?", "#", ".."])
 
   defp metadata(record) do
     data =
@@ -716,10 +802,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   defp decode(config, workstation) do
     with encoded when is_binary(encoded) <- get_in(workstation, ["annotations", @annotation]),
          {:ok, data} when is_map(data) <- Jason.decode(encoded),
-         true <- Enum.all?(~w(key deployment_id tracker_kind issue_id kind workspace_path template_identity), &nonblank?(data[&1])),
+         true <-
+           Enum.all?(
+             ~w(key deployment_id tracker_kind issue_id kind workspace_path template_identity),
+             &nonblank?(data[&1])
+           ),
          true <- data["deployment_id"] == config.deployment_id and data["scope"] == Config.scope(config),
          true <- is_nil(data["provider_uid"]) or data["provider_uid"] == workstation["uid"],
-         true <- labels(data["deployment_id"], data["key"]) |> Enum.all?(fn {key, value} -> get_in(workstation, ["labels", key]) == value end),
+         true <-
+           labels(data["deployment_id"], data["key"])
+           |> Enum.all?(fn {key, value} -> get_in(workstation, ["labels", key]) == value end),
          {:ok, desired} <- enum(data["desired"], [:running, :stopped, :absent]),
          {:ok, pending} <- decode_pending(config.provider, data["pending"]),
          true <- is_map(data["metadata"]),
@@ -804,6 +896,125 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp nonblank?(value), do: is_binary(value) and String.trim(value) != ""
 
+  defp credential_profile(config, template) do
+    if Credentials.enabled?(config) do
+      env = get_in(template, ["container", "env"]) || %{}
+
+      valid =
+        config.kind == "google_workstations" and env["SYMPHONY_PROFILE"] == "features" and
+          env["SYMPHONY_CODEX_ENABLED"] == "1" and env["SYMPHONY_CODEX_SECRET"] == config.codex_credentials["secret"] and
+          not Map.has_key?(env, "SYMPHONY_CODEX_ASSIGNMENT") and not Map.has_key?(env, "SYMPHONY_CODEX_MODE")
+
+      if valid, do: :ok, else: {:error, {:invalid, :codex_profile}}
+    else
+      :ok
+    end
+  end
+
+  defp credential_create_authority(config, record, opts) do
+    if Credentials.enabled?(config) do
+      with {:ok, %{record: authority}} <- SymphonyElixir.CodexCredentials.read(config, opts),
+           assignment when is_map(assignment) <- Credentials.assignment(record),
+           expected =
+             Map.take(authority, ~w(schema credential_id epoch claim_id owner))
+             |> Map.put("secret_version", authority["head_version"]),
+           true <-
+             (authority["state"] in ["OWNED", "CHECKPOINTED", "RECOVERY_REQUIRED"] and expected == assignment) or
+               (not is_nil(record.provider_ref) and Credentials.resolved?(record)) do
+        :ok
+      else
+        _ -> {:error, {:unknown, :credential_outcome_unknown}}
+      end
+    else
+      if Credentials.tracked?(record), do: {:error, {:unknown, :credential_outcome_unknown}}, else: :ok
+    end
+  end
+
+  defp credential_start_guard(config, record, opts) do
+    if Credentials.enabled?(config) or Credentials.tracked?(record) do
+      with :ok <- Credentials.authorize_start(config, record, opts),
+           {:ok, template} <- get(config, config_name(config, record), opts),
+           :ok <- credential_profile(config, template),
+           {:ok, workstation} <- get(config, resource_name(config, record), opts),
+           {:ok, expected} <- credential_environment(config, record, workstation),
+           true <- workstation["env"] == expected do
+        :ok
+      else
+        _ -> {:error, :credential_outcome_unknown}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp credential_mutation_guard(config, record, :start, opts) do
+    case credential_start_guard(config, record, opts) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:unknown, reason}}
+    end
+  end
+
+  defp credential_mutation_guard(config, record, :delete, opts) do
+    case Credentials.authorize_destroy(config, record, opts) do
+      :ok -> :ok
+      {:error, _} -> {:error, {:unknown, :credential_outcome_unknown}}
+    end
+  end
+
+  defp credential_mutation_guard(_config, _record, _verb, _opts), do: :ok
+
+  defp credential_environment(config, record, workstation) do
+    unbound =
+      Credentials.data(record)["stage"] == "claimed" and
+        is_nil(get_in(Credentials.data(record), ["assignment", "owner", "workstation_uid"]))
+
+    old_assignment = credential_environment_assignment(workstation)
+
+    if Credentials.enabled?(config) and record.desired == :running and
+         not (unbound and workstation["state"] == "STATE_STOPPED") do
+      assigned_credential_environment(config, record, workstation, old_assignment)
+    else
+      if Credentials.tracked?(record) and not Credentials.enabled?(config),
+        do: {:error, :credential_outcome_unknown},
+        else: {:ok, nil}
+    end
+  end
+
+  defp credential_environment_assignment(workstation) do
+    case Jason.decode(Map.get(workstation, "env", %{})["SYMPHONY_CODEX_ASSIGNMENT"] || "null") do
+      {:ok, value} when is_map(value) -> value
+      _ -> %{}
+    end
+  end
+
+  defp assigned_credential_environment(config, record, workstation, old_assignment) do
+    assigned = Credentials.assignment(record)
+    mode = Credentials.data(record)["mode"]
+    env = Map.get(workstation, "env", %{})
+
+    reopened_recovery =
+      env["SYMPHONY_CODEX_MODE"] == "recover" and mode == "execute" and
+        old_assignment["claim_id"] == assigned["claim_id"]
+
+    valid = valid_credential_environment?(config, assigned, mode, env)
+    expected = Map.merge(env, %{"SYMPHONY_CODEX_ASSIGNMENT" => Jason.encode!(assigned), "SYMPHONY_CODEX_MODE" => mode})
+
+    if valid and not reopened_recovery and (expected == env or workstation["state"] == "STATE_STOPPED"),
+      do: {:ok, expected},
+      else: {:error, :credential_outcome_unknown}
+  end
+
+  defp valid_credential_environment?(config, assigned, mode, env) do
+    markers = %{
+      "SYMPHONY_PROFILE" => "features",
+      "SYMPHONY_CODEX_ENABLED" => "1",
+      "SYMPHONY_CODEX_SECRET" => config.codex_credentials["secret"]
+    }
+
+    is_map(assigned) and is_binary(get_in(assigned, ["owner", "workstation_uid"])) and mode in ["execute", "recover"] and
+      Enum.all?(markers, fn {key, value} -> not Map.has_key?(env, key) or env[key] == value end)
+  end
+
   defp compatible(template) do
     valid = nonblank?(template["uid"]) and template["reconciling"] != true
     safe = compatible_storage?(template) and compatible_runtime?(template) and compatible_network?(template)
@@ -836,7 +1047,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp retained_config(record, template) do
     with :ok <- compatible(template),
-         true <- template["uid"] == record.template_identity and fingerprint(template) == record.metadata["config_fingerprint"] do
+         true <-
+           template["uid"] == record.template_identity and
+             fingerprint(template) == record.metadata["config_fingerprint"] do
       :ok
     else
       _ -> {:error, {:invalid, :workstations_config_changed}}
@@ -845,9 +1058,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp fingerprint(template),
     do:
-      template |> Map.put_new("disableTcpConnections", false) |> Map.take(@runtime_fields) |> canonical() |> :erlang.term_to_binary() |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+      template
+      |> Map.put_new("disableTcpConnections", false)
+      |> Map.take(@runtime_fields)
+      |> canonical()
+      |> :erlang.term_to_binary()
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
 
-  defp canonical(map) when is_map(map), do: map |> Enum.map(fn {key, value} -> {key, canonical(value)} end) |> Enum.sort()
+  defp canonical(map) when is_map(map),
+    do: map |> Enum.map(fn {key, value} -> {key, canonical(value)} end) |> Enum.sort()
+
   defp canonical(list) when is_list(list), do: Enum.map(list, &canonical/1)
   defp canonical(value), do: value
 
@@ -865,6 +1086,73 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       {:halt, {:error, {:unknown, :invalid_inventory}}}
     end
   end
+
+  defp credential_inventory(config, templates, workstations, operations, opts) do
+    if Keyword.get(opts, :credential_inventory, false) do
+      credential_templates =
+        templates
+        |> Enum.filter(fn template ->
+          env = get_in(template, ["container", "env"]) || %{}
+          template["name"] == parent(config) or credential_markers?(env)
+        end)
+        |> MapSet.new(& &1["name"])
+
+      invalid_templates =
+        not MapSet.member?(credential_templates, parent(config)) or
+          Enum.any?(templates, &(not valid_config_name?(config, &1["name"])))
+
+      pending = Enum.any?(operations, &pending_credential_inventory_operation?(config, &1))
+      unaccounted = Enum.any?(workstations, &unaccounted_credential_workstation?(config, credential_templates, &1))
+
+      if invalid_templates or pending or unaccounted,
+        do: {:error, {:unknown, :credential_inventory_unaccounted}},
+        else: :ok
+    else
+      :ok
+    end
+  end
+
+  defp pending_credential_inventory_operation?(config, operation) do
+    target = get_in(operation, ["metadata", "target"])
+
+    operation["done"] != true and
+      (not is_binary(target) or target == cluster(config) or String.starts_with?(target, cluster(config) <> "/"))
+  end
+
+  defp unaccounted_credential_workstation?(config, credential_templates, workstation) do
+    template = inventory_workstation_template(config, workstation["name"])
+
+    relevant =
+      MapSet.member?(credential_templates, template) or credential_markers?(Map.get(workstation, "env", %{})) or
+        String.contains?(get_in(workstation, ["annotations", @annotation]) || "", "\"codex_credentials\"")
+
+    is_nil(template) or
+      (relevant and get_in(workstation, ["labels", "symphony-deployment"]) != deployment_hash(config.deployment_id))
+  end
+
+  defp inventory_workstation_template(config, name) when is_binary(name) do
+    case String.split(name, "/workstations/") do
+      [template, key] ->
+        if valid_config_name?(config, template) and key not in ["", ".", ".."] and segment(key) == key,
+          do: template,
+          else: nil
+
+      _ ->
+        nil
+    end
+  end
+
+  defp inventory_workstation_template(_config, _name), do: nil
+
+  defp credential_markers?(env) when is_map(env) do
+    env["SYMPHONY_PROFILE"] == "features" or
+      Enum.any?(
+        ~w(SYMPHONY_CODEX_ENABLED SYMPHONY_CODEX_SECRET SYMPHONY_CODEX_ASSIGNMENT SYMPHONY_CODEX_MODE),
+        &Map.has_key?(env, &1)
+      )
+  end
+
+  defp credential_markers?(_), do: true
 
   defp decode_owned(config, workstations, operations) do
     workstations
@@ -929,8 +1217,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   end
 
   defp complete(body) when is_map(body) do
-    if Map.get(body, "unreachable", []) == [] and Map.get(body, "unreachables", []) == [] and not Map.has_key?(body, "error") and
-         get_in(body, ["warning", "code"]) in [nil, "NO_RESULTS_ON_PAGE"], do: :ok, else: {:error, {:unknown, :partial_inventory}}
+    if Map.get(body, "unreachable", []) == [] and Map.get(body, "unreachables", []) == [] and
+         not Map.has_key?(body, "error") and
+         get_in(body, ["warning", "code"]) in [nil, "NO_RESULTS_ON_PAGE"],
+       do: :ok,
+       else: {:error, {:unknown, :partial_inventory}}
   end
 
   defp complete(_), do: {:error, {:unknown, :invalid_inventory}}
@@ -939,7 +1230,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     captured = Map.get(record.metadata, "backing_resources", [])
 
     Enum.filter(resources, fn resource ->
-      owned = labels(record.deployment_id, record.key) |> Enum.all?(fn {key, value} -> get_in(resource, ["labels", key]) == value end)
+      owned =
+        labels(record.deployment_id, record.key)
+        |> Enum.all?(fn {key, value} -> get_in(resource, ["labels", key]) == value end)
+
       owned or Enum.any?(captured, &(&1["id"] == resource["id"] and &1["selfLink"] == resource["selfLink"]))
     end)
   end
@@ -973,10 +1267,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   end
 
   defp owned_backing?(record, resource),
-    do: Enum.all?(labels(record.deployment_id, record.key), fn {key, value} -> get_in(resource, ["labels", key]) == value end)
+    do:
+      Enum.all?(labels(record.deployment_id, record.key), fn {key, value} ->
+        get_in(resource, ["labels", key]) == value
+      end)
 
   defp has_backing?(owned, kind),
-    do: Enum.any?(owned, &(is_binary(&1["id"]) and is_binary(&1["selfLink"]) and String.contains?(&1["selfLink"], kind)))
+    do:
+      Enum.any?(owned, &(is_binary(&1["id"]) and is_binary(&1["selfLink"]) and String.contains?(&1["selfLink"], kind)))
 
   defp get(config, path, opts), do: api(config, :get, path, [], nil, opts)
 
@@ -993,10 +1291,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     end
   end
 
-  defp labels(deployment, key), do: %{"symphony-managed" => "true", "symphony-deployment" => deployment_hash(deployment), "symphony-ticket" => key}
+  defp labels(deployment, key),
+    do: %{"symphony-managed" => "true", "symphony-deployment" => deployment_hash(deployment), "symphony-ticket" => key}
+
   defp deployment_hash(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower) |> binary_part(0, 32)
   defp segment(value), do: URI.encode(value, &URI.char_unreserved?/1)
-  defp region(config), do: "projects/" <> segment(config.provider["project"]) <> "/locations/" <> segment(config.provider["location"])
+
+  defp region(config),
+    do: "projects/" <> segment(config.provider["project"]) <> "/locations/" <> segment(config.provider["location"])
+
   defp cluster(config), do: region(config) <> "/workstationClusters/" <> segment(config.provider["cluster"])
   defp parent(config), do: cluster(config) <> "/workstationConfigs/" <> segment(config.provider["config"])
   defp config_name(config, record), do: Map.get(record.metadata, "config_name", parent(config))
@@ -1041,8 +1344,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   defp release_failed_stage({:ok, _} = connection, _stage), do: connection
 
   defp release_failed_stage(error, stage) do
-    Operations.release_staged_paths(stage)
-    error
+    case Operations.release_staged_paths(stage) do
+      :ok -> error
+      {:error, _} -> {:error, {:unknown, :local_cleanup_unconfirmed}}
+    end
   end
 
   defp connect_staged(config, record, gcloud, ssh, directory, supervisor, authority, opts) do
@@ -1057,9 +1362,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
         "--cluster=" <> config.provider["cluster"],
         "--config=" <> List.last(String.split(config_name(config, record), "/")),
         "--local-host-port=127.0.0.1:0"
-      ] ++ Client.auth_args(config)
+      ] ++ GoogleCredentials.auth_args(config.provider)
 
-    case Operations.start_staged_port(Keyword.fetch!(opts, :staged_paths), gcloud, args, env: [{"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}]) do
+    case Operations.start_staged_port(Keyword.fetch!(opts, :staged_paths), gcloud, args,
+           env: [{"CLOUDSDK_CORE_DISABLE_PROMPTS", "1"}]
+         ) do
       {:ok, port} -> establish_tunnel(config, port, ssh, directory, supervisor, authority, opts)
       error -> error
     end
@@ -1068,11 +1375,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   end
 
   defp establish_tunnel(config, port, ssh, directory, supervisor, authority, opts) do
-    timeout = max(Client.remaining(opts), 1)
-
     result =
       with {:ok, local_port} <- tunnel_ready(port, opts, ""),
-           {:ok, socket} <- :gen_tcp.connect({127, 0, 0, 1}, local_port, [:binary, active: false], timeout) do
+           remaining when remaining > 0 <- Client.remaining(opts),
+           {:ok, socket} <- :gen_tcp.connect({127, 0, 0, 1}, local_port, [:binary, active: false], remaining) do
         :gen_tcp.close(socket)
         known_hosts = Path.join(directory, "known_hosts")
 
@@ -1107,18 +1413,26 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
           "127.0.0.1"
         ]
 
-        with {:ok, %{status: 0}} <- Command.run(ssh, prefix ++ ["true"], Keyword.put(opts, :timeout_ms, max(Client.remaining(opts), 1))),
+        with :ok <- await_ssh(ssh, prefix ++ ["true"], opts),
              {:ok, stat} <- File.stat(known_hosts),
              true <- stat.size > 0,
              :ok <- File.chmod(known_hosts, 0o600) do
           target = %Target{
             executable: ssh,
-            prefix: Enum.map(prefix, fn value -> if value == "StrictHostKeyChecking=accept-new", do: "StrictHostKeyChecking=yes", else: value end),
+            prefix:
+              Enum.map(prefix, fn value ->
+                if value == "StrictHostKeyChecking=accept-new", do: "StrictHostKeyChecking=yes", else: value
+              end),
             label: "managed-workstation"
           }
 
-          Operations.open_connection(supervisor, authority, target, ports: [port], private_paths: [directory], staged_paths: Keyword.fetch!(opts, :staged_paths))
+          Operations.open_connection(supervisor, authority, target,
+            ports: [port],
+            private_paths: [directory],
+            staged_paths: Keyword.fetch!(opts, :staged_paths)
+          )
         else
+          {:error, {:unknown, _}} = error -> error
           _ -> {:error, {:unknown, :workstations_ssh_not_ready}}
         end
       else
@@ -1128,6 +1442,48 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     result
   rescue
     _ -> {:error, {:unknown, :workstations_tunnel_failed}}
+  end
+
+  defp await_ssh(ssh, args, opts, failure \\ {:error, {:unknown, {:workstations_ssh_not_ready, :deadline, nil}}}) do
+    case Client.remaining(opts) do
+      0 ->
+        failure
+
+      remaining ->
+        ssh_attempt(ssh, args, opts, remaining)
+    end
+  end
+
+  defp ssh_attempt(ssh, args, opts, remaining) do
+    case Command.run(ssh, args, Keyword.put(opts, :timeout_ms, remaining)) do
+      {:ok, %{status: 0}} ->
+        :ok
+
+      {:ok, %{status: status, output: output}} ->
+        if status == 255 and ssh_starting?(output) do
+          Process.sleep(min(Keyword.get(opts, :poll_interval_ms, 250), Client.remaining(opts)))
+          await_ssh(ssh, args, opts, {:error, {:unknown, {:workstations_ssh_not_ready, :transport, status}}})
+        else
+          {:error, {:unknown, {:workstations_ssh_not_ready, :exit, status}}}
+        end
+
+      {:error, {:unknown, {reason, _output}}} when reason in [:timeout, :output_limit] ->
+        {:error, {:unknown, {:workstations_ssh_not_ready, reason, nil}}}
+
+      {:error, {:unknown, reason}} when is_atom(reason) ->
+        {:error, {:unknown, {:workstations_ssh_not_ready, reason, nil}}}
+
+      _ ->
+        {:error, {:unknown, {:workstations_ssh_not_ready, :command_failed, nil}}}
+    end
+  end
+
+  defp ssh_starting?(output) do
+    # Retry only known pre-handshake diagnostics; mixed or unfamiliar output fails closed.
+    Regex.match?(
+      ~r/\A(?:(?:kex_exchange_identification: (?:read: Connection reset by peer|Connection closed by remote host)|Connection (?:reset|closed) by (?:127\.0\.0\.1|UNKNOWN) port \d+|ssh: connect to host 127\.0\.0\.1 port \d+: (?:Connection refused|Connection timed out))\r?\n?)+\z/,
+      output
+    )
   end
 
   defp private_directory_path do

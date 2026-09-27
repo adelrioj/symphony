@@ -78,7 +78,13 @@ defmodule SymphonyElixir.Agent.ClaudeRealSSHTest do
       ]
 
       target = %SSH.Target{executable: System.find_executable("ssh"), prefix: prefix, label: "real-ssh"}
-      context = %SymphonyElixir.ExecutionContext{mode: :ssh, workspace_root: workspace, target: target, worker_host: "real-ssh"}
+
+      context = %SymphonyElixir.ExecutionContext{
+        mode: :ssh,
+        workspace_root: workspace,
+        target: target,
+        worker_host: "real-ssh"
+      }
 
       {:ok, session} = Claude.start_session(workspace, execution_context: context)
       on_exit(fn -> Claude.stop_session(session) end)

@@ -365,7 +365,13 @@ defmodule SymphonyElixir.LiveE2ETest do
   # Registers its own archive the moment the issue exists, so a scope issue can never be created
   # without a discard attached to it.
   defp create_scope_issue!(team, state, label) do
-    issue = create_issue!(team["id"], nil, state["id"], "Symphony live cycle scope #{label} #{System.unique_integer([:positive])}")
+    issue =
+      create_issue!(
+        team["id"],
+        nil,
+        state["id"],
+        "Symphony live cycle scope #{label} #{System.unique_integer([:positive])}"
+      )
 
     on_exit(fn -> archive_issue(issue.id) end)
 
@@ -539,8 +545,11 @@ defmodule SymphonyElixir.LiveE2ETest do
 
   defp cycle_ends_at!(%{"endsAt" => ends_at}) when is_binary(ends_at) do
     case DateTime.from_iso8601(ends_at) do
-      {:ok, datetime, _utc_offset} -> DateTime.truncate(datetime, :second)
-      {:error, reason} -> flunk("expected an ISO8601 endsAt on the active cycle, got #{inspect(ends_at)}: #{inspect(reason)}")
+      {:ok, datetime, _utc_offset} ->
+        DateTime.truncate(datetime, :second)
+
+      {:error, reason} ->
+        flunk("expected an ISO8601 endsAt on the active cycle, got #{inspect(ends_at)}: #{inspect(reason)}")
     end
   end
 
@@ -772,7 +781,9 @@ defmodule SymphonyElixir.LiveE2ETest do
         output
 
       {:ok, {output, status}} ->
-        flunk("failed to read remote result from #{worker_host}:#{remote_result_path} (status #{status}): #{inspect(output)}")
+        flunk(
+          "failed to read remote result from #{worker_host}:#{remote_result_path} (status #{status}): #{inspect(output)}"
+        )
 
       {:error, reason} ->
         flunk("failed to read remote result from #{worker_host}:#{remote_result_path}: #{inspect(reason)}")
@@ -858,8 +869,11 @@ defmodule SymphonyElixir.LiveE2ETest do
                    max_turns: 3,
                    execution_context:
                      case SymphonyElixir.Config.settings!().worker.ssh_hosts do
-                       [] -> SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
-                       [host | _] -> SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, host)
+                       [] ->
+                         SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+
+                       [host | _] ->
+                         SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, host)
                      end
                  )
 

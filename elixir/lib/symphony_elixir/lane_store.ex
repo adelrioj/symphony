@@ -144,10 +144,12 @@ defmodule SymphonyElixir.LaneStore do
   def protect_environment(lane_id, identity), do: GenServer.call(__MODULE__, {:protect_environment, lane_id, identity})
 
   @spec protect_environment(lane_id(), binary() | nil, reference()) :: {:ok, reference()} | {:error, term()}
-  def protect_environment(lane_id, identity, token), do: GenServer.call(__MODULE__, {:protect_environment, lane_id, identity, token})
+  def protect_environment(lane_id, identity, token),
+    do: GenServer.call(__MODULE__, {:protect_environment, lane_id, identity, token})
 
   @spec release_environment(lane_id(), reference(), :empty_inventory) :: :ok | {:error, term()}
-  def release_environment(lane_id, token, :empty_inventory), do: GenServer.call(__MODULE__, {:release_environment, lane_id, token})
+  def release_environment(lane_id, token, :empty_inventory),
+    do: GenServer.call(__MODULE__, {:release_environment, lane_id, token})
 
   @doc false
   @spec preflight_result(Entry.t(), :ok | {:error, term()}, (-> :ok | {:ok, pid()} | {:error, term()})) :: :ok
@@ -198,7 +200,8 @@ defmodule SymphonyElixir.LaneStore do
   @impl true
   def handle_call({:mutate, {:delete_profile, id}, fun, reason}, from, state) do
     if Enum.any?(state.reservations, fn {_token, reservation} -> reservation.profile_id == id end) do
-      {:reply, {:error, [%{path: "dispatches", message: "profile is still referenced by preparing or active attempts"}]}, state}
+      {:reply,
+       {:error, [%{path: "dispatches", message: "profile is still referenced by preparing or active attempts"}]}, state}
     else
       flush_run_references()
       handle_call({:mutate, nil, fun, reason}, from, state)
@@ -225,7 +228,12 @@ defmodule SymphonyElixir.LaneStore do
         identity = effective_identity(entry.settings)
         reservation = %{lane_id: id, profile_id: entry.profile_id, owner: owner, monitor: monitor, identity: identity}
 
-        state = %{state | reservations: Map.put(state.reservations, token, reservation), reservation_monitors: Map.put(state.reservation_monitors, monitor, token)}
+        state = %{
+          state
+          | reservations: Map.put(state.reservations, token, reservation),
+            reservation_monitors: Map.put(state.reservation_monitors, monitor, token)
+        }
+
         {:reply, {:ok, token, entry}, state}
 
       {:ok, %Entry{error: error}} ->
@@ -291,7 +299,10 @@ defmodule SymphonyElixir.LaneStore do
 
       if current == identity and identity_check(state, id, identity) == :ok do
         token = make_ref()
-        guard = state.guards |> Map.fetch!(id) |> Map.merge(%{identity: identity, token: token}) |> Map.delete(:released?)
+
+        guard =
+          state.guards |> Map.fetch!(id) |> Map.merge(%{identity: identity, token: token}) |> Map.delete(:released?)
+
         {:reply, {:ok, token}, put_in(state.guards[id], guard)}
       else
         {:reply, {:error, :environment_identity_in_use}, state}
@@ -301,8 +312,11 @@ defmodule SymphonyElixir.LaneStore do
 
   def handle_call({:release_environment, id, token}, _from, state) do
     case Map.get(state.guards, id) do
-      %{token: ^token} = guard -> {:reply, :ok, put_in(state.guards[id], %{guard | token: nil} |> Map.put(:released?, true))}
-      _ -> {:reply, {:error, :invalid_environment_guard}, state}
+      %{token: ^token} = guard ->
+        {:reply, :ok, put_in(state.guards[id], %{guard | token: nil} |> Map.put(:released?, true))}
+
+      _ ->
+        {:reply, {:error, :invalid_environment_guard}, state}
     end
   end
 
@@ -403,7 +417,12 @@ defmodule SymphonyElixir.LaneStore do
 
         others ->
           persist_disabled(entry.lane_id)
-          %{entry | enabled: false, error: "workspace location conflicts with lane(s) #{others |> Enum.sort() |> Enum.join(", ")}"}
+
+          %{
+            entry
+            | enabled: false,
+              error: "workspace location conflicts with lane(s) #{others |> Enum.sort() |> Enum.join(", ")}"
+          }
       end
     end)
     |> Enum.reduce(state, fn entry, acc ->
@@ -831,7 +850,8 @@ defmodule SymphonyElixir.LaneStore do
     %{state | monitors: Map.put(state.monitors, ref, id)}
   end
 
-  defp tracker_changed?(%Entry{settings: %Schema{tracker: old}}, %Entry{settings: %Schema{tracker: new}}), do: old != new
+  defp tracker_changed?(%Entry{settings: %Schema{tracker: old}}, %Entry{settings: %Schema{tracker: new}}),
+    do: old != new
 
   defp notify_orchestrator(id) do
     if pid = LaneRegistry.whereis(id, :orchestrator), do: send(pid, {:lane_updated, id})
@@ -866,7 +886,12 @@ defmodule SymphonyElixir.LaneStore do
         end
       end)
 
-    %{state | guards: Map.delete(state.guards, id), reservations: reservations, reservation_monitors: reservation_monitors}
+    %{
+      state
+      | guards: Map.delete(state.guards, id),
+        reservations: reservations,
+        reservation_monitors: reservation_monitors
+    }
   end
 
   defp forget_monitors(state, id) do
@@ -921,7 +946,9 @@ defmodule SymphonyElixir.LaneStore do
   end
 
   defp identity_allowed?(_state, %Entry{settings: nil}), do: true
-  defp identity_allowed?(state, entry), do: identity_check(state, entry.lane_id, effective_identity(entry.settings), entry.settings) == :ok
+
+  defp identity_allowed?(state, entry),
+    do: identity_check(state, entry.lane_id, effective_identity(entry.settings), entry.settings) == :ok
 
   defp allow_identity_change(state, id, old_identity, new_settings) do
     case Map.get(state.guards, id) do
@@ -1012,8 +1039,13 @@ defmodule SymphonyElixir.LaneStore do
   end
 
   defp log_entry(entry) do
-    Enum.each(entry.warnings, &Logger.warning("Lane configuration warning lane_id=#{entry.lane_id} lane=#{entry.slug} message=#{&1}"))
-    if entry.error, do: Logger.error("Lane configuration error lane_id=#{entry.lane_id} lane=#{entry.slug} reason=#{entry.error}")
+    Enum.each(
+      entry.warnings,
+      &Logger.warning("Lane configuration warning lane_id=#{entry.lane_id} lane=#{entry.slug} message=#{&1}")
+    )
+
+    if entry.error,
+      do: Logger.error("Lane configuration error lane_id=#{entry.lane_id} lane=#{entry.slug} reason=#{entry.error}")
   end
 
   defp broadcast(entry) do

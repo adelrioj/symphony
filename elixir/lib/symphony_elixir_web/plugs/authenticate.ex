@@ -22,7 +22,10 @@ defmodule SymphonyElixirWeb.Plugs.Authenticate do
         if mode == :api, do: protect_cookie_request(conn), else: conn
 
       mode == :api ->
-        conn |> put_status(401) |> json(%{error: %{code: "unauthorized", message: "Missing or invalid operator token"}}) |> halt()
+        conn
+        |> put_status(401)
+        |> json(%{error: %{code: "unauthorized", message: "Missing or invalid operator token"}})
+        |> halt()
 
       true ->
         conn |> redirect(to: "/login") |> halt()
@@ -46,6 +49,9 @@ defmodule SymphonyElixirWeb.Plugs.Authenticate do
     Plug.CSRFProtection.call(conn, @csrf_options)
   rescue
     Plug.CSRFProtection.InvalidCSRFTokenError ->
-      conn |> put_status(403) |> json(%{error: %{code: "invalid_csrf_token", message: "A valid CSRF token is required"}}) |> halt()
+      conn
+      |> put_status(403)
+      |> json(%{error: %{code: "invalid_csrf_token", message: "A valid CSRF token is required"}})
+      |> halt()
   end
 end

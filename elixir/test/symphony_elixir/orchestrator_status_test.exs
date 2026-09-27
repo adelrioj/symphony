@@ -25,13 +25,24 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       content =
         if blocked?,
-          do: [%{"type" => "tool_use", "name" => "mcp__symphony__approval_prompt", "input" => %{"action" => "Need approval"}}],
+          do: [
+            %{
+              "type" => "tool_use",
+              "name" => "mcp__symphony__approval_prompt",
+              "input" => %{"action" => "Need approval"}
+            }
+          ],
           else: [%{"type" => "text", "text" => "Completed work"}]
 
       events = [
         %{"type" => "system", "subtype" => "init", "session_id" => "history-session"},
         %{"type" => "assistant", "message" => %{"content" => content}},
-        %{"type" => "result", "subtype" => if(blocked?, do: "error_during_execution", else: "success"), "is_error" => blocked?, "result" => "Finished"}
+        %{
+          "type" => "result",
+          "subtype" => if(blocked?, do: "error_during_execution", else: "success"),
+          "is_error" => blocked?,
+          "result" => "Finished"
+        }
       ]
 
       acc =
@@ -63,12 +74,25 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         hook_after_run: "printf after; exit 7"
       )
 
-      issue = %Issue{id: "history-#{outcome}", identifier: "HIST-#{outcome}", title: outcome, state: "Todo", dispatchable: true}
+      issue = %Issue{
+        id: "history-#{outcome}",
+        identifier: "HIST-#{outcome}",
+        title: outcome,
+        state: "Todo",
+        dispatchable: true
+      }
+
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
       parent = self()
 
       runner = fn issue, recipient, opts ->
-        opts = Keyword.merge(opts, backend_module: HistoryBackend, history_parent: parent, issue_state_fetcher: fn _ids -> {:ok, []} end)
+        opts =
+          Keyword.merge(opts,
+            backend_module: HistoryBackend,
+            history_parent: parent,
+            issue_state_fetcher: fn _ids -> {:ok, []} end
+          )
+
         AgentRunner.run(issue, recipient, opts)
       end
 
@@ -135,7 +159,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     payload = Presenter.state_payload(orchestrator, 1_000)
     assert [environment] = payload.environments
     assert environment.environment_id == record.key
-    assert environment.provider_resource_id == "projects/project/locations/region/workstationClusters/cluster/workstationConfigs/config/workstations/worker"
+
+    assert environment.provider_resource_id ==
+             "projects/project/locations/region/workstationClusters/cluster/workstationConfigs/config/workstations/worker"
+
     assert environment.phase == :unknown
     assert environment.desired == :stopped
     assert environment.occupies_slot
@@ -146,7 +173,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert {:ok, issue} = Presenter.issue_payload(record.issue_identifier, orchestrator, 1_000)
     encoded = Jason.encode!(%{state: payload, issue: issue})
 
-    for secret <- ["never-expose-this", "never-expose-key", "never-expose-token", "never-expose-authentication", "never-expose-provider-output", "never-expose-reference"] do
+    for secret <- [
+          "never-expose-this",
+          "never-expose-key",
+          "never-expose-token",
+          "never-expose-authentication",
+          "never-expose-provider-output",
+          "never-expose-reference"
+        ] do
       refute encoded =~ secret
     end
 
@@ -179,7 +213,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "stale attempt_ids cannot change replacement runtime, usage or exhaustion" do
     attempt_id = make_ref()
-    replacement = %{attempt_id: attempt_id, workspace_path: "/replacement", session_id: "replacement", codex_total_tokens: 0}
+
+    replacement = %{
+      attempt_id: attempt_id,
+      workspace_path: "/replacement",
+      session_id: "replacement",
+      codex_total_tokens: 0
+    }
+
     state = %Orchestrator.State{running: %{"issue" => replacement}}
     stale = make_ref()
     update = %{event: :session_started, timestamp: DateTime.utc_now(), session_id: "stale", usage: %{total_tokens: 999}}
@@ -417,7 +458,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         "type" => "assistant",
         "message" => %{
           "id" => "msg-1",
-          "usage" => %{"input_tokens" => 10, "cache_creation_input_tokens" => 20, "cache_read_input_tokens" => 30, "output_tokens" => 4},
+          "usage" => %{
+            "input_tokens" => 10,
+            "cache_creation_input_tokens" => 20,
+            "cache_read_input_tokens" => 30,
+            "output_tokens" => 4
+          },
           "content" => [%{"type" => "text", "text" => "Inspecting failure"}]
         }
       },
@@ -425,7 +471,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         "type" => "assistant",
         "message" => %{
           "id" => "msg-1",
-          "usage" => %{"input_tokens" => 10, "cache_creation_input_tokens" => 20, "cache_read_input_tokens" => 30, "output_tokens" => 6},
+          "usage" => %{
+            "input_tokens" => 10,
+            "cache_creation_input_tokens" => 20,
+            "cache_read_input_tokens" => 30,
+            "output_tokens" => 6
+          },
           "content" => [%{"type" => "tool_use", "name" => "Read", "input" => %{"file_path" => "/private/path"}}]
         }
       },
@@ -459,7 +510,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           "type" => "result",
           "subtype" => "success",
           "is_error" => false,
-          "usage" => %{"input_tokens" => 12, "cache_creation_input_tokens" => 20, "cache_read_input_tokens" => 90, "output_tokens" => 9},
+          "usage" => %{
+            "input_tokens" => 12,
+            "cache_creation_input_tokens" => 20,
+            "cache_read_input_tokens" => 90,
+            "output_tokens" => 9
+          },
           "result" => "Verified repair"
         },
         acc
@@ -477,7 +533,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           "type" => "result",
           "subtype" => "success",
           "is_error" => false,
-          "usage" => %{"input_tokens" => 1, "cache_creation_input_tokens" => 2, "cache_read_input_tokens" => 3, "output_tokens" => 2},
+          "usage" => %{
+            "input_tokens" => 1,
+            "cache_creation_input_tokens" => 2,
+            "cache_read_input_tokens" => 3,
+            "output_tokens" => 2
+          },
           "result" => "Finished follow-up"
         }
       ],
@@ -1844,16 +1905,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            }
          }
        }, "item started: command execution"},
-      {"item/completed", %{"params" => %{"item" => %{"type" => "fileChange", "status" => "completed"}}}, "item completed: file change"},
+      {"item/completed", %{"params" => %{"item" => %{"type" => "fileChange", "status" => "completed"}}},
+       "item completed: file change"},
       {"item/agentMessage/delta", %{"params" => %{"delta" => "hello"}}, "agent message streaming"},
       {"item/plan/delta", %{"params" => %{"delta" => "step"}}, "plan streaming"},
       {"item/reasoning/summaryTextDelta", %{"params" => %{"summaryText" => "thinking"}}, "reasoning summary streaming"},
-      {"item/reasoning/summaryPartAdded", %{"params" => %{"summaryText" => "section"}}, "reasoning summary section added"},
+      {"item/reasoning/summaryPartAdded", %{"params" => %{"summaryText" => "section"}},
+       "reasoning summary section added"},
       {"item/reasoning/textDelta", %{"params" => %{"textDelta" => "reason"}}, "reasoning text streaming"},
       {"item/commandExecution/outputDelta", %{"params" => %{"outputDelta" => "ok"}}, "command output streaming"},
       {"item/fileChange/outputDelta", %{"params" => %{"outputDelta" => "changed"}}, "file change output streaming"},
-      {"item/commandExecution/requestApproval", %{"params" => %{"parsedCmd" => "git status"}}, "command approval requested (git status)"},
-      {"item/fileChange/requestApproval", %{"params" => %{"fileChangeCount" => 2}}, "file change approval requested (2 files)"},
+      {"item/commandExecution/requestApproval", %{"params" => %{"parsedCmd" => "git status"}},
+       "command approval requested (git status)"},
+      {"item/fileChange/requestApproval", %{"params" => %{"fileChangeCount" => 2}},
+       "file change approval requested (2 files)"},
       {"item/tool/call", %{"params" => %{"tool" => "linear_graphql"}}, "dynamic tool call requested (linear_graphql)"},
       {"item/tool/requestUserInput", %{"params" => %{"question" => "Continue?"}}, "tool requires user input: Continue?"}
     ]
@@ -2012,7 +2077,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       workspace_path: "/remote/persistent/original-opaque-checkout",
       template_identity: "qualified-template",
       provider_ref: %{
-        name: "projects/project/locations/region/workstationClusters/cluster/workstationConfigs/config/workstations/worker",
+        name:
+          "projects/project/locations/region/workstationClusters/cluster/workstationConfigs/config/workstations/worker",
         uid: "worker-uid",
         private: "never-expose-reference"
       },

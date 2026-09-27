@@ -25,9 +25,25 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
   defp invoke(provider, :post, path, file, opts) do
     timeout = max(1, min(20_000, remaining(opts)))
     command = Keyword.get(opts, :command_fun, &Command.run/3)
-    args = ["--kubeconfig", provider["kubeconfig"], "--context", provider["context"], "--path", path, "--file", file, "--timeout-ms", to_string(timeout)]
 
-    case command.(System.find_executable("symphony-kubernetes-create") || "symphony-kubernetes-create", args, Keyword.merge(opts, timeout_ms: remaining(opts), max_output_bytes: 8_388_608)) do
+    args = [
+      "--kubeconfig",
+      provider["kubeconfig"],
+      "--context",
+      provider["context"],
+      "--path",
+      path,
+      "--file",
+      file,
+      "--timeout-ms",
+      to_string(timeout)
+    ]
+
+    case command.(
+           System.find_executable("symphony-kubernetes-create") || "symphony-kubernetes-create",
+           args,
+           Keyword.merge(opts, timeout_ms: remaining(opts), max_output_bytes: 8_388_608)
+         ) do
       {:ok, %{output: output, status: status}} -> decode(output, status, :post)
       _ -> {:error, {:unknown, :kubernetes_command_failed}}
     end
@@ -68,7 +84,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
     seconds = min(10, div(remaining(opts) - 1_000, 1_000))
 
     if seconds > 0 and is_binary(version) and version not in ["", "0"] do
-      path = query(collection, %{"watch" => "true", "fieldSelector" => "metadata.name=#{name}", "resourceVersion" => version, "timeoutSeconds" => to_string(seconds)})
+      path =
+        query(collection, %{
+          "watch" => "true",
+          "fieldSelector" => "metadata.name=#{name}",
+          "resourceVersion" => version,
+          "timeoutSeconds" => to_string(seconds)
+        })
 
       case request(config, :watch, path, nil, opts) do
         {:ok, %{status: 200, body: events}} when is_list(events) -> {:ok, events}
@@ -83,9 +105,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
 
   @spec private_directory(keyword()) :: {:ok, String.t(), Operations.staged_paths()} | {:error, term()}
   def private_directory(opts) do
-    path = Path.join(System.tmp_dir!(), "symphony-kubernetes-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false))
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-kubernetes-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+      )
 
-    with {:ok, lease} <- Operations.stage_private_paths(opts[:task_supervisor], Keyword.get(opts, :authority, self()), self(), [path]) do
+    with {:ok, lease} <-
+           Operations.stage_private_paths(opts[:task_supervisor], Keyword.get(opts, :authority, self()), self(), [path]) do
       case Operations.create_staged_directory(lease, path) do
         :ok ->
           {:ok, path, lease}
@@ -109,9 +136,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
   end
 
   defp credentials(provider) do
-    if Enum.all?(["kubeconfig", "context"], &(is_binary(provider[&1]) and String.trim(provider[&1]) != "")) and File.regular?(provider["kubeconfig"]),
-      do: :ok,
-      else: {:error, {:invalid, :kubernetes_credentials}}
+    if Enum.all?(["kubeconfig", "context"], &(is_binary(provider[&1]) and String.trim(provider[&1]) != "")) and
+         File.regular?(provider["kubeconfig"]),
+       do: :ok,
+       else: {:error, {:invalid, :kubernetes_credentials}}
   end
 
   defp arguments(:get, path, _file), do: {:ok, ["get", "--raw", path]}
@@ -139,15 +167,20 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
   defp arguments(_, _, _), do: {:error, {:invalid, :kubernetes_method}}
 
   defp patch_arguments(resource, name, namespace, file, extra \\ []),
-    do: {:ok, ["patch", resource, name, "--namespace", namespace, "--type=json", "--patch-file", file, "-o", "json"] ++ extra}
+    do:
+      {:ok,
+       ["patch", resource, name, "--namespace", namespace, "--type=json", "--patch-file", file, "-o", "json"] ++ extra}
 
   defp decode(output, 0, :watch) do
     output
     |> String.split("\n", trim: true)
     |> Enum.reduce_while({:ok, []}, fn line, {:ok, events} ->
       case Jason.decode(line) do
-        {:ok, %{"type" => type} = event} when type in ["ADDED", "MODIFIED", "DELETED", "BOOKMARK"] -> {:cont, {:ok, [event | events]}}
-        _ -> {:halt, {:error, {:unknown, :kubernetes_watch_history_lost}}}
+        {:ok, %{"type" => type} = event} when type in ["ADDED", "MODIFIED", "DELETED", "BOOKMARK"] ->
+          {:cont, {:ok, [event | events]}}
+
+        _ ->
+          {:halt, {:error, {:unknown, :kubernetes_watch_history_lost}}}
       end
     end)
     |> case do
@@ -168,7 +201,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
     params = page_params(token)
 
     case request(config, :get, query(path, params), nil, opts) do
-      {:ok, %{status: 200, body: %{"items" => items, "metadata" => metadata} = body}} when is_list(items) and is_map(metadata) ->
+      {:ok, %{status: 200, body: %{"items" => items, "metadata" => metadata} = body}}
+      when is_list(items) and is_map(metadata) ->
         with {:ok, items} <- typed_items(body, items) do
           continue_page(config, path, opts, items, metadata, acc, seen, restarts)
         end
@@ -197,7 +231,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
     valid =
       version != "" and item_kind != "" and item_kind != kind and
         Enum.all?(items, fn item ->
-          is_map(item) and Map.get(item, "apiVersion", version) == version and Map.get(item, "kind", item_kind) == item_kind
+          is_map(item) and Map.get(item, "apiVersion", version) == version and
+            Map.get(item, "kind", item_kind) == item_kind
         end)
 
     if valid do
@@ -229,6 +264,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Client do
     URI.to_string(%{uri | query: URI.encode_query(Map.merge(existing, params))})
   end
 
-  defp deadline(opts), do: Keyword.put_new_lazy(opts, :deadline, fn -> System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, 20_000) end)
+  defp deadline(opts),
+    do:
+      Keyword.put_new_lazy(opts, :deadline, fn ->
+        System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, 20_000)
+      end)
+
   defp remaining(opts), do: max(0, opts[:deadline] - System.monotonic_time(:millisecond))
 end

@@ -23,12 +23,23 @@ defmodule SymphonyElixir.RunsTest do
 
   test "ordered writes commit an attempt, ledger and cached usage before publishing" do
     lane_id = LaneContext.current!()
-    {:ok, %{version_id: version_id, profile_id: profile_id, config_identity: config_identity}} = LaneStore.lookup(lane_id)
+
+    {:ok, %{version_id: version_id, profile_id: profile_id, config_identity: config_identity}} =
+      LaneStore.lookup(lane_id)
+
     :ok = ObservabilityPubSub.subscribe_run("ordered")
 
     assert :ok = start_run("ordered")
     assert :ok = Runs.event("ordered", %{event: :session_started, message: "hello", session_id: "s1"}, %{}, 1)
-    assert :ok = Runs.event("ordered", %{event: :turn_completed, message: "done", session_id: "s1"}, %{input_tokens: 10, output_tokens: 5, cached_tokens: 4, total_tokens: 15}, 2)
+
+    assert :ok =
+             Runs.event(
+               "ordered",
+               %{event: :turn_completed, message: "done", session_id: "s1"},
+               %{input_tokens: 10, output_tokens: 5, cached_tokens: 4, total_tokens: 15},
+               2
+             )
+
     assert :ok = Runs.finished("ordered", "done")
 
     run = Runs.get_by_attempt("ordered")
@@ -53,7 +64,10 @@ defmodule SymphonyElixir.RunsTest do
 
     assert_receive {:run_event, %Event{kind: "agent_message"}}, 1_000
     assert %Run{turns: 3, cached_tokens: 7} = Repo.get!(Run, run.id)
-    assert [%Event{kind: "agent_message"}, %Event{kind: "usage", payload: %{"cached_tokens" => 7}}] = Runs.events(run.id)
+
+    assert [%Event{kind: "agent_message"}, %Event{kind: "usage", payload: %{"cached_tokens" => 7}}] =
+             Runs.events(run.id)
+
     Runs.event("committed", %{event: :notification}, %{cached_tokens: 2}, 1)
     assert %Run{turns: 3, cached_tokens: 9} = Runs.get_by_attempt("committed")
   end
@@ -72,7 +86,13 @@ defmodule SymphonyElixir.RunsTest do
     try do
       log =
         capture_log(fn ->
-          Runs.event("atomic", %{event: :turn_completed, session_id: "atomic-session"}, %{input_tokens: 99, total_tokens: 99}, 2)
+          Runs.event(
+            "atomic",
+            %{event: :turn_completed, session_id: "atomic-session"},
+            %{input_tokens: 99, total_tokens: 99},
+            2
+          )
+
           Runs.flush()
         end)
 
@@ -186,9 +206,22 @@ defmodule SymphonyElixir.RunsTest do
   test "source events retain their classification and readable names in the durable feed" do
     start_run("kinds")
 
-    Enum.each([:turn_input_required, :approval_required, :hook_before_run, :startup_failed, :turn_failed, "turn_started", "result", "hook", {:vendor, 7}], fn event ->
-      Runs.event("kinds", %{event: event}, %{}, 0)
-    end)
+    Enum.each(
+      [
+        :turn_input_required,
+        :approval_required,
+        :hook_before_run,
+        :startup_failed,
+        :turn_failed,
+        "turn_started",
+        "result",
+        "hook",
+        {:vendor, 7}
+      ],
+      fn event ->
+        Runs.event("kinds", %{event: event}, %{}, 0)
+      end
+    )
 
     run = Runs.get_by_attempt("kinds")
 
@@ -382,10 +415,24 @@ defmodule SymphonyElixir.RunsTest do
     """)
   end
 
-  defp issue, do: %Issue{id: "iss-1", identifier: "RN-1", title: "Run history", description: "", state: "Todo", url: "https://example.org/RN-1", dispatchable: true}
+  defp issue,
+    do: %Issue{
+      id: "iss-1",
+      identifier: "RN-1",
+      title: "Run history",
+      description: "",
+      state: "Todo",
+      url: "https://example.org/RN-1",
+      dispatchable: true
+    }
 
   defp start_run(attempt_id, extra \\ %{}) do
-    Runs.started(Map.merge(%{lane_id: LaneContext.current!(), issue: issue(), attempt_id: attempt_id, attempt: nil, worker_ref: nil}, extra))
+    Runs.started(
+      Map.merge(
+        %{lane_id: LaneContext.current!(), issue: issue(), attempt_id: attempt_id, attempt: nil, worker_ref: nil},
+        extra
+      )
+    )
   end
 
   defp await_deleted(id, attempts \\ 100)
@@ -425,7 +472,11 @@ defmodule SymphonyElixir.RunsTest do
     """
 
     {output, status} =
-      System.cmd(System.find_executable("mix"), ["run", "--no-start", "--no-compile", "-e", script], cd: Path.expand("../..", __DIR__), env: [{"MIX_ENV", "test"}], stderr_to_stdout: true)
+      System.cmd(System.find_executable("mix"), ["run", "--no-start", "--no-compile", "-e", script],
+        cd: Path.expand("../..", __DIR__),
+        env: [{"MIX_ENV", "test"}],
+        stderr_to_stdout: true
+      )
 
     assert status == 0, output
     if expected_output, do: assert(output =~ expected_output)

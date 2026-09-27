@@ -151,7 +151,8 @@ defmodule SymphonyElixir.GitHub.AgentTool do
   defp tool_error_payload(:missing_github_token) do
     %{
       "error" => %{
-        "message" => "Symphony is missing GitHub auth. Set `tracker.provider.token` in `WORKFLOW.md` or export `GITHUB_TOKEN`."
+        "message" =>
+          "Symphony is missing GitHub auth. Set `tracker.provider.token` in `WORKFLOW.md` or export `GITHUB_TOKEN`."
       }
     }
   end

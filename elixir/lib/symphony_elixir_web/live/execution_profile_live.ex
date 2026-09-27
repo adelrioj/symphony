@@ -15,8 +15,11 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
     end
 
     case parse_id(id) |> then(&ExecutionProfiles.get/1) do
-      nil -> {:ok, socket |> put_flash(:error, "Execution profile not found") |> push_navigate(to: "/execution-profiles")}
-      profile -> {:ok, assign_profile(socket, profile) |> assign(:errors, []) |> assign(:confirm_delete, false)}
+      nil ->
+        {:ok, socket |> put_flash(:error, "Execution profile not found") |> push_navigate(to: "/execution-profiles")}
+
+      profile ->
+        {:ok, assign_profile(socket, profile) |> assign(:errors, []) |> assign(:confirm_delete, false)}
     end
   end
 
@@ -105,8 +108,12 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
 
   defp refresh(socket) do
     case ExecutionProfiles.get(socket.assigns.profile.id) do
-      nil -> {:noreply, socket |> put_flash(:error, "Execution profile no longer exists") |> push_navigate(to: "/execution-profiles")}
-      profile -> {:noreply, assign_profile(socket, profile)}
+      nil ->
+        {:noreply,
+         socket |> put_flash(:error, "Execution profile no longer exists") |> push_navigate(to: "/execution-profiles")}
+
+      profile ->
+        {:noreply, assign_profile(socket, profile)}
     end
   end
 
@@ -115,8 +122,14 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
 
     errors =
       case Configuration.validate_profile(%{"worker" => profile.worker}) do
-        :ok -> if(profile.repair_error, do: [%{path: "profile", message: "Needs repair before use; correct the linked lane configuration."}], else: [])
-        {:error, errors} -> errors
+        :ok ->
+          if(profile.repair_error,
+            do: [%{path: "profile", message: "Needs repair before use; correct the linked lane configuration."}],
+            else: []
+          )
+
+        {:error, errors} ->
+          errors
       end
 
     assign(socket,
@@ -157,8 +170,11 @@ defmodule SymphonyElixirWeb.ExecutionProfileLive do
 
   defp valid_environment_detail(worker) do
     case worker["environment"] do
-      %{"kind" => kind, "deployment_id" => deployment} -> "#{kind} deployment #{deployment}"
-      _ -> if worker["ssh_hosts"] in [nil, []], do: "Local machine", else: "SSH: #{Enum.join(worker["ssh_hosts"], ", ")}"
+      %{"kind" => kind, "deployment_id" => deployment} ->
+        "#{kind} deployment #{deployment}"
+
+      _ ->
+        if worker["ssh_hosts"] in [nil, []], do: "Local machine", else: "SSH: #{Enum.join(worker["ssh_hosts"], ", ")}"
     end
   end
 

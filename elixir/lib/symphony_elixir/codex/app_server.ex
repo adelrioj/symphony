@@ -45,7 +45,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          {:ok, port} <- start_port(expanded_workspace, context, dynamic_tool_binding) do
       metadata = port_metadata(port, context.worker_host)
 
-      with {:ok, session_policies} <- Config.codex_runtime_settings(expanded_workspace, remote: ExecutionContext.remote?(context)),
+      with {:ok, session_policies} <-
+             Config.codex_runtime_settings(expanded_workspace, remote: ExecutionContext.remote?(context)),
            {:ok, thread_id} <-
              do_start_session(port, expanded_workspace, session_policies, dynamic_tool_binding) do
         {:ok,
@@ -123,7 +124,9 @@ defmodule SymphonyElixir.Codex.AppServer do
              }}
 
           {:error, reason} ->
-            Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
+            Logger.warning(
+              "Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}"
+            )
 
             emit_message(
               on_message,
@@ -159,7 +162,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp validate_workspace_cwd(workspace, %ExecutionContext{mode: :local, workspace_root: root}) when is_binary(workspace) do
+  defp validate_workspace_cwd(workspace, %ExecutionContext{mode: :local, workspace_root: root})
+       when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)
     expanded_root = root
     expanded_root_prefix = expanded_root <> "/"

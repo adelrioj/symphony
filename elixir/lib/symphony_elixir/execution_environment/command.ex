@@ -18,7 +18,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
 
   @spec with_json_file(term(), (String.t() -> result), keyword()) :: result | error() when result: term()
   def with_json_file(body, fun, opts) when is_function(fun, 1) do
-    directory = Path.join(System.tmp_dir!(), "symphony-command-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false))
+    directory =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-command-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+      )
 
     with_stage(opts, [directory], fn lease ->
       with :ok <- Operations.create_staged_directory(lease, directory),
@@ -32,7 +36,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Command do
 
   defp execute(executable, args, opts, timeout, limit) do
     clock = Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
-    remaining = if Keyword.has_key?(opts, :deadline), do: max(Keyword.fetch!(opts, :deadline) - clock.(), 0), else: timeout
+
+    remaining =
+      if Keyword.has_key?(opts, :deadline), do: max(Keyword.fetch!(opts, :deadline) - clock.(), 0), else: timeout
+
     deadline = System.monotonic_time(:millisecond) + min(timeout, remaining)
 
     with_stage(opts, [], fn lease ->

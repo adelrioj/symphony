@@ -68,7 +68,10 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
 
   test "new physical obligations invalidate an older stop proof across repeated cleanup failures" do
     stopped = %{record() | phase: :stopped, proof: {:quiescent, %{uid: "earlier-worker"}}}
-    {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(%{Lifecycle.new(stopped, "a", :cleanup) | phase: :stopped}, :destroy, 0)
+
+    {deleting, [{:provider, :destroy, id}]} =
+      Lifecycle.step(%{Lifecycle.new(stopped, "a", :cleanup) | phase: :stopped}, :destroy, 0)
+
     unresolved = %{stopped | phase: :unknown, proof: {:compute_unknown, %{worker_uid: "late-worker"}}}
     {retained, []} = Lifecycle.step(deleting, {:failed, id, {:unknown, :physical_outcome}, unresolved}, 1)
     assert Lifecycle.occupied?(retained)
@@ -89,7 +92,10 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
 
   test "later authoritative absence supersedes unknown deletion with an outstanding start" do
     proof = %{record() | phase: :stopped, proof: {:quiescent, %{uid: "pod"}}}
-    {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(%{Lifecycle.new(proof, "a", :cleanup) | phase: :stopped}, :destroy, 0)
+
+    {deleting, [{:provider, :destroy, id}]} =
+      Lifecycle.step(%{Lifecycle.new(proof, "a", :cleanup) | phase: :stopped}, :destroy, 0)
+
     late_start = %{proof | phase: :unknown, pending: [%{verb: :start, id: "late-start", outcome: :unknown}]}
     {unknown, []} = Lifecycle.step(deleting, {:failed, id, {:unknown, :timeout}, late_start}, 1)
     assert Lifecycle.occupied?(unknown)
@@ -141,6 +147,98 @@ defmodule SymphonyElixir.EnvironmentLifecycleTest do
     proof = %{record() | phase: :stopped, proof: {:quiescent, %{workers: []}}}
     {released, [{:release, :denied}]} = Lifecycle.step(still_unknown, {:stopped, id, proof}, 3)
     refute Lifecycle.occupied?(released)
+  end
+
+  test "physical stop and synthetic inspection cannot release an unresolved Codex assignment" do
+    assignment = credential_assignment()
+    credential = %{"assignment" => assignment, "stage" => "recovery_required", "reason" => "checkpoint_failed"}
+
+    record = %{
+      record()
+      | kind: "google_workstations",
+        provider_ref: %{name: assignment["owner"]["workstation_name"], uid: "ws-uid"},
+        metadata: %{"codex_credentials" => credential}
+    }
+
+    entry = %{Lifecycle.new(record, "new-recovery-attempt", :agent) | phase: :running}
+    {stopping, [{:provider, :stop, id}]} = Lifecycle.step(entry, {:agent_exited, "new-recovery-attempt", :done}, 0)
+
+    physical = %{
+      record
+      | phase: :stopped,
+        proof: {:quiescent, %{uid: "ws-uid", operation: "projects/p/locations/r/operations/stop"}}
+    }
+
+    {blocked, effects} = Lifecycle.step(stopping, {:stopped, id, physical}, 1)
+    assert effects == []
+    assert Lifecycle.occupied?(blocked)
+    assert blocked.record.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] == "original-attempt"
+    assert {blocked, []} == Lifecycle.step(blocked, :destroy, 2)
+  end
+
+  test "credential release requires an acknowledged exact disposition not a cleanup hook marker" do
+    assignment = credential_assignment()
+
+    proof = %{
+      "uid" => "ws-uid",
+      "operation" => "projects/p/locations/r/operations/stop",
+      "attempt_id" => "original-attempt"
+    }
+
+    disposition =
+      Map.take(assignment, ["schema", "credential_id", "epoch", "claim_id", "owner"])
+      |> Map.merge(%{
+        "secret_version" => "projects/123456/secrets/features-codex/versions/2",
+        "stop_proof" => proof,
+        "resource_acknowledged" => true
+      })
+
+    credential = %{"assignment" => assignment, "stage" => "committed", "disposition" => disposition}
+
+    record = %{
+      record()
+      | kind: "google_workstations",
+        provider_ref: %{name: assignment["owner"]["workstation_name"], uid: "ws-uid"},
+        metadata: %{"codex_credentials" => credential, "symphony_cleanup_hook_completed" => true},
+        proof: {:quiescent, %{uid: "ws-uid", operation: proof["operation"]}},
+        phase: :stopped
+    }
+
+    {stopping, _} =
+      Lifecycle.step(%{Lifecycle.new(record, "recovery-attempt", :agent) | phase: :running}, {:cancel, :done}, 0)
+
+    for changed <- [
+          put_in(record.metadata, ["codex_credentials", "disposition", "resource_acknowledged"], false),
+          put_in(record.metadata, ["codex_credentials", "disposition", "owner", "attempt_id"], "recovery-attempt"),
+          put_in(record.metadata, ["codex_credentials", "disposition", "epoch"], 2),
+          put_in(record.metadata, ["codex_credentials", "disposition", "claim_id"], "foreign-claim"),
+          put_in(record.metadata, ["codex_credentials", "disposition", "owner", "workstation_uid"], "foreign-uid")
+        ] do
+      {blocked, []} = Lifecycle.step(stopping, {:stopped, stopping.operation_id, %{record | metadata: changed}}, 1)
+      assert Lifecycle.occupied?(blocked)
+    end
+
+    {stopped, [{:release, :done}]} = Lifecycle.step(stopping, {:stopped, stopping.operation_id, record}, 1)
+    refute Lifecycle.occupied?(stopped)
+    assert {_, [{:provider, :destroy, _}]} = Lifecycle.step(stopped, :destroy, 2)
+  end
+
+  defp credential_assignment do
+    %{
+      "schema" => 1,
+      "credential_id" => "features-personal-codex",
+      "epoch" => 1,
+      "claim_id" => "claim-original",
+      "secret_version" => "projects/123456/secrets/features-codex/versions/1",
+      "owner" => %{
+        "deployment_id" => "deployment",
+        "lane" => "features",
+        "workstation_name" =>
+          "projects/p/locations/r/workstationClusters/c/workstationConfigs/features/workstations/se-ticket",
+        "workstation_uid" => "ws-uid",
+        "attempt_id" => "original-attempt"
+      }
+    }
   end
 
   test "retention uses saved UTC terminal stamp and fresh authoritative observation" do

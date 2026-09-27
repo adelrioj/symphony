@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   @moduledoc "Pure lifecycle transitions; only qualified provider evidence releases execution capacity."
-  alias SymphonyElixir.ExecutionEnvironment.Record
+  alias SymphonyElixir.ExecutionEnvironment.{Credentials, Record}
 
   defmodule Entry do
     @moduledoc false
@@ -57,7 +57,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   @spec step(Entry.t(), term(), integer()) :: {Entry.t(), [term()]}
   def step(%Entry{phase: :reserved} = entry, :prepare, _now), do: operation(entry, :prepare, :preparing)
 
-  def step(%Entry{} = entry, {:reconcile, operation}, _now) when operation in [:stop, :destroy, :inspect, :metadata, :cleanup_hook] do
+  def step(%Entry{} = entry, {:reconcile, operation}, _now)
+      when operation in [:stop, :destroy, :inspect, :metadata, :cleanup_hook] do
     phase =
       case operation do
         :stop -> :stopping
@@ -76,12 +77,24 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
     {%{entry | attempt_id: id, purpose: purpose, phase: :reserved, completion: nil, context: nil, last_error: nil}, []}
   end
 
-  def step(%Entry{phase: :preparing, operation_id: id} = entry, {:prepared, id, %Record{phase: :running} = record}, _now) when not is_nil(id) do
+  def step(
+        %Entry{phase: :preparing, operation_id: id} = entry,
+        {:prepared, id, %Record{phase: :running} = record},
+        _now
+      )
+      when not is_nil(id) do
     {%{entry | record: record, operation_id: nil}, []}
   end
 
-  def step(%Entry{phase: :preparing, operation_id: nil, operation_seq: seq, record: %Record{phase: :running}} = entry, :launch, _now) when seq > 0 do
-    {%{entry | phase: :running}, [{:launch_agent, entry.attempt_id}]}
+  def step(
+        %Entry{phase: :preparing, operation_id: nil, operation_seq: seq, record: %Record{phase: :running}} = entry,
+        :launch,
+        _now
+      )
+      when seq > 0 do
+    if Credentials.ready?(entry.record),
+      do: {%{entry | phase: :running}, [{:launch_agent, entry.attempt_id}]},
+      else: {entry, []}
   end
 
   def step(%Entry{phase: :running, attempt_id: id} = entry, {:agent_exited, id, completion}, _now) do
@@ -92,12 +105,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
     operation(%{entry | completion: completion}, :stop, :stopping)
   end
 
-  def step(%Entry{phase: :unknown, record: %Record{desired: :absent}} = entry, {:stopped, _id, _record}, _now), do: {entry, []}
+  def step(%Entry{phase: :unknown, record: %Record{desired: :absent}} = entry, {:stopped, _id, _record}, _now),
+    do: {entry, []}
 
-  def step(%Entry{phase: phase, operation_id: id} = entry, {:stopped, id, %Record{} = record}, _now) when phase in [:stopping, :unknown] and not is_nil(id) do
+  def step(%Entry{phase: phase, operation_id: id} = entry, {:stopped, id, %Record{} = record}, _now)
+      when phase in [:stopping, :unknown] and not is_nil(id) do
     record = invalidate_start_proof(record)
 
-    if quiescent?(record) and not unresolved?(record) do
+    if quiescent?(record) and not unresolved?(record) and Credentials.resolved?(record) do
       {%{entry | record: record, phase: :stopped, context: nil, operation_id: nil}, [{:release, entry.completion}]}
     else
       {%{entry | record: record, phase: :unknown}, []}
@@ -112,15 +127,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   def step(%Entry{phase: :stopped} = entry, :destroy, _now) do
     # Two distinct grounds may permit deletion, and they are deliberately not merged:
     # an adapter observed quiescence, or an operator declared the host permanently lost.
-    # `not unresolved?/1` still gates both — a declaration settles no pending operation, so a
-    # record holding an unresolved create stays retained exactly as create-drain requires.
-    if (quiescent?(entry.record) or declared_lost?(entry.record)) and not unresolved?(entry.record),
-      do: operation(entry, :destroy, :deleting),
-      else: {entry, []}
+    # `not unresolved?/1` and credential disposition still gate both — a declaration settles no
+    # pending operation, so a record holding an unresolved create stays retained exactly as create-drain requires.
+    if (quiescent?(entry.record) or declared_lost?(entry.record)) and not unresolved?(entry.record) and
+         Credentials.resolved?(entry.record),
+       do: operation(entry, :destroy, :deleting),
+       else: {entry, []}
   end
 
-  def step(%Entry{phase: phase, operation_id: id} = entry, {:destroyed, id, %Record{absent?: true} = record}, _now) when phase in [:deleting, :unknown] and not is_nil(id) do
-    if unresolved?(record) do
+  def step(%Entry{phase: phase, operation_id: id} = entry, {:destroyed, id, %Record{absent?: true} = record}, _now)
+      when phase in [:deleting, :unknown] and not is_nil(id) do
+    if unresolved?(record) or not Credentials.resolved?(record) do
       {entry, []}
     else
       {%{entry | record: record, phase: :absent, context: nil, operation_id: nil}, [:forget]}
@@ -133,18 +150,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   def occupied?(%Entry{phase: :absent}), do: false
 
   def occupied?(%Entry{phase: phase, record: record}) when phase in [:stopped, :deleting] do
-    not quiescent?(record) or unresolved_start?(record)
+    not quiescent?(record) or unresolved_start?(record) or not Credentials.resolved?(record)
   end
 
   def occupied?(%Entry{phase: :unknown, record: %Record{desired: :absent} = record}) do
-    not quiescent?(record) or unresolved_start?(record)
+    not quiescent?(record) or unresolved_start?(record) or not Credentials.resolved?(record)
   end
 
   def occupied?(%Entry{}), do: true
 
   @type terminal_observation :: :terminal | :nonterminal | :missing | :error
   @spec deletion_due?(Record.t(), terminal_observation(), non_neg_integer(), integer()) :: boolean()
-  def deletion_due?(%Record{terminal_observed_at: timestamp}, :terminal, retention_ms, now) when is_integer(timestamp) and is_integer(retention_ms) and retention_ms >= 0 do
+  def deletion_due?(%Record{terminal_observed_at: timestamp}, :terminal, retention_ms, now)
+      when is_integer(timestamp) and is_integer(retention_ms) and retention_ms >= 0 do
     now >= timestamp and now - timestamp >= retention_ms
   end
 
@@ -159,10 +177,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
   defp quiescent?(%Record{proof: {:quiescent, evidence}}), do: is_map(evidence) and map_size(evidence) > 0
   defp quiescent?(_record), do: false
   # An operator assertion is never quiescence; it is a separate ground, reported separately.
-  defp declared_lost?(%Record{proof: {:operator_declared_lost, evidence}}), do: is_map(evidence) and map_size(evidence) > 0
+  defp declared_lost?(%Record{proof: {:operator_declared_lost, evidence}}),
+    do: is_map(evidence) and map_size(evidence) > 0
+
   defp declared_lost?(_record), do: false
   defp unresolved?(record), do: Enum.any?(record.pending, &(&1.outcome in [:pending, :unknown]))
-  defp unresolved_start?(record), do: Enum.any?(record.pending, &(&1.verb in [:create, :start] and &1.outcome in [:pending, :unknown]))
+
+  defp unresolved_start?(record),
+    do: Enum.any?(record.pending, &(&1.verb in [:create, :start] and &1.outcome in [:pending, :unknown]))
+
   defp invalidate_start_proof(%Record{proof: {:compute_unknown, _}} = record), do: record
   # A declaration records what an operator asserted. An unrelated unresolved start must not
   # erase it; the start still blocks release through unresolved?/1.

@@ -91,7 +91,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler d
   end
 
   defp log_pass({:ok, summary}) do
-    if summary.accepted + summary.refused + summary.unresolved > 0, do: Logger.info("Host loss reconcile summary=#{inspect(summary)}")
+    if summary.accepted + summary.refused + summary.unresolved > 0,
+      do: Logger.info("Host loss reconcile summary=#{inspect(summary)}")
   end
 
   # A pass that cannot read is a pass that knows nothing, which is not the same as a clean one.
@@ -118,9 +119,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler d
 
   defp drive(config, object, summary, opts) do
     case Declaration.decode(object["spec"]) do
-      {:ok, declaration} -> settle(config, object, declaration, summary, opts)
+      {:ok, declaration} ->
+        settle(config, object, declaration, summary, opts)
+
       # A declaration the CRD schema should have rejected. Record it rather than retrying forever.
-      {:error, reason} -> record(config, object, refused_status(reason), Map.update!(summary, :refused, &(&1 + 1)), opts)
+      {:error, reason} ->
+        record(config, object, refused_status(reason), Map.update!(summary, :refused, &(&1 + 1)), opts)
     end
   end
 
@@ -142,11 +146,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler d
   defp accepted_status(declaration, records) do
     obligations = Enum.map(declaration.spec["obligationUIDs"], &%{"uid" => &1, "disposition" => "discharged"})
     environments = Enum.map(records, &%{"key" => &1.key, "state" => "discharged"})
-    %{"outcome" => "accepted", "observedAt" => timestamp(), "obligations" => obligations, "environments" => environments}
+
+    %{
+      "outcome" => "accepted",
+      "observedAt" => timestamp(),
+      "obligations" => obligations,
+      "environments" => environments
+    }
   end
 
   defp refused_status(reason), do: %{"outcome" => "refused", "observedAt" => timestamp(), "message" => inspect(reason)}
-  defp unresolved_status(reason), do: %{"outcome" => "unresolved", "observedAt" => timestamp(), "message" => inspect(reason)}
+
+  defp unresolved_status(reason),
+    do: %{"outcome" => "unresolved", "observedAt" => timestamp(), "message" => inspect(reason)}
 
   defp record(config, object, status, summary, opts) do
     patch = [%{"op" => "add", "path" => "/status", "value" => status}]
@@ -160,7 +172,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler d
       # adapter identity may write this subresource, and an identity that is refused it would
       # otherwise retry for ever, writing nothing and saying nothing about why.
       other ->
-        Logger.warning("Host loss outcome could not be recorded declaration=#{name(object)} outcome=#{status["outcome"]} reason=#{inspect(other)}")
+        Logger.warning(
+          "Host loss outcome could not be recorded declaration=#{name(object)} outcome=#{status["outcome"]} reason=#{inspect(other)}"
+        )
+
         summary
     end
   end
@@ -224,5 +239,6 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.DeclarationReconciler d
   defp timestamp, do: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
   defp collection(config),
-    do: "/apis/symphony.dev/v1alpha1/namespaces/#{URI.encode(config.provider["namespace"], &URI.char_unreserved?/1)}/hostlossdeclarations"
+    do:
+      "/apis/symphony.dev/v1alpha1/namespaces/#{URI.encode(config.provider["namespace"], &URI.char_unreserved?/1)}/hostlossdeclarations"
 end

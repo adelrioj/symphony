@@ -7,7 +7,10 @@ defmodule SymphonyElixir.Agent.CodexTest do
 
   test "to_result/1 maps a codex turn map with usage to a done Result" do
     turn = %{
-      result: %{"usage" => %{"input_tokens" => 4, "output_tokens" => 6, "total_tokens" => 10}, "summary" => "did the thing"},
+      result: %{
+        "usage" => %{"input_tokens" => 4, "output_tokens" => 6, "total_tokens" => 10},
+        "summary" => "did the thing"
+      },
       session_id: "thread-1-turn-1",
       thread_id: "thread-1",
       turn_id: "turn-1"

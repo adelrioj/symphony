@@ -3,7 +3,8 @@ defmodule SymphonyElixir.CLI do
   Entrypoint for the installation daemon, lane commands, and standalone Linear MCP.
   """
 
-  alias SymphonyElixir.LogFile
+  alias SymphonyElixir.CodexCredentials.Recovery
+  alias SymphonyElixir.{LogFile, Maintenance}
   alias SymphonyElixir.MCP.LinearServer
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
@@ -17,15 +18,27 @@ defmodule SymphonyElixir.CLI do
   @import_switches [slug: :string, name: :string, note: :string, data_root: :string]
   @export_switches [data_root: :string]
   @mcp_switches [linear_mcp: :boolean, workflow: :string]
+  @credential_switches [
+    data_root: :string,
+    workflow: :string,
+    action: :string,
+    resource: :string,
+    expected_epoch: :integer,
+    expected_generation: :string,
+    receipt_file: :string
+  ]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
           required(:ensure_all_started) => (-> ensure_started_result()),
           required(:start_repo) => (-> :ok | {:error, term()}),
-          required(:import_lane) => (Path.t(), keyword() -> {:ok, SymphonyElixir.Lanes.Lane.t(), [String.t()]} | {:error, [SymphonyElixir.Lanes.error()]}),
+          required(:import_lane) => (Path.t(), keyword() ->
+                                       {:ok, SymphonyElixir.Lanes.Lane.t(), [String.t()]}
+                                       | {:error, [SymphonyElixir.Lanes.error()]}),
           required(:export_lane) => (String.t() -> {:ok, String.t()} | {:error, :not_found | :no_version}),
           required(:operator_token) => (-> String.t() | nil),
           required(:write_output) => (String.t() -> :ok),
+          optional(:reconcile_credentials) => (keyword() -> {:ok, map()} | {:error, atom()}),
           optional(:ensure_linear_mcp_started) => (-> ensure_started_result()),
           optional(:configure_linear_mcp_logger) => (-> :ok),
           optional(:serve_linear_mcp) => (-> :ok)
@@ -75,6 +88,10 @@ defmodule SymphonyElixir.CLI do
     with :ok <- evaluate_export(args, deps), do: {:ok, :command}
   end
 
+  defp evaluate_mode(["credentials", "reconcile" | args], deps) do
+    with :ok <- evaluate_credentials(args, deps), do: {:ok, :command}
+  end
+
   defp evaluate_mode(args, deps) do
     with {:ok, opts, []} <- parse(args, @mcp_switches, 0),
          true <- Keyword.get(opts, :linear_mcp, false),
@@ -86,10 +103,40 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
+  defp evaluate_credentials(args, deps) do
+    switches =
+      args |> Enum.filter(&String.starts_with?(&1, "--")) |> Enum.map(&(&1 |> String.split("=", parts: 2) |> hd()))
+
+    with true <- length(switches) == length(Enum.uniq(switches)),
+         {options, [], []} <- OptionParser.parse(args, strict: @credential_switches),
+         options = Keyword.put_new(options, :action, "inspect"),
+         :ok <- Recovery.validate_options(options),
+         {:ok, result} <- Map.get(deps, :reconcile_credentials, &Recovery.reconcile/1).(options),
+         {:ok, output} <- Jason.encode(%{ok: true, result: result}),
+         true <- byte_size(output) < 1_048_576 do
+      deps.write_output.(output <> "\n")
+    else
+      {:error, reason} when is_atom(reason) -> credential_error(reason)
+      false -> credential_error(:output_limit)
+      _ -> credential_error(:invalid_arguments)
+    end
+  rescue
+    _ -> credential_error(:recovery_failed)
+  catch
+    _, _ -> credential_error(:recovery_failed)
+  end
+
+  defp credential_error(reason) do
+    code = Atom.to_string(reason)
+    code = if Regex.match?(~r/\A[a-z][a-z0-9_]{0,63}\z/, code), do: code, else: "recovery_failed"
+    {:error, Jason.encode!(%{ok: false, reason: code})}
+  end
+
   defp evaluate_serve(args, deps) do
     with {:ok, opts, []} <- parse(args, @serve_switches, 0),
          :ok <- validate_serve_options(opts),
          :ok <- require_guardrails_acknowledgement(opts),
+         :ok <- verify_maintenance(opts, :controller),
          {:ok, token} <- require_operator_token(deps),
          {:ok, root} <- prepare_data_root(opts),
          :ok <- create_directory(Path.join(root, "log")) do
@@ -113,11 +160,15 @@ defmodule SymphonyElixir.CLI do
          :ok <- start_repo(opts, deps) do
       case deps.import_lane.(Path.expand(path), Keyword.take(opts, [:name, :note]) |> Keyword.put(:slug, slug)) do
         {:ok, lane, warnings} ->
-          lines = ["imported lane #{lane.slug} version #{lane.current_version_id}" | Enum.map(warnings, &("warning: " <> &1))]
+          lines = [
+            "imported lane #{lane.slug} version #{lane.current_version_id}" | Enum.map(warnings, &("warning: " <> &1))
+          ]
+
           deps.write_output.(Enum.join(lines, "\n") <> "\n")
 
         {:error, errors} ->
-          {:error, "Invalid lane configuration in #{path}:\n" <> Enum.map_join(errors, "\n", &"  #{&1.path}: #{&1.message}")}
+          {:error,
+           "Invalid lane configuration in #{path}:\n" <> Enum.map_join(errors, "\n", &"  #{&1.path}: #{&1.message}")}
       end
     end
   end
@@ -220,13 +271,23 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp start_repo(opts, deps) do
-    with {:ok, root} <- prepare_data_root(opts) do
+    with :ok <- verify_maintenance(opts, :offline),
+         {:ok, root} <- prepare_data_root(opts) do
       Application.put_env(:symphony_elixir, :data_root, root)
 
       case deps.start_repo.() do
         :ok -> :ok
         {:error, reason} -> {:error, "Failed to open the Symphony database: #{inspect(reason)}"}
       end
+    end
+  end
+
+  defp verify_maintenance(opts, mode) do
+    root = Path.expand(Keyword.get(opts, :data_root, File.cwd!()))
+
+    case Maintenance.verify_managed(root, mode) do
+      :ok -> :ok
+      {:error, :maintenance_required} -> {:error, "maintenance_required"}
     end
   end
 
@@ -262,6 +323,7 @@ defmodule SymphonyElixir.CLI do
     Usage: symphony serve [--data-root <dir>] [--port <port>] [--host <ip>] [--events-retention-days <n>] --i-understand-that-this-will-be-running-without-the-usual-guardrails
            symphony lanes import <WORKFLOW.md> --slug <slug> [--name <name>] [--note <text>] [--data-root <dir>]
            symphony lanes export <slug> [--data-root <dir>]
+           symphony credentials reconcile --data-root <dir> --workflow <path> [--action inspect|checkpoint|reseed-stop|reseed-commit] [--resource <name> --expected-epoch <n> --expected-generation <decimal>] [--receipt-file <private-json>]
            symphony --linear-mcp --workflow <path-to-WORKFLOW.md>
     The daemon no longer takes a WORKFLOW.md path: import it as a lane first.
     """
@@ -276,6 +338,7 @@ defmodule SymphonyElixir.CLI do
       export_lane: &export_lane/1,
       operator_token: fn -> System.get_env("SYMPHONY_OPERATOR_TOKEN") end,
       write_output: &IO.write/1,
+      reconcile_credentials: &Recovery.reconcile/1,
       ensure_linear_mcp_started: &start_linear_mcp_runtime/0,
       configure_linear_mcp_logger: &configure_linear_mcp_logger/0,
       serve_linear_mcp: &serve_linear_mcp/0

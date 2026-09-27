@@ -59,11 +59,13 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   def resolve(_profile, _lane_config, _workspace_subdir, _prompt), do: {:error, [error("config", "must be an object")]}
 
   @doc false
-  @spec resolve(map(), map(), String.t(), String.t(), String.t() | nil) ::
+  @spec resolve(map(), map(), String.t(), String.t(), String.t() | nil, :runtime | :structure) ::
           {:ok, map()} | {:error, [map()]}
-  def resolve(profile, lane_config, workspace_subdir, prompt, cached_root)
+  def resolve(profile, lane_config, workspace_subdir, prompt, cached_root, validation \\ :runtime)
+
+  def resolve(profile, lane_config, workspace_subdir, prompt, cached_root, validation)
       when is_map(profile) and is_map(lane_config) and is_binary(workspace_subdir) and is_binary(prompt) and
-             (is_binary(cached_root) or is_nil(cached_root)) do
+             (is_binary(cached_root) or is_nil(cached_root)) and validation in [:runtime, :structure] do
     with {:ok, worker} <- profile_worker(profile),
          :ok <- validate_lane_ownership(lane_config),
          {:ok, base_root} <- profile_workspace_base(profile),
@@ -71,8 +73,9 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
          effective_config <- compose(profile, worker, lane_config, effective_root),
          normalized_prompt <- prompt |> String.replace(~r/\R/u, "\n") |> String.trim(),
          workflow <- %{config: effective_config, prompt: normalized_prompt, prompt_template: normalized_prompt},
-         {:ok, settings} <- Schema.parse(Map.delete(workflow.config, "server"), errors: :list),
-         :ok <- Config.validate_settings(settings) do
+         {:ok, settings} <-
+           Schema.parse(Map.delete(workflow.config, "server"), errors: :list, resolve_secrets: validation == :runtime),
+         :ok <- Config.validate_settings(settings, validation) do
       {:ok, %{settings: settings, workflow: workflow, warnings: warnings(workflow.config)}}
     else
       {:error, errors} when is_list(errors) -> {:error, errors}
@@ -80,7 +83,8 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
     end
   end
 
-  def resolve(_profile, _lane_config, _workspace_subdir, _prompt, _cached_root), do: {:error, [error("config", "must be an object")]}
+  def resolve(_profile, _lane_config, _workspace_subdir, _prompt, _cached_root, _validation),
+    do: {:error, [error("config", "must be an object")]}
 
   @spec validate_profile(map()) :: :ok | {:error, [map()]}
   def validate_profile(profile) when is_map(profile) do
@@ -156,7 +160,9 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
     errors =
       [
         if(Map.has_key?(config, "worker"), do: error("config.worker", "is owned by the execution profile")),
-        if(Map.has_key?(config, "workspace_base"), do: error("config.workspace_base", "is owned by the execution profile")),
+        if(Map.has_key?(config, "workspace_base"),
+          do: error("config.workspace_base", "is owned by the execution profile")
+        ),
         workspace_root_error(config)
       ]
       |> Enum.reject(&is_nil/1)
@@ -171,7 +177,8 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   defp workspace_root_error(%{"workspace" => _workspace}), do: error("config.workspace", "must be an object")
   defp workspace_root_error(_config), do: nil
 
-  defp effective_root(_worker, _base_root, _workspace_subdir, cached_root) when is_binary(cached_root) and cached_root != "", do: {:ok, cached_root}
+  defp effective_root(_worker, _base_root, _workspace_subdir, cached_root)
+       when is_binary(cached_root) and cached_root != "", do: {:ok, cached_root}
 
   defp effective_root(worker, base_root, workspace_subdir, nil) do
     base_root = resolve_workspace_base(base_root)
@@ -235,7 +242,9 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   end
 
   defp warnings(config) do
-    if Map.has_key?(config, "server"), do: ["server is configured per installation now (symphony serve --port/--host); the section is ignored"], else: []
+    if Map.has_key?(config, "server"),
+      do: ["server is configured per installation now (symphony serve --port/--host); the section is ignored"],
+      else: []
   end
 
   defp errors_for({:invalid_workflow_config, errors}) when is_list(errors),
@@ -249,7 +258,10 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
   end
 
   defp errors_for(:missing_tracker_kind), do: [error("tracker.kind", "can't be blank")]
-  defp errors_for({:unsupported_tracker_kind, kind}), do: [error("tracker.kind", "unsupported tracker kind: #{inspect(kind)}")]
+
+  defp errors_for({:unsupported_tracker_kind, kind}),
+    do: [error("tracker.kind", "unsupported tracker kind: #{inspect(kind)}")]
+
   defp errors_for(reason), do: [error("config", inspect(reason))]
 
   defp error(path, message), do: %{path: path, message: message}
@@ -258,8 +270,11 @@ defmodule SymphonyElixir.ExecutionProfiles.Configuration do
     Enum.map(errors, fn %{path: "profile." <> path} = error -> %{error | path: path} end)
   end
 
-  defp restore_redacted_value(@redacted, original, _path) when original not in [@missing, @redacted], do: {:ok, original}
-  defp restore_redacted_value(@redacted, _original, path), do: {:error, [error(path, "cannot redact a value that does not already exist")]}
+  defp restore_redacted_value(@redacted, original, _path) when original not in [@missing, @redacted],
+    do: {:ok, original}
+
+  defp restore_redacted_value(@redacted, _original, path),
+    do: {:error, [error(path, "cannot redact a value that does not already exist")]}
 
   defp restore_redacted_value(value, original, path) when is_map(value) do
     Enum.reduce_while(value, {:ok, %{}}, fn {key, child}, {:ok, restored} ->
