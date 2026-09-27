@@ -2098,31 +2098,41 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp observe_volume_deletion(config, record, key, volume, q, opts) do
-    observed? =
-      case Client.watch(config, "/api/v1/persistentvolumes", volume["pv_name"], volume["pv_version"], opts) do
-        {:ok, events} -> Enum.any?(events, &volume_deleted?(&1, volume, q))
-        _ -> false
-      end
+    volume = refresh_watch_version(config, volume, opts)
+    record = %{record | metadata: put_in(record.metadata, ["volumes", key], volume)}
 
-    if observed? or bound_volume_absent?(config, volume, opts) do
-      %{record | metadata: put_in(record.metadata, ["volumes", key, "deleted"], true)}
-    else
-      record
+    case Client.watch(config, "/api/v1/persistentvolumes", volume["pv_name"], volume["pv_version"], opts) do
+      {:ok, events} ->
+        if Enum.any?(events, &volume_deleted?(&1, volume, q)) do
+          %{record | metadata: put_in(record.metadata, ["volumes", key, "deleted"], true)}
+        else
+          record
+        end
+
+      _ ->
+        record
     end
   end
 
-  # The watch starts at the captured PV resourceVersion, which etcd compacts within minutes. A
-  # deletion that happened after compaction can then never be observed and cleanup would retain
-  # the identity forever. PV names are unique and never reused, and the CSI protection finalizer
-  # was observed on this exact PV, so Kubernetes could only remove it after CSI deleted the
-  # backing volume: authoritative absence of the PV, with no PV claiming the PVC, is the same proof.
-  defp bound_volume_absent?(config, volume, opts) do
-    with true <- volume["csi_finalizer_observed"] == true,
-         {:ok, nil} <- Client.lookup(config, collection(config, "persistentvolumes"), volume["pv_name"], opts),
-         {:ok, provisioned} <- Client.list(config, collection(config, "persistentvolumes"), opts) do
-      not Enum.any?(provisioned, &(get_in(&1, ["spec", "claimRef", "uid"]) == volume["pvc_uid"]))
-    else
-      _ -> false
+  # Only an exact-UID DELETED event proves CSI deletion (SPEC.md "Bound-volume cleanup"); absence,
+  # lost history and stripped finalizers never do. The event is only replayable while its
+  # resourceVersion is retained, and etcd compacts within minutes, but capture stops refreshing
+  # pv_version once the claim is gone. So while the same PV still exists (Terminating behind its
+  # CSI finalizer), watch from its current version; destroy_inventory persists the record before
+  # it finishes, so each retry starts inside the retention window. A PV that vanished while no
+  # attempt was watching stays unresolved, as the spec requires.
+  defp refresh_watch_version(config, volume, opts) do
+    case Client.lookup(config, collection(config, "persistentvolumes"), volume["pv_name"], opts) do
+      {:ok, %{} = pv} ->
+        if uid(pv) == volume["pv_uid"] and get_in(pv, ["spec", "csi", "volumeHandle"]) == volume["volume_handle"] and
+             get_in(pv, ["spec", "claimRef", "uid"]) == volume["pvc_uid"] do
+          Map.put(volume, "pv_version", rv(pv))
+        else
+          volume
+        end
+
+      _ ->
+        volume
     end
   end
 

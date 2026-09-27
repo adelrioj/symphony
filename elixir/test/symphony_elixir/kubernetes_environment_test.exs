@@ -2600,8 +2600,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   end
 
   test "watch transport loss never certifies compute or disk deletion" do
-    # The PV still exists: only an authoritative absence may stand in for a lost watch.
-    {config, record, opts} = api_fixture(delay_pv: true)
+    {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     {:ok, started} = Kubernetes.start(config, intended, opts)
@@ -2622,6 +2621,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
              Kubernetes.destroy(config, stopped, blocked_opts)
 
     refute get_in(deleting.metadata, ["volumes", "workspace-se-ticket", "deleted"]) == true
+    refute get_in(guard_data(record), ["record", "metadata", "volumes", "workspace-se-ticket", "deleted"]) == true
   end
 
   test "CSI deletion accepts the last stored PV metadata when finalizer removal deletes atomically" do
@@ -2637,13 +2637,39 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert deleted.absent?
   end
 
-  test "CSI deletion is proven by authoritative absence once the watch history was compacted" do
+  test "PV absence after watch compaction never certifies CSI deletion" do
     {config, record, opts} = api_fixture(delay_pv: true)
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     assert {:error, {:unknown, :kubernetes_cleanup_pending}, deleting} = Kubernetes.destroy(config, created, opts)
-    refute get_in(deleting.metadata, ["volumes", "workspace-se-ticket", "deleted"]) == true
 
-    # The PV is gone but its DELETED event is not in the retained history.
+    # The PV vanished while nothing watched and its history is compacted: SPEC.md forbids
+    # absence or lost history as a substitute for the exact-UID DELETED event.
+    remove_object("persistentvolumes", "pv-ticket")
+    Process.put(:kubernetes_compacted_before, 1_000_000)
+
+    assert {:error, {:unknown, :kubernetes_cleanup_pending}, _} = Kubernetes.destroy(config, deleting, opts)
+    refute get_in(guard_data(record), ["record", "metadata", "volumes", "workspace-se-ticket", "deleted"]) == true
+  end
+
+  test "a lingering PV keeps its DELETED event inside the watch retention window" do
+    {config, record, opts} = api_fixture(delay_pv: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    assert {:error, {:unknown, :kubernetes_cleanup_pending}, deleting} = Kubernetes.destroy(config, created, opts)
+    captured = get_in(guard_data(record), ["record", "metadata", "volumes", "workspace-se-ticket", "pv_version"])
+
+    # The PV keeps changing while it waits behind its CSI finalizer, and etcd compacts the
+    # history older than its current version: the captured version is no longer replayable.
+    pv = api_state()["persistentvolumes"]["pv-ticket"]
+    current = Integer.to_string(String.to_integer(captured) + 50)
+    put_object("persistentvolumes", put_in(pv, ["metadata", "resourceVersion"], current))
+    Process.put(:kubernetes_compacted_before, String.to_integer(current))
+
+    assert {:error, {:unknown, :kubernetes_cleanup_pending}, deleting} = Kubernetes.destroy(config, deleting, opts)
+    assert get_in(guard_data(record), ["record", "metadata", "volumes", "workspace-se-ticket", "pv_version"]) == current
+
+    # CSI deletes the volume between attempts; its DELETED event is newer than the refreshed version.
+    pv = api_state()["persistentvolumes"]["pv-ticket"]
+    put_event("persistentvolumes", "pv-ticket", %{"type" => "DELETED", "object" => pv})
     remove_object("persistentvolumes", "pv-ticket")
 
     assert {:ok, deleted} = Kubernetes.destroy(config, deleting, opts)
@@ -3310,7 +3336,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       params["watch"] == "true" ->
         watch_name = String.replace_prefix(params["fieldSelector"], "metadata.name=", "")
         events = Map.get(Process.get(:kubernetes_events), {resource, watch_name}, [])
-        {:ok, %{status: 0, output: Enum.map_join(events, "\n", &Jason.encode!/1)}}
+
+        # etcd compaction: history older than the floor is gone, as a real 410 Gone reports.
+        if String.to_integer(params["resourceVersion"]) < Process.get(:kubernetes_compacted_before, 0) do
+          {:ok, %{status: 1, output: Jason.encode!(%{"kind" => "Status", "code" => 410})}}
+        else
+          {:ok, %{status: 0, output: Enum.map_join(events, "\n", &Jason.encode!/1)}}
+        end
 
       "get" in args ->
         inventory_response(resource)
