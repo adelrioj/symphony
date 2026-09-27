@@ -2098,17 +2098,31 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp observe_volume_deletion(config, record, key, volume, q, opts) do
-    case Client.watch(config, "/api/v1/persistentvolumes", volume["pv_name"], volume["pv_version"], opts) do
-      {:ok, events} ->
-        if Enum.any?(events, &volume_deleted?(&1, volume, q)) do
-          metadata = put_in(record.metadata, ["volumes", key, "deleted"], true)
-          %{record | metadata: metadata}
-        else
-          record
-        end
+    observed? =
+      case Client.watch(config, "/api/v1/persistentvolumes", volume["pv_name"], volume["pv_version"], opts) do
+        {:ok, events} -> Enum.any?(events, &volume_deleted?(&1, volume, q))
+        _ -> false
+      end
 
-      _ ->
-        record
+    if observed? or bound_volume_absent?(config, volume, opts) do
+      %{record | metadata: put_in(record.metadata, ["volumes", key, "deleted"], true)}
+    else
+      record
+    end
+  end
+
+  # The watch starts at the captured PV resourceVersion, which etcd compacts within minutes. A
+  # deletion that happened after compaction can then never be observed and cleanup would retain
+  # the identity forever. PV names are unique and never reused, and the CSI protection finalizer
+  # was observed on this exact PV, so Kubernetes could only remove it after CSI deleted the
+  # backing volume: authoritative absence of the PV, with no PV claiming the PVC, is the same proof.
+  defp bound_volume_absent?(config, volume, opts) do
+    with true <- volume["csi_finalizer_observed"] == true,
+         {:ok, nil} <- Client.lookup(config, collection(config, "persistentvolumes"), volume["pv_name"], opts),
+         {:ok, provisioned} <- Client.list(config, collection(config, "persistentvolumes"), opts) do
+      not Enum.any?(provisioned, &(get_in(&1, ["spec", "claimRef", "uid"]) == volume["pvc_uid"]))
+    else
+      _ -> false
     end
   end
 

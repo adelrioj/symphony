@@ -2600,7 +2600,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   end
 
   test "watch transport loss never certifies compute or disk deletion" do
-    {config, record, opts} = api_fixture()
+    # The PV still exists: only an authoritative absence may stand in for a lost watch.
+    {config, record, opts} = api_fixture(delay_pv: true)
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     {:ok, started} = Kubernetes.start(config, intended, opts)
@@ -2630,6 +2631,19 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     pv = api_state()["persistentvolumes"]["pv-ticket"]
     put_event("persistentvolumes", "pv-ticket", %{"type" => "DELETED", "object" => pv})
+    remove_object("persistentvolumes", "pv-ticket")
+
+    assert {:ok, deleted} = Kubernetes.destroy(config, deleting, opts)
+    assert deleted.absent?
+  end
+
+  test "CSI deletion is proven by authoritative absence once the watch history was compacted" do
+    {config, record, opts} = api_fixture(delay_pv: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    assert {:error, {:unknown, :kubernetes_cleanup_pending}, deleting} = Kubernetes.destroy(config, created, opts)
+    refute get_in(deleting.metadata, ["volumes", "workspace-se-ticket", "deleted"]) == true
+
+    # The PV is gone but its DELETED event is not in the retained history.
     remove_object("persistentvolumes", "pv-ticket")
 
     assert {:ok, deleted} = Kubernetes.destroy(config, deleting, opts)
