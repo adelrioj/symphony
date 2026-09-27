@@ -36,6 +36,24 @@ defmodule SymphonyElixir.ExecutionProfileConfigurationTest do
     assert {:error, [%{path: "config"}]} = Configuration.resolve(%{"worker" => %{"environment" => environment}}, %{"tracker" => %{"kind" => "memory"}}, ".", "work")
   end
 
+  @tag :tmp_dir
+  test "stored fixed-root Kubernetes workspaces remain resolvable for ownership", %{tmp_dir: root} do
+    kubeconfig = Path.join(root, "kubeconfig")
+    File.write!(kubeconfig, "test")
+    provider = %{"kubeconfig" => kubeconfig, "context" => "test", "namespace" => "test", "template" => "worker-slot", "ssh_user" => "worker", "ssh_auth_volume" => "ssh", "ssh_port" => 22}
+    environment = %{"kind" => "kubernetes", "deployment_id" => "test", "provider" => provider, "startup_timeout_ms" => 1_000, "shutdown_timeout_ms" => 1_000}
+    profile = %{"worker" => %{"environment" => environment}, "workspace_base" => "/state/workspace/worker"}
+    lane = %{"tracker" => %{"kind" => "memory"}}
+
+    assert {:ok, historical} = Configuration.resolve(profile, lane, "tra-features", "work")
+    assert historical.settings.workspace.root == "/state/workspace/worker/tra-features"
+    assert {:ok, fixed} = Configuration.resolve(profile, lane, ".", "work")
+    assert fixed.settings.workspace.root == "/state/workspace/worker"
+    other = put_in(profile, ["worker", "environment", "provider", "template"], "other-template")
+    assert {:ok, nested} = Configuration.resolve(other, lane, "tra-features", "work")
+    assert nested.settings.workspace.root == "/state/workspace/worker/tra-features"
+  end
+
   test "unbound workspace references compose against the configured default base" do
     key = "SYMPHONY_UNBOUND_PROFILE_BASE"
     previous = System.get_env(key)
