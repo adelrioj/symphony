@@ -1127,9 +1127,10 @@ Tracker links use only tracker-provided `http`/`https` URLs.
 | `/lanes/:slug/versions` | Immutable version history and activation |
 | `/runs/:attempt_id` | Durable attempt details, token totals and event timeline |
 
-Approve and Reply move a blocked ticket back to the lane's first non-blocked active state through
-the tracker (Reply posts a comment first); the next attempt sees the comment only if its prompt or
-tools read comments.
+Approve and Reply apply only to a ticket that is still blocked (held blocked by the lane, or in
+`agent.blocked_state` in the tracker). They move it back to the lane's first non-blocked active state
+through the tracker (Reply posts a comment first) and release the lane's block; the next attempt sees
+the comment only if its prompt or tools read comments.
 
 Browser requests without authentication redirect to `/login`; API requests return `401`.
 Login establishes an HTTP-only signed session; bearer authentication can also seed a browser session.

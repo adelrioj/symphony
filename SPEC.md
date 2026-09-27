@@ -1805,8 +1805,11 @@ Installation settings and authentication:
 - The console MAY offer operator actions: stop a running attempt (recorded as `stopped`, claim
   released, workspace kept), run a pending retry immediately, and resume a blocked ticket by
   optionally commenting and moving it to the first active state other than the blocked state,
-  through the tracker adapter. Resuming MUST NOT bypass normal reconciliation; the next attempt is
-  dispatched by the usual poll.
+  through the tracker adapter, then releasing the orchestrator's block on it. Resume applies only
+  to a blocked ticket (held blocked by the orchestrator, or in the blocked state in the tracker) and
+  is refused otherwise. Resuming MUST NOT bypass normal reconciliation; the next attempt is
+  dispatched by the usual poll. A stopped attempt may likewise be dispatched again on the next poll
+  while its ticket stays in an active state.
 - Show per-lane sessions, retries, totals, events, health/error indicators and durable attempt history.
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
   consumes the JSON API below.

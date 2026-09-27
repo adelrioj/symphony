@@ -37,7 +37,7 @@ be linked.
 |---|---|---|
 | running | **Stop run** (inline confirm) | Orchestrator stops the task, records the attempt as `stopped`, releases the claim, keeps the workspace. The next poll may dispatch it again while it stays in an active state. |
 | retrying | **Retry now** | Cancels the backoff timer and runs the retry immediately. |
-| blocked | **Approve & resume** | Moves the ticket to the lane's first active state that is not `agent.blocked_state` through the `Tracker` behaviour, then requests a refresh. The normal blocked reconcile releases it and a new attempt starts. |
+| blocked | **Approve & resume** | Re-checks that the ticket is blocked (held blocked by the orchestrator, or in `agent.blocked_state` in the tracker; otherwise refuses with "it is no longer blocked"), moves it to the lane's first active state that is not `agent.blocked_state` through the `Tracker` behaviour, releases the orchestrator's block, then requests a refresh so the next poll starts a new attempt. |
 | blocked | **Reply to agent** | Posts the message as a tracker comment, then does the same as Approve. The new attempt sees the comment only if its prompt or tools read comments. |
 
 ## Data the backend must add
