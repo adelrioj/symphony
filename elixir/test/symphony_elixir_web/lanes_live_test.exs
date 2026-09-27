@@ -21,7 +21,7 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
     {:ok, bugs} = Lanes.create(%{slug: "bugs", name: "Bugs", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}, prompt: "b"})
     :ok = LaneStore.mark_error(bugs.id, "Tracker preflight failed: unknown team")
 
-    {:ok, view, html} = live(conn, "/")
+    {:ok, view, html} = live(conn, "/lanes")
     assert html =~ "default"
     assert has_element?(view, "#lane-bugs", "Bugs")
     assert has_element?(view, "#lane-bugs", "Tracker preflight failed")
@@ -40,7 +40,7 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
         prompt: "q"
       })
 
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/lanes")
 
     view |> element("#lane-qa button[phx-click='toggle']") |> render_click()
     assert Lanes.get!(lane.id).enabled
@@ -62,7 +62,7 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
   end
 
   test "external store changes add and remove cards without an injected broadcast", %{conn: conn} do
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/lanes")
     {:ok, lane} = Lanes.create(%{slug: "external", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}})
     wait_until(fn -> has_element?(view, "#lane-external") end)
     :ok = LaneStore.mark_error(lane.id, "Tracker preflight failed")
@@ -75,7 +75,7 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
     {:ok, lane} = Lanes.create(%{slug: "slow-snapshot", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => 60_000}}})
     {:ok, lane} = Lanes.set_enabled(lane, true)
     wait_until(fn -> LaneSupervisor.running?(lane.id) end)
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/lanes")
     assert has_element?(view, "#lane-slow-snapshot .numeric", "running 0")
 
     :ok = LaneStore.mark_error(lane.id, "Tracker temporarily unavailable")
@@ -102,7 +102,7 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
 
   test "invalid and deleted toggle IDs show an error without mutating another lane", %{conn: conn} do
     {:ok, lane} = Lanes.create(%{slug: "removed", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}})
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/lanes")
     render_click(view, "toggle", %{})
     assert has_element?(view, "#flash-error", "lane:")
     render_click(view, "toggle", %{"id" => "malformed"})
@@ -116,7 +116,7 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
   test "bearer authentication supports the connected landing view and mutations" do
     {:ok, lane} = Lanes.create(%{slug: "bearer", execution_profile_id: new_profile!().id, config: %{"tracker" => %{"kind" => "memory"}}})
     conn = Plug.Conn.put_req_header(build_conn(), "authorization", "Bearer test-token")
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/lanes")
     view |> element("#lane-bearer button[phx-click='toggle']") |> render_click()
     assert Lanes.get!(lane.id).enabled
     wait_until(fn -> has_element?(view, "#lane-bearer .state-badge", "running") end)
@@ -135,7 +135,7 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
     wait_until(fn -> LaneRegistry.whereis(lane.id, :orchestrator) == nil end)
 
     try do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/lanes")
       assert has_element?(view, "#lane-restarting button[phx-click='toggle']", "Disable")
       refute has_element?(view, "#lane-restarting .numeric")
       assert has_element?(view, "#lane-default")
@@ -148,7 +148,7 @@ defmodule SymphonyElixirWeb.LanesLiveTest do
 
   test "the landing page explains how to create a lane when the installation is empty", %{conn: conn} do
     :ok = Lanes.delete(Lanes.get_by_slug("default"))
-    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/lanes")
     assert has_element?(view, ".empty-state", "No lanes yet")
     assert has_element?(view, "a[href='/lanes/new']")
   end

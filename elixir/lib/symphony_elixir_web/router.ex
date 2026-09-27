@@ -45,7 +45,8 @@ defmodule SymphonyElixirWeb.Router do
     pipe_through(:browser)
 
     live_session :operator, on_mount: SymphonyElixirWeb.LiveAuth do
-      live("/", LanesLive, :index)
+      live("/", ConsoleLive, :index)
+      live("/lanes", LanesLive, :index)
       live("/execution-profiles", ExecutionProfilesLive, :index)
       live("/execution-profiles/new", ExecutionProfileEditorLive, :new)
       live("/execution-profiles/:id/edit", ExecutionProfileEditorLive, :edit)
