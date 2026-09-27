@@ -115,6 +115,28 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     assert has_element?(view, "#lane-nav-ops .console-dot--idle")
   end
 
+  test "finished rows show run status and the panel labels the stored state", %{conn: conn, lane: lane} do
+    issue = %Issue{id: "old-2", identifier: "OPS-7", title: "Shipped last week", state: "In Progress"}
+    :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "old-2-att", attempt: 1})
+    :ok = Runs.event("old-2-att", %{event: :usage}, %{input_tokens: 5_000_000, output_tokens: 2_600, total_tokens: 5_002_600}, 3)
+    :ok = Runs.finished("old-2-att", "done")
+    :ok = Runs.flush()
+
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Aold-2")
+    assert has_element?(view, "#console-list [data-ticket='ops:old-2'] .console-chip", "done")
+    refute has_element?(view, "#console-list [data-ticket='ops:old-2']", "In Progress")
+    assert has_element?(view, "#console-detail dt", "Tracker state at dispatch")
+    assert has_element?(view, "#console-detail dd", "5.0m in · 2.6k out")
+  end
+
+  test "a disabled lane says so instead of showing free slots", %{conn: conn, lane: lane} do
+    {:ok, entry} = LaneStore.lookup(lane.id)
+    :ok = LaneStore.put_entry(%{entry | enabled: false})
+    {:ok, view, _html} = live(conn, "/?lane=ops")
+    assert has_element?(view, "#lane-nav-ops .console-count", "off")
+    refute has_element?(view, "#lane-nav-ops", "/2")
+  end
+
   @tag snapshot: %{running: [], blocked: [], retrying: [], queued: [], claimed: 0, codex_totals: %{}, rate_limits: nil}
   test "a blocked run from history is only a finished ticket", %{conn: conn, lane: lane} do
     issue = %Issue{id: "old-blk", identifier: "OPS-8", title: "Blocked long ago", state: "Blocked / Needs Attention"}

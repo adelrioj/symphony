@@ -110,6 +110,12 @@ defmodule SymphonyElixirWeb.Console do
 
   def agent_setting(_entry, _key, default), do: default
 
+  @spec format_tokens(non_neg_integer() | nil) :: String.t()
+  def format_tokens(count) when is_integer(count) and count >= 999_950, do: "#{Float.round(count / 1_000_000, 1)}m"
+  def format_tokens(count) when is_integer(count) and count >= 1_000, do: "#{Float.round(count / 1_000, 1)}k"
+  def format_tokens(count) when is_integer(count), do: Integer.to_string(count)
+  def format_tokens(_count), do: "0"
+
   @spec describe_event(map()) :: String.t()
   def describe_event(%{"message" => message})
       when is_binary(message) and message != "" do

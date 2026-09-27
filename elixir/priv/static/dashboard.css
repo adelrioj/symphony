@@ -718,6 +718,7 @@ pre,
 .console-row:hover { background: var(--page-soft); }
 .console-row[aria-selected="true"] { background: var(--accent-soft); }
 .console-id { color: var(--muted); font-size: 0.75rem; }
+.console-attempt { color: var(--muted); font-size: 0.7rem; white-space: nowrap; }
 .console-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .console-meta { display: flex; gap: 0.4rem; align-items: center; }
 .console-sub { grid-column: 2 / -1; font-size: 0.75rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

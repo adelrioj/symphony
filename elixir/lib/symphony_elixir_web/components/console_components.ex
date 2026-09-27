@@ -36,7 +36,8 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
         <span class={"console-dot console-dot--#{lane_health(entry, @tickets)}"}></span>
         {entry.name}
         <span class="console-backend">{Console.agent_setting(entry, :backend, "codex")}</span>
-        <span class="console-count">{count(@tickets, entry.slug, "running")}/{Console.agent_setting(entry, :max_concurrent_agents, 0)}</span>
+        <span :if={entry.enabled} class="console-count">{count(@tickets, entry.slug, "running")}/{Console.agent_setting(entry, :max_concurrent_agents, 0)}</span>
+        <span :if={not entry.enabled} class="console-count">off</span>
       </.link>
       <.link
         id="attention-toggle"
@@ -112,8 +113,8 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
             <span :for={blocker <- ticket.blocked_by} class="console-chip">⊘ {blocker}</span>
           </span>
           <span class="console-meta">
-            <span :if={ticket.attempt && ticket.attempt > 1} class="mono muted">attempt {ticket.attempt}</span>
-            <span class="console-chip">{if @nav.group == :status, do: ticket.tracker_state, else: ticket.status}</span>
+            <span :if={ticket.attempt && ticket.attempt > 1} class="console-attempt">attempt {ticket.attempt}</span>
+            <span class="console-chip">{if @nav.group == :status and not ticket.history, do: ticket.tracker_state, else: ticket.status}</span>
             <span :if={is_nil(@nav.lane)} class="console-lane-tag">{ticket.lane}</span>
           </span>
           <span :if={ticket.status == "running"} class="console-sub">

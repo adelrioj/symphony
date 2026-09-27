@@ -179,6 +179,15 @@ defmodule SymphonyElixirWeb.ConsoleTest do
            ) == "codex"
   end
 
+  test "formats token counts the way people read them" do
+    assert Console.format_tokens(nil) == "0"
+    assert Console.format_tokens(412) == "412"
+    assert Console.format_tokens(2_600) == "2.6k"
+    assert Console.format_tokens(999_949) == "999.9k"
+    assert Console.format_tokens(999_950) == "1.0m"
+    assert Console.format_tokens(4_012_000) == "4.0m"
+  end
+
   test "describes stored event payloads and keeps only web tracker links" do
     assert Console.describe_event(%{"message" => "hello"}) == "hello"
 

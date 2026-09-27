@@ -74,14 +74,16 @@ defmodule SymphonyElixirWeb.ConsoleLive do
           <h2 class="console-detail-title">{@ticket.title || @ticket.identifier}</h2>
           <p :if={@ticket.labels != []}><span :for={label <- @ticket.labels} class="console-chip">{label}</span></p>
           <dl class="console-kv">
-            <dt>Tracker state</dt>
+            <dt>{if @ticket.history, do: "Tracker state at dispatch", else: "Tracker state"}</dt>
             <dd>{@ticket.tracker_state || "unknown"}</dd>
             <dt>Run status</dt>
             <dd><span class={"console-pill console-pill--#{@ticket.status}"}>{@ticket.status}</span></dd>
             <dt :if={@ticket.turn_count}>Turns</dt>
             <dd :if={@ticket.turn_count}>{@ticket.turn_count} / {Console.agent_setting(@detail.entry, :max_turns, 0)}</dd>
             <dt :if={@ticket.tokens}>Tokens</dt>
-            <dd :if={@ticket.tokens} class="mono">{@ticket.tokens.input_tokens} in · {@ticket.tokens.output_tokens} out</dd>
+            <dd :if={@ticket.tokens} class="mono">
+              {Console.format_tokens(@ticket.tokens.input_tokens)} in · {Console.format_tokens(@ticket.tokens.output_tokens)} out
+            </dd>
             <dt :if={@ticket.blocked_by != []}>Blocked by</dt>
             <dd :if={@ticket.blocked_by != []}>{Enum.join(@ticket.blocked_by, ", ")}</dd>
           </dl>
