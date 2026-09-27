@@ -44,7 +44,7 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
         class="console-lane"
         aria-current={to_string(@nav.attention)}
       >
-        Needs attention <span class="console-count">{Enum.count(@tickets, &(&1.status == "blocked"))}</span>
+        Needs attention <span class="console-count">{Enum.count(@tickets, &(not &1.history and &1.status == "blocked"))}</span>
       </.link>
       <a class="console-lane console-lane--manage" href="/lanes">Manage lanes</a>
     </nav>
@@ -119,7 +119,7 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
           <span :if={ticket.status == "running"} class="console-sub">
             <span class="console-live"></span>Turn {ticket.turn_count} · {ticket.last_message}
           </span>
-          <span :if={ticket.status in ["blocked", "retrying"]} class="console-sub console-sub--warn">
+          <span :if={not ticket.history and ticket.status in ["blocked", "retrying"]} class="console-sub console-sub--warn">
             {ticket.error}{if ticket.due_at, do: " · next attempt #{ticket.due_at}"}
           </span>
         </.link>
@@ -128,7 +128,7 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
     """
   end
 
-  defp count(tickets, slug, status), do: Enum.count(tickets, &(&1.lane == slug and &1.status == status))
+  defp count(tickets, slug, status), do: Enum.count(tickets, &(&1.lane == slug and not &1.history and &1.status == status))
 
   defp lane_health(entry, tickets) do
     cond do

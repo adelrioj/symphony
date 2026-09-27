@@ -127,11 +127,11 @@ defmodule SymphonyElixirWeb.ConsoleLive do
                 <button type="submit">Send and resume</button>
               </p>
             </form>
-            <button :if={is_nil(@panel) and @ticket.status == "blocked"} type="button" phx-click="approve">
+            <button :if={is_nil(@panel) and not @ticket.history and @ticket.status == "blocked"} type="button" phx-click="approve">
               Approve &amp; resume
             </button>
             <button
-              :if={is_nil(@panel) and @ticket.status == "blocked"}
+              :if={is_nil(@panel) and not @ticket.history and @ticket.status == "blocked"}
               type="button"
               class="subtle-button"
               phx-click="panel"
@@ -139,11 +139,11 @@ defmodule SymphonyElixirWeb.ConsoleLive do
             >
               Reply to agent
             </button>
-            <button :if={is_nil(@panel) and @ticket.status == "retrying"} type="button" phx-click="retry_now">
+            <button :if={is_nil(@panel) and not @ticket.history and @ticket.status == "retrying"} type="button" phx-click="retry_now">
               Retry now
             </button>
             <button
-              :if={is_nil(@panel) and @ticket.status == "running"}
+              :if={is_nil(@panel) and not @ticket.history and @ticket.status == "running"}
               type="button"
               class="danger-button"
               phx-click="panel"
@@ -167,7 +167,7 @@ defmodule SymphonyElixirWeb.ConsoleLive do
     views = Enum.map(entries, &%{entry: &1, payload: Presenter.lane_payload(&1, @snapshot_timeout_ms), runs: Runs.list_for_lane(&1.lane_id, @history_limit)})
     tickets = Console.tickets(views)
     scoped = Enum.filter(entries, &(is_nil(nav.lane) or &1.slug == nav.lane))
-    visible = Enum.filter(tickets, &((is_nil(nav.lane) or &1.lane == nav.lane) and (not nav.attention or &1.status == "blocked")))
+    visible = Enum.filter(tickets, &((is_nil(nav.lane) or &1.lane == nav.lane) and (not nav.attention or (not &1.history and &1.status == "blocked"))))
     ticket = Enum.find(tickets, &(&1.key == nav.selected))
 
     assign(socket,

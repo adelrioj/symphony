@@ -72,13 +72,13 @@ defmodule SymphonyElixirWeb.ConsoleTest do
     assert length(keys) == length(Enum.uniq(keys))
   end
 
-  test "run-status groups keep a fixed order and keep empty groups" do
+  test "run-status groups keep a fixed order, keep empty groups, and put all history under finished" do
     tickets =
       Console.tickets([
         %{
           entry: entry("main"),
           payload: payload(),
-          runs: [run("i5", "A-5", "turns_exhausted")]
+          runs: [run("i5", "A-5", "turns_exhausted"), run("i7", "A-7", "blocked")]
         }
       ])
 
@@ -90,8 +90,11 @@ defmodule SymphonyElixirWeb.ConsoleTest do
              {"blocked", 1},
              {"retrying", 1},
              {"queued", 1},
-             {"finished", 1}
+             {"finished", 2}
            ]
+
+    assert %{tickets: [%{identifier: "A-2", history: false}]} =
+             Enum.find(Console.groups(tickets, :status, []), &(&1.key == "blocked"))
 
     assert Enum.map(Console.groups([], :status, []), &length(&1.tickets)) ==
              [0, 0, 0, 0, 0]
@@ -116,7 +119,7 @@ defmodule SymphonyElixirWeb.ConsoleTest do
         %{
           entry: entry("main"),
           payload: payload(),
-          runs: [run("i5", "A-5", "done")]
+          runs: [run("i5", "A-5", "done"), run("i7", "A-7", "blocked")]
         },
         %{
           entry: github,
@@ -148,14 +151,14 @@ defmodule SymphonyElixirWeb.ConsoleTest do
              {"In Progress", "active", ["A-1"]},
              {"Blocked", "blocked", ["A-2"]},
              {"Other states", nil, ["#1"]},
-             {"Finished runs", nil, ["A-5"]}
+             {"Finished runs", nil, ["A-5", "A-7"]}
            ]
   end
 
-  test "strip shows running and blocked agents and counts idle slots from running only" do
+  test "strip shows live running and blocked agents and counts idle slots from running only" do
     tickets =
       Console.tickets([
-        %{entry: entry("main"), payload: payload(), runs: []}
+        %{entry: entry("main"), payload: payload(), runs: [run("i7", "A-7", "blocked")]}
       ])
 
     assert %{agents: [%{identifier: "A-1"}, %{identifier: "A-2"}], idle: 2, max: 3} =
@@ -207,6 +210,7 @@ defmodule SymphonyElixirWeb.ConsoleTest do
         title: nil,
         tracker_state: nil,
         status: "blocked",
+        history: false,
         labels: [],
         url: nil,
         blocked_by: [],

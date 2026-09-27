@@ -20,12 +20,13 @@ defmodule SymphonyElixirWeb.Console do
 
   @finished_limit 20
   @live_statuses ~w(running blocked retrying queued)
+  # Live groups take live tickets by status; "finished" takes every history ticket, whatever its run status.
   @status_groups [
-    {"running", "Running", ["running"]},
-    {"blocked", "Needs attention", ["blocked"]},
-    {"retrying", "Retry queue", ["retrying"]},
-    {"queued", "Queued", ["queued"]},
-    {"finished", "Finished", ~w(done failed turns_exhausted stopped)}
+    {"running", "Running"},
+    {"blocked", "Needs attention"},
+    {"retrying", "Retry queue"},
+    {"queued", "Queued"},
+    {"finished", "Finished"}
   ]
   @category_order %{"active" => 0, "blocked" => 1, "terminal" => 2}
 
@@ -34,19 +35,19 @@ defmodule SymphonyElixirWeb.Console do
 
   @spec groups([ticket()], :status | :tracker, [Entry.t()]) :: [group()]
   def groups(tickets, :status, _entries) do
-    for {key, label, statuses} <- @status_groups do
+    for {key, label} <- @status_groups do
       %{
         key: key,
         label: label,
         icon: key,
         category: nil,
-        tickets: Enum.filter(tickets, &(&1.status in statuses))
+        tickets: Enum.filter(tickets, &if(key == "finished", do: &1.history, else: not &1.history and &1.status == key))
       }
     end
   end
 
   def groups(tickets, :tracker, entries) do
-    {live, finished} = Enum.split_with(tickets, &(&1.status in @live_statuses))
+    {finished, live} = Enum.split_with(tickets, & &1.history)
 
     {state_groups, other} =
       Enum.map_reduce(tracker_states(entries), live, fn {state, category}, remaining ->
@@ -90,7 +91,7 @@ defmodule SymphonyElixirWeb.Console do
     agents =
       Enum.filter(
         tickets,
-        &(&1.lane == entry.slug and &1.status in ["running", "blocked"])
+        &(&1.lane == entry.slug and not &1.history and &1.status in ["running", "blocked"])
       )
 
     max =
@@ -168,6 +169,7 @@ defmodule SymphonyElixirWeb.Console do
       title: Map.get(item, :title),
       tracker_state: Map.get(item, :state),
       status: status,
+      history: false,
       labels: Map.get(item, :labels) || [],
       url: external_url(Map.get(item, :issue_url)),
       blocked_by: Map.get(item, :blocked_by, []),
@@ -190,6 +192,7 @@ defmodule SymphonyElixirWeb.Console do
       title: run.issue_title,
       tracker_state: run.issue_state,
       status: run.status,
+      history: true,
       labels: [],
       url: nil,
       blocked_by: [],

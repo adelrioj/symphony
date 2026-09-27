@@ -115,6 +115,25 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     assert has_element?(view, "#lane-nav-ops .console-dot--idle")
   end
 
+  @tag snapshot: %{running: [], blocked: [], retrying: [], queued: [], claimed: 0, codex_totals: %{}, rate_limits: nil}
+  test "a blocked run from history is only a finished ticket", %{conn: conn, lane: lane} do
+    issue = %Issue{id: "old-blk", identifier: "OPS-8", title: "Blocked long ago", state: "Blocked / Needs Attention"}
+    :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "old-blk-att", attempt: 1})
+    :ok = Runs.finished("old-blk-att", "blocked")
+    :ok = Runs.flush()
+
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Aold-blk")
+    assert has_element?(view, "#console-list [data-group='finished'] [data-ticket='ops:old-blk']")
+    refute has_element?(view, "#console-list [data-group='blocked'] [data-ticket='ops:old-blk']")
+    refute has_element?(view, "#strip-ops [data-ticket='ops:old-blk']")
+    assert has_element?(view, "#lane-nav-ops .console-dot--idle")
+    assert has_element?(view, "#attention-toggle .console-count", "0")
+    refute has_element?(view, "#console-detail button")
+
+    view |> element("#attention-toggle") |> render_click()
+    refute has_element?(view, "#console-list [data-ticket='ops:old-blk']")
+  end
+
   @tag snapshot: %{
          running: [
            %{
