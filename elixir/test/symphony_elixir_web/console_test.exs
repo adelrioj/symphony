@@ -54,6 +54,124 @@ defmodule SymphonyElixirWeb.ConsoleTest do
            } = List.last(tickets)
   end
 
+  test "environment-only credential recovery stays visible in attention and other tracker states" do
+    environment = recovery_environment()
+
+    tickets =
+      Console.tickets([
+        %{
+          entry: entry("main"),
+          payload: %{running: [], blocked: [], retrying: [], queued: [], environments: [environment]},
+          runs: []
+        }
+      ])
+
+    assert [
+             %{
+               key: "main:bon-143",
+               identifier: "BON-143",
+               source: :environment,
+               status: "blocked",
+               history: false,
+               title: nil,
+               tracker_state: nil,
+               url: nil,
+               attempt: nil,
+               error: "checkpoint_failed",
+               environment: ^environment
+             } = ticket
+           ] = tickets
+
+    assert %{label: "Needs attention", tickets: [^ticket]} =
+             Enum.find(Console.groups(tickets, :status, [entry("main")]), &(&1.key == "blocked"))
+
+    assert [%{label: "Other states", tickets: [^ticket]}] =
+             Console.groups(tickets, :tracker, [entry("main")])
+
+    assert %{agents: [], idle: 3, max: 3} = Console.strip(entry("main"), tickets)
+  end
+
+  test "credential recovery is visible with no unresolved marker and an unknown phase" do
+    environment = %{recovery_environment() | phase: :unknown, unresolved: nil}
+
+    assert [%{status: "blocked", source: :environment, environment: ^environment}] =
+             Console.tickets([
+               %{entry: entry("main"), payload: %{environments: [environment]}, runs: []}
+             ])
+  end
+
+  test "unresolved environments need attention without credential recovery" do
+    environment = %{
+      recovery_environment()
+      | credential: nil,
+        unresolved: %{operation: :stop, category: :transient, code: :provider_unavailable}
+    }
+
+    assert [%{status: "blocked", error: "provider_unavailable", environment: ^environment}] =
+             Console.tickets([
+               %{entry: entry("main"), payload: %{environments: [environment]}, runs: []}
+             ])
+  end
+
+  test "runtime tickets remain authoritative and retain matching environment details" do
+    environment = %{recovery_environment() | issue_id: "i1", issue_identifier: "A-1"}
+
+    tickets =
+      Console.tickets([
+        %{
+          entry: entry("main"),
+          payload: Map.put(payload(), :environments, [environment]),
+          runs: [run("i1", "A-1", "done")]
+        }
+      ])
+
+    assert [
+             %{
+               source: :runtime,
+               status: "running",
+               title: "Run",
+               tracker_state: "In Progress",
+               url: "https://linear.app/a/A-1",
+               environment: ^environment
+             }
+           ] = Enum.filter(tickets, &(&1.issue_id == "i1"))
+
+    assert %{agents: [%{issue_id: "i1"}, %{issue_id: "i2"}], idle: 2} =
+             Console.strip(entry("main"), tickets)
+  end
+
+  test "environment recovery suppresses older history without borrowing tracker metadata" do
+    tickets =
+      Console.tickets([
+        %{
+          entry: entry("main"),
+          payload: %{environments: [recovery_environment()]},
+          runs: [run("bon-143", "BON-143", "done"), run("bon-143", "BON-143", "failed")]
+        }
+      ])
+
+    assert [%{source: :environment, title: nil, tracker_state: nil, url: nil, attempt: nil}] = tickets
+    assert %{tickets: []} = Enum.find(Console.groups(tickets, :status, []), &(&1.key == "finished"))
+  end
+
+  test "healthy retained stopped environments do not become blocked tickets" do
+    environment = %{recovery_environment() | phase: :stopped, credential: nil, unresolved: nil, occupies_slot: false}
+
+    assert [] =
+             Console.tickets([
+               %{entry: entry("main"), payload: %{environments: [environment]}, runs: []}
+             ])
+
+    assert [%{source: :history, status: "done", environment: nil}] =
+             Console.tickets([
+               %{
+                 entry: entry("main"),
+                 payload: %{environments: [environment]},
+                 runs: [run("bon-143", "BON-143", "done")]
+               }
+             ])
+  end
+
   test "keys stay unique across lanes, and unavailable lanes contribute only history" do
     unavailable = %{error: %{code: "snapshot_unavailable"}}
 
@@ -248,6 +366,23 @@ defmodule SymphonyElixirWeb.ConsoleTest do
     other_group = Enum.find(groups, &(&1.key == "other"))
     assert other_group != nil
     assert length(other_group.tickets) == 1
+  end
+
+  defp recovery_environment do
+    %{
+      environment_id: "env-bon-143",
+      provider: "workstations",
+      issue_id: "bon-143",
+      issue_identifier: "BON-143",
+      phase: :stopping,
+      desired: :stopped,
+      occupies_slot: true,
+      workspace_path: "/fixture/BON-143",
+      provider_resource_id: "fixture-workstation",
+      terminal_observed_at: nil,
+      credential: %{stage: "recovery_required", reason: "checkpoint_failed"},
+      unresolved: nil
+    }
   end
 
   defp entry(slug, opts \\ []) do

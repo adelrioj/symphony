@@ -23,6 +23,12 @@ Import creates a dedicated profile and reports its generated name. It is an offl
 live file watcher; use the authenticated UI/API for live edits. Profile changes automatically reach
 future runs on every linked lane, but do not stop active attempts or rewrite their cleanup snapshot.
 
+The console shows managed environments that need recovery under **Needs attention**, even when
+preparation failed before an agent attempt started. Select the issue to see the environment phase,
+desired state, slot occupancy and credential recovery reason. These entries are not live agents.
+They have no agent approval, reply, retry or stop controls. Use the deployment's supported
+credential recovery procedure; an issue's tracker state does not prove that an agent is running.
+
 Use `/execution-profiles` to create and edit shared worker/workspace settings. A profile edit validates
 all linked lanes, including disabled lanes, and publishes them atomically. Per-lane concurrency and
 per-host limits remain independent; the profile view can show the aggregate linked-lane/shared-host

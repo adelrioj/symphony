@@ -1,8 +1,8 @@
 defmodule SymphonyElixirWeb.Console do
   @moduledoc """
-  Pure projections for the operator console. Flattens lane snapshots and durable
-  run history into tickets, groups them by run status or tracker state, and
-  sizes each lane's agent strip.
+  Pure projections for the operator console. Flattens lane snapshots, environment
+  recovery needs, and durable run history into tickets, groups them by run status
+  or tracker state, and sizes each lane's agent strip from runtime tickets only.
   """
 
   alias SymphonyElixir.LaneStore.Entry
@@ -91,7 +91,8 @@ defmodule SymphonyElixirWeb.Console do
     agents =
       Enum.filter(
         tickets,
-        &(&1.lane == entry.slug and not &1.history and &1.status in ["running", "blocked"])
+        &(&1.lane == entry.slug and not &1.history and &1.source != :environment and
+            &1.status in ["running", "blocked"])
       )
 
     max =
@@ -167,23 +168,54 @@ defmodule SymphonyElixirWeb.Console do
   def external_url(_url), do: nil
 
   defp lane_tickets(%{entry: entry, payload: payload, runs: runs}) do
+    environments = Map.new(Map.get(payload, :environments, []), &{&1.issue_id, &1})
+
     live =
       Enum.flat_map(@live_statuses, fn status ->
         payload
         |> Map.get(String.to_existing_atom(status), [])
-        |> Enum.map(&live_ticket(entry, status, &1))
+        |> Enum.map(fn item ->
+          entry
+          |> live_ticket(status, item)
+          |> Map.put(:environment, Map.get(environments, item.issue_id))
+        end)
       end)
 
     live_ids = MapSet.new(live, & &1.issue_id)
 
+    attention =
+      payload
+      |> Map.get(:environments, [])
+      |> Enum.reject(&MapSet.member?(live_ids, &1.issue_id))
+      |> Enum.filter(&environment_attention?/1)
+      |> Enum.map(&environment_ticket(entry, &1))
+
+    current_ids = MapSet.new(live ++ attention, & &1.issue_id)
+
     finished =
       runs
-      |> Enum.reject(&(&1.status == "running" or MapSet.member?(live_ids, &1.issue_id)))
+      |> Enum.reject(&(&1.status == "running" or MapSet.member?(current_ids, &1.issue_id)))
       |> Enum.uniq_by(& &1.issue_id)
       |> Enum.take(@finished_limit)
       |> Enum.map(&run_ticket(entry, &1))
 
-    live ++ finished
+    live ++ attention ++ finished
+  end
+
+  defp environment_attention?(environment) do
+    match?(%{stage: "recovery_required"}, environment[:credential]) or is_map(environment[:unresolved])
+  end
+
+  defp environment_ticket(entry, environment) do
+    reason = get_in(environment, [:credential, :reason]) || get_in(environment, [:unresolved, :code])
+
+    entry
+    |> live_ticket("blocked", environment)
+    |> Map.merge(%{
+      source: :environment,
+      environment: environment,
+      error: if(is_nil(reason), do: nil, else: to_string(reason))
+    })
   end
 
   defp live_ticket(entry, status, item) do
@@ -197,6 +229,8 @@ defmodule SymphonyElixirWeb.Console do
       tracker_state: Map.get(item, :state),
       status: status,
       history: false,
+      source: :runtime,
+      environment: nil,
       labels: Map.get(item, :labels) || [],
       url: external_url(Map.get(item, :issue_url)),
       blocked_by: Map.get(item, :blocked_by, []),
@@ -224,6 +258,8 @@ defmodule SymphonyElixirWeb.Console do
       tracker_state: run.issue_state,
       status: run.status,
       history: true,
+      source: :history,
+      environment: nil,
       labels: [],
       url: nil,
       blocked_by: [],

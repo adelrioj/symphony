@@ -8,6 +8,30 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
 
   @endpoint SymphonyElixirWeb.Endpoint
 
+  @recovery_snapshot %{
+    running: [],
+    blocked: [],
+    retrying: [],
+    queued: [],
+    claimed: 0,
+    codex_totals: %{},
+    rate_limits: nil,
+    environments: [
+      %{
+        environment_id: "workstation-bon-143",
+        provider: "workstation",
+        issue_id: "bon-143",
+        issue_identifier: "BON-143",
+        phase: :stopping,
+        desired: :stopped,
+        occupies_slot: true,
+        workspace_path: "/workspace/BON-143",
+        credential: %{stage: "recovery_required", reason: "checkpoint_failed"},
+        unresolved: nil
+      }
+    ]
+  }
+
   defmodule FakeOrchestrator do
     use GenServer
 
@@ -96,6 +120,84 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
   test "a queued ticket's panel says why it has no run", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Aq-1")
     assert has_element?(view, "#queued-note", "No run yet. Waiting on OPS-1.")
+  end
+
+  @tag snapshot: @recovery_snapshot
+  test "workstation recovery stays visible through filters and clears after a healthy refresh", %{
+    conn: conn,
+    fake: fake
+  } do
+    {:ok, view, _html} = live(conn, "/?lane=ops")
+    assert has_element?(view, "#console-list [data-group='blocked'] [data-ticket='ops:bon-143']", "BON-143")
+    refute has_element?(view, "#strip-ops [data-ticket='ops:bon-143']")
+    assert has_element?(view, "#strip-ops .console-tile--idle", "2 idle")
+
+    view |> element("#attention-toggle") |> render_click()
+    view |> element("#group-tracker") |> render_click()
+    view |> element("#console-list [data-ticket='ops:bon-143']") |> render_click()
+    assert_patch(view, "/?lane=ops&group=tracker&attention=1&ticket=ops%3Abon-143")
+    assert has_element?(view, "#console-detail h2", "BON-143")
+    assert has_element?(view, "#environment-detail", "stopping")
+    assert has_element?(view, "#environment-detail", "stopped")
+    assert has_element?(view, "#environment-detail", "yes")
+    assert has_element?(view, "#environment-detail", "recovery_required")
+    assert has_element?(view, "#environment-detail", "checkpoint_failed")
+    refute has_element?(view, "#console-detail button")
+    refute has_element?(view, "#console-detail a[href^='/runs/']")
+
+    :sys.replace_state(fake, fn state ->
+      environments =
+        Enum.map(state.snapshot.environments, &%{&1 | phase: :stopped, occupies_slot: false, credential: nil})
+
+      %{state | snapshot: %{state.snapshot | environments: environments}}
+    end)
+
+    send(view.pid, :observability_updated)
+    refute has_element?(view, "#console-list [data-ticket='ops:bon-143']")
+    assert has_element?(view, "#console-detail", "Select a ticket")
+  end
+
+  @tag snapshot: @recovery_snapshot
+  test "environment-only selections reject forged agent actions and panels", %{conn: conn} do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Abon-143")
+
+    for panel <- ["stop", "reply"] do
+      render_hook(view, "panel", %{"panel" => panel})
+      refute has_element?(view, "#stop-confirm")
+      refute has_element?(view, "#reply-form")
+    end
+
+    for event <- ["approve", "reply", "retry_now", "stop"] do
+      render_hook(view, event, %{"message" => "Do not post this"})
+      assert has_element?(view, "#flash-error", "No agent run is available for this workstation.")
+    end
+
+    refute_receive {:orchestrator_call, _}, 50
+    refute_receive {:memory_tracker_state_update, _, _}, 50
+    refute_receive {:memory_tracker_comment, _, _}, 50
+  end
+
+  @tag snapshot: %{
+         @recovery_snapshot
+         | environments: [
+             %{
+               issue_id: "bon-143",
+               issue_identifier: "BON-143",
+               phase: :unknown,
+               desired: :stopped,
+               occupies_slot: true,
+               credential: nil,
+               unresolved: %{operation: :reconcile, category: :unknown, code: :environment_state_unknown}
+             }
+           ]
+       }
+  test "unresolved workstation details explain an unknown environment phase", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?lane=ops&attention=1&ticket=ops%3Abon-143")
+    assert has_element?(view, "#console-list [data-ticket='ops:bon-143']")
+    assert has_element?(view, "#environment-detail", "unknown")
+    assert has_element?(view, "#environment-detail", "environment_state_unknown")
+    refute has_element?(view, "#console-detail button")
   end
 
   @tag snapshot: %{
@@ -317,9 +419,16 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     assert has_element?(view, "#flash-error", "OPS-3 was not changed: it is no longer waiting to retry.")
   end
 
-  test "approve and reply resume a blocked ticket through the tracker", %{conn: conn} do
+  test "approve and reply resume a blocked runtime ticket with workstation details", %{conn: conn, fake: fake} do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    :sys.replace_state(fake, fn state ->
+      environment = %{hd(@recovery_snapshot.environments) | issue_id: "blk-1", issue_identifier: "OPS-2"}
+      %{state | snapshot: Map.put(state.snapshot, :environments, [environment])}
+    end)
+
     {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Ablk-1")
+    assert has_element?(view, "#environment-detail", "checkpoint_failed")
 
     view |> element("#console-detail button", "Approve") |> render_click()
     assert_receive {:memory_tracker_state_update, "blk-1", "Todo"}

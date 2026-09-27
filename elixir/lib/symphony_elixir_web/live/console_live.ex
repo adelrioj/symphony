@@ -35,6 +35,9 @@ defmodule SymphonyElixirWeb.ConsoleLive do
   def handle_info(:observability_updated, socket), do: {:noreply, load(socket)}
 
   @impl true
+  def handle_event("panel", _params, %{assigns: %{ticket: %{source: :environment}}} = socket),
+    do: reject_environment_action(socket)
+
   def handle_event("panel", %{"panel" => panel}, socket) when panel in ["stop", "reply"],
     do: {:noreply, assign(socket, :panel, panel)}
 
@@ -114,6 +117,23 @@ defmodule SymphonyElixirWeb.ConsoleLive do
             <dt :if={@ticket.blocked_by != []}>Blocked by</dt>
             <dd :if={@ticket.blocked_by != []}>{Enum.join(@ticket.blocked_by, ", ")}</dd>
           </dl>
+          <section :if={@ticket.environment} id="environment-detail">
+            <h3 class="console-h">Workstation</h3>
+            <dl class="console-kv">
+              <dt>Phase</dt>
+              <dd>{@ticket.environment[:phase] || "unknown"}</dd>
+              <dt>Desired state</dt>
+              <dd>{@ticket.environment[:desired] || "unknown"}</dd>
+              <dt>Occupies slot</dt>
+              <dd>{slot_occupancy(@ticket.environment[:occupies_slot])}</dd>
+              <dt :if={@ticket.environment[:credential]}>Credential stage</dt>
+              <dd :if={@ticket.environment[:credential]}>{@ticket.environment.credential[:stage] || "unknown"}</dd>
+              <dt :if={get_in(@ticket.environment, [:credential, :reason])}>Credential reason</dt>
+              <dd :if={get_in(@ticket.environment, [:credential, :reason])}>{@ticket.environment.credential.reason}</dd>
+              <dt :if={get_in(@ticket.environment, [:unresolved, :code])}>Unresolved code</dt>
+              <dd :if={get_in(@ticket.environment, [:unresolved, :code])}>{@ticket.environment.unresolved.code}</dd>
+            </dl>
+          </section>
           <p :if={@ticket.error} class="error-copy">{@ticket.error}</p>
           <p :if={@ticket.status == "queued"} id="queued-note" class="muted">
             No run yet. {if @ticket.blocked_by != [],
@@ -140,7 +160,7 @@ defmodule SymphonyElixirWeb.ConsoleLive do
             </ol>
           </section>
           <footer class="console-actions">
-            <div :if={@panel == "stop"} class="console-confirm" id="stop-confirm">
+            <div :if={@ticket.source == :runtime and @panel == "stop"} class="console-confirm" id="stop-confirm">
               <p>
                 <strong>Stop this run?</strong>
                 The agent session ends now and the workspace is kept. The ticket stays in
@@ -151,7 +171,7 @@ defmodule SymphonyElixirWeb.ConsoleLive do
                 <button type="button" class="danger-button" phx-click="stop">Stop run</button>
               </p>
             </div>
-            <form :if={@panel == "reply"} id="reply-form" class="console-reply" phx-submit="reply">
+            <form :if={@ticket.source == :runtime and @panel == "reply"} id="reply-form" class="console-reply" phx-submit="reply">
               <label for="reply-message">
                 Message to the agent. It is posted on the ticket, and the ticket moves back to an active state.
               </label>
@@ -161,11 +181,11 @@ defmodule SymphonyElixirWeb.ConsoleLive do
                 <button type="submit">Send and resume</button>
               </p>
             </form>
-            <button :if={is_nil(@panel) and not @ticket.history and @ticket.status == "blocked"} type="button" phx-click="approve">
+            <button :if={is_nil(@panel) and @ticket.source == :runtime and @ticket.status == "blocked"} type="button" phx-click="approve">
               Approve &amp; resume
             </button>
             <button
-              :if={is_nil(@panel) and not @ticket.history and @ticket.status == "blocked"}
+              :if={is_nil(@panel) and @ticket.source == :runtime and @ticket.status == "blocked"}
               type="button"
               class="subtle-button"
               phx-click="panel"
@@ -173,11 +193,11 @@ defmodule SymphonyElixirWeb.ConsoleLive do
             >
               Reply to agent
             </button>
-            <button :if={is_nil(@panel) and not @ticket.history and @ticket.status == "retrying"} type="button" phx-click="retry_now">
+            <button :if={is_nil(@panel) and @ticket.source == :runtime and @ticket.status == "retrying"} type="button" phx-click="retry_now">
               Retry now
             </button>
             <button
-              :if={is_nil(@panel) and not @ticket.history and @ticket.status == "running"}
+              :if={is_nil(@panel) and @ticket.source == :runtime and @ticket.status == "running"}
               type="button"
               class="danger-button"
               phx-click="panel"
@@ -249,6 +269,20 @@ defmodule SymphonyElixirWeb.ConsoleLive do
 
   defp blank_to_nil(value) when value in [nil, ""], do: nil
   defp blank_to_nil(value), do: value
+
+  defp slot_occupancy(true), do: "yes"
+  defp slot_occupancy(false), do: "no"
+  defp slot_occupancy(_value), do: "unknown"
+
+  defp reject_environment_action(socket) do
+    {:noreply,
+     socket
+     |> assign(:panel, nil)
+     |> put_flash(:error, "No agent run is available for this workstation.")}
+  end
+
+  defp act(%{assigns: %{ticket: %{source: :environment}}} = socket, _verb, _action),
+    do: reject_environment_action(socket)
 
   defp act(%{assigns: %{ticket: %{} = ticket, detail: %{entry: entry}}} = socket, verb, action) do
     socket =
