@@ -527,7 +527,14 @@ defmodule SymphonyElixir.Workspace do
     )
 
     with :ok <- validate_workspace_path(workspace, context) do
-      run_command = fn -> System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true, env: [{"SYMPHONY_ISSUE_IDENTIFIER", issue_context.issue_identifier}]) end
+      run_command = fn ->
+        System.cmd("sh", ["-lc", command],
+          cd: workspace,
+          stderr_to_stdout: true,
+          env: [{"SYMPHONY_ISSUE_IDENTIFIER", issue_context.issue_identifier}]
+        )
+      end
+
       task = Task.async(fn -> execute_hook_task(run_command, on_hook, hook_name) end)
 
       case Task.yield(task, timeout_ms) do

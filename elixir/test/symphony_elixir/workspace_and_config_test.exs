@@ -180,7 +180,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     target = managed_shell_target!(root)
     issue = %Issue{id: "stable", identifier: "QA-7'; touch injected; #"}
-    managed = %ExecutionContext{mode: :managed, workspace_root: root, workspace_path: Path.join(root, "persisted-key"), target: target}
+
+    managed = %ExecutionContext{
+      mode: :managed,
+      workspace_root: root,
+      workspace_path: Path.join(root, "persisted-key"),
+      target: target
+    }
 
     for context <- [ExecutionContext.local(root), managed] do
       assert {:ok, workspace} = Workspace.create_for_issue(issue, context)
