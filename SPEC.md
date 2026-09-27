@@ -1810,6 +1810,8 @@ Installation settings and authentication:
   is refused otherwise. Resuming MUST NOT bypass normal reconciliation; the next attempt is
   dispatched by the usual poll. A stopped attempt may likewise be dispatched again on the next poll
   while its ticket stays in an active state.
+- The console MAY offer a control that requests an immediate poll of the lanes in view, with the
+  same semantics as `POST /api/v1/refresh`.
 - Show per-lane sessions, retries, totals, events, health/error indicators and durable attempt history.
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
   consumes the JSON API below.

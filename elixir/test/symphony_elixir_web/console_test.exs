@@ -179,6 +179,16 @@ defmodule SymphonyElixirWeb.ConsoleTest do
            ) == "codex"
   end
 
+  test "formats durations and ignores missing or unparsable times" do
+    at = ~U[2026-09-27 10:00:00Z]
+    assert Console.duration(at, DateTime.add(at, 42)) == "42s"
+    assert Console.duration(DateTime.to_iso8601(at), DateTime.add(at, 724)) == "12m 04s"
+    assert Console.duration(at, DateTime.add(at, 3 * 3600 + 5 * 60)) == "3h 05m"
+    assert Console.duration(at, DateTime.add(at, -10)) == "0s"
+    assert Console.duration(nil, at) == nil
+    assert Console.duration("not a time", at) == nil
+  end
+
   test "formats token counts the way people read them" do
     assert Console.format_tokens(nil) == "0"
     assert Console.format_tokens(412) == "412"

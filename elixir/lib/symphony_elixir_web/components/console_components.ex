@@ -61,6 +61,9 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
           <span class={"console-dot console-dot--#{lane_health(entry, @tickets)}"}></span>
           {entry.name}
           <span class="console-backend">{Console.agent_setting(entry, :backend, "codex")}</span>
+          <span :if={Console.recent_crash?(entry, @now)} class="console-restarts">
+            restarted {entry.runtime.restarts}× · last crash {Calendar.strftime(entry.runtime.last_crash.at, "%H:%M")}
+          </span>
         </p>
         <div class="console-tiles">
           <.link
@@ -115,13 +118,19 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
           <span class="console-meta">
             <span :if={ticket.attempt && ticket.attempt > 1} class="console-attempt">attempt {ticket.attempt}</span>
             <span class="console-chip">{if @nav.group == :status and not ticket.history, do: ticket.tracker_state, else: ticket.status}</span>
+            <span class="console-backend">{ticket.backend}</span>
             <span :if={is_nil(@nav.lane)} class="console-lane-tag">{ticket.lane}</span>
           </span>
           <span :if={ticket.status == "running"} class="console-sub">
-            <span class="console-live"></span>Turn {ticket.turn_count} · {ticket.last_message}
+            <span class="console-live"></span><span class="mono">{Console.duration(ticket.started_at, @now)}</span>
+            · Turn {ticket.turn_count}
+            <span :if={ticket.tokens} class="mono">
+              · {Console.format_tokens(ticket.tokens.input_tokens)} in · {Console.format_tokens(ticket.tokens.output_tokens)} out
+            </span>
+            · {ticket.last_message}
           </span>
           <span :if={not ticket.history and ticket.status in ["blocked", "retrying"]} class="console-sub console-sub--warn">
-            {ticket.error}{if ticket.due_at, do: " · next attempt #{ticket.due_at}"}
+            {ticket.error}{if ticket.due_at, do: " · retry in #{Console.duration(@now, ticket.due_at)}"}
           </span>
         </.link>
       </section>

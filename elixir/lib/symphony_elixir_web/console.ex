@@ -116,6 +116,26 @@ defmodule SymphonyElixirWeb.Console do
   def format_tokens(count) when is_integer(count), do: Integer.to_string(count)
   def format_tokens(_count), do: "0"
 
+  @doc "Seconds from `from` to `to` (ISO 8601 strings or DateTimes), as \"12m 04s\"; nil when either is missing."
+  @spec duration(String.t() | DateTime.t() | nil, String.t() | DateTime.t() | nil) :: String.t() | nil
+  def duration(from, to) do
+    with %DateTime{} = from <- to_datetime(from), %DateTime{} = to <- to_datetime(to) do
+      seconds = max(DateTime.diff(to, from), 0)
+      {h, m, s} = {div(seconds, 3600), div(rem(seconds, 3600), 60), rem(seconds, 60)}
+
+      cond do
+        h > 0 -> "#{h}h #{pad(m)}m"
+        m > 0 -> "#{m}m #{pad(s)}s"
+        true -> "#{s}s"
+      end
+    end
+  end
+
+  @doc "True when the lane's runtime crashed within the last hour."
+  @spec recent_crash?(Entry.t(), DateTime.t()) :: boolean()
+  def recent_crash?(%Entry{runtime: %{last_crash: %{at: at}}}, now), do: DateTime.diff(now, at) < 3600
+  def recent_crash?(_entry, _now), do: false
+
   @spec describe_event(map()) :: String.t()
   def describe_event(%{"message" => message})
       when is_binary(message) and message != "" do
@@ -170,6 +190,7 @@ defmodule SymphonyElixirWeb.Console do
     %{
       key: entry.slug <> ":" <> item.issue_id,
       lane: entry.slug,
+      backend: agent_setting(entry, :backend, "codex"),
       issue_id: item.issue_id,
       identifier: item.issue_identifier,
       title: Map.get(item, :title),
@@ -185,7 +206,10 @@ defmodule SymphonyElixirWeb.Console do
       error: Map.get(item, :error),
       due_at: Map.get(item, :due_at),
       started_at: Map.get(item, :started_at),
-      tokens: Map.get(item, :tokens)
+      tokens: Map.get(item, :tokens),
+      session_id: Map.get(item, :session_id),
+      worker_host: Map.get(item, :worker_host),
+      workspace_path: Map.get(item, :workspace_path)
     }
   end
 
@@ -193,6 +217,7 @@ defmodule SymphonyElixirWeb.Console do
     %{
       key: entry.slug <> ":" <> run.issue_id,
       lane: entry.slug,
+      backend: agent_setting(entry, :backend, "codex"),
       issue_id: run.issue_id,
       identifier: run.issue_identifier,
       title: run.issue_title,
@@ -212,7 +237,10 @@ defmodule SymphonyElixirWeb.Console do
         input_tokens: run.input_tokens,
         output_tokens: run.output_tokens,
         total_tokens: run.input_tokens + run.output_tokens
-      }
+      },
+      session_id: nil,
+      worker_host: nil,
+      workspace_path: nil
     }
   end
 
@@ -238,4 +266,17 @@ defmodule SymphonyElixirWeb.Console do
   end
 
   defp same_state?(_state, _group_state), do: false
+
+  defp to_datetime(%DateTime{} = at), do: at
+
+  defp to_datetime(at) when is_binary(at) do
+    case DateTime.from_iso8601(at) do
+      {:ok, at, _offset} -> at
+      _ -> nil
+    end
+  end
+
+  defp to_datetime(_at), do: nil
+
+  defp pad(n), do: n |> Integer.to_string() |> String.pad_leading(2, "0")
 end

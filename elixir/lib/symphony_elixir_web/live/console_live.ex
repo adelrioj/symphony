@@ -38,6 +38,20 @@ defmodule SymphonyElixirWeb.ConsoleLive do
   def handle_event("panel", %{"panel" => panel}, socket) when panel in ["stop", "reply"],
     do: {:noreply, assign(socket, :panel, panel)}
 
+  def handle_event("poll", _params, socket) do
+    %{entries: entries, nav: nav} = socket.assigns
+
+    refreshed =
+      for entry <- entries, is_nil(nav.lane) or entry.slug == nav.lane, match?({:ok, _}, Presenter.refresh_payload(Presenter.orchestrator_for(entry))), do: entry
+
+    socket =
+      if refreshed == [],
+        do: put_flash(socket, :error, "No lane is running, so nothing was polled."),
+        else: put_flash(socket, :info, "Polling #{length(refreshed)} lane(s) now.")
+
+    {:noreply, socket}
+  end
+
   def handle_event("cancel", _params, socket), do: {:noreply, assign(socket, :panel, nil)}
   def handle_event("stop", _params, socket), do: act(socket, "stopped", &OperatorActions.stop/2)
   def handle_event("retry_now", _params, socket), do: act(socket, "dispatched", &OperatorActions.retry_now/2)
@@ -60,9 +74,10 @@ defmodule SymphonyElixirWeb.ConsoleLive do
             <.link id="group-status" patch={console_path(@nav, group: :status)} aria-current={to_string(@nav.group == :status)}>Run status</.link>
             <.link id="group-tracker" patch={console_path(@nav, group: :tracker)} aria-current={to_string(@nav.group == :tracker)}>Tracker state</.link>
           </div>
+          <button id="poll-trackers" type="button" class="subtle-button" phx-click="poll">↻ Poll trackers</button>
         </header>
-        <.strip nav={@nav} strips={@strips} tickets={@tickets} />
-        <.ticket_list nav={@nav} groups={@groups} />
+        <.strip nav={@nav} strips={@strips} tickets={@tickets} now={@now} />
+        <.ticket_list nav={@nav} groups={@groups} now={@now} />
       </section>
       <aside class="console-detail" id="console-detail" aria-label="Ticket detail">
         <p :if={is_nil(@ticket)} class="empty-state">Select a ticket or agent to see its run.</p>
@@ -80,14 +95,28 @@ defmodule SymphonyElixirWeb.ConsoleLive do
             <dd><span class={"console-pill console-pill--#{@ticket.status}"}>{@ticket.status}</span></dd>
             <dt :if={@ticket.turn_count}>Turns</dt>
             <dd :if={@ticket.turn_count}>{@ticket.turn_count} / {Console.agent_setting(@detail.entry, :max_turns, 0)}</dd>
+            <dt :if={@ticket.status == "running" and @ticket.started_at}>Elapsed</dt>
+            <dd :if={@ticket.status == "running" and @ticket.started_at} class="mono">{Console.duration(@ticket.started_at, @now)}</dd>
             <dt :if={@ticket.tokens}>Tokens</dt>
             <dd :if={@ticket.tokens} class="mono">
               {Console.format_tokens(@ticket.tokens.input_tokens)} in · {Console.format_tokens(@ticket.tokens.output_tokens)} out
+              <span :if={@detail.attempts != []}>· {Console.format_tokens(hd(@detail.attempts).cached_tokens)} cached</span>
             </dd>
+            <dt :if={@ticket.session_id}>Session</dt>
+            <dd :if={@ticket.session_id} class="mono">{@ticket.session_id}</dd>
+            <dt :if={@ticket.worker_host}>Worker</dt>
+            <dd :if={@ticket.worker_host} class="mono">{@ticket.worker_host}</dd>
+            <dt :if={@ticket.workspace_path}>Workspace</dt>
+            <dd :if={@ticket.workspace_path} class="mono">{@ticket.workspace_path}</dd>
             <dt :if={@ticket.blocked_by != []}>Blocked by</dt>
             <dd :if={@ticket.blocked_by != []}>{Enum.join(@ticket.blocked_by, ", ")}</dd>
           </dl>
           <p :if={@ticket.error} class="error-copy">{@ticket.error}</p>
+          <p :if={@ticket.status == "queued"} id="queued-note" class="muted">
+            No run yet. {if @ticket.blocked_by != [],
+              do: "Waiting on #{Enum.join(@ticket.blocked_by, ", ")}.",
+              else: "Dispatches when a slot frees up."}
+          </p>
           <section :if={@ticket.last_message}>
             <h3 class="console-h">Latest agent message</h3>
             <p class="console-msg">{@ticket.last_message}</p>
@@ -173,6 +202,7 @@ defmodule SymphonyElixirWeb.ConsoleLive do
     ticket = Enum.find(tickets, &(&1.key == nav.selected))
 
     assign(socket,
+      now: DateTime.utc_now(),
       entries: entries,
       tickets: tickets,
       strips: Enum.map(scoped, &{&1, Console.strip(&1, tickets)}),

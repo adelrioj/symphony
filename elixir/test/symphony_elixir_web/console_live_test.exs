@@ -47,7 +47,72 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
 
     {:ok, entry} = LaneStore.lookup(lane.id)
     :ok = LaneStore.put_entry(%{entry | enabled: true})
-    {:ok, conn: Plug.Test.init_test_session(build_conn(), %{"operator" => true}), lane: lane}
+    {:ok, conn: Plug.Test.init_test_session(build_conn(), %{"operator" => true}), lane: lane, fake: fake}
+  end
+
+  test "rows show elapsed time, tokens, backend and a relative retry time", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?lane=ops")
+    assert has_element?(view, "#console-list [data-ticket='ops:run-1'] .console-sub", "12m 04s")
+    assert has_element?(view, "#console-list [data-ticket='ops:run-1'] .console-sub", "3.1m in · 1.8k out")
+    assert has_element?(view, "#console-list [data-ticket='ops:run-1'] .console-backend", "codex")
+    assert render(element(view, "#console-list [data-ticket='ops:rty-1'] .console-sub")) =~ ~r/retry in (59|1m 00)s/
+  end
+
+  test "the panel shows session, worker, workspace, elapsed and cached tokens", %{conn: conn, lane: lane} do
+    issue = %Issue{id: "run-1", identifier: "OPS-1", title: "Cache deps in CI", state: "In Progress"}
+    :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "att-1", attempt: 1})
+    :ok = Runs.event("att-1", %{event: :notification}, %{input_tokens: 5, output_tokens: 1, cached_tokens: 1_200}, 1)
+    :ok = Runs.flush()
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Arun-1")
+    assert has_element?(view, "#console-detail .console-kv", "s1")
+    assert has_element?(view, "#console-detail .console-kv", "worker-a")
+    assert has_element?(view, "#console-detail .console-kv", "/ws/OPS-1")
+    assert has_element?(view, "#console-detail .console-kv", "12m 04s")
+    assert has_element?(view, "#console-detail .console-kv", "1.2k cached")
+  end
+
+  test "a queued ticket's panel says why it has no run", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Aq-1")
+    assert has_element?(view, "#queued-note", "No run yet. Waiting on OPS-1.")
+  end
+
+  @tag snapshot: %{
+         running: [],
+         blocked: [],
+         retrying: [],
+         claimed: 0,
+         codex_totals: %{},
+         rate_limits: nil,
+         queued: [
+           %{issue_id: "q-2", identifier: "OPS-5", title: "Free", state: "Todo"}
+           |> Map.merge(%{labels: [], issue_url: nil, priority: nil, blocked_by: []})
+         ]
+       }
+  test "an unblocked queued ticket waits for a slot", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Aq-2")
+    assert has_element?(view, "#queued-note", "Dispatches when a slot frees up.")
+  end
+
+  test "a lane that crashed in the last hour warns in its strip", %{conn: conn, lane: lane} do
+    {:ok, entry} = LaneStore.lookup(lane.id)
+    crashed = fn at -> %{entry | runtime: %{entry.runtime | restarts: 2, last_crash: %{reason: ":boom", at: at}}} end
+    :ok = LaneStore.put_entry(crashed.(DateTime.utc_now()))
+    {:ok, view, _html} = live(conn, "/?lane=ops")
+    assert has_element?(view, "#strip-ops .console-restarts", "restarted 2×")
+
+    :ok = LaneStore.put_entry(crashed.(DateTime.add(DateTime.utc_now(), -7200)))
+    send(view.pid, :observability_updated)
+    refute has_element?(view, "#strip-ops .console-restarts")
+  end
+
+  test "poll trackers asks the scoped lanes to poll now", %{conn: conn, fake: fake} do
+    {:ok, view, _html} = live(conn, "/?lane=ops")
+    view |> element("#poll-trackers") |> render_click()
+    assert has_element?(view, "#flash-info", "Polling 1 lane(s) now.")
+
+    GenServer.stop(fake)
+    view |> element("#poll-trackers") |> render_click()
+    assert has_element?(view, "#flash-error", "nothing was polled")
   end
 
   test "strip, grouped list and history render from lane snapshots", %{conn: conn, lane: lane} do
@@ -299,14 +364,16 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
           attempt_id: "att-1",
           state: "In Progress",
           session_id: "s1",
+          worker_host: "worker-a",
+          workspace_path: "/ws/OPS-1",
           turn_count: 3,
           last_codex_event: :notification,
           last_codex_message: nil,
-          started_at: now,
+          started_at: DateTime.add(now, -724),
           last_codex_timestamp: now,
-          codex_input_tokens: 10,
-          codex_output_tokens: 2,
-          codex_total_tokens: 12
+          codex_input_tokens: 3_100_000,
+          codex_output_tokens: 1_800,
+          codex_total_tokens: 3_101_800
         }
       ],
       blocked: [

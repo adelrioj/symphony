@@ -695,6 +695,8 @@ pre,
 .console-dot--off { background: transparent; border: 1.5px solid var(--muted); }
 .console-main { display: flex; flex-direction: column; min-width: 0; }
 .console-top { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1rem; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+#poll-trackers { margin-left: auto; }
+.console-restarts { font-size: 0.75rem; color: var(--danger); }
 .console-heading { margin: 0; font-size: 1rem; }
 .console-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 7px; overflow: hidden; }
 .console-seg a { padding: 0.25rem 0.7rem; font-size: 0.8rem; color: var(--muted); text-decoration: none; }

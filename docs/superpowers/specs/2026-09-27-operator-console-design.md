@@ -16,6 +16,8 @@ can act on a run without leaving the page.
 - **Live strip** above the list: one group per lane in scope. Each running or blocked ticket is a
   tile (identifier, `T<turn>/<max_turns>` or "blocked", title, latest message or error). Free slots
   (`max_concurrent_agents - running`) render as one "N idle" tile, and a disabled lane as "Disabled".
+  A lane whose runtime crashed in the last hour shows "restarted N× · last crash HH:MM".
+- **Poll trackers** button asks every lane in scope to poll now (the same refresh as `POST /api/v1/refresh`).
 - **Ticket list** with a group-by switch:
   - **Run status** (default): Running, Needs attention, Retry queue, Queued, Finished. Rows show
     tracker state.
@@ -24,9 +26,13 @@ can act on a run without leaving the page.
     does not name go under "Other states"; finished runs go under "Finished runs" (their stored
     state is from dispatch time, so they are not placed into a tracker column). Empty groups are
     hidden. Rows show run status.
-- **Detail panel** for the selected ticket: tracker state, run status, turns, tokens, blockers,
+- Every row carries its agent backend. Running rows add elapsed time, turn, input/output tokens and
+  the latest message; retrying rows say "retry in <duration>".
+- **Detail panel** for the selected ticket: tracker state, run status, turns, elapsed time, tokens
+  (cached from the latest durable run), session id, worker host, workspace path, blockers,
   error, latest agent message, attempt chips linking to `/runs/:attempt_id`, the latest attempt's
-  last 50 events, and actions.
+  last 50 events, and actions. A queued ticket says why it has no run: waiting on its blockers, or
+  on a free slot. Times refresh when the page reloads its snapshot, not every second.
 
 URL query carries `lane`, `group=tracker`, `attention=1` and `ticket=<lane>:<issue_id>` so views can
 be linked.
