@@ -183,6 +183,19 @@ defmodule SymphonyElixir.RunsTest do
     assert version_id == current.version_id
   end
 
+  test "attempts keep the ticket title and list newest first per issue" do
+    lane_id = LaneContext.current!()
+    issue = %Issue{id: "titled", identifier: "TT-1", title: "Keep my title", state: "Todo"}
+    :ok = Runs.started(%{lane_id: lane_id, issue: issue, attempt_id: "titled-1", attempt: 1})
+    :ok = Runs.finished("titled-1", "failed")
+    :ok = Runs.started(%{lane_id: lane_id, issue: issue, attempt_id: "titled-2", attempt: 2})
+    :ok = Runs.started(%{lane_id: lane_id, issue: %Issue{issue | id: "other", identifier: "TT-2"}, attempt_id: "other-1", attempt: 1})
+
+    assert [%Run{attempt_id: "titled-2", issue_title: "Keep my title"}, %Run{attempt_id: "titled-1"}] = Runs.for_issue(lane_id, "titled", 10)
+    assert [%Run{attempt_id: "titled-2"}] = Runs.for_issue(lane_id, "titled", 1)
+    assert [] = Runs.for_issue(lane_id, "missing", 10)
+  end
+
   test "source events retain their classification and readable names in the durable feed" do
     start_run("kinds")
 

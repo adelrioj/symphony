@@ -221,3 +221,15 @@ defmodule SymphonyElixir.Repo.Migrations.AddExecutionProfiles do
     "Legacy #{slug}"
   end
 end
+
+defmodule SymphonyElixir.Repo.Migrations.AddRunIssueTitle do
+  @moduledoc false
+  use Ecto.Migration
+
+  @spec change() :: term()
+  def change do
+    alter table(:runs) do
+      add(:issue_title, :string)
+    end
+  end
+end
