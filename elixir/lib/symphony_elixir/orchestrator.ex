@@ -2934,6 +2934,32 @@ defmodule SymphonyElixir.Orchestrator do
      }, state}
   end
 
+  def handle_call({:operator_stop, issue_id}, _from, state) do
+    case Map.get(state.running, issue_id) do
+      nil ->
+        {:reply, {:error, :not_running}, state}
+
+      entry ->
+        Logger.info("Operator stopped issue_id=#{issue_id} issue_identifier=#{entry.identifier}")
+        state = terminate_running_issue(state, issue_id, false)
+        notify_dashboard()
+        {:reply, :ok, state}
+    end
+  end
+
+  def handle_call({:operator_retry_now, issue_id}, _from, state) do
+    case Map.get(state.retry_attempts, issue_id) do
+      %{retry_token: token} = retry ->
+        if is_reference(retry[:timer_ref]), do: Process.cancel_timer(retry.timer_ref)
+        Logger.info("Operator requested immediate retry issue_id=#{issue_id} issue_identifier=#{retry[:identifier]}")
+        send(self(), {:retry_issue, issue_id, token})
+        {:reply, :ok, state}
+
+      nil ->
+        {:reply, {:error, :not_retrying}, state}
+    end
+  end
+
   @impl true
   def terminate(reason, state) do
     status = if reason in [:normal, :shutdown] or match?({:shutdown, _}, reason), do: "stopped", else: "failed"
