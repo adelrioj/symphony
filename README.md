@@ -40,7 +40,8 @@ and a Linear API key. Agents run unattended: use a trusted environment and scope
    docker compose up -d
    ```
 
-Open <http://localhost:4000>, sign in with the operator token, and enable `main`.
+Open <http://localhost:4000>, sign in with the operator token, and enable `main` from **Lanes**.
+The console at `/` then shows its agents and tickets.
 New lanes start disabled. Use the structured lane editor and `/execution-profiles` for live
 changes; the imported file is flattened interchange only, not a watched runtime configuration.
 Editors preserve omitted settings and explicit disabling values during unrelated changes.
