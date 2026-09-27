@@ -49,6 +49,16 @@ COPY elixir/ ./
 # Mix daemon can load SQLite's NIF; a second mix compile adds no packaging effect.
 RUN mix escript.build
 
+# Provenance goes last: an ARG leaks into every later RUN's cache key, and SOURCE_REVISION
+# changes on every commit, so declaring it above the toolchain layers would redo the OTP build.
+# CI derives these from the checked-out commit; local builds must supply them explicitly.
+# The archive covers elixir/ only, not this recipe.
+ARG SOURCE_REVISION
+ARG SOURCE_ARCHIVE_SHA256
+RUN test -n "$SOURCE_REVISION" && test -n "$SOURCE_ARCHIVE_SHA256"
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.trazadera.symphony.source-archive-sha256="${SOURCE_ARCHIVE_SHA256}"
+
 ENV PATH="/app/elixir/bin:${PATH}"
 
 # Per-issue clones and durable database/log data are runtime volumes, not image contents.
@@ -64,7 +74,8 @@ ENTRYPOINT ["mix", "symphony"]
 # `if Mix.env() == :test`, and it needs .git, because the runner compares `git rev-parse HEAD`
 # against pins.consumer_source_commit before it will run.
 #
-# Build it explicitly:  docker build --target candidate -f docker/Dockerfile .
+# Build explicitly with --target candidate -f docker/Dockerfile and the same provenance
+# build args as for `runtime`.
 # `runtime` stays the default target for docker-publish.yml.
 #
 # Why this stage exists: the image used through 2026-09-18,

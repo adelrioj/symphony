@@ -29,7 +29,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @stock_baseline %{
     release: "approved-7140d4b65725",
     termination_contract: "approved-pending-fault-matrix-kubelet-all-containers-v1",
-    controller_source_commit: "7140d4b657253e6bf318bd93e2a66ba67094d8d3",
+    controller_source_commit: "c313905c1c2233c2076c600399735cd1c3c5c8c1",
     controller_image_prefix: "ghcr.io/trazadera/agent-sandbox-symphony-controller@sha256:",
     schemas: [
       {"sandboxes.agents.x-k8s.io", "37a7a827d77c8dd22fe8a2af41c7e41e1b1d5f67"},

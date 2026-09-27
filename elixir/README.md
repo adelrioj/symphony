@@ -132,8 +132,10 @@ above, which leaves you in `symphony/elixir`.
    ```
 3. **Edit `workflows/example.md`** before import: set the tracker scope and `hooks.after_create`
    clone URL. Keep `workspace.root: /workspaces` to match the volume. Any `server` section is ignored.
-4. **Import offline, then launch:**
+4. **Import offline, then launch** (build from a clean checkout so the labels identify the image's source):
    ```bash
+   export SOURCE_REVISION="$(git rev-parse HEAD)"
+   export SOURCE_ARCHIVE_SHA256="$(git archive --format=tar "$SOURCE_REVISION" elixir | sha256sum | cut -d' ' -f1)"
    docker compose build
    docker compose run --rm symphony-example lanes import /config/example.md --slug example --data-root /data
    docker compose up -d
@@ -604,6 +606,9 @@ does not suppress a new cleanup after a genuine reopen.
 
 `after_create` still bootstraps only a new checkout; `before_run`/`after_run` keep their existing
 failure policies. All run on the selected worker through the captured execution context.
+Hooks receive the caller-provided issue identifier in `SYMPHONY_ISSUE_IDENTIFIER`.
+Use this rather than the directory basename: managed checkout paths are stable resource keys,
+not issue identifiers, and remain unchanged when an issue is renamed.
 Ordinary backend exceptions/exits still attempt best-effort `after_run` before propagating the
 original failure. Explicit managed-execution uncertainty skips follow-on remote hooks.
 Cleanup needing `before_remove` prepares the retained environment under the same capacity budget,
