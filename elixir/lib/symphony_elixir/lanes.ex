@@ -703,7 +703,10 @@ defmodule SymphonyElixir.Lanes do
          subdir
        )
        when is_binary(base) do
-    if Path.expand(base) == "/state/workspace/worker" and subdir != "." do
+    # Compare the resolved base, as the repair path does: an env reference such as
+    # $SYMPHONY_WORKER_BASE must not bypass the guard.
+    if Path.expand(Configuration.workspace_base(%{"workspace_base" => base}) || "") == "/state/workspace/worker" and
+         subdir != "." do
       {:error, [%{path: "workspace_subdir", message: "must be . for the fixed-root Kubernetes worker"}]}
     else
       :ok
