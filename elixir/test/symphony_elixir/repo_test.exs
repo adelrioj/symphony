@@ -25,8 +25,14 @@ defmodule SymphonyElixir.RepoTest do
     isolated_repo()
     assert :ok = legacy_migrate()
 
-    Repo.query!("INSERT INTO lanes (id, slug, name, inserted_at, updated_at) VALUES (1, 'features', 'Features', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
-    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, 'tracker: {}', 'Build it', CURRENT_TIMESTAMP)")
+    Repo.query!(
+      "INSERT INTO lanes (id, slug, name, inserted_at, updated_at) VALUES (1, 'features', 'Features', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+
+    Repo.query!(
+      "INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, 'tracker: {}', 'Build it', CURRENT_TIMESTAMP)"
+    )
+
     Repo.query!("UPDATE lanes SET current_version_id = 1 WHERE id = 1")
 
     Repo.query!("""
@@ -34,7 +40,9 @@ defmodule SymphonyElixir.RepoTest do
     VALUES (1, 1, 1, 'issue-1', 'TEST-1', 'attempt-1', CURRENT_TIMESTAMP)
     """)
 
-    Repo.query!("INSERT INTO run_events (run_id, at, kind, payload) VALUES (1, CURRENT_TIMESTAMP, 'started', '{\"turn\":1}')")
+    Repo.query!(
+      "INSERT INTO run_events (run_id, at, kind, payload) VALUES (1, CURRENT_TIMESTAMP, 'started', '{\"turn\":1}')"
+    )
 
     assert :ok = Repo.migrate()
 
@@ -59,7 +67,9 @@ defmodule SymphonyElixir.RepoTest do
     end
 
     assert [[1]] = Repo.query!("SELECT count(*) FROM schema_migrations WHERE version = 20260920000001").rows
-    assert [["execution_profiles"]] = Repo.query!("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'execution_profiles'").rows
+
+    assert [["execution_profiles"]] =
+             Repo.query!("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'execution_profiles'").rows
   end
 
   test "database rejects unsupported lane executors and duplicate lane slugs" do
@@ -67,7 +77,9 @@ defmodule SymphonyElixir.RepoTest do
     :ok = Repo.migrate()
     profile_id = create_profile("Executor test")
 
-    insert = "INSERT INTO lanes (slug, name, executor, execution_profile_id, inserted_at, updated_at) VALUES (?, 'Features', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    insert =
+      "INSERT INTO lanes (slug, name, executor, execution_profile_id, inserted_at, updated_at) VALUES (?, 'Features', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+
     assert {:error, %Exqlite.Error{}} = Repo.query(insert, ["features", "kubernetes", profile_id])
     assert {:ok, _} = Repo.query(insert, ["features", "local", profile_id])
     assert {:error, %Exqlite.Error{}} = Repo.query(insert, ["features", "local"])
@@ -82,41 +94,76 @@ defmodule SymphonyElixir.RepoTest do
     enabled_root = Path.join(root, "enabled")
     disabled_root = Path.join(root, "disabled")
 
-    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (1, 'enabled', 'Enabled', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+    Repo.query!(
+      "INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (1, 'enabled', 'Enabled', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
 
-    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, ?, 'run it', CURRENT_TIMESTAMP)", [
-      "workspace:\n  root: #{enabled_root}\nworker:\n  ssh_hosts: [worker.example]\ntracker:\n  kind: memory"
-    ])
+    Repo.query!(
+      "INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, ?, 'run it', CURRENT_TIMESTAMP)",
+      [
+        "workspace:\n  root: #{enabled_root}\nworker:\n  ssh_hosts: [worker.example]\ntracker:\n  kind: memory"
+      ]
+    )
 
     Repo.query!("UPDATE lanes SET current_version_id = 1 WHERE id = 1")
 
-    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (2, 'disabled', 'Disabled', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+    Repo.query!(
+      "INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (2, 'disabled', 'Disabled', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
 
-    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (2, 2, ?, 'disabled', CURRENT_TIMESTAMP)", [
-      "workspace:\n  root: #{disabled_root}\ntracker:\n  kind: memory"
-    ])
+    Repo.query!(
+      "INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (2, 2, ?, 'disabled', CURRENT_TIMESTAMP)",
+      [
+        "workspace:\n  root: #{disabled_root}\ntracker:\n  kind: memory"
+      ]
+    )
 
     Repo.query!("UPDATE lanes SET current_version_id = 2 WHERE id = 2")
 
-    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, deleted_at, inserted_at, updated_at) VALUES (3, 'deleted', 'Deleted', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
-    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (3, 3, 'tracker:\n  kind: memory', 'deleted', CURRENT_TIMESTAMP)")
+    Repo.query!(
+      "INSERT INTO lanes (id, slug, name, enabled, deleted_at, inserted_at, updated_at) VALUES (3, 'deleted', 'Deleted', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+
+    Repo.query!(
+      "INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (3, 3, 'tracker:\n  kind: memory', 'deleted', CURRENT_TIMESTAMP)"
+    )
+
     Repo.query!("UPDATE lanes SET current_version_id = 3 WHERE id = 3")
 
-    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (4, 'malformed', 'Malformed', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
-    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (4, 4, 'tracker: [', 'broken', CURRENT_TIMESTAMP)")
+    Repo.query!(
+      "INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (4, 'malformed', 'Malformed', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+
+    Repo.query!(
+      "INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (4, 4, 'tracker: [', 'broken', CURRENT_TIMESTAMP)"
+    )
+
     Repo.query!("UPDATE lanes SET current_version_id = 4 WHERE id = 4")
-    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (5, 'missing-version', 'Missing', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
 
-    Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (6, 'managed', 'Managed', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+    Repo.query!(
+      "INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (5, 'missing-version', 'Missing', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
 
-    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (6, 6, ?, 'managed', CURRENT_TIMESTAMP)", [
-      "workspace:\n  root: /home/worker/workspaces\nworker:\n  environment:\n    kind: google_workstations\n    deployment_id: migration\n    startup_timeout_ms: 1000\n    shutdown_timeout_ms: 1000\n    terminal_retention_ms: 0\n    provider:\n      project: p\n      location: l\n      cluster: c\n      config: cfg\n      credential_configuration: deploy\n      impersonate_service_account: sa@example.com\n      ssh_user: worker\ntracker:\n  kind: memory"
-    ])
+    Repo.query!(
+      "INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (6, 'managed', 'Managed', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+
+    Repo.query!(
+      "INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (6, 6, ?, 'managed', CURRENT_TIMESTAMP)",
+      [
+        "workspace:\n  root: /home/worker/workspaces\nworker:\n  environment:\n    kind: google_workstations\n    deployment_id: migration\n    startup_timeout_ms: 1000\n    shutdown_timeout_ms: 1000\n    terminal_retention_ms: 0\n    provider:\n      project: p\n      location: l\n      cluster: c\n      config: cfg\n      credential_configuration: deploy\n      impersonate_service_account: sa@example.com\n      ssh_user: worker\ntracker:\n  kind: memory"
+      ]
+    )
 
     Repo.query!("UPDATE lanes SET current_version_id = 6 WHERE id = 6")
 
-    Repo.query!("INSERT INTO runs (id, lane_id, lane_version_id, issue_id, issue_identifier, attempt_id, started_at) VALUES (1, 1, 1, 'issue-1', 'TEST-1', 'migration-attempt', CURRENT_TIMESTAMP)")
-    Repo.query!("INSERT INTO run_events (run_id, at, kind, payload) VALUES (1, CURRENT_TIMESTAMP, 'started', '{\"kept\":true}')")
+    Repo.query!(
+      "INSERT INTO runs (id, lane_id, lane_version_id, issue_id, issue_identifier, attempt_id, started_at) VALUES (1, 1, 1, 'issue-1', 'TEST-1', 'migration-attempt', CURRENT_TIMESTAMP)"
+    )
+
+    Repo.query!(
+      "INSERT INTO run_events (run_id, at, kind, payload) VALUES (1, CURRENT_TIMESTAMP, 'started', '{\"kept\":true}')"
+    )
 
     :ok = Repo.migrate()
 
@@ -131,12 +178,16 @@ defmodule SymphonyElixir.RepoTest do
     assert {:ok, %{settings: %{workspace: %{root: ^canonical_disabled_root}}}} = Lanes.resolve_lane(Repo.get!(Lane, 2))
 
     assert [[^enabled_root, ssh_worker, nil]] =
-             Repo.query!("SELECT workspace_base, worker, repair_error FROM execution_profiles WHERE name = 'Legacy enabled'").rows
+             Repo.query!(
+               "SELECT workspace_base, worker, repair_error FROM execution_profiles WHERE name = 'Legacy enabled'"
+             ).rows
 
     assert Jason.decode!(ssh_worker) == %{"ssh_hosts" => ["worker.example"]}
 
     assert [["/home/worker/workspaces", managed_worker, nil]] =
-             Repo.query!("SELECT workspace_base, worker, repair_error FROM execution_profiles WHERE name = 'Legacy managed'").rows
+             Repo.query!(
+               "SELECT workspace_base, worker, repair_error FROM execution_profiles WHERE name = 'Legacy managed'"
+             ).rows
 
     assert get_in(Jason.decode!(managed_worker), ["environment", "provider", "credential_configuration"]) == "deploy"
 
@@ -147,11 +198,17 @@ defmodule SymphonyElixir.RepoTest do
              JOIN run_events ON run_events.run_id = runs.id WHERE lane_versions.id = 1
              """).rows
 
-    assert [[profile_id]] = Repo.query!("SELECT execution_profile_id FROM runs WHERE attempt_id = 'migration-attempt'").rows
+    assert [[profile_id]] =
+             Repo.query!("SELECT execution_profile_id FROM runs WHERE attempt_id = 'migration-attempt'").rows
+
     assert is_integer(profile_id)
 
-    assert [["."], ["."], ["."], ["."], ["."], ["."]] = Repo.query!("SELECT workspace_subdir FROM lanes ORDER BY id").rows
-    assert [[repair_error]] = Repo.query!("SELECT repair_error FROM execution_profiles WHERE name = 'Legacy malformed'").rows
+    assert [["."], ["."], ["."], ["."], ["."], ["."]] =
+             Repo.query!("SELECT workspace_subdir FROM lanes ORDER BY id").rows
+
+    assert [[repair_error]] =
+             Repo.query!("SELECT repair_error FROM execution_profiles WHERE name = 'Legacy malformed'").rows
+
     assert repair_error =~ "repair"
     refute Repo.get!(Lane, 4).enabled
     refute Repo.get!(Lane, 5).enabled
@@ -170,15 +227,23 @@ defmodule SymphonyElixir.RepoTest do
       front_matter = "tracker:\n  kind: memory\n" <> unquote(infrastructure)
       previous_front_matter = "tracker:\n  kind: memory"
 
-      Repo.query!("INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (1, 'repair', 'Repair', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+      Repo.query!(
+        "INSERT INTO lanes (id, slug, name, enabled, inserted_at, updated_at) VALUES (1, 'repair', 'Repair', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+      )
 
-      Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, ?, 'previous prompt', CURRENT_TIMESTAMP)", [
-        previous_front_matter
-      ])
+      Repo.query!(
+        "INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, ?, 'previous prompt', CURRENT_TIMESTAMP)",
+        [
+          previous_front_matter
+        ]
+      )
 
-      Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (2, 1, ?, 'current prompt', CURRENT_TIMESTAMP)", [
-        front_matter
-      ])
+      Repo.query!(
+        "INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (2, 1, ?, 'current prompt', CURRENT_TIMESTAMP)",
+        [
+          front_matter
+        ]
+      )
 
       Repo.query!("UPDATE lanes SET current_version_id = 2 WHERE id = 1")
 
@@ -187,7 +252,9 @@ defmodule SymphonyElixir.RepoTest do
       VALUES (1, 1, 1, 'repair-issue', 'REPAIR-1', 'repair-attempt', 'done', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       """)
 
-      Repo.query!("INSERT INTO run_events (run_id, at, kind, payload) VALUES (1, CURRENT_TIMESTAMP, 'turn_finished', '{\"kept\":true}')")
+      Repo.query!(
+        "INSERT INTO run_events (run_id, at, kind, payload) VALUES (1, CURRENT_TIMESTAMP, 'turn_finished', '{\"kept\":true}')"
+      )
 
       assert :ok = Repo.migrate()
       assert :ok = Repo.migrate()
@@ -226,12 +293,22 @@ defmodule SymphonyElixir.RepoTest do
     profile_id = create_profile("History test")
 
     assert {:error, %Exqlite.Error{}} =
-             Repo.query("INSERT INTO lane_versions (lane_id, front_matter, prompt, inserted_at) VALUES (999, '', '', CURRENT_TIMESTAMP)")
+             Repo.query(
+               "INSERT INTO lane_versions (lane_id, front_matter, prompt, inserted_at) VALUES (999, '', '', CURRENT_TIMESTAMP)"
+             )
 
-    Repo.query!("INSERT INTO lanes (id, slug, name, execution_profile_id, inserted_at, updated_at) VALUES (1, 'features', 'Features', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", [profile_id])
-    Repo.query!("INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, '', '', CURRENT_TIMESTAMP)")
+    Repo.query!(
+      "INSERT INTO lanes (id, slug, name, execution_profile_id, inserted_at, updated_at) VALUES (1, 'features', 'Features', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      [profile_id]
+    )
 
-    insert_run = "INSERT INTO runs (id, lane_id, lane_version_id, issue_id, issue_identifier, attempt_id, started_at) VALUES (?, 1, 1, 'issue-1', 'TEST-1', 'attempt-1', CURRENT_TIMESTAMP)"
+    Repo.query!(
+      "INSERT INTO lane_versions (id, lane_id, front_matter, prompt, inserted_at) VALUES (1, 1, '', '', CURRENT_TIMESTAMP)"
+    )
+
+    insert_run =
+      "INSERT INTO runs (id, lane_id, lane_version_id, issue_id, issue_identifier, attempt_id, started_at) VALUES (?, 1, 1, 'issue-1', 'TEST-1', 'attempt-1', CURRENT_TIMESTAMP)"
+
     Repo.query!(insert_run, [1])
     assert {:error, %Exqlite.Error{}} = Repo.query(insert_run, [2])
     Repo.query!("INSERT INTO run_events (run_id, at, kind) VALUES (1, CURRENT_TIMESTAMP, 'started')")
@@ -248,12 +325,22 @@ defmodule SymphonyElixir.RepoTest do
     isolated_repo()
     :ok = Repo.migrate()
     profile_id = create_profile("Referenced")
-    assert {:error, %Exqlite.Error{}} = Repo.query("INSERT INTO lanes (slug, name, inserted_at, updated_at) VALUES ('missing-profile', 'Missing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
 
     assert {:error, %Exqlite.Error{}} =
-             Repo.query("INSERT INTO lanes (slug, name, execution_profile_id, inserted_at, updated_at) VALUES ('bad-profile', 'Bad', 999999, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+             Repo.query(
+               "INSERT INTO lanes (slug, name, inserted_at, updated_at) VALUES ('missing-profile', 'Missing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+             )
 
-    Repo.query!("INSERT INTO lanes (slug, name, execution_profile_id, inserted_at, updated_at) VALUES ('referenced', 'Referenced', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", [profile_id])
+    assert {:error, %Exqlite.Error{}} =
+             Repo.query(
+               "INSERT INTO lanes (slug, name, execution_profile_id, inserted_at, updated_at) VALUES ('bad-profile', 'Bad', 999999, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+             )
+
+    Repo.query!(
+      "INSERT INTO lanes (slug, name, execution_profile_id, inserted_at, updated_at) VALUES ('referenced', 'Referenced', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      [profile_id]
+    )
+
     assert {:error, %Exqlite.Error{}} = Repo.query("DELETE FROM execution_profiles WHERE id = ?", [profile_id])
     Repo.query!("UPDATE lanes SET deleted_at = CURRENT_TIMESTAMP WHERE slug = 'referenced'")
     assert {:error, %Exqlite.Error{}} = Repo.query("DELETE FROM execution_profiles WHERE id = ?", [profile_id])
@@ -342,10 +429,13 @@ defmodule SymphonyElixir.RepoTest do
   end
 
   defp create_profile(name) do
-    Repo.query!("INSERT INTO execution_profiles (name, workspace_base, worker, inserted_at, updated_at) VALUES (?, ?, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", [
-      name,
-      Path.join(System.tmp_dir!(), name)
-    ])
+    Repo.query!(
+      "INSERT INTO execution_profiles (name, workspace_base, worker, inserted_at, updated_at) VALUES (?, ?, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      [
+        name,
+        Path.join(System.tmp_dir!(), name)
+      ]
+    )
 
     Repo.query!("SELECT id FROM execution_profiles WHERE name = ?", [name]).rows |> hd() |> hd()
   end

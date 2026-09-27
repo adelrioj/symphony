@@ -30,7 +30,13 @@ defmodule SymphonyElixirWeb.ConfigurationFieldsTest do
 
   test "SSH concurrency limits reject fractional and nontext form values" do
     for limit <- ["1.5", 2] do
-      input = Map.merge(params(), %{"worker_mode" => "ssh", "ssh_hosts" => "worker-a", "max_concurrent_agents_per_host" => limit})
+      input =
+        Map.merge(params(), %{
+          "worker_mode" => "ssh",
+          "ssh_hosts" => "worker-a",
+          "max_concurrent_agents_per_host" => limit
+        })
+
       {_attrs, errors} = ConfigurationFields.profile_attributes(input)
       assert Enum.any?(errors, &(&1.path == "worker.max_concurrent_agents_per_host"))
     end
@@ -61,6 +67,12 @@ defmodule SymphonyElixirWeb.ConfigurationFieldsTest do
   end
 
   defp params do
-    %{"name" => "Worker", "description" => "", "workspace_base" => "/tmp/component-worker", "worker_mode" => "local", "provider_json" => "{}"}
+    %{
+      "name" => "Worker",
+      "description" => "",
+      "workspace_base" => "/tmp/component-worker",
+      "worker_mode" => "local",
+      "provider_json" => "{}"
+    }
   end
 end

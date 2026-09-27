@@ -6,6 +6,93 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
   alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Guard}
   alias SymphonyElixir.ManagedEnvironmentFixture.Provider
 
+  test "invalid scoped prerequisites cannot reach provider requests or allocation" do
+    opts = [
+      timeout_ms: 1_000,
+      request_fun: fn _ -> flunk("provider reached") end,
+      command_fun: fn _, _, _ -> flunk("command reached") end
+    ]
+
+    assert {:error, :invalid_metadata_policy} =
+             Provider.preflight(workstations_config(), %{"metadata_policy" => "allow_any"}, opts)
+
+    assert {:error, :permission_scope_required} =
+             Provider.preflight(workstations_config(), %{"metadata_policy" => "scoped_gcp"}, opts)
+
+    assert {:ok, %{mode: "deny_all"}} =
+             Provider.permission_preflight(workstations_config(), %{mode: "deny_all"}, %{}, opts)
+  end
+
+  test "permission preflight cannot import code from the checkout" do
+    directory = Path.join(System.tmp_dir!(), "permission-import-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    File.write!(
+      Path.join(directory, "base64.py"),
+      "open('checkout-code-ran', 'w').close()\nraise RuntimeError('untrusted module')\n"
+    )
+
+    command = fn executable, args, _opts ->
+      {output, status} = System.cmd(executable, args, cd: directory, stderr_to_stdout: true)
+      {:ok, %{status: status, output: output}}
+    end
+
+    assert {:error, :permission_prerequisites_unavailable} =
+             Provider.permission_preflight(
+               workstations_config(),
+               %{mode: "scoped_gcp", scope: %{}},
+               %{template_uid: "config-uid"},
+               timeout_ms: 5_000,
+               command_fun: command
+             )
+
+    refute File.exists?(Path.join(directory, "checkout-code-ran"))
+  end
+
+  test "scoped guest identity cannot substitute for actual VM and configuration accounts" do
+    expected = "worker@qual.iam.gserviceaccount.com"
+    image = "europe-west1-docker.pkg.dev/qual/images/worker@sha256:" <> String.duplicate("a", 64)
+    policy = %{mode: "scoped_gcp", scope: %{"service_account" => expected, "image_repository" => %{"image" => image}}}
+    record = %{key: "missing", metadata: %{}}
+    config = workstations_config()
+
+    for {vm_account, config_account, passes} <- [
+          {expected, expected, true},
+          {"other@qual.iam.gserviceaccount.com", expected, false},
+          {expected, "other@qual.iam.gserviceaccount.com", false}
+        ] do
+      request = fn req ->
+        if String.ends_with?(req[:url], "/instances") do
+          instance = %{
+            "id" => "123",
+            "name" => "control",
+            "selfLink" => "https://www.googleapis.com/compute/v1/projects/p/zones/l-a/instances/control",
+            "labels" => workstation_labels(),
+            "status" => "RUNNING",
+            "serviceAccounts" => [%{"email" => vm_account}]
+          }
+
+          response(%{"items" => %{"zones/l-a" => %{"instances" => [instance]}}})
+        else
+          response(%{
+            "uid" => "config-uid",
+            "container" => %{"image" => image},
+            "host" => %{"gceInstance" => %{"serviceAccount" => config_account}}
+          })
+        end
+      end
+
+      result = Provider.permission_identity(config, record, policy, workstation_opts(request))
+
+      if passes do
+        assert {:ok, %{service_account: ^expected, instance_id: "123", config_uid: "config-uid"}} = result
+      else
+        assert {:error, :permission_vm_identity_unavailable} = result
+      end
+    end
+  end
+
   test "single-attempt helper response loss retains exact accepted create attribution", context do
     config = kubernetes_config(context)
     entry = %{attempt_id: "worker-attempt", record: %{key: "se-ticket", issue_id: "issue-1"}}
@@ -35,7 +122,12 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
 
       file = Enum.at(args, Enum.find_index(args, &(&1 == "--file")) + 1)
       accepted = File.read!(file) |> Jason.decode!() |> put_in(["metadata", "uid"], "sandbox-uid")
-      accepted = if Process.get(:changed_guard), do: put_in(accepted, ["metadata", "annotations", "symphony.dev/create-guard-uid"], "replacement"), else: accepted
+
+      accepted =
+        if Process.get(:changed_guard),
+          do: put_in(accepted, ["metadata", "annotations", "symphony.dev/create-guard-uid"], "replacement"),
+          else: accepted
+
       send(self(), :create_sent)
       {:ok, %{status: 0, output: Jason.encode!(accepted)}}
     end
@@ -64,11 +156,16 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
                       resource_uid: "sandbox-uid"
                     }}
 
-    assert_receive {:event, %{event: :create_response_lost, create_attempt_id: "create-attempt", guard_uid: "guard-uid"}}
+    assert_receive {:event,
+                    %{event: :create_response_lost, create_attempt_id: "create-attempt", guard_uid: "guard-uid"}}
+
     refute Process.get(:fault_armed)
     Process.put(:fault_armed, true)
     Process.put(:changed_guard, true)
-    assert {:ok, %{status: 200}} = Client.request(config, :post, "/apis/agents.x-k8s.io/v1beta1/namespaces/workers/sandboxes", body, opts)
+
+    assert {:ok, %{status: 200}} =
+             Client.request(config, :post, "/apis/agents.x-k8s.io/v1beta1/namespaces/workers/sandboxes", body, opts)
+
     assert_receive :create_sent
     refute_receive {:event, %{event: :create_accepted}}
     refute_receive {:event, %{event: :create_response_lost}}
@@ -76,7 +173,9 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
   end
 
   test "stop guard patch denial uses impersonated kubectl authorization and mutation", context do
-    config = put_in(kubernetes_config(context), [:provider, "qualification"], %{"denied_identity" => "qualification-denied"})
+    config =
+      put_in(kubernetes_config(context), [:provider, "qualification"], %{"denied_identity" => "qualification-denied"})
+
     entry = %{attempt_id: "worker-attempt", record: %{key: "se-ticket", issue_id: "issue-1"}}
     patch = [%{"op" => "test", "path" => "/metadata/uid", "value" => "guard-uid"}]
 
@@ -90,11 +189,24 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
 
         file = Enum.at(args, Enum.find_index(args, &(&1 == "-f")) + 1)
         review = File.read!(file) |> Jason.decode!()
-        assert review["spec"]["resourceAttributes"] == %{"namespace" => "workers", "verb" => "patch", "group" => "", "resource" => "configmaps", "name" => "symphony-guard-test"}
+
+        assert review["spec"]["resourceAttributes"] == %{
+                 "namespace" => "workers",
+                 "verb" => "patch",
+                 "group" => "",
+                 "resource" => "configmaps",
+                 "name" => "symphony-guard-test"
+               }
+
         {:ok, %{status: 0, output: Jason.encode!(%{"status" => %{"allowed" => false}})}}
       else
         send(self(), :guard_patch_denied)
-        output = if Process.get(:local_parse_error), do: "error: unknown flag: --as", else: "Error from server (Forbidden): configmaps is forbidden"
+
+        output =
+          if Process.get(:local_parse_error),
+            do: "error: unknown flag: --as",
+            else: "Error from server (Forbidden): configmaps is forbidden"
+
         {:ok, %{status: 1, output: output}}
       end
     end
@@ -107,7 +219,15 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
              Client.request(config, :patch, "/api/v1/namespaces/workers/configmaps/symphony-guard-test", patch, opts)
 
     assert_receive :guard_patch_denied
-    assert_receive {:event, %{event: :stop_denied, attempt_id: "worker-attempt", guard_uid: "guard-uid", resource_name: "symphony-guard-test"}}
+
+    assert_receive {:event,
+                    %{
+                      event: :stop_denied,
+                      attempt_id: "worker-attempt",
+                      guard_uid: "guard-uid",
+                      resource_name: "symphony-guard-test"
+                    }}
+
     refute_receive :guard_patch_denied
     Process.put(:local_parse_error, true)
 
@@ -188,7 +308,12 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
 
       pods =
         if parent_uid do
-          owner = %{"apiVersion" => "agents.x-k8s.io/v1beta1", "kind" => "Sandbox", "name" => record.key, "uid" => parent_uid}
+          owner = %{
+            "apiVersion" => "agents.x-k8s.io/v1beta1",
+            "kind" => "Sandbox",
+            "name" => record.key,
+            "uid" => parent_uid
+          }
 
           [
             pod()
@@ -215,7 +340,14 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
       assert counts == %{"se-ticket" => length(pods)}
       assert observed.phase == :unknown
       refute observed.absent?
-      assert observed.metadata["guard"] == %{"kind" => "ConfigMap", "name" => guard_name, "uid" => "guard-uid", "namespace" => "workers", "phase" => phase}
+
+      assert observed.metadata["guard"] == %{
+               "kind" => "ConfigMap",
+               "name" => guard_name,
+               "uid" => "guard-uid",
+               "namespace" => "workers",
+               "phase" => phase
+             }
     end
   end
 
@@ -488,7 +620,12 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
   defp pod do
     %{
       "kind" => "Pod",
-      "metadata" => %{"name" => "control", "uid" => "control-uid", "namespace" => "workers", "labels" => %{"owner" => "other"}},
+      "metadata" => %{
+        "name" => "control",
+        "uid" => "control-uid",
+        "namespace" => "workers",
+        "labels" => %{"owner" => "other"}
+      },
       "spec" => %{"nodeName" => "node", "containers" => [%{"name" => "app", "image" => "image@sha256:abc"}]},
       "status" => %{"phase" => "Running", "conditions" => [%{"type" => "Ready", "status" => "True"}]}
     }
@@ -498,7 +635,14 @@ defmodule SymphonyElixir.ManagedEnvironmentProviderFixtureTest do
     %{
       kind: "google_workstations",
       deployment_id: "deployment",
-      provider: %{"project" => "p", "location" => "l", "cluster" => "c", "config" => "cfg"}
+      provider: %{
+        "project" => "p",
+        "location" => "l",
+        "cluster" => "c",
+        "config" => "cfg",
+        "credential_configuration" => "symphony-workstations",
+        "impersonate_service_account" => "lifecycle@qual.iam.gserviceaccount.com"
+      }
     }
   end
 

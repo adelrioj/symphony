@@ -19,8 +19,11 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
     end
 
     case parse_id(id) |> then(&ExecutionProfiles.get/1) do
-      nil -> {:ok, socket |> put_flash(:error, "Execution profile not found") |> push_navigate(to: "/execution-profiles")}
-      profile -> {:ok, editor_assigns(socket, profile)}
+      nil ->
+        {:ok, socket |> put_flash(:error, "Execution profile not found") |> push_navigate(to: "/execution-profiles")}
+
+      profile ->
+        {:ok, editor_assigns(socket, profile)}
     end
   end
 
@@ -31,7 +34,9 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
 
   @impl true
   def handle_info(:profiles_updated, socket), do: refresh_profile(socket)
-  def handle_info(:observability_updated, socket), do: {:noreply, assign(socket, :lanes, linked_lanes(socket.assigns.profile))}
+
+  def handle_info(:observability_updated, socket),
+    do: {:noreply, assign(socket, :lanes, linked_lanes(socket.assigns.profile))}
 
   @impl true
   def handle_event(event, %{"profile" => incoming}, socket) when event in ["validate", "save"] and is_map(incoming) do
@@ -56,7 +61,8 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
     end
   end
 
-  def handle_event(event, _payload, socket) when event in ["validate", "save"], do: {:noreply, assign(socket, :errors, [%{path: "profile", message: "must be an object"}])}
+  def handle_event(event, _payload, socket) when event in ["validate", "save"],
+    do: {:noreply, assign(socket, :errors, [%{path: "profile", message: "must be an object"}])}
 
   @impl true
   def render(assigns) do
@@ -113,7 +119,12 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
   defp editor_assigns(socket, %Profile{} = profile) do
     params = profile_params(profile)
     errors = profile_errors(%{"worker" => profile.worker || %{}})
-    errors = if profile.repair_error && errors == [], do: [%{path: "profile", message: "Needs repair before use; correct the linked lane configuration."}], else: errors
+
+    errors =
+      if profile.repair_error && errors == [],
+        do: [%{path: "profile", message: "Needs repair before use; correct the linked lane configuration."}],
+        else: errors
+
     assign(socket, profile: profile, params: params, errors: errors, lanes: linked_lanes(profile), dirty: false)
   end
 
@@ -133,7 +144,10 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
       "deployment_id" => value_string(Map.get(environment, "deployment_id")),
       "startup_timeout" => ConfigurationFields.duration_input(Map.get(environment, "startup_timeout_ms")),
       "shutdown_timeout" => ConfigurationFields.duration_input(Map.get(environment, "shutdown_timeout_ms")),
-      "terminal_retention" => ConfigurationFields.duration_input(Map.get(environment, "terminal_retention_ms", %EnvironmentConfig{}.terminal_retention_ms)),
+      "terminal_retention" =>
+        ConfigurationFields.duration_input(
+          Map.get(environment, "terminal_retention_ms", %EnvironmentConfig{}.terminal_retention_ms)
+        ),
       "provider_json" => ConfigurationFields.safe_json(provider)
     }
   end
@@ -143,7 +157,12 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
     initial = profile_params(profile)
 
     if params["worker_mode"] == initial["worker_mode"] do
-      worker = preserve_unchanged_fields(attrs["worker"], profile.worker || %{}, params, initial, [{"ssh_hosts", "ssh_hosts"}, {"max_concurrent_agents_per_host", "max_concurrent_agents_per_host"}])
+      worker =
+        preserve_unchanged_fields(attrs["worker"], profile.worker || %{}, params, initial, [
+          {"ssh_hosts", "ssh_hosts"},
+          {"max_concurrent_agents_per_host", "max_concurrent_agents_per_host"}
+        ])
+
       worker = preserve_environment(worker, profile.worker || %{}, params, initial)
       {Map.put(attrs, "worker", worker), errors}
     else
@@ -173,11 +192,14 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
     end
   end
 
-  defp fields_unchanged?(params, initial, fields), do: Enum.all?(fields, fn {field, _key} -> params[field] == initial[field] end)
+  defp fields_unchanged?(params, initial, fields),
+    do: Enum.all?(fields, fn {field, _key} -> params[field] == initial[field] end)
 
   defp preserve_unchanged_fields(candidate, original, params, initial, fields) do
     Enum.reduce(fields, candidate, fn {field, key}, acc ->
-      if Map.has_key?(original, key) and params[field] == initial[field], do: Map.put(acc, key, original[key]), else: acc
+      if Map.has_key?(original, key) and params[field] == initial[field],
+        do: Map.put(acc, key, original[key]),
+        else: acc
     end)
   end
 
@@ -193,12 +215,18 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
 
   defp refresh_profile(socket) do
     case ExecutionProfiles.get(socket.assigns.profile.id) do
-      nil -> {:noreply, socket |> put_flash(:error, "Execution profile no longer exists") |> push_navigate(to: "/execution-profiles")}
-      profile -> {:noreply, refresh_existing_profile(socket, profile)}
+      nil ->
+        {:noreply,
+         socket |> put_flash(:error, "Execution profile no longer exists") |> push_navigate(to: "/execution-profiles")}
+
+      profile ->
+        {:noreply, refresh_existing_profile(socket, profile)}
     end
   end
 
-  defp refresh_existing_profile(%{assigns: %{dirty: true}} = socket, profile), do: assign(socket, :lanes, linked_lanes(profile))
+  defp refresh_existing_profile(%{assigns: %{dirty: true}} = socket, profile),
+    do: assign(socket, :lanes, linked_lanes(profile))
+
   defp refresh_existing_profile(socket, profile), do: editor_assigns(socket, profile)
 
   defp linked_lanes(%Profile{id: nil}), do: []
@@ -208,7 +236,10 @@ defmodule SymphonyElixirWeb.ExecutionProfileEditorLive do
   defp value_string(nil), do: ""
   defp value_string(value) when is_binary(value) or is_number(value), do: to_string(value)
   defp value_string(value), do: ConfigurationFields.safe_json(value)
-  defp hosts_input(hosts) when is_list(hosts), do: if(Enum.all?(hosts, &is_binary/1), do: Enum.join(hosts, "\n"), else: ConfigurationFields.safe_json(hosts))
+
+  defp hosts_input(hosts) when is_list(hosts),
+    do: if(Enum.all?(hosts, &is_binary/1), do: Enum.join(hosts, "\n"), else: ConfigurationFields.safe_json(hosts))
+
   defp hosts_input(hosts), do: value_string(hosts)
   defp default_workspace_base, do: %SymphonyElixir.Config.Schema.Workspace{}.root
   defp cancel_path(%Profile{id: nil}), do: "/execution-profiles"

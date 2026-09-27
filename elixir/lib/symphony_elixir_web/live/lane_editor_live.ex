@@ -118,7 +118,10 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   def handle_event(event, payload, socket) when event in ["validate", "save"] do
     incoming = if is_map(payload), do: Map.get(payload, "lane")
     {params, input_errors} = merge_params(socket.assigns.params, incoming)
-    {config_result, validation_errors, warnings} = validate(socket.assigns.lane, params, socket.assigns.original_config, socket.assigns.original_params)
+
+    {config_result, validation_errors, warnings} =
+      validate(socket.assigns.lane, params, socket.assigns.original_config, socket.assigns.original_params)
+
     errors = input_errors ++ validation_errors
 
     result = submit_lane(event, socket.assigns.lane, params, config_result, errors)
@@ -129,10 +132,13 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     end
   end
 
-  def handle_event("open_profile_create", _payload, socket), do: {:noreply, assign(socket, :profile_create, profile_create_assigns())}
+  def handle_event("open_profile_create", _payload, socket),
+    do: {:noreply, assign(socket, :profile_create, profile_create_assigns())}
+
   def handle_event("cancel_profile_create", _payload, socket), do: {:noreply, assign(socket, :profile_create, nil)}
 
-  def handle_event(event, %{"profile" => incoming}, socket) when event in ["validate_profile_create", "create_profile"] and is_map(incoming) do
+  def handle_event(event, %{"profile" => incoming}, socket)
+      when event in ["validate_profile_create", "create_profile"] and is_map(incoming) do
     panel = socket.assigns.profile_create || profile_create_assigns()
     params = Map.merge(panel.params, Map.take(incoming, Map.keys(panel.params)))
     {attrs, errors} = ConfigurationFields.profile_attributes(params, panel.original_worker)
@@ -377,7 +383,8 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   defp merge_param({field, value}, {params, errors}) when is_binary(value) or is_boolean(value) or is_integer(value),
     do: {Map.put(params, field, value), errors}
 
-  defp merge_param({field, _value}, {params, errors}), do: {params, [%{path: field, message: "must be a scalar form value"} | errors]}
+  defp merge_param({field, _value}, {params, errors}),
+    do: {params, [%{path: field, message: "must be a scalar form value"} | errors]}
 
   defp validate(lane, params, original_config, original_params) do
     config_result = config_from_params(params, original_config, original_params)
@@ -404,7 +411,9 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {config_result, errors, warnings}
   end
 
-  defp changeset_message({message, opts}), do: Enum.reduce(opts, message, fn {key, value}, acc -> String.replace(acc, "%{#{key}}", to_string(value)) end)
+  defp changeset_message({message, opts}),
+    do: Enum.reduce(opts, message, fn {key, value}, acc -> String.replace(acc, "%{#{key}}", to_string(value)) end)
+
   defp changeset_field_errors({field, messages}), do: Enum.map(messages, &%{path: to_string(field), message: &1})
 
   defp validate_against_profile(lane, params, config) do
@@ -414,13 +423,16 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     end
   end
 
-  defp validate_profile_config(nil, _lane, _params, _config), do: [%{path: "execution_profile_id", message: "not found"}]
+  defp validate_profile_config(nil, _lane, _params, _config),
+    do: [%{path: "execution_profile_id", message: "not found"}]
 
   defp validate_profile_config(profile, lane, params, config) do
     subdir = workspace_subdir(params)
     attrs = profile_attrs(profile)
 
-    errors_for_resolution(Configuration.resolve(attrs, config, subdir, params["prompt"], Lanes.cached_root(lane && lane.id, attrs, subdir)))
+    errors_for_resolution(
+      Configuration.resolve(attrs, config, subdir, params["prompt"], Lanes.cached_root(lane && lane.id, attrs, subdir))
+    )
   end
 
   defp errors_for_resolution({:ok, _}), do: []
@@ -430,7 +442,11 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     with {:ok, profile_id} <- integer_param(params["execution_profile_id"]) do
       {:ok,
        params
-       |> Map.merge(%{"config" => config, "execution_profile_id" => profile_id, "workspace_subdir" => workspace_subdir(params)})
+       |> Map.merge(%{
+         "config" => config,
+         "execution_profile_id" => profile_id,
+         "workspace_subdir" => workspace_subdir(params)
+       })
        |> Map.drop(["_submitted_fields", "enabled" | config_param_keys()])}
     end
   end
@@ -451,7 +467,8 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
       original = config_value(original_config, path)
       unchanged? = same_control_value?(params[field], original_params[field], type)
 
-      if active_config_field?(definition, provider_prefix) and MapSet.member?(submitted_fields, field) and not (is_nil(original) and unchanged?) do
+      if active_config_field?(definition, provider_prefix) and MapSet.member?(submitted_fields, field) and
+           not (is_nil(original) and unchanged?) do
         patch_field(acc, path, retained_or_parsed_value(unchanged?, params[field], type, field, original))
       else
         acc
@@ -488,7 +505,10 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
   defp parse_value(value, :list, _field, original) when value == "$REDACTED", do: {:ok, original}
   defp parse_value("", :list, _field, nil), do: {:ok, nil}
-  defp parse_value(value, :list, _field, _original) when is_binary(value), do: {:ok, String.split(value, ~r/[\r\n]+/, trim: true)}
+
+  defp parse_value(value, :list, _field, _original) when is_binary(value),
+    do: {:ok, String.split(value, ~r/[\r\n]+/, trim: true)}
+
   defp parse_value(_value, :list, field, _original), do: {:error, %{path: field, message: "must be a string"}}
   defp parse_value(value, :integer, _field, original) when value == "$REDACTED", do: {:ok, original}
   defp parse_value(value, :integer, _field, _original) when value in [nil, ""], do: {:ok, nil}
@@ -505,7 +525,9 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
   defp parse_value(value, :duration, _field, original) when value == "$REDACTED", do: {:ok, original}
   defp parse_value(value, :duration, _field, _original) when value in [nil, ""], do: {:ok, nil}
-  defp parse_value(value, :duration, field, _original), do: ConfigurationFields.parse_duration(value, config_path(field))
+
+  defp parse_value(value, :duration, field, _original),
+    do: ConfigurationFields.parse_duration(value, config_path(field))
 
   defp parse_value(value, :boolean, _field, _original) when value in [true, "true", "on"], do: {:ok, true}
   defp parse_value(value, :boolean, _field, _original) when value in [false, "false", ""], do: {:ok, false}
@@ -570,7 +592,9 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     display_defaults = put_in(Schema.lane_defaults(), ["tracker", "kind"], nil)
     display_config = display_defaults |> merge_display_defaults(config) |> canonical_linear_provider()
 
-    Enum.reduce(@config_fields, params, fn {field, path, type}, acc -> Map.put(acc, field, field_value(display_config, path, type)) end)
+    Enum.reduce(@config_fields, params, fn {field, path, type}, acc ->
+      Map.put(acc, field, field_value(display_config, path, type))
+    end)
   end
 
   defp field_value(config, path, :list), do: config |> config_value(path) |> List.wrap() |> Enum.join("\n")
@@ -658,10 +682,24 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     end
   end
 
-  defp profile_attrs(profile), do: %{"name" => profile.name, "description" => profile.description, "workspace_base" => profile.workspace_base, "worker" => profile.worker}
+  defp profile_attrs(profile),
+    do: %{
+      "name" => profile.name,
+      "description" => profile.description,
+      "workspace_base" => profile.workspace_base,
+      "worker" => profile.worker
+    }
+
   defp selected_profile(profiles, id), do: Enum.find(profiles, &(&1.id == id or to_string(&1.id) == to_string(id)))
   defp profile_summary(profile), do: "#{profile.name} · #{worker_label(profile.worker)}"
-  defp worker_label(worker) when is_map(worker), do: if(is_map(worker["environment"]), do: "managed", else: if(worker["ssh_hosts"] in [nil, []], do: "local", else: "static SSH"))
+
+  defp worker_label(worker) when is_map(worker),
+    do:
+      if(is_map(worker["environment"]),
+        do: "managed",
+        else: if(worker["ssh_hosts"] in [nil, []], do: "local", else: "static SSH")
+      )
+
   defp effective_workspace(profile, subdir), do: Path.join(profile.workspace_base || "", subdir || "")
   defp integer_param(value) when is_integer(value) and value > 0, do: {:ok, value}
 
@@ -673,7 +711,14 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   end
 
   defp integer_param(_), do: {:error, [%{path: "execution_profile_id", message: "must be an integer"}]}
-  defp config_warnings(config) when is_map(config), do: if(Map.has_key?(config, "server"), do: ["server is configured per installation and is preserved only in advanced configuration"], else: [])
+
+  defp config_warnings(config) when is_map(config),
+    do:
+      if(Map.has_key?(config, "server"),
+        do: ["server is configured per installation and is preserved only in advanced configuration"],
+        else: []
+      )
+
   defp value_string(nil), do: ""
   defp value_string(value), do: to_string(value)
   defp truthy?(value), do: value in [true, "true", "on"]
@@ -697,7 +742,8 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     end)
   end
 
-  defp advanced_config(config), do: Enum.reduce(@config_fields, config, fn {_field, path, _type}, advanced -> delete_path(advanced, path) end)
+  defp advanced_config(config),
+    do: Enum.reduce(@config_fields, config, fn {_field, path, _type}, advanced -> delete_path(advanced, path) end)
 
   defp deep_merge(left, right) when is_map(left) and is_map(right) do
     Map.merge(left, right, fn _key, left_value, right_value ->
@@ -714,7 +760,9 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   defp display_default(_key, _default, value), do: value
 
   defp lane_field_errors(assigns) do
-    matching_errors = Enum.filter(assigns.errors, &(&1.path in [assigns.field, assigns.path, "config." <> assigns.path]))
+    matching_errors =
+      Enum.filter(assigns.errors, &(&1.path in [assigns.field, assigns.path, "config." <> assigns.path]))
+
     assigns = assign(assigns, :matching_errors, matching_errors)
 
     ~H"""
@@ -723,7 +771,12 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
   end
 
   defp lane_prefix_errors(assigns) do
-    matching_errors = Enum.filter(assigns.errors, &(String.starts_with?(&1.path, assigns.prefix) or String.starts_with?(&1.path, "config." <> assigns.prefix)))
+    matching_errors =
+      Enum.filter(
+        assigns.errors,
+        &(String.starts_with?(&1.path, assigns.prefix) or String.starts_with?(&1.path, "config." <> assigns.prefix))
+      )
+
     assigns = assign(assigns, :matching_errors, matching_errors)
 
     ~H"""
@@ -731,5 +784,6 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     """
   end
 
-  defp workspace_subdir(params), do: if(params["workspace_subdir"] in [nil, ""], do: params["slug"] || "", else: params["workspace_subdir"])
+  defp workspace_subdir(params),
+    do: if(params["workspace_subdir"] in [nil, ""], do: params["slug"] || "", else: params["workspace_subdir"])
 end

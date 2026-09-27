@@ -243,7 +243,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert update_query =~ "issueUpdate"
 
     for {results, expected} <- [
-          {[state_lookup_result("state-1"), {:ok, %{"data" => %{"issueUpdate" => %{"success" => false}}}}], {:error, :issue_update_failed}},
+          {[state_lookup_result("state-1"), {:ok, %{"data" => %{"issueUpdate" => %{"success" => false}}}}],
+           {:error, :issue_update_failed}},
           {[{:error, :boom}], {:error, :boom}},
           {[{:ok, %{"data" => %{}}}], {:error, :state_not_found}},
           {[state_lookup_result("state-1"), {:ok, %{"data" => %{}}}], {:error, :issue_update_failed}},
@@ -310,11 +311,14 @@ defmodule SymphonyElixir.ExtensionsTest do
   test "preflight treats a full workflow state page as unprovable rather than absent" do
     Application.put_env(:symphony_elixir, :linear_client_module, PreflightClient)
 
-    settings = preflight_settings(provider: %{"team_keys" => ["BIG"]}, active_states: ["Todo"], terminal_states: ["State 1"])
+    settings =
+      preflight_settings(provider: %{"team_keys" => ["BIG"]}, active_states: ["Todo"], terminal_states: ["State 1"])
 
     log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
 
-    assert log =~ "Linear state \"Todo\" was not found, and team(s) [\"BIG\"] returned a full page of 50 workflow states, so its absence cannot be proven"
+    assert log =~
+             "Linear state \"Todo\" was not found, and team(s) [\"BIG\"] returned a full page of 50 workflow states, so its absence cannot be proven"
+
     refute log =~ "\"State 1\""
   end
 
@@ -350,7 +354,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     settings = preflight_settings(provider: %{"team_keys" => ["MDZ"]})
 
     for {result, expected} <- [
-          {{:ok, %{"errors" => [%{"message" => "complexity"}]}}, {:error, {:linear_graphql_errors, [%{"message" => "complexity"}]}}},
+          {{:ok, %{"errors" => [%{"message" => "complexity"}]}},
+           {:error, {:linear_graphql_errors, [%{"message" => "complexity"}]}}},
           {{:ok, %{"data" => %{"teams" => %{}}}}, {:error, :linear_unknown_payload}},
           {{:error, :timeout}, {:error, :timeout}}
         ] do
@@ -399,7 +404,8 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
 
-    assert log =~ "Linear required label \"feat-symphony\" is absent from team(s) [\"TRA\"]; those teams will contribute no issues at all"
+    assert log =~
+             "Linear required label \"feat-symphony\" is absent from team(s) [\"TRA\"]; those teams will contribute no issues at all"
   end
 
   test "preflight treats a full label page as unprovable rather than absent" do
@@ -409,7 +415,8 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     log = capture_log(fn -> assert :ok = Adapter.preflight(settings) end)
 
-    assert log =~ "Linear label \"crowded-label\" was not found for team(s) [\"MDZ\"], and the label query returned a full page of 250 labels, so its absence cannot be proven"
+    assert log =~
+             "Linear label \"crowded-label\" was not found for team(s) [\"MDZ\"], and the label query returned a full page of 250 labels, so its absence cannot be proven"
   end
 
   # The state arm classifies unprovability per team; the label arm used to compute one global
@@ -550,7 +557,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert state_payload["counts"] == %{
              "running" => length(state_payload["running"]),
              "retrying" => length(state_payload["retrying"]),
-             "blocked" => length(state_payload["blocked"])
+             "blocked" => length(state_payload["blocked"]),
+             "queued" => length(state_payload["queued"])
            }
 
     conn = get(api_conn(), "/api/v1/MT-HTTP")
@@ -583,7 +591,11 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     conn = post(api_conn(), "/api/v1/refresh", %{})
 
-    assert %{"lanes" => [%{"lane" => "default", "queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]}]} =
+    assert %{
+             "lanes" => [
+               %{"lane" => "default", "queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]}
+             ]
+           } =
              json_response(conn, 202)
   end
 
@@ -699,7 +711,16 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     lane_id = SymphonyElixir.LaneContext.current!()
     issue = %Issue{id: "issue-ui", identifier: "UI-1", title: "UI history", state: "Todo"}
-    :ok = SymphonyElixir.Runs.started(%{lane_id: lane_id, issue: issue, attempt_id: "att-ui", attempt: nil, worker_ref: nil})
+
+    :ok =
+      SymphonyElixir.Runs.started(%{
+        lane_id: lane_id,
+        issue: issue,
+        attempt_id: "att-ui",
+        attempt: nil,
+        worker_ref: nil
+      })
+
     :ok = SymphonyElixir.Runs.finished("att-ui", "done")
 
     {:ok, view, html} = live(browser_conn(), "/lanes/default")
@@ -814,7 +835,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state", headers: [{"authorization", "Bearer test-token"}])
     assert response.status == 200
-    assert hd(response.body["lanes"])["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
+    assert hd(response.body["lanes"])["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1, "queued" => 0}
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200

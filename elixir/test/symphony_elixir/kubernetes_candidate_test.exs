@@ -47,7 +47,12 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     state = Map.put(worker_observations(), :dispatches, %{"first" => first})
     refute Runner.model_dispatch_ready?(state)
     refute Runner.model_dispatch_ready?(%{state | dispatches: %{"first" => first, "duplicate" => first}})
-    refute Runner.model_dispatch_ready?(%{state | dispatches: %{"first" => first, "second" => %{second | environment_id: "env-one"}}})
+
+    refute Runner.model_dispatch_ready?(%{
+             state
+             | dispatches: %{"first" => first, "second" => %{second | environment_id: "env-one"}}
+           })
+
     state = %{state | dispatches: %{"first" => first, "second" => second}}
     assert Runner.model_dispatch_ready?(state)
     refute Runner.model_dispatch_ready?(put_in(state, [:dispatches, "second", "ended_at"], "finished"))
@@ -61,7 +66,9 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     ExUnit.CaptureLog.capture_log(fn ->
       task =
         Task.Supervisor.async_nolink(ctx.tasks, fn ->
-          SymphonyElixir.KubernetesCandidateRunner.run_probe(ctx, %{id: "one"}, nil, [attempt_id: "missing"], nil, %{key: "env-one"})
+          SymphonyElixir.KubernetesCandidateRunner.run_probe(ctx, %{id: "one"}, nil, [attempt_id: "missing"], nil, %{
+            key: "env-one"
+          })
         end)
 
       assert {:exit, {{:badmatch, {:error, :candidate_deadline}}, _}} = Task.yield(task, 1_000)
@@ -74,8 +81,13 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
 
     assert Runner.validate_input(hold) == :ok
     assert Runner.validate_input(%{hold | "worker_count" => 2}) == {:error, :candidate_input_rejected}
-    assert Runner.validate_input(%{hold | "authorization" => "disposable-namespace-model", "backend" => "claude"}) == {:error, :candidate_input_rejected}
-    assert Runner.validate_input(%{hold | "authorization" => "disposable-namespace-model"}) == {:error, :candidate_input_rejected}
+
+    assert Runner.validate_input(%{hold | "authorization" => "disposable-namespace-model", "backend" => "claude"}) ==
+             {:error, :candidate_input_rejected}
+
+    assert Runner.validate_input(%{hold | "authorization" => "disposable-namespace-model"}) ==
+             {:error, :candidate_input_rejected}
+
     assert Runner.validate_input(%{hold | "mode" => "fault"}) == {:error, :candidate_input_rejected}
     assert Runner.validate_input(%{hold | "mode" => "run", "worker_count" => 2}) == :ok
     assert Runner.validate_input(%{hold | "mode" => "cleanup"}) == :ok
@@ -90,7 +102,8 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
       "pins" => %{},
       "timeout_ms" => 1_000,
       "cleanup_timeout_ms" => 1_000,
-      "runner_sha256" => Candidate.sha256(File.read!(Path.expand("../support/kubernetes_candidate_runner.exs", __DIR__))),
+      "runner_sha256" =>
+        Candidate.sha256(File.read!(Path.expand("../support/kubernetes_candidate_runner.exs", __DIR__))),
       "negative_control_paths" => ["/api/v1/namespaces/unrelated"],
       "worker_count" => 1,
       "backend" => nil
@@ -133,8 +146,22 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     File.chmod!(ctx.root, 0o700)
     workflow = Path.join(ctx.root, "WORKFLOW")
     output = Path.join(ctx.root, "evidence.json")
-    environment = %{kind: "kubernetes", deployment_id: "ignored", provider: ctx.config.provider, startup_timeout_ms: 1_000, shutdown_timeout_ms: 1_000}
-    File.write!(workflow, SymphonyElixir.Workflow.render(Jason.encode!(%{worker: %{environment: environment}, hooks: %{before_run: "must-not-run"}}), "Must not reach an agent."))
+
+    environment = %{
+      kind: "kubernetes",
+      deployment_id: "ignored",
+      provider: ctx.config.provider,
+      startup_timeout_ms: 1_000,
+      shutdown_timeout_ms: 1_000
+    }
+
+    File.write!(
+      workflow,
+      SymphonyElixir.Workflow.render(
+        Jason.encode!(%{worker: %{environment: environment}, hooks: %{before_run: "must-not-run"}}),
+        "Must not reach an agent."
+      )
+    )
 
     input = %{
       "authorization" => "disposable-namespace-non-model",
@@ -144,7 +171,8 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
       "pins" => %{"deployment_id" => "candidate-db-probe"},
       "timeout_ms" => 1_000,
       "cleanup_timeout_ms" => 1_000,
-      "runner_sha256" => Candidate.sha256(File.read!(Path.expand("../support/kubernetes_candidate_runner.exs", __DIR__))),
+      "runner_sha256" =>
+        Candidate.sha256(File.read!(Path.expand("../support/kubernetes_candidate_runner.exs", __DIR__))),
       "negative_control_paths" => ["/api/v1/namespaces/unrelated"],
       "worker_count" => 1,
       "backend" => nil
@@ -178,8 +206,22 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
 
     File.chmod!(ctx.root, 0o700)
     workflow = Path.join(ctx.root, "WORKFLOW")
-    environment = %{kind: "kubernetes", deployment_id: "ignored", provider: ctx.config.provider, startup_timeout_ms: 1_000, shutdown_timeout_ms: 1_000}
-    File.write!(workflow, Workflow.render(Jason.encode!(%{worker: %{environment: environment}}), "Operator workflow must not replace the probe task."))
+
+    environment = %{
+      kind: "kubernetes",
+      deployment_id: "ignored",
+      provider: ctx.config.provider,
+      startup_timeout_ms: 1_000,
+      shutdown_timeout_ms: 1_000
+    }
+
+    File.write!(
+      workflow,
+      Workflow.render(
+        Jason.encode!(%{worker: %{environment: environment}}),
+        "Operator workflow must not replace the probe task."
+      )
+    )
 
     input = %{
       "authorization" => "disposable-namespace-model",
@@ -189,7 +231,8 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
       "pins" => %{"deployment_id" => "candidate-model-probe"},
       "timeout_ms" => 1_000,
       "cleanup_timeout_ms" => 1_000,
-      "runner_sha256" => Candidate.sha256(File.read!(Path.expand("../support/kubernetes_candidate_runner.exs", __DIR__))),
+      "runner_sha256" =>
+        Candidate.sha256(File.read!(Path.expand("../support/kubernetes_candidate_runner.exs", __DIR__))),
       "negative_control_paths" => ["/api/v1/namespaces/unrelated"],
       "worker_count" => 1,
       "backend" => "claude"
@@ -201,7 +244,11 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     assert {:error, :candidate_setup_failed} = KubernetesCandidateRunner.run_file(input_path)
     [lane] = Lanes.list()
     :ok = LaneContext.put(lane.id)
-    issue = %SymphonyElixir.Tracker.Issue{description: "Create candidate-probe.txt containing SYMPHONY-test-nonce. Then stop."}
+
+    issue = %SymphonyElixir.Tracker.Issue{
+      description: "Create candidate-probe.txt containing SYMPHONY-test-nonce. Then stop."
+    }
+
     assert String.trim(PromptBuilder.build_prompt(issue)) == issue.description
   end
 
@@ -213,7 +260,10 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     for {id, expected} <- [{"one", "running"}, {"two", "passed"}] do
       task =
         Task.async(fn ->
-          Runner.run_probe(ctx, %{id: id}, nil, [attempt_id: id], target, %{key: "env-" <> id, workspace_path: Path.join(ctx.root, id)})
+          Runner.run_probe(ctx, %{id: id}, nil, [attempt_id: id], target, %{
+            key: "env-" <> id,
+            workspace_path: Path.join(ctx.root, id)
+          })
         end)
 
       assert Task.await(task) == :ok
@@ -229,7 +279,10 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     alias SymphonyElixir.KubernetesCandidateRunner, as: Runner
     ctx = probe_context(ctx, "claude")
     parent = self()
-    update = {:codex_worker_update, "one", "attempt", %{event: :session_started, session_id: "session", payload: "MODEL_SECRET_CANARY"}}
+
+    update =
+      {:codex_worker_update, "one", "attempt",
+       %{event: :session_started, session_id: "session", payload: "MODEL_SECRET_CANARY"}}
 
     owner =
       spawn(fn ->
@@ -286,10 +339,31 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
 
   defp probe_context(ctx, backend) do
     observations = start_supervised!({Agent, fn -> Map.merge(worker_observations(), %{dispatches: %{}}) end})
-    control = start_supervised!({SymphonyElixir.ManagedEnvironmentFixture.Control, config: ctx.config, checks: [], session_limit: 0})
+
+    control =
+      start_supervised!(
+        {SymphonyElixir.ManagedEnvironmentFixture.Control, config: ctx.config, checks: [], session_limit: 0}
+      )
+
     tasks = start_supervised!(Task.Supervisor)
-    input = %{"backend" => backend, "timeout_ms" => 0, "output_path" => Path.join(ctx.root, "probe.json"), "pins" => %{}, "runner_sha256" => "test", "mode" => "run"}
-    Map.merge(ctx, %{observations: observations, control: control, tasks: tasks, input: input, lane_id: "test", lane_version_id: "test"})
+
+    input = %{
+      "backend" => backend,
+      "timeout_ms" => 0,
+      "output_path" => Path.join(ctx.root, "probe.json"),
+      "pins" => %{},
+      "runner_sha256" => "test",
+      "mode" => "run"
+    }
+
+    Map.merge(ctx, %{
+      observations: observations,
+      control: control,
+      tasks: tasks,
+      input: input,
+      lane_id: "test",
+      lane_version_id: "test"
+    })
   end
 
   test "incomplete candidate identity is rejected without contacting the provider", %{config: config} do
@@ -325,10 +399,13 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     opts = [candidate_baseline: %{}, command_fun: fn _, _, _ -> flunk("invalid candidate must not mutate or query") end]
 
     for operation <- [:ensure, :inspect, :start, :stop, :destroy] do
-      assert {:error, {:invalid, :kubernetes_candidate_identity}, _} = apply(Kubernetes, operation, [ctx.config, record, opts])
+      assert {:error, {:invalid, :kubernetes_candidate_identity}, _} =
+               apply(Kubernetes, operation, [ctx.config, record, opts])
     end
 
-    assert {:error, {:invalid, :kubernetes_candidate_identity}, _} = Kubernetes.put_intent(ctx.config, record, %{desired: :absent}, opts)
+    assert {:error, {:invalid, :kubernetes_candidate_identity}, _} =
+             Kubernetes.put_intent(ctx.config, record, %{desired: :absent}, opts)
+
     assert {:error, {:invalid, :kubernetes_candidate_identity}} = Kubernetes.discover(ctx.config, opts)
   end
 
@@ -387,7 +464,9 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
 
     for pins <- wrong do
       no_io = fn _, _, _ -> flunk("wrong capability must fail before I/O") end
-      assert {:error, {:invalid, :kubernetes_candidate_identity}} = Kubernetes.candidate_preflight(ctx.config, pins, command_fun: no_io)
+
+      assert {:error, {:invalid, :kubernetes_candidate_identity}} =
+               Kubernetes.candidate_preflight(ctx.config, pins, command_fun: no_io)
     end
   end
 
@@ -395,10 +474,18 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     changed = [
       put_in(ctx.objects, ["namespace", "metadata", "uid"], "replacement"),
       put_in(ctx.objects, ["deployments", Access.at(0), "spec", "replicas"], 2),
-      put_in(ctx.objects, ["sandboxtemplates", Access.at(0), "spec", "podTemplate", "spec", "containers", Access.at(0), "image"], image("c")),
+      put_in(
+        ctx.objects,
+        ["sandboxtemplates", Access.at(0), "spec", "podTemplate", "spec", "containers", Access.at(0), "image"],
+        image("c")
+      ),
       put_in(ctx.objects, ["customresourcedefinitions", Access.at(0), "spec", "scope"], "Cluster"),
       put_in(ctx.objects, ["networkpolicies", Access.at(0), "spec", "policyTypes"], ["Ingress"]),
-      put_in(ctx.objects, ["configmaps", Access.at(0), "data", "contract.json"], Jason.encode!(Map.put(ctx.pins["contract"], "qualification_report", "another-report")))
+      put_in(
+        ctx.objects,
+        ["configmaps", Access.at(0), "data", "contract.json"],
+        Jason.encode!(Map.put(ctx.pins["contract"], "qualification_report", "another-report"))
+      )
     ]
 
     for objects <- changed do
@@ -416,16 +503,33 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
           ["--watch-namespace=candidate", "-watch-namespace=elsewhere"]
         ] do
       args = args ++ ["--leader-election-namespace=management"]
-      objects = put_in(ctx.objects, ["deployments", Access.at(0), "spec", "template", "spec", "containers", Access.at(0), "args"], args)
+
+      objects =
+        put_in(
+          ctx.objects,
+          ["deployments", Access.at(0), "spec", "template", "spec", "containers", Access.at(0), "args"],
+          args
+        )
+
       pins = Map.put(ctx.pins, "controller_spec_digest", Candidate.digest(hd(objects["deployments"])["spec"]))
-      assert {:error, {:invalid, :kubernetes_candidate_contract_mismatch}} = Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
+
+      assert {:error, {:invalid, :kubernetes_candidate_contract_mismatch}} =
+               Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
     end
   end
 
   test "a pinned command override cannot disguise a different controller entrypoint", ctx do
-    objects = put_in(ctx.objects, ["deployments", Access.at(0), "spec", "template", "spec", "containers", Access.at(0), "command"], ["sh", "-c", "exec controller"])
+    objects =
+      put_in(
+        ctx.objects,
+        ["deployments", Access.at(0), "spec", "template", "spec", "containers", Access.at(0), "command"],
+        ["sh", "-c", "exec controller"]
+      )
+
     pins = Map.put(ctx.pins, "controller_spec_digest", Candidate.digest(hd(objects["deployments"])["spec"]))
-    assert {:error, {:invalid, :kubernetes_candidate_contract_mismatch}} = Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
+
+    assert {:error, {:invalid, :kubernetes_candidate_contract_mismatch}} =
+             Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
   end
 
   test "a new cluster-admin grant through any controller subject invalidates otherwise exact pins", ctx do
@@ -438,9 +542,16 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     ]
 
     for subject <- subjects do
-      binding = %{"metadata" => meta("widened", "widened-uid"), "subjects" => [subject], "roleRef" => %{"apiGroup" => "rbac.authorization.k8s.io", "kind" => "ClusterRole", "name" => "cluster-admin"}}
+      binding = %{
+        "metadata" => meta("widened", "widened-uid"),
+        "subjects" => [subject],
+        "roleRef" => %{"apiGroup" => "rbac.authorization.k8s.io", "kind" => "ClusterRole", "name" => "cluster-admin"}
+      }
+
       objects = Map.put(ctx.objects, "clusterrolebindings", [binding])
-      assert {:error, {:invalid, :kubernetes_candidate_authorization}} = Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(objects))
+
+      assert {:error, {:invalid, :kubernetes_candidate_authorization}} =
+               Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(objects))
     end
   end
 
@@ -451,7 +562,10 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
       "roleRef" => %{"apiGroup" => "rbac.authorization.k8s.io", "kind" => "ClusterRole", "name" => "cluster-admin"}
     }
 
-    assert :ok = Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(Map.put(ctx.objects, "clusterrolebindings", [binding])))
+    assert :ok =
+             Kubernetes.candidate_preflight(ctx.config, ctx.pins,
+               command_fun: command(Map.put(ctx.objects, "clusterrolebindings", [binding]))
+             )
   end
 
   test "RoleBinding service account namespace defaults to the binding namespace", ctx do
@@ -478,7 +592,11 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
       "metadata" => meta("basic-user", "basic-uid"),
       "rules" => [
         %{"nonResourceURLs" => ["/api", "/apis", "/version"], "verbs" => ["get"]},
-        %{"apiGroups" => ["authorization.k8s.io"], "resources" => ["selfsubjectaccessreviews", "selfsubjectrulesreviews"], "verbs" => ["create"]},
+        %{
+          "apiGroups" => ["authorization.k8s.io"],
+          "resources" => ["selfsubjectaccessreviews", "selfsubjectrulesreviews"],
+          "verbs" => ["create"]
+        },
         %{"apiGroups" => ["authentication.k8s.io"], "resources" => ["selfsubjectreviews"], "verbs" => ["create"]}
       ]
     }
@@ -494,7 +612,10 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
   end
 
   test "all-namespace ConfigMap and Pod reads are not standard discovery grants", ctx do
-    role = %{"metadata" => meta("read-workloads", "read-workloads-uid"), "rules" => [%{"apiGroups" => [""], "resources" => ["configmaps", "pods"], "verbs" => ["get", "list", "watch"]}]}
+    role = %{
+      "metadata" => meta("read-workloads", "read-workloads-uid"),
+      "rules" => [%{"apiGroups" => [""], "resources" => ["configmaps", "pods"], "verbs" => ["get", "list", "watch"]}]
+    }
 
     binding = %{
       "metadata" => meta("read-workloads", "read-workloads-binding-uid"),
@@ -503,11 +624,16 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     }
 
     objects = ctx.objects |> Map.update!("clusterroles", &(&1 ++ [role])) |> Map.put("clusterrolebindings", [binding])
-    assert {:error, {:invalid, :kubernetes_candidate_authorization}} = Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(objects))
+
+    assert {:error, {:invalid, :kubernetes_candidate_authorization}} =
+             Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(objects))
   end
 
   test "GET on an interactive pod subresource is not a harmless read grant", ctx do
-    role = %{"metadata" => meta("exec", "exec-uid"), "rules" => [%{"apiGroups" => [""], "resources" => ["pods/exec"], "verbs" => ["get"]}]}
+    role = %{
+      "metadata" => meta("exec", "exec-uid"),
+      "rules" => [%{"apiGroups" => [""], "resources" => ["pods/exec"], "verbs" => ["get"]}]
+    }
 
     binding = %{
       "metadata" => meta("exec", "exec-binding-uid"),
@@ -516,19 +642,38 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     }
 
     objects = ctx.objects |> Map.update!("clusterroles", &(&1 ++ [role])) |> Map.put("clusterrolebindings", [binding])
-    assert {:error, {:invalid, :kubernetes_candidate_authorization}} = Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(objects))
+
+    assert {:error, {:invalid, :kubernetes_candidate_authorization}} =
+             Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(objects))
   end
 
   test "candidate contracts still enforce the ordinary unsafe template rejection", ctx do
-    objects = put_in(ctx.objects, ["sandboxtemplates", Access.at(0), "spec", "podTemplate", "spec", "hostNetwork"], true)
+    objects =
+      put_in(ctx.objects, ["sandboxtemplates", Access.at(0), "spec", "podTemplate", "spec", "hostNetwork"], true)
+
     pins = put_in(ctx.pins, ["contract", "template_digest"], Candidate.digest(hd(objects["sandboxtemplates"])["spec"]))
     objects = put_in(objects, ["configmaps", Access.at(0), "data", "contract.json"], Jason.encode!(pins["contract"]))
-    assert {:error, {:invalid, :unsafe_kubernetes_template}} = Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
+
+    assert {:error, {:invalid, :unsafe_kubernetes_template}} =
+             Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
   end
 
   test "space-separated watch namespace and bare boolean flags are canonical controller flags", ctx do
-    args = ["--watch-namespace", "candidate", "--leader-election-namespace=management", "--leader-elect", "--extensions=false"]
-    objects = put_in(ctx.objects, ["deployments", Access.at(0), "spec", "template", "spec", "containers", Access.at(0), "args"], args)
+    args = [
+      "--watch-namespace",
+      "candidate",
+      "--leader-election-namespace=management",
+      "--leader-elect",
+      "--extensions=false"
+    ]
+
+    objects =
+      put_in(
+        ctx.objects,
+        ["deployments", Access.at(0), "spec", "template", "spec", "containers", Access.at(0), "args"],
+        args
+      )
+
     pins = Map.put(ctx.pins, "controller_spec_digest", Candidate.digest(hd(objects["deployments"])["spec"]))
     assert :ok = Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
   end
@@ -538,15 +683,26 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     [container] = get_in(ctx.objects, containers)
     args = ["--watch-namespace=candidate", "--leader-election-namespace=management", 1]
 
-    for objects <- [put_in(ctx.objects, containers ++ [Access.at(0), "args"], args), put_in(ctx.objects, containers, [container, container])] do
+    for objects <- [
+          put_in(ctx.objects, containers ++ [Access.at(0), "args"], args),
+          put_in(ctx.objects, containers, [container, container])
+        ] do
       pins = Map.put(ctx.pins, "controller_spec_digest", Candidate.digest(hd(objects["deployments"])["spec"]))
-      assert {:error, {:invalid, :kubernetes_candidate_contract_mismatch}} = Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
+
+      assert {:error, {:invalid, :kubernetes_candidate_contract_mismatch}} =
+               Kubernetes.candidate_preflight(ctx.config, pins, command_fun: command(objects))
     end
   end
 
   test "the pinned workload role may manage sandboxes through the agents API group", ctx do
     [workload, management] = ctx.objects["roles"]
-    sandboxes = %{"apiGroups" => ["agents.x-k8s.io"], "resources" => ["sandboxes", "sandboxes/status"], "verbs" => ["get", "list", "watch", "patch"]}
+
+    sandboxes = %{
+      "apiGroups" => ["agents.x-k8s.io"],
+      "resources" => ["sandboxes", "sandboxes/status"],
+      "verbs" => ["get", "list", "watch", "patch"]
+    }
+
     widened = Map.update!(workload, "rules", &(&1 ++ [sandboxes]))
     objects = Map.put(ctx.objects, "roles", [widened, management])
     pins = put_in(ctx.pins, ["controller_authorization", "workload_role"], authorization_pin(widened))
@@ -560,7 +716,9 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     for ref <- [%{admin | "apiGroup" => "example.io"}, %{admin | "kind" => "Role", "name" => "workload"}] do
       binding = %{"metadata" => meta("widened", "widened-uid"), "subjects" => [subject], "roleRef" => ref}
       objects = Map.put(ctx.objects, "clusterrolebindings", [binding])
-      assert {:error, {:invalid, :kubernetes_candidate_authorization}} = Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(objects))
+
+      assert {:error, {:invalid, :kubernetes_candidate_authorization}} =
+               Kubernetes.candidate_preflight(ctx.config, ctx.pins, command_fun: command(objects))
     end
   end
 
@@ -596,12 +754,21 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
 
   defp fixture(helper) do
     config = %{
-      provider: %{"namespace" => "candidate", "kubeconfig" => __ENV__.file, "context" => "unit", "template" => "worker", "ssh_user" => "worker", "ssh_auth_volume" => "auth", "ssh_port" => 2222},
+      provider: %{
+        "namespace" => "candidate",
+        "kubeconfig" => __ENV__.file,
+        "context" => "unit",
+        "template" => "worker",
+        "ssh_user" => "worker",
+        "ssh_auth_volume" => "auth",
+        "ssh_port" => 2222
+      },
       deployment_id: "candidate-run"
     }
 
     template = %{
-      "metadata" => Map.put(meta("worker", "template-uid"), "annotations", %{"symphony.dev/qualification" => "candidate-contract"}),
+      "metadata" =>
+        Map.put(meta("worker", "template-uid"), "annotations", %{"symphony.dev/qualification" => "candidate-contract"}),
       "spec" => %{
         "networkPolicyManagement" => "Unmanaged",
         "podTemplate" => %{
@@ -621,21 +788,51 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
       "spec" => %{
         "replicas" => 1,
         "template" => %{
-          "spec" => %{"serviceAccountName" => "controller", "containers" => [%{"image" => image("b"), "args" => ["--watch-namespace=candidate", "--leader-election-namespace=management"]}]}
+          "spec" => %{
+            "serviceAccountName" => "controller",
+            "containers" => [
+              %{
+                "image" => image("b"),
+                "args" => ["--watch-namespace=candidate", "--leader-election-namespace=management"]
+              }
+            ]
+          }
         }
       },
       "status" => %{"availableReplicas" => 1, "observedGeneration" => 1}
     }
 
     runtime = %{"metadata" => meta("isolated", "runtime-uid"), "handler" => "kata"}
-    storage = %{"metadata" => meta("private", "storage-uid"), "reclaimPolicy" => "Delete", "provisioner" => "candidate.csi"}
-    policy = %{"metadata" => meta("private", "policy-uid"), "spec" => %{"podSelector" => %{"matchLabels" => %{"profile" => "private"}}, "policyTypes" => ["Ingress", "Egress"]}}
+
+    storage = %{
+      "metadata" => meta("private", "storage-uid"),
+      "reclaimPolicy" => "Delete",
+      "provisioner" => "candidate.csi"
+    }
+
+    policy = %{
+      "metadata" => meta("private", "policy-uid"),
+      "spec" => %{
+        "podSelector" => %{"matchLabels" => %{"profile" => "private"}},
+        "policyTypes" => ["Ingress", "Egress"]
+      }
+    }
 
     schemas =
       Enum.map(~w(sandboxes.agents.x-k8s.io sandboxtemplates.extensions.agents.x-k8s.io), fn name ->
         %{
           "metadata" => meta(name, name),
-          "spec" => %{"scope" => "Namespaced", "versions" => [%{"name" => "v1beta1", "served" => true, "storage" => true, "schema" => %{"openAPIV3Schema" => %{"type" => "object"}}}]}
+          "spec" => %{
+            "scope" => "Namespaced",
+            "versions" => [
+              %{
+                "name" => "v1beta1",
+                "served" => true,
+                "storage" => true,
+                "schema" => %{"openAPIV3Schema" => %{"type" => "object"}}
+              }
+            ]
+          }
         }
       end)
 
@@ -664,9 +861,23 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     sa = %{"metadata" => Map.put(meta("controller", "sa-uid"), "namespace", "management")}
 
     workload =
-      role("workload", "candidate", [%{"apiGroups" => [""], "resources" => ["pods", "persistentvolumeclaims", "services"], "verbs" => ["get", "list", "watch", "create", "patch", "update", "delete"]}])
+      role("workload", "candidate", [
+        %{
+          "apiGroups" => [""],
+          "resources" => ["pods", "persistentvolumeclaims", "services"],
+          "verbs" => ["get", "list", "watch", "create", "patch", "update", "delete"]
+        }
+      ])
 
-    management = role("management", "management", [%{"apiGroups" => ["coordination.k8s.io"], "resources" => ["leases"], "verbs" => ["get", "list", "watch", "create", "patch", "update"]}])
+    management =
+      role("management", "management", [
+        %{
+          "apiGroups" => ["coordination.k8s.io"],
+          "resources" => ["leases"],
+          "verbs" => ["get", "list", "watch", "create", "patch", "update"]
+        }
+      ])
+
     workload_binding = role_binding(workload)
     management_binding = role_binding(management)
 
@@ -699,12 +910,23 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
       |> Map.merge(%{
         "namespace" => %{"metadata" => meta("candidate", "namespace-uid")},
         "sandboxtemplates" => [template],
-        "configmaps" => [%{"metadata" => meta("candidate-contract", "contract-uid"), "immutable" => true, "data" => %{"contract.json" => Jason.encode!(q)}}],
+        "configmaps" => [
+          %{
+            "metadata" => meta("candidate-contract", "contract-uid"),
+            "immutable" => true,
+            "data" => %{"contract.json" => Jason.encode!(q)}
+          }
+        ],
         "customresourcedefinitions" => schemas,
         "serviceaccounts" => [sa],
         "roles" => [workload, management],
         "rolebindings" => [workload_binding, management_binding],
-        "clusterroles" => [%{"metadata" => meta("cluster-admin", "admin-uid"), "rules" => [%{"apiGroups" => ["*"], "resources" => ["*"], "verbs" => ["*"]}]}],
+        "clusterroles" => [
+          %{
+            "metadata" => meta("cluster-admin", "admin-uid"),
+            "rules" => [%{"apiGroups" => ["*"], "resources" => ["*"], "verbs" => ["*"]}]
+          }
+        ],
         "clusterrolebindings" => [],
         "deployments" => [controller],
         "runtimeclasses" => [runtime],
@@ -715,7 +937,8 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     {config, pins, objects}
   end
 
-  defp role(name, namespace, rules), do: %{"metadata" => Map.put(meta(name, name <> "-uid"), "namespace", namespace), "rules" => rules}
+  defp role(name, namespace, rules),
+    do: %{"metadata" => Map.put(meta(name, name <> "-uid"), "namespace", namespace), "rules" => rules}
 
   defp role_binding(role),
     do: %{
@@ -724,7 +947,10 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
       "roleRef" => %{"apiGroup" => "rbac.authorization.k8s.io", "kind" => "Role", "name" => role["metadata"]["name"]}
     }
 
-  defp authorization_pin(object), do: Map.take(object["metadata"], ~w(name namespace uid)) |> Map.put("digest", Candidate.digest(Map.drop(object, ~w(metadata apiVersion kind))))
+  defp authorization_pin(object),
+    do:
+      Map.take(object["metadata"], ~w(name namespace uid))
+      |> Map.put("digest", Candidate.digest(Map.drop(object, ~w(metadata apiVersion kind))))
 
   defp meta(name, uid), do: %{"name" => name, "uid" => uid, "generation" => 1, "resourceVersion" => "1"}
   defp image(char), do: "unit.invalid/candidate@sha256:" <> String.duplicate(char, 64)

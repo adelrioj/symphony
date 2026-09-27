@@ -11,7 +11,12 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   setup do
     previous = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
-    endpoint_config = :symphony_elixir |> Application.get_env(SymphonyElixirWeb.Endpoint, []) |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
+    endpoint_config =
+      :symphony_elixir
+      |> Application.get_env(SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
     previous_key = System.get_env("LINEAR_API_KEY")
@@ -33,7 +38,11 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert html =~ "Limits"
     refute html =~ "Executor"
 
-    advanced = Jason.encode!(%{"tracker" => %{"kind" => "memory", "api_key" => "$LINEAR_API_KEY"}, "extension" => %{"nested" => [1, true]}}, pretty: true)
+    advanced =
+      Jason.encode!(
+        %{"tracker" => %{"kind" => "memory", "api_key" => "$LINEAR_API_KEY"}, "extension" => %{"nested" => [1, true]}},
+        pretty: true
+      )
 
     render_change(view, "validate", %{
       "lane" => %{
@@ -52,7 +61,12 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert has_element?(view, "#lane-prompt", "keep this prompt")
     assert has_element?(view, "#advanced-json", "extension")
 
-    view |> form("#profile-create-form", profile: %{name: "Inline profile", workspace_base: Path.join(System.tmp_dir!(), "inline-profile")}) |> render_submit()
+    view
+    |> form("#profile-create-form",
+      profile: %{name: "Inline profile", workspace_base: Path.join(System.tmp_dir!(), "inline-profile")}
+    )
+    |> render_submit()
+
     profile = Enum.find(ExecutionProfiles.list(), &(&1.name == "Inline profile"))
     assert profile
     assert has_element?(view, "#profile-select option[selected]", "Inline profile")
@@ -61,7 +75,15 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     render_change(view, "validate", %{"lane" => %{"tracker_kind" => "memory"}})
 
     view
-    |> form("#lane-form", lane: %{slug: "features", name: "Features", prompt: "keep this prompt", tracker_kind: "memory", advanced_json: advanced})
+    |> form("#lane-form",
+      lane: %{
+        slug: "features",
+        name: "Features",
+        prompt: "keep this prompt",
+        tracker_kind: "memory",
+        advanced_json: advanced
+      }
+    )
     |> render_submit()
 
     assert_redirect(view, "/lanes/features")
@@ -75,7 +97,11 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "canceling inline profile creation keeps the draft untouched", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/lanes/new")
-    render_change(view, "validate", %{"lane" => %{"slug" => "cancelled", "name" => "Pending", "prompt" => "draft survives"}})
+
+    render_change(view, "validate", %{
+      "lane" => %{"slug" => "cancelled", "name" => "Pending", "prompt" => "draft survives"}
+    })
+
     view |> element("button", "Create profile inline") |> render_click()
     view |> element("#profile-create-panel button", "Cancel") |> render_click()
     refute has_element?(view, "#profile-create-panel")
@@ -95,11 +121,27 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert has_element?(view, "#github-repo")
     assert has_element?(view, "#github-token")
 
-    render_change(view, "validate", %{"lane" => %{"slug" => "exact-duration", "name" => "Exact duration", "tracker_kind" => "memory", "polling_interval_ms" => "0"}})
+    render_change(view, "validate", %{
+      "lane" => %{
+        "slug" => "exact-duration",
+        "name" => "Exact duration",
+        "tracker_kind" => "memory",
+        "polling_interval_ms" => "0"
+      }
+    })
+
     assert has_element?(view, "#limits .field-error", "must be greater than 0")
 
     view
-    |> form("#lane-form", lane: %{slug: "exact-duration", name: "Exact duration", execution_profile_id: profile.id, tracker_kind: "memory", polling_interval_ms: "0.017"})
+    |> form("#lane-form",
+      lane: %{
+        slug: "exact-duration",
+        name: "Exact duration",
+        execution_profile_id: profile.id,
+        tracker_kind: "memory",
+        polling_interval_ms: "0.017"
+      }
+    )
     |> render_submit()
 
     lane = Lanes.get_by_slug("exact-duration")
@@ -117,7 +159,9 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     render_change(view, "validate", %{"lane" => %{"slug" => "features"}})
 
     view
-    |> form("#lane-form", lane: %{slug: "features", name: "Features", execution_profile_id: profile.id, tracker_kind: "memory"})
+    |> form("#lane-form",
+      lane: %{slug: "features", name: "Features", execution_profile_id: profile.id, tracker_kind: "memory"}
+    )
     |> render_submit()
 
     assert Lanes.get_by_slug("features").workspace_subdir == "features"
@@ -132,8 +176,20 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     System.put_env("PATH", root <> ":" <> (previous_path || ""))
     on_exit(fn -> restore_env("PATH", previous_path) end)
 
-    {:ok, profile} = ExecutionProfiles.create(%{name: "SSH editor", workspace_base: "/remote/base", worker: %{"ssh_hosts" => ["host-a"]}})
-    {:ok, lane} = Lanes.create(%{slug: "ssh-editor", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "SSH editor",
+        workspace_base: "/remote/base",
+        worker: %{"ssh_hosts" => ["host-a"]}
+      })
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "ssh-editor",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     File.rm!(fake_ssh)
 
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
@@ -144,9 +200,22 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   end
 
   test "unknown nested config and raw secret references survive an unrelated name edit", %{conn: conn} do
-    config = %{"tracker" => %{"kind" => "memory", "api_key" => "$LINEAR_API_KEY"}, "extension" => %{"nested" => [%{"keep" => true}]}}
+    config = %{
+      "tracker" => %{"kind" => "memory", "api_key" => "$LINEAR_API_KEY"},
+      "extension" => %{"nested" => [%{"keep" => true}]}
+    }
+
     profile = new_profile!()
-    {:ok, lane} = Lanes.create(%{slug: "lossless", name: "Before", execution_profile_id: profile.id, config: config, prompt: "prompt"})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "lossless",
+        name: "Before",
+        execution_profile_id: profile.id,
+        config: config,
+        prompt: "prompt"
+      })
+
     {:ok, view, _html} = live(conn, "/lanes/lossless/edit")
     view |> form("#lane-form", lane: %{name: "After"}) |> render_submit()
     assert_redirect(view, "/lanes/lossless")
@@ -158,7 +227,11 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "malformed advanced JSON reports an error without saving or discarding the draft", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/lanes/new")
-    render_change(view, "validate", %{"lane" => %{"slug" => "bad-json", "prompt" => "preserve me", "advanced_json" => "{"}})
+
+    render_change(view, "validate", %{
+      "lane" => %{"slug" => "bad-json", "prompt" => "preserve me", "advanced_json" => "{"}
+    })
+
     assert has_element?(view, "#lane-errors", "advanced:")
     assert has_element?(view, "#lane-prompt", "preserve me")
     assert is_nil(Lanes.get_by_slug("bad-json"))
@@ -169,7 +242,14 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "slug mutation is rejected by the domain", %{conn: conn} do
     profile = new_profile!()
-    {:ok, lane} = Lanes.create(%{slug: "immutable", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "immutable",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     assert {:error, [%{path: "slug", message: "is immutable"}]} = Lanes.update(lane, %{slug: "changed"})
     {:ok, _view, _html} = live(conn, "/lanes/immutable/edit")
   end
@@ -229,7 +309,14 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert {:error, {:live_redirect, %{to: "/"}}} = live(conn, "/lanes/not-found/edit")
 
     profile = new_profile!()
-    {:ok, _lane} = Lanes.create(%{slug: "duplicate", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, _lane} =
+      Lanes.create(%{
+        slug: "duplicate",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, view, _html} = live(conn, "/lanes/new")
 
     view
@@ -249,7 +336,15 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "external updates preserve a draft and external deletion redirects", %{conn: conn} do
     profile = new_profile!()
-    {:ok, lane} = Lanes.create(%{slug: "external-editor", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}, prompt: "saved"})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "external-editor",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}},
+        prompt: "saved"
+      })
+
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
 
     render_change(view, "validate", %{"lane" => %{"prompt" => "unsaved draft"}})
@@ -262,7 +357,14 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "saving an open editor does not overwrite a newer enabled state", %{conn: conn} do
     profile = new_profile!()
-    {:ok, lane} = Lanes.create(%{slug: "enabled-editor", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "enabled-editor",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
 
     assert {:ok, %{enabled: true}} = Lanes.set_enabled(lane, true)
@@ -274,7 +376,13 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   @tag :remediation
   test "remediation: a name-only sparse lane edit preserves absent settings and their effective defaults", %{conn: conn} do
     profile = new_profile!()
-    config = %{"tracker" => %{"kind" => "memory"}, "agent" => %{"in_progress_state" => ""}, "claude" => %{"allowed_tools" => []}}
+
+    config = %{
+      "tracker" => %{"kind" => "memory"},
+      "agent" => %{"in_progress_state" => ""},
+      "claude" => %{"allowed_tools" => []}
+    }
+
     {:ok, lane} = Lanes.create(%{slug: "sparse-editor", execution_profile_id: profile.id, config: config})
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
 
@@ -295,7 +403,14 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   @tag :remediation
   test "remediation: sparse lane JSON defaults remain editable without materializing unrelated settings", %{conn: conn} do
     profile = new_profile!()
-    {:ok, lane} = Lanes.create(%{slug: "sparse-explicit-edit", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "sparse-explicit-edit",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
 
     view
@@ -312,7 +427,9 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   end
 
   @tag :remediation
-  test "remediation: a name-only edit preserves meaningful empty settings while optional hooks can still be cleared", %{conn: conn} do
+  test "remediation: a name-only edit preserves meaningful empty settings while optional hooks can still be cleared", %{
+    conn: conn
+  } do
     profile = new_profile!()
 
     {:ok, lane} =
@@ -439,7 +556,13 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   test "structured tracker inputs redact dollar-prefixed literal secrets without replacing them on save", %{conn: conn} do
     profile = new_profile!()
     provider = %{"api_key" => "$private-token", "team_keys" => ["OPS"]}
-    {:ok, lane} = Lanes.create(%{slug: "literal-dollar-secret", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "linear", "provider" => provider}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "literal-dollar-secret",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "linear", "provider" => provider}}
+      })
 
     {:ok, view, html} = live(conn, "/lanes/#{lane.slug}/edit")
     refute html =~ "$private-token"
@@ -452,7 +575,15 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   @tag :remediation
   test "remediation: malformed named JSON retains a recoverable lane draft and leaves storage unchanged", %{conn: conn} do
     profile = new_profile!()
-    {:ok, lane} = Lanes.create(%{slug: "named-json", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}, prompt: "saved prompt"})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "named-json",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}},
+        prompt: "saved prompt"
+      })
+
     version = Lanes.current_version(lane)
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
 
@@ -479,8 +610,20 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   @tag :remediation
   test "remediation: an unrelated lane edit restores credentials inside nested arrays", %{conn: conn} do
     profile = new_profile!()
-    extension = %{"groups" => [%{"accounts" => [%{"token" => "lane-array-secret", "api_key" => "$LINEAR_API_KEY", "label" => "primary"}]}]}
-    {:ok, lane} = Lanes.create(%{slug: "array-secrets", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}, "extension" => extension}})
+
+    extension = %{
+      "groups" => [
+        %{"accounts" => [%{"token" => "lane-array-secret", "api_key" => "$LINEAR_API_KEY", "label" => "primary"}]}
+      ]
+    }
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "array-secrets",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}, "extension" => extension}
+      })
+
     {:ok, view, html} = live(conn, "/lanes/#{lane.slug}/edit")
     refute html =~ "lane-array-secret"
     assert has_element?(view, "#advanced-json", "$REDACTED")
@@ -495,12 +638,21 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
         {"scalar replaced by object", %{"account" => "plain"}, %{"account" => %{"token" => "$REDACTED"}}}
       ] do
     @tag :remediation
-    test "remediation: lane redaction forgery with #{scenario} returns an error without discarding the draft", %{conn: conn} do
+    test "remediation: lane redaction forgery with #{scenario} returns an error without discarding the draft", %{
+      conn: conn
+    } do
       profile = new_profile!()
       original = unquote(Macro.escape(original))
       forged = unquote(Macro.escape(forged))
       slug = "forged-#{System.unique_integer([:positive])}"
-      {:ok, lane} = Lanes.create(%{slug: slug, execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}, "extension" => original}})
+
+      {:ok, lane} =
+        Lanes.create(%{
+          slug: slug,
+          execution_profile_id: profile.id,
+          config: %{"tracker" => %{"kind" => "memory"}, "extension" => original}
+        })
+
       version = Lanes.current_version(lane)
       {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
       advanced = Jason.encode!(%{"extension" => forged})
@@ -516,16 +668,39 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   end
 
   for {kind, provider, controls} <- [
-        {"gitlab", %{"api_url" => "https://gitlab.example/api/v4", "api_key" => "private-gitlab-key", "project_path" => "team/project"},
-         [{"gitlab-api-url", "https://gitlab.example/api/v4"}, {"gitlab-api-key", "$REDACTED"}, {"gitlab-project-path", "team/project"}]},
-        {"asana", %{"endpoint" => "https://app.asana.com/api/1.0", "api_key" => "private-asana-key", "project_gid" => "123456"},
-         [{"asana-endpoint", "https://app.asana.com/api/1.0"}, {"asana-api-key", "$REDACTED"}, {"asana-project-gid", "123456"}]}
+        {"gitlab",
+         %{
+           "api_url" => "https://gitlab.example/api/v4",
+           "api_key" => "private-gitlab-key",
+           "project_path" => "team/project"
+         },
+         [
+           {"gitlab-api-url", "https://gitlab.example/api/v4"},
+           {"gitlab-api-key", "$REDACTED"},
+           {"gitlab-project-path", "team/project"}
+         ]},
+        {"asana",
+         %{"endpoint" => "https://app.asana.com/api/1.0", "api_key" => "private-asana-key", "project_gid" => "123456"},
+         [
+           {"asana-endpoint", "https://app.asana.com/api/1.0"},
+           {"asana-api-key", "$REDACTED"},
+           {"asana-project-gid", "123456"}
+         ]}
       ] do
     test "#{kind} controls preserve provider values across a name edit", %{conn: conn} do
       profile = new_profile!()
       provider = unquote(Macro.escape(provider))
       {active_state, terminal_state} = if unquote(kind) == "gitlab", do: {"opened", "closed"}, else: {"Todo", "Done"}
-      config = %{"tracker" => %{"kind" => unquote(kind), "provider" => provider, "active_states" => [active_state], "terminal_states" => [terminal_state]}}
+
+      config = %{
+        "tracker" => %{
+          "kind" => unquote(kind),
+          "provider" => provider,
+          "active_states" => [active_state],
+          "terminal_states" => [terminal_state]
+        }
+      }
+
       {:ok, lane} = Lanes.create(%{slug: "provider-#{unquote(kind)}", execution_profile_id: profile.id, config: config})
       {:ok, view, html} = live(conn, "/lanes/#{lane.slug}/edit")
 
@@ -542,8 +717,22 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "switching tracker applies only the selected adapter's provider controls", %{conn: conn} do
     profile = new_profile!()
-    provider = %{"api_url" => "https://gitlab.example/api/v4", "api_key" => "old-gitlab-key", "project_path" => "team/project"}
-    config = %{"tracker" => %{"kind" => "gitlab", "provider" => provider, "active_states" => ["opened"], "terminal_states" => ["closed"]}}
+
+    provider = %{
+      "api_url" => "https://gitlab.example/api/v4",
+      "api_key" => "old-gitlab-key",
+      "project_path" => "team/project"
+    }
+
+    config = %{
+      "tracker" => %{
+        "kind" => "gitlab",
+        "provider" => provider,
+        "active_states" => ["opened"],
+        "terminal_states" => ["closed"]
+      }
+    }
+
     {:ok, lane} = Lanes.create(%{slug: "switch-adapter", execution_profile_id: profile.id, config: config})
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
     view |> form("#lane-form", lane: %{tracker_kind: "github"}) |> render_change()
@@ -581,7 +770,14 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   test "a credential retention marker preserves an existing environment reference", %{conn: conn} do
     profile = new_profile!()
     provider = %{"api_key" => "$LINEAR_API_KEY", "project_slug" => "project"}
-    {:ok, lane} = Lanes.create(%{slug: "retain-reference", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "linear", "provider" => provider}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "retain-reference",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "linear", "provider" => provider}}
+      })
+
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
     assert has_element?(view, "#tracker-api-key[value='$LINEAR_API_KEY']")
     view |> form("#lane-form", lane: %{tracker_api_key: "$REDACTED"}) |> render_submit()
@@ -591,7 +787,13 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "invalid scalar types and numeric controls preserve the stored lane and its draft", %{conn: conn} do
     profile = new_profile!()
-    {:ok, lane} = Lanes.create(%{slug: "invalid-control", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "invalid-control",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
 
     for {field, value, error_path} <- [
           {"name", %{"nested" => "object"}, "name"},
@@ -615,7 +817,13 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "blank and integer-valued controls remove overrides without losing redacted unchanged values", %{conn: conn} do
     profile = new_profile!()
-    config = %{"tracker" => %{"kind" => "memory", "required_labels" => ["ready"]}, "agent" => %{"max_turns" => 7, "max_turn_exhaustions" => 2}, "polling" => %{"interval_ms" => 2_000}}
+
+    config = %{
+      "tracker" => %{"kind" => "memory", "required_labels" => ["ready"]},
+      "agent" => %{"max_turns" => 7, "max_turn_exhaustions" => 2},
+      "polling" => %{"interval_ms" => 2_000}
+    }
+
     {:ok, lane} = Lanes.create(%{slug: "clear-integer", execution_profile_id: profile.id, config: config})
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
 
@@ -643,7 +851,11 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   test "inline profile failures retain the lane draft and external profile options refresh", %{conn: conn} do
     profile = new_profile!()
     {:ok, view, _html} = live(conn, "/lanes/new")
-    render_change(view, "validate", %{"lane" => %{"slug" => "pending-inline", "prompt" => "Keep this draft", "tracker_kind" => "memory"}})
+
+    render_change(view, "validate", %{
+      "lane" => %{"slug" => "pending-inline", "prompt" => "Keep this draft", "tracker_kind" => "memory"}
+    })
+
     render_submit(view, "create_profile", %{"profile" => false})
     assert has_element?(view, "#profile-create-errors", "profile")
 
@@ -652,7 +864,14 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert has_element?(view, "#lane-prompt", "Keep this draft")
 
     render_change(view, "validate_profile_create", %{
-      "profile" => %{"worker_mode" => "managed", "environment_kind" => "unsupported", "deployment_id" => "existing", "startup_timeout" => "1", "shutdown_timeout" => "2", "terminal_retention" => "0"}
+      "profile" => %{
+        "worker_mode" => "managed",
+        "environment_kind" => "unsupported",
+        "deployment_id" => "existing",
+        "startup_timeout" => "1",
+        "shutdown_timeout" => "2",
+        "terminal_retention" => "0"
+      }
     })
 
     assert has_element?(view, "#profile-create-errors", "worker")
@@ -667,7 +886,15 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
   test "a deleted selected profile cannot be saved from an open creation form", %{conn: conn} do
     profile = new_profile!()
     {:ok, view, _html} = live(conn, "/lanes/new")
-    render_change(view, "validate", %{"lane" => %{"slug" => "stale-profile", "execution_profile_id" => to_string(profile.id), "tracker_kind" => "memory"}})
+
+    render_change(view, "validate", %{
+      "lane" => %{
+        "slug" => "stale-profile",
+        "execution_profile_id" => to_string(profile.id),
+        "tracker_kind" => "memory"
+      }
+    })
+
     assert :ok = ExecutionProfiles.delete(profile)
     render_submit(view, "save", %{"lane" => %{"prompt" => "Still a draft"}})
     assert has_element?(view, "#lane-errors", "execution_profile_id")
@@ -677,9 +904,20 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "a save racing a deletion cannot recreate a lane before its notification arrives", %{conn: conn} do
     profile = new_profile!()
-    {:ok, lane} = Lanes.create(%{slug: "stale-lane-save", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "stale-lane-save",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
-    SymphonyElixir.Repo.update!(Ecto.Changeset.change(lane, deleted_at: DateTime.utc_now() |> DateTime.truncate(:second)))
+
+    SymphonyElixir.Repo.update!(
+      Ecto.Changeset.change(lane, deleted_at: DateTime.utc_now() |> DateTime.truncate(:second))
+    )
+
     view |> form("#lane-form", lane: %{name: "Must not resurrect"}) |> render_submit()
     assert has_element?(view, "#lane-errors", "Lane no longer exists")
     assert is_nil(Lanes.get(lane.id))
@@ -690,11 +928,19 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     profile = new_profile!()
 
     for {suffix, corrupt} <- [{"missing", :missing}, {"malformed", :malformed}] do
-      {:ok, lane} = Lanes.create(%{slug: "repair-#{suffix}", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+      {:ok, lane} =
+        Lanes.create(%{
+          slug: "repair-#{suffix}",
+          execution_profile_id: profile.id,
+          config: %{"tracker" => %{"kind" => "memory"}}
+        })
 
       case corrupt do
-        :missing -> SymphonyElixir.Repo.update!(Ecto.Changeset.change(lane, current_version_id: nil))
-        :malformed -> SymphonyElixir.Repo.update!(Ecto.Changeset.change(Lanes.current_version(lane), front_matter: "tracker: ["))
+        :missing ->
+          SymphonyElixir.Repo.update!(Ecto.Changeset.change(lane, current_version_id: nil))
+
+        :malformed ->
+          SymphonyElixir.Repo.update!(Ecto.Changeset.change(Lanes.current_version(lane), front_matter: "tracker: ["))
       end
 
       assert :ok = SymphonyElixir.LaneStore.refresh(lane.id)
@@ -727,7 +973,13 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     profile = new_profile!()
 
     for {suffix, invalid, displayed} <- [{"text", "broken", "broken"}, {"negative", -500, "-0.5"}] do
-      {:ok, lane} = Lanes.create(%{slug: "duration-repair-#{suffix}", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+      {:ok, lane} =
+        Lanes.create(%{
+          slug: "duration-repair-#{suffix}",
+          execution_profile_id: profile.id,
+          config: %{"tracker" => %{"kind" => "memory"}}
+        })
+
       version = Lanes.current_version(lane)
       source = Jason.encode!(%{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => invalid}})
       Repo.update!(Ecto.Changeset.change(version, front_matter: source))
@@ -783,7 +1035,11 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     {:ok, lane} = Lanes.create(%{slug: "hidden-backend-draft", execution_profile_id: profile.id, config: config})
     {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
     view |> form("#lane-form", lane: %{codex_command: "new-codex app-server"}) |> render_change()
-    view |> form("#lane-form", lane: %{agent_backend: "claude", agent_backend_by_state_json: ~s({"Review":"codex"})}) |> render_change()
+
+    view
+    |> form("#lane-form", lane: %{agent_backend: "claude", agent_backend_by_state_json: ~s({"Review":"codex"})})
+    |> render_change()
+
     refute has_element?(view, "#codex-command")
     view |> form("#lane-form") |> render_submit()
     assert_redirect(view, "/lanes/#{lane.slug}")
@@ -796,9 +1052,25 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   test "a nullable provider can be populated through named adapter controls", %{conn: conn} do
     profile = new_profile!()
-    {:ok, lane} = Lanes.create(%{slug: "repair-null-provider", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "repair-null-provider",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     version = Lanes.current_version(lane)
-    config = %{"tracker" => %{"kind" => "github", "provider" => nil, "active_states" => ["open"], "terminal_states" => ["closed"]}}
+
+    config = %{
+      "tracker" => %{
+        "kind" => "github",
+        "provider" => nil,
+        "active_states" => ["open"],
+        "terminal_states" => ["closed"]
+      }
+    }
+
     source = Jason.encode!(config)
     Repo.update!(Ecto.Changeset.change(version, front_matter: source))
     assert :ok = LaneStore.refresh(lane.id)
@@ -815,9 +1087,25 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     profile = new_profile!()
 
     for {suffix, provider} <- [{"string", "broken"}, {"boolean", false}] do
-      {:ok, lane} = Lanes.create(%{slug: "repair-provider-#{suffix}", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+      {:ok, lane} =
+        Lanes.create(%{
+          slug: "repair-provider-#{suffix}",
+          execution_profile_id: profile.id,
+          config: %{"tracker" => %{"kind" => "memory"}}
+        })
+
       version = Lanes.current_version(lane)
-      source = Jason.encode!(%{"tracker" => %{"kind" => "linear", "api_key" => "old-lane-token", "project_slug" => "legacy-project", "provider" => provider}})
+
+      source =
+        Jason.encode!(%{
+          "tracker" => %{
+            "kind" => "linear",
+            "api_key" => "old-lane-token",
+            "project_slug" => "legacy-project",
+            "provider" => provider
+          }
+        })
+
       Repo.update!(Ecto.Changeset.change(version, front_matter: source))
       assert :ok = LaneStore.refresh(lane.id)
 
@@ -854,7 +1142,11 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
   defp new_profile! do
     {:ok, profile} =
-      ExecutionProfiles.create(%{name: "Lane test #{System.unique_integer([:positive])}", workspace_base: Path.join(System.tmp_dir!(), "lane-test-#{System.unique_integer([:positive])}"), worker: %{}})
+      ExecutionProfiles.create(%{
+        name: "Lane test #{System.unique_integer([:positive])}",
+        workspace_base: Path.join(System.tmp_dir!(), "lane-test-#{System.unique_integer([:positive])}"),
+        worker: %{}
+      })
 
     profile
   end

@@ -10,7 +10,7 @@ defmodule SymphonyElixir.MixProject do
       start_permanent: Mix.env() == :prod,
       test_coverage: [
         summary: [
-          threshold: coverage_threshold()
+          threshold: 80
         ],
         ignore_modules: coverage_ignore_modules()
       ],
@@ -28,13 +28,6 @@ defmodule SymphonyElixir.MixProject do
       aliases: aliases(),
       deps: deps()
     ]
-  end
-
-  defp coverage_threshold do
-    case System.get_env("SYMPHONY_COVER_REVIEW_MODULES") do
-      "1" -> 80
-      _ -> 100
-    end
   end
 
   defp coverage_ignore_modules do

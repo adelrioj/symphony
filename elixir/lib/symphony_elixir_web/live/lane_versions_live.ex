@@ -14,8 +14,17 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
     if connected?(socket), do: :ok = ObservabilityPubSub.subscribe_lane(slug)
 
     case Lanes.get_by_slug(slug) do
-      nil -> {:ok, socket |> put_flash(:error, "No lane with slug #{slug}") |> push_navigate(to: "/")}
-      lane -> {:ok, assign(socket, lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: version_rows(lane), errors: [])}
+      nil ->
+        {:ok, socket |> put_flash(:error, "No lane with slug #{slug}") |> push_navigate(to: "/")}
+
+      lane ->
+        {:ok,
+         assign(socket,
+           lane: lane,
+           profile: ExecutionProfiles.get(lane.execution_profile_id),
+           versions: version_rows(lane),
+           errors: []
+         )}
     end
   end
 
@@ -33,8 +42,16 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
       {:ok, lane} ->
         {:noreply,
          socket
-         |> assign(lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: version_rows(lane), errors: [])
-         |> put_flash(:info, "Historical lane settings use the currently selected profile; infrastructure is not rolled back.")}
+         |> assign(
+           lane: lane,
+           profile: ExecutionProfiles.get(lane.execution_profile_id),
+           versions: version_rows(lane),
+           errors: []
+         )
+         |> put_flash(
+           :info,
+           "Historical lane settings use the currently selected profile; infrastructure is not rolled back."
+         )}
 
       {:error, errors} ->
         {:noreply, assign(socket, errors: errors)}
@@ -44,8 +61,16 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
   @impl true
   def handle_info({:lane_updated, _slug}, socket) do
     case Lanes.get_by_slug(socket.assigns.lane.slug) do
-      nil -> {:noreply, socket |> put_flash(:error, "Lane no longer exists") |> push_navigate(to: "/")}
-      lane -> {:noreply, assign(socket, lane: lane, profile: ExecutionProfiles.get(lane.execution_profile_id), versions: version_rows(lane))}
+      nil ->
+        {:noreply, socket |> put_flash(:error, "Lane no longer exists") |> push_navigate(to: "/")}
+
+      lane ->
+        {:noreply,
+         assign(socket,
+           lane: lane,
+           profile: ExecutionProfiles.get(lane.execution_profile_id),
+           versions: version_rows(lane)
+         )}
     end
   end
 
@@ -95,7 +120,12 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
     case Workflow.parse_parts(version.front_matter, version.prompt) do
       {:ok, workflow} ->
         {_profile, config} = Configuration.split(workflow.config)
-        %{version: version, invalid?: false, content: Workflow.render(Workflow.encode_config(Configuration.redact_secrets(config)), workflow.prompt)}
+
+        %{
+          version: version,
+          invalid?: false,
+          content: Workflow.render(Workflow.encode_config(Configuration.redact_secrets(config)), workflow.prompt)
+        }
 
       {:error, _reason} ->
         %{version: version, invalid?: true, content: version.prompt}

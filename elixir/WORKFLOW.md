@@ -12,6 +12,8 @@
 # Structured editors display effective defaults without persisting unchanged omitted settings.
 # Explicit disabling values (for example an empty in-progress state) survive unrelated edits.
 # server: is ignored; use serve --port/--host. Use the same --data-root for import and serve.
+# Disabled imports need no tracker/operator credentials; $ENV references stay raw in SQLite.
+# Enabling a lane or updating an enabled lane still requires resolved tracker credentials.
 tracker:
   kind: linear
   provider:
@@ -59,6 +61,12 @@ workspace:
 #       credential_configuration: symphony-workers
 #       impersonate_service_account: symphony-workers@development-project.iam.gserviceaccount.com
 #       ssh_user: user
+#     # Optional, Features Workstations only; omit to keep credentials disabled:
+#     # codex_credentials:
+#     #   credential_id: features-personal-codex
+#     #   secret: projects/123456789/secrets/features-codex
+#     #   control_bucket: example-codex-control
+#     #   control_object: features/authority.json
 #
 # Kubernetes example (workspace.root: /state/workspaces):
 # worker:
@@ -97,6 +105,23 @@ workspace:
 # Workstations requires explicit noninteractive gcloud configuration + impersonation,
 # separate worker identity/provider-enforced credential isolation, persistent /home/private
 # Docker storage, DELETE reclaim, no archive/warm pool, and complete VM/disk inventory.
+# Personal Codex requires the authoritative config profile=features, enabled=1 and exact
+# secret markers. All four optional credential references are reload identity.
+# Claim precedes create; actual UID binding and instance env readback precede start;
+# worker READY/open with exact assignment precedes agent admission.
+# Controller seal/checkpoint retains SSH and reserves physical-stop time. Physical stop
+# alone never releases a credential or authorizes deletion. Current cloud authority,
+# exact durable disposition and handoff acknowledgement are required; SQLite is not authority.
+# Cleanup starts directly in recover mode, preserves the original owner attempt and
+# retained uncertain cache, and cannot reopen execute admission for the same claim.
+# Bounded credential recovery_required status retains the disk and blocks credential dispatch.
+# Operator credentials reconcile requires the real inherited operator-mode maintenance
+# lock, an existing read-only database with every lane disabled, and this workflow's
+# parsed content matching the current Features version. It never starts scheduling.
+# inspect is read-only; checkpoint requires original clean provenance and physical stop.
+# reseed-stop preserves ownership; reseed-commit records resolved_epoch separately from
+# the original assignment epoch/attempt and durably acknowledges the pending handoff.
+# No file-mode disabled flag, caller-authored stop proof, force, or old-version fallback.
 # Kubernetes pins Agent Sandbox v1.0.1 and an immutable qualification ConfigMap referenced
 # by Template annotation symphony.dev/qualification; it requires qualified Kata guest
 # storage, admission/gates, enforcing NetworkPolicy, private SSH and kubelet/CSI evidence.

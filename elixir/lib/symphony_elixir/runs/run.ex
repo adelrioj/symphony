@@ -15,6 +15,7 @@ defmodule SymphonyElixir.Runs.Run do
     field(:config_identity, :binary)
     field(:issue_id, :string)
     field(:issue_identifier, :string)
+    field(:issue_title, :string)
     field(:issue_state, :string)
     field(:attempt_id, :string)
     field(:attempt, :integer)
@@ -42,6 +43,7 @@ defmodule SymphonyElixir.Runs.Run do
       :config_identity,
       :issue_id,
       :issue_identifier,
+      :issue_title,
       :issue_state,
       :attempt_id,
       :attempt,

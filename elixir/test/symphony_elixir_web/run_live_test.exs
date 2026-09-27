@@ -16,8 +16,26 @@ defmodule SymphonyElixirWeb.RunLiveTest do
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)
     on_exit(fn -> Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous) end)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
-    issue = %Issue{id: "i", identifier: "RL-1", title: "t", description: "d", state: "Todo", url: "https://example.org/RL-1", dispatchable: true}
-    :ok = Runs.started(%{lane_id: LaneContext.current!(), issue: issue, attempt_id: "att-live", attempt: nil, worker_ref: nil})
+
+    issue = %Issue{
+      id: "i",
+      identifier: "RL-1",
+      title: "t",
+      description: "d",
+      state: "Todo",
+      url: "https://example.org/RL-1",
+      dispatchable: true
+    }
+
+    :ok =
+      Runs.started(%{
+        lane_id: LaneContext.current!(),
+        issue: issue,
+        attempt_id: "att-live",
+        attempt: nil,
+        worker_ref: nil
+      })
+
     :ok = Runs.event("att-live", %{event: :session_started, message: "booted", session_id: "s"}, %{}, 1)
     {:ok, conn: Plug.Test.init_test_session(build_conn(), %{"operator" => true})}
   end
@@ -28,7 +46,14 @@ defmodule SymphonyElixirWeb.RunLiveTest do
     assert has_element?(view, "#run-status", "running")
     assert has_element?(view, "#events li", "booted")
 
-    :ok = Runs.event("att-live", %{event: :turn_completed, message: "finished turn", session_id: "s"}, %{input_tokens: 3, output_tokens: 4, cached_tokens: 2, total_tokens: 7}, 2)
+    :ok =
+      Runs.event(
+        "att-live",
+        %{event: :turn_completed, message: "finished turn", session_id: "s"},
+        %{input_tokens: 3, output_tokens: 4, cached_tokens: 2, total_tokens: 7},
+        2
+      )
+
     :ok = Runs.flush()
     wait_until(fn -> has_element?(view, "#events li", "finished turn") end)
     assert has_element?(view, "#events li", "usage")
@@ -115,13 +140,22 @@ defmodule SymphonyElixirWeb.RunLiveTest do
     Task.await(producer)
     wait_until(fn -> has_element?(view, "#run-status", "done") and has_element?(view, "#events li", "message 20") end)
     events = Runs.events(Runs.get_by_attempt("att-live").id)
-    ids = view |> render() |> Floki.parse_document!() |> Floki.find("#events li") |> Enum.flat_map(&Floki.attribute(&1, "id"))
+
+    ids =
+      view
+      |> render()
+      |> Floki.parse_document!()
+      |> Floki.find("#events li")
+      |> Enum.flat_map(&Floki.attribute(&1, "id"))
+
     assert ids == Enum.map(events, &"events-#{&1.id}")
     assert length(ids) == 21
   end
 
   test "retained history remains readable after its lane is removed", %{conn: conn} do
-    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "historical", front_matter: "tracker:\n  kind: memory"})
+    {:ok, lane} =
+      TestSupport.create_lane_from_front_matter(%{slug: "historical", front_matter: "tracker:\n  kind: memory"})
+
     issue = %Issue{id: "old", identifier: "OLD-1", title: "Old", state: "Done"}
     :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "old-run"})
     :ok = Runs.finished("old-run", "done")

@@ -21,10 +21,17 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
   @scheduler_observation_limit 32
   @input_fields ~w(authorization mode workflow_path output_path pins timeout_ms cleanup_timeout_ms runner_sha256 negative_control_paths worker_count backend)
   @source __ENV__.file
-  @support_sha256 Map.new(["managed_environment_fixture/provider.exs", "managed_environment_fixture/control.exs", "kubernetes_candidate_evidence.exs"], fn file ->
-                    bytes = File.read!(Path.join(__DIR__, file))
-                    {file, :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)}
-                  end)
+  @support_sha256 Map.new(
+                    [
+                      "managed_environment_fixture/provider.exs",
+                      "managed_environment_fixture/control.exs",
+                      "kubernetes_candidate_evidence.exs"
+                    ],
+                    fn file ->
+                      bytes = File.read!(Path.join(__DIR__, file))
+                      {file, :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)}
+                    end
+                  )
 
   def run_file(path) do
     with true <- System.get_env("SYMPHONY_RUN_KUBERNETES_CANDIDATE") == "1",
@@ -66,7 +73,8 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
   defp authorized_mode?(input) do
     input["mode"] in ["run", "cleanup", "hold"] and
       (input["mode"] != "hold" or
-         (input["authorization"] == "disposable-namespace-non-model" and input["backend"] == nil and input["worker_count"] == 1))
+         (input["authorization"] == "disposable-namespace-non-model" and input["backend"] == nil and
+            input["worker_count"] == 1))
   end
 
   defp run(input) do
@@ -77,7 +85,14 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
          true <- stat.type == :directory and Bitwise.band(stat.mode, 0o777) == 0o700,
          {:ok, file} <- File.open(output, [:write, :exclusive, :binary]) do
       File.chmod!(output, 0o600)
-      IO.binwrite(file, Jason.encode!(Map.merge(%{stage: "candidate-unqualified", qualified: false, status: "initializing"}, model_counts(%{}))))
+
+      IO.binwrite(
+        file,
+        Jason.encode!(
+          Map.merge(%{stage: "candidate-unqualified", qualified: false, status: "initializing"}, model_counts(%{}))
+        )
+      )
+
       File.close(file)
       execute(input)
     else
@@ -124,7 +139,18 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       {:ok, tasks} = Task.Supervisor.start_link()
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, control)
       GenServer.call(control, {:issues, []})
-      ctx = %{input: input, config: config, lane_id: lane.id, lane_version_id: lane.current_version_id, control: control, observations: observations, tasks: tasks, authority: self()}
+
+      ctx = %{
+        input: input,
+        config: config,
+        lane_id: lane.id,
+        lane_version_id: lane.current_version_id,
+        control: control,
+        observations: observations,
+        tasks: tasks,
+        authority: self()
+      }
+
       persist(ctx)
 
       try do
@@ -136,6 +162,7 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
         issues = issues(input, inventory.records)
         GenServer.call(control, {:issues, issues})
         GenServer.call(control, :allocation_started)
+
         update(ctx, %{status: "running", workers: Map.new(issues, &{&1.id, %{outcome: "pending", environment_id: nil}})})
 
         try do
@@ -190,7 +217,12 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
   end
 
   defp candidate_workflow(raw, deployment, workers, backend) do
-    agent = %{"max_concurrent_agents" => workers, "backend" => backend || "codex", "in_progress_state" => "", "max_turns" => 1}
+    agent = %{
+      "max_concurrent_agents" => workers,
+      "backend" => backend || "codex",
+      "in_progress_state" => "",
+      "max_turns" => 1
+    }
 
     raw
     |> Map.put("tracker", %{"kind" => "memory", "active_states" => ["Candidate"], "terminal_states" => ["Done"]})
@@ -198,13 +230,19 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     |> Map.put("polling", %{"interval_ms" => 1_000})
     |> Map.put("agent", agent)
     # The guest login PATH excludes these installed agent and tracker MCP executables.
-    |> Map.put("claude", %{"command" => "/opt/symphony-worker/bin/claude", "linear_mcp_command" => "/opt/symphony-worker/bin/symphony"})
+    |> Map.put("claude", %{
+      "command" => "/opt/symphony-worker/bin/claude",
+      "linear_mcp_command" => "/opt/symphony-worker/bin/symphony"
+    })
     # Pin codex's invocation for the same reason claude's is pinned: the candidate run must not
     # inherit how the agent under test is launched from an operator-supplied workflow. The
     # `app-server` subcommand is the load-bearing part — a bare `codex` starts the interactive
     # TUI, which exits 1 with "stdin is not a terminal" the moment it is driven over a pipe.
     |> Map.put("codex", %{"command" => "/usr/local/bin/codex app-server"})
-    |> update_in(["worker", "environment"], &Map.merge(&1, %{"deployment_id" => deployment, "terminal_retention_ms" => 0}))
+    |> update_in(
+      ["worker", "environment"],
+      &Map.merge(&1, %{"deployment_id" => deployment, "terminal_retention_ms" => 0})
+    )
   end
 
   # The model task is deliberately trivial and self-evidencing: the agent writes a
@@ -227,7 +265,16 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
   end
 
   defp issues(_, records) do
-    Enum.map(records, &%Issue{id: &1.issue_id, identifier: &1.issue_identifier, title: "Candidate cleanup", state: "Done", dispatchable: false})
+    Enum.map(
+      records,
+      &%Issue{
+        id: &1.issue_id,
+        identifier: &1.issue_identifier,
+        title: "Candidate cleanup",
+        state: "Done",
+        dispatchable: false
+      }
+    )
   end
 
   defp model_task(%{"backend" => backend, "pins" => pins}, index) when is_binary(backend) do
@@ -239,7 +286,11 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
   defp model_task(_input, _index), do: nil
 
   def model_nonce(deployment_id, index),
-    do: "SYMPHONY-" <> (:crypto.hash(:sha256, deployment_id <> "/" <> Integer.to_string(index)) |> Base.encode16(case: :lower) |> binary_part(0, 24))
+    do:
+      "SYMPHONY-" <>
+        (:crypto.hash(:sha256, deployment_id <> "/" <> Integer.to_string(index))
+         |> Base.encode16(case: :lower)
+         |> binary_part(0, 24))
 
   defp start_runtime(ctx) do
     operation = fn adapter, config, entry, op, opts ->
@@ -247,7 +298,13 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       if entry, do: capture(ctx, {:ok, entry.record})
       timeout = if op in [:stop, :destroy], do: config.shutdown_timeout_ms, else: config.startup_timeout_ms
       opts = opts |> Keyword.put_new(:timeout_ms, timeout) |> Keyword.put(:candidate_baseline, ctx.input["pins"])
-      callbacks = %{armed?: fn _ -> false end, disarm: fn _ -> :ok end, event: fn event -> GenServer.call(ctx.control, {:event, event}) end}
+
+      callbacks = %{
+        armed?: fn _ -> false end,
+        disarm: fn _ -> :ok end,
+        event: fn event -> GenServer.call(ctx.control, {:event, event}) end
+      }
+
       opts = Provider.fault_options(config, entry, op, opts, callbacks)
 
       result =
@@ -322,7 +379,8 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
         case observed do
           {:ok, %{records: [], live_worker_counts: counts}} ->
-            state.environment_guard == nil and map_size(state.environment_jobs) == 0 and map_size(state.environment_entries) == 0 and Enum.all?(counts, &(elem(&1, 1) == 0))
+            state.environment_guard == nil and map_size(state.environment_jobs) == 0 and
+              map_size(state.environment_entries) == 0 and Enum.all?(counts, &(elem(&1, 1) == 0))
 
           _ ->
             false
@@ -330,7 +388,15 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       end)
 
     stop_runtime()
-    :ok = await(5_000, fn -> Agent.get(ctx.observations, &Enum.all?(&1.dispatches, fn {_, dispatch} -> Map.has_key?(dispatch, "ended_at") end)) end)
+
+    :ok =
+      await(5_000, fn ->
+        Agent.get(
+          ctx.observations,
+          &Enum.all?(&1.dispatches, fn {_, dispatch} -> Map.has_key?(dispatch, "ended_at") end)
+        )
+      end)
+
     if result == :ok, do: update(ctx, %{cleanup: "complete"})
   rescue
     _ -> update(ctx, %{cleanup: "unknown"})
@@ -382,7 +448,8 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
     read =
       Command.run(
         target.executable,
-        target.prefix ++ [SSH.remote_shell_command("cd " <> quote_shell(record.workspace_path) <> " && cat candidate-probe.txt")],
+        target.prefix ++
+          [SSH.remote_shell_command("cd " <> quote_shell(record.workspace_path) <> " && cat candidate-probe.txt")],
         env: target.env,
         timeout_ms: 30_000,
         max_output_bytes: 4096,
@@ -555,9 +622,20 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
           do: {attempt_id, event.session_id, event.event}
 
     %{
-      model_probes_completed: Enum.count(dispatches, fn {_, dispatch} -> is_binary(dispatch.backend) and Map.has_key?(dispatch, "probe_finished_at") end),
-      model_sessions_started: sessions |> Enum.filter(&(elem(&1, 2) == :session_started)) |> Enum.uniq_by(&{elem(&1, 0), elem(&1, 1)}) |> length(),
-      model_sessions_completed: sessions |> Enum.filter(&(elem(&1, 2) in [:completed, :turn_completed])) |> Enum.uniq_by(&{elem(&1, 0), elem(&1, 1)}) |> length()
+      model_probes_completed:
+        Enum.count(dispatches, fn {_, dispatch} ->
+          is_binary(dispatch.backend) and Map.has_key?(dispatch, "probe_finished_at")
+        end),
+      model_sessions_started:
+        sessions
+        |> Enum.filter(&(elem(&1, 2) == :session_started))
+        |> Enum.uniq_by(&{elem(&1, 0), elem(&1, 1)})
+        |> length(),
+      model_sessions_completed:
+        sessions
+        |> Enum.filter(&(elem(&1, 2) in [:completed, :turn_completed]))
+        |> Enum.uniq_by(&{elem(&1, 0), elem(&1, 1)})
+        |> length()
     }
   end
 
@@ -610,16 +688,31 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
   defp capture_scheduler(ctx, state, counts) do
     observation = scheduler_observation(state, counts)
-    change(ctx, &Map.put(&1, :scheduler_observations, record_scheduler_observation(Map.get(&1, :scheduler_observations, []), observation)))
+
+    change(
+      ctx,
+      &Map.put(
+        &1,
+        :scheduler_observations,
+        record_scheduler_observation(Map.get(&1, :scheduler_observations, []), observation)
+      )
+    )
   end
 
   defp entry_observation(%Lifecycle.Entry{record: record} = entry),
-    do: %{issue_id: record.issue_id, environment_id: record.key, status: Atom.to_string(entry.phase), occupied: Lifecycle.occupied?(entry)}
+    do: %{
+      issue_id: record.issue_id,
+      environment_id: record.key,
+      status: Atom.to_string(entry.phase),
+      occupied: Lifecycle.occupied?(entry)
+    }
 
   defp discovery_state(state) when state in [:ready, :pending], do: Atom.to_string(state)
   defp discovery_state({:error, _}), do: "error"
   defp discovery_state(_), do: "unknown"
-  defp scheduler_signature(observation), do: Map.take(observation, [:guard_held, :discovery, :jobs, :entries, :live_worker_counts])
+
+  defp scheduler_signature(observation),
+    do: Map.take(observation, [:guard_held, :discovery, :jobs, :entries, :live_worker_counts])
 
   defp capture(ctx, result) do
     GenServer.call(ctx.control, {:event, %{event: :record_observation, result: result}})
@@ -635,7 +728,11 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
     observations = records |> Enum.map(&Evidence.record(&1, ctx.config)) |> Enum.reject(&is_nil/1)
 
-    Agent.update(ctx.observations, &Map.update!(&1, :protocol_observations, fn prior -> Enum.uniq(prior ++ observations) end))
+    Agent.update(
+      ctx.observations,
+      &Map.update!(&1, :protocol_observations, fn prior -> Enum.uniq(prior ++ observations) end)
+    )
+
     persist(ctx)
   end
 
@@ -646,10 +743,15 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
       {:ok, objects} ->
         observations = objects |> Enum.map(&Evidence.guard(&1, ctx.config)) |> Enum.reject(&is_nil/1)
 
-        retained = for observation <- observations, observation["observed_receipt"]["phase"] == "Complete", do: Map.put(observation["resource"], "phase", "Complete")
+        retained =
+          for observation <- observations,
+              observation["observed_receipt"]["phase"] == "Complete",
+              do: Map.put(observation["resource"], "phase", "Complete")
 
         Agent.update(ctx.observations, fn prior ->
-          prior |> Map.update(:guard_observations, observations, &Enum.uniq(&1 ++ observations)) |> Map.put(:retained_guards, retained)
+          prior
+          |> Map.update(:guard_observations, observations, &Enum.uniq(&1 ++ observations))
+          |> Map.put(:retained_guards, retained)
         end)
 
       _ ->
@@ -700,7 +802,13 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
         :ok = persist(ctx)
       )
 
-  defp options(ctx), do: [candidate_baseline: ctx.input["pins"], timeout_ms: min(ctx.input["timeout_ms"], 60_000), task_supervisor: ctx.tasks, authority: ctx.authority]
+  defp options(ctx),
+    do: [
+      candidate_baseline: ctx.input["pins"],
+      timeout_ms: min(ctx.input["timeout_ms"], 60_000),
+      task_supervisor: ctx.tasks,
+      authority: ctx.authority
+    ]
 
   defp stop_runtime do
     if pid = Process.whereis(@runtime), do: Supervisor.stop(pid, :normal, 10_000)
@@ -744,7 +852,12 @@ defmodule SymphonyElixir.KubernetesCandidateRunner do
 
     atomic_write(
       input["output_path"],
-      Map.merge(evidence, %{"stage" => "candidate-unqualified", "qualified" => false, "status" => "harness_failed", "production_allocation" => "stopped"})
+      Map.merge(evidence, %{
+        "stage" => "candidate-unqualified",
+        "qualified" => false,
+        "status" => "harness_failed",
+        "production_allocation" => "stopped"
+      })
     )
   end
 

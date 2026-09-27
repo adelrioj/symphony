@@ -128,7 +128,12 @@ defmodule Mix.Tasks.SymphonyTest do
     workflow = Path.join(root, "WORKFLOW.md")
     database = Path.join(root, "symphony.sqlite3")
     coverage_file = Path.join(root, "mcp.coverdata")
-    File.write!(workflow, "---\ntracker:\n  kind: linear\n  api_key: test-token\n  provider:\n    project_slug: example\nserver:\n  port: 4000\n---\nStandalone MCP prompt")
+
+    File.write!(
+      workflow,
+      "---\ntracker:\n  kind: linear\n  api_key: test-token\n  provider:\n    project_slug: example\nserver:\n  port: 4000\n---\nStandalone MCP prompt"
+    )
+
     request = Jason.encode!(%{"jsonrpc" => "2.0", "id" => 7, "method" => "tools/list"}) <> "\n"
 
     script = """

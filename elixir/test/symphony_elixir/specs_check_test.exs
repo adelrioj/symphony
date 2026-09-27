@@ -30,6 +30,107 @@ defmodule SymphonyElixir.SpecsCheckTest do
     assert SpecsCheck.missing_public_specs([dir]) == []
   end
 
+  test "accepts a spec on a default-argument declaration with multiple guarded clauses" do
+    dir = create_tmp_dir()
+
+    write_module!(dir, "sample.ex", ~S"""
+    defmodule Sample do
+      @spec value(term()) :: term()
+      def value(arg \\ :ok)
+      def value(arg) when is_atom(arg), do: arg
+      def value(arg) when is_integer(arg), do: arg
+    end
+    """)
+
+    assert SpecsCheck.missing_public_specs([dir]) == []
+  end
+
+  test "reports an unspecced default-argument declaration once at its declaration line" do
+    dir = create_tmp_dir()
+
+    write_module!(dir, "sample.ex", ~S"""
+    defmodule Sample do
+      def value(arg \\ :ok)
+      def value(arg) when is_atom(arg), do: arg
+      def value(arg) when is_integer(arg), do: arg
+    end
+    """)
+
+    assert [finding] = SpecsCheck.missing_public_specs([dir])
+    assert SpecsCheck.finding_identifier(finding) == "Sample.value/1"
+    assert finding.line == 2
+  end
+
+  test "a later clause spec does not satisfy an unspecced declaration" do
+    dir = create_tmp_dir()
+
+    write_module!(dir, "sample.ex", ~S"""
+    defmodule Sample do
+      def value(arg \\ :ok)
+      @spec value(term()) :: term()
+      def value(arg), do: arg
+    end
+    """)
+
+    assert [finding] = SpecsCheck.missing_public_specs([dir])
+    assert SpecsCheck.finding_identifier(finding) == "Sample.value/1"
+    assert finding.line == 2
+  end
+
+  test "a declaration spec does not cover another arity or function" do
+    dir = create_tmp_dir()
+
+    write_module!(dir, "sample.ex", ~S"""
+    defmodule Sample do
+      @spec value(term()) :: term()
+      def value(arg \\ :ok)
+      def value(arg), do: arg
+      def value(left, right), do: {left, right}
+      def other(arg), do: arg
+    end
+    """)
+
+    findings = SpecsCheck.missing_public_specs([dir])
+
+    assert Enum.map(findings, &SpecsCheck.finding_identifier/1) == ["Sample.value/2", "Sample.other/1"]
+  end
+
+  test "a declaration still requires an adjacent spec" do
+    dir = create_tmp_dir()
+
+    write_module!(dir, "sample.ex", ~S"""
+    defmodule Sample do
+      @spec value(term()) :: term()
+      defp helper(arg), do: arg
+      def value(arg \\ :ok)
+      def value(arg), do: helper(arg)
+    end
+    """)
+
+    assert [finding] = SpecsCheck.missing_public_specs([dir])
+    assert SpecsCheck.finding_identifier(finding) == "Sample.value/1"
+    assert finding.line == 4
+  end
+
+  test "impl on a declaration exempts its clauses but not another function" do
+    dir = create_tmp_dir()
+
+    write_module!(dir, "worker.ex", ~S"""
+    defmodule Worker do
+      @behaviour GenServer
+      @impl true
+      def init(state \\ [])
+      def init(state) when is_list(state), do: {:ok, state}
+      def init(state) when is_map(state), do: {:ok, state}
+      def other(state), do: state
+    end
+    """)
+
+    findings = SpecsCheck.missing_public_specs([dir])
+
+    assert Enum.map(findings, &SpecsCheck.finding_identifier/1) == ["Worker.other/1"]
+  end
+
   test "allows defp without @spec" do
     dir = create_tmp_dir()
 
@@ -82,6 +183,7 @@ defmodule SymphonyElixir.SpecsCheckTest do
     dir = Path.join(System.tmp_dir!(), "specs-check-test-#{unique}")
     File.rm_rf!(dir)
     File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
     dir
   end
 

@@ -13,7 +13,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   end
 
   test "a late permanently gated Pod cannot turn a qualified suspension into running" do
-    pod = %{"metadata" => %{"uid" => "late"}, "spec" => %{"schedulingGates" => [%{"name" => "symphony.dev/start-authorized"}]}}
+    pod = %{
+      "metadata" => %{"uid" => "late"},
+      "spec" => %{"schedulingGates" => [%{"name" => "symphony.dev/start-authorized"}]}
+    }
+
     observed = Kubernetes.normalize(record(), sandbox(), [pod], %{})
     assert observed.phase == :stopped
     assert {:quiescent, _} = observed.proof
@@ -26,8 +30,23 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   end
 
   test "saved exact UID termination evidence permits physical stop" do
-    proof = %{"old" => %{"kind" => "kubelet_terminated", "uid" => "old", "resourceVersion" => "14", "qualification_uid" => "qualified"}}
-    observed = Kubernetes.normalize(record(%{"authorized_pod_uids" => ["old"], "qualification_uid" => "qualified"}), sandbox(), [], proof)
+    proof = %{
+      "old" => %{
+        "kind" => "kubelet_terminated",
+        "uid" => "old",
+        "resourceVersion" => "14",
+        "qualification_uid" => "qualified"
+      }
+    }
+
+    observed =
+      Kubernetes.normalize(
+        record(%{"authorized_pod_uids" => ["old"], "qualification_uid" => "qualified"}),
+        sandbox(),
+        [],
+        proof
+      )
+
     assert observed.phase == :stopped
     assert {:quiescent, _} = observed.proof
   end
@@ -44,19 +63,29 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       path = Enum.at(args, Enum.find_index(args, &(&1 == "--raw")) + 1)
 
       case URI.decode_query(URI.parse(path).query || "") do
-        %{"continue" => "second"} -> {:ok, %{status: 0, output: Jason.encode!(%{"metadata" => %{}, "items" => [%{"metadata" => %{"name" => "late"}}]})}}
-        _ -> {:ok, %{status: 0, output: Jason.encode!(%{"metadata" => %{"continue" => "second"}, "items" => []})}}
+        %{"continue" => "second"} ->
+          {:ok,
+           %{status: 0, output: Jason.encode!(%{"metadata" => %{}, "items" => [%{"metadata" => %{"name" => "late"}}]})}}
+
+        _ ->
+          {:ok, %{status: 0, output: Jason.encode!(%{"metadata" => %{"continue" => "second"}, "items" => []})}}
       end
     end
 
-    assert {:ok, [%{"metadata" => %{"name" => "late"}}]} = Client.list(config(), "/api/v1/namespaces/test/pods", command_fun: command, timeout_ms: 1_000)
+    assert {:ok, [%{"metadata" => %{"name" => "late"}}]} =
+             Client.list(config(), "/api/v1/namespaces/test/pods", command_fun: command, timeout_ms: 1_000)
+
     denied = fn _, _, _ -> {:ok, %{status: 1, output: "Error from server (Forbidden)"}} end
-    assert {:error, {:unknown, _}} = Client.list(config(), "/api/v1/namespaces/test/pods", command_fun: denied, timeout_ms: 1_000)
+
+    assert {:error, {:unknown, _}} =
+             Client.list(config(), "/api/v1/namespaces/test/pods", command_fun: denied, timeout_ms: 1_000)
   end
 
   test "stderr NotFound cannot certify absence" do
     command = fn _, _, _ -> {:ok, %{status: 1, output: "Error from server (NotFound): pods missing"}} end
-    assert {:error, {:unknown, _}} = Client.lookup(config(), "/api/v1/namespaces/test/pods", "missing", command_fun: command, timeout_ms: 1_000)
+
+    assert {:error, {:unknown, _}} =
+             Client.lookup(config(), "/api/v1/namespaces/test/pods", "missing", command_fun: command, timeout_ms: 1_000)
   end
 
   test "JSON CAS conflict is retained and request bodies are private and removed" do
@@ -92,8 +121,18 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   test "production refuses a baseline the deployment does not match" do
     {config, _record, opts} = api_fixture()
-    stale = put_in(api_state()["configmaps"]["qualification"]["data"]["contract.json"], Jason.encode!(%{"release" => "v1.0.1"}))
-    put_object("configmaps", %{"metadata" => meta("qualification", "qualification-uid"), "immutable" => true, "data" => %{"contract.json" => stale}})
+
+    stale =
+      put_in(
+        api_state()["configmaps"]["qualification"]["data"]["contract.json"],
+        Jason.encode!(%{"release" => "v1.0.1"})
+      )
+
+    put_object("configmaps", %{
+      "metadata" => meta("qualification", "qualification-uid"),
+      "immutable" => true,
+      "data" => %{"contract.json" => stale}
+    })
 
     assert {:error, _} = Kubernetes.preflight(config, opts)
   end
@@ -133,7 +172,15 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, _} = Kubernetes.start(config, intended, opts)
     destroy_host(["disk-ticket"])
     other = Jason.decode!(api_state()["configmaps"]["symphony-destruction-receipt-3070466"]["data"]["receipt.json"])
-    put_object("configmaps", put_in(api_state()["configmaps"]["symphony-destruction-receipt-3070466"], ["data", "receipt.json"], Jason.encode!(%{other | "machine_id" => "another-machine"})))
+
+    put_object(
+      "configmaps",
+      put_in(
+        api_state()["configmaps"]["symphony-destruction-receipt-3070466"],
+        ["data", "receipt.json"],
+        Jason.encode!(%{other | "machine_id" => "another-machine"})
+      )
+    )
 
     assert refusal(config, record, opts) == :kubernetes_destruction_receipt_invalid
   end
@@ -198,7 +245,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     destroy_host(["disk-ticket"])
 
     assert refusal(config, record, opts, %{"obligationUIDs" => ["pvc-uid"]}) == :kubernetes_declared_obligations_inexact
-    assert refusal(config, record, opts, %{"obligationUIDs" => ~w(pod-uid pvc-uid a-stranger)}) == :kubernetes_declared_obligations_inexact
+
+    assert refusal(config, record, opts, %{"obligationUIDs" => ~w(pod-uid pvc-uid a-stranger)}) ==
+             :kubernetes_declared_obligations_inexact
   end
 
   test "a declaration naming a host this environment was never bound to is refused" do
@@ -207,7 +256,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     {:ok, _} = Kubernetes.start(config, intended, opts)
     destroy_host(["disk-ticket"])
-    host = %{"node_name" => "worker-1", "node_uid" => "someone-elses-node", "machine_id" => "machine", "system_uuid" => "system"}
+
+    host = %{
+      "node_name" => "worker-1",
+      "node_uid" => "someone-elses-node",
+      "machine_id" => "machine",
+      "system_uuid" => "system"
+    }
 
     assert refusal(config, record, opts, %{"host" => host}) == :kubernetes_declared_host_mismatch
   end
@@ -223,7 +278,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     host = %{"node_name" => "worker-1", "node_uid" => "node-uid", "machine_id" => "machine", "system_uuid" => "system"}
 
     guards = %{
-      record.key => %{"uid" => api_state()["configmaps"][Guard.name(record)]["metadata"]["uid"], "resourceVersion" => api_state()["configmaps"][Guard.name(record)]["metadata"]["resourceVersion"]}
+      record.key => %{
+        "uid" => api_state()["configmaps"][Guard.name(record)]["metadata"]["uid"],
+        "resourceVersion" => api_state()["configmaps"][Guard.name(record)]["metadata"]["resourceVersion"]
+      }
     }
 
     {:ok, declaration} =
@@ -251,7 +309,15 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     destroy_host(["disk-ticket"])
     declaration = loss_declaration(record)
     parent = api_state()["sandboxes"][record.key]
-    put_object("sandboxes", update_in(parent, ["status", "creationJournal", "operations"], &Enum.map(&1, fn op -> Map.put(op, "state", "Issued") end)))
+
+    put_object(
+      "sandboxes",
+      update_in(
+        parent,
+        ["status", "creationJournal", "operations"],
+        &Enum.map(&1, fn op -> Map.put(op, "state", "Issued") end)
+      )
+    )
 
     assert {:error, _} = Kubernetes.declare_lost(config, declaration, opts)
     refute guard_data(record)["record"]["metadata"]["loss_declaration"]
@@ -273,7 +339,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     {:ok, _} = Kubernetes.start(config, intended, opts)
     destroy_host(["disk-ticket"])
-    stranger = %{"environmentKeys" => ["se-stranger"], "guards" => %{"se-stranger" => %{"uid" => "guard-uid", "resourceVersion" => "1"}}}
+
+    stranger = %{
+      "environmentKeys" => ["se-stranger"],
+      "guards" => %{"se-stranger" => %{"uid" => "guard-uid", "resourceVersion" => "1"}}
+    }
 
     assert refusal(config, record, opts, stranger) == :kubernetes_declared_environment_missing
   end
@@ -298,7 +368,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     {:ok, _} = Kubernetes.start(config, intended, opts)
     destroy_host(["disk-ticket"])
-    put_object("persistentvolumes", put_in(api_state()["persistentvolumes"]["pv-ticket"], ["spec", "csi", "volumeHandle"], "a-different-disk"))
+
+    put_object(
+      "persistentvolumes",
+      put_in(api_state()["persistentvolumes"]["pv-ticket"], ["spec", "csi", "volumeHandle"], "a-different-disk")
+    )
 
     assert refusal(config, record, opts) == :kubernetes_declared_volume_not_in_receipt
   end
@@ -306,7 +380,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   test "a claim that never bound is not host-local storage and is not discharged by a receipt" do
     {config, record, opts} = api_fixture(pinned_host: true)
     {:ok, created} = Kubernetes.ensure(config, record, opts)
-    state = api_state() |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil) |> Map.put("persistentvolumes", %{})
+
+    state =
+      api_state()
+      |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil)
+      |> Map.put("persistentvolumes", %{})
+
     Process.put(:kubernetes_api, state)
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     {:ok, _} = Kubernetes.start(config, intended, opts)
@@ -331,7 +410,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
         if reading?, do: forbidden, else: api_command(exe, args, options)
       end
 
-      assert {:error, {reason, _}} = Kubernetes.declare_lost(config, declaration, Keyword.put(opts, :command_fun, refuse))
+      assert {:error, {reason, _}} =
+               Kubernetes.declare_lost(config, declaration, Keyword.put(opts, :command_fun, refuse))
+
       assert reason in [:denied, :unknown]
     end
   end
@@ -439,7 +520,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     publish_declaration(record)
     assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, opts)
 
-    replacement = node_object() |> put_in(["metadata", "uid"], "a-new-node") |> put_in(["status", "nodeInfo", "machineID"], "a-new-machine")
+    replacement =
+      node_object()
+      |> put_in(["metadata", "uid"], "a-new-node")
+      |> put_in(["status", "nodeInfo", "machineID"], "a-new-machine")
+
     put_object("nodes", replacement)
 
     assert {:ok, %{alarms: 0}} = DeclarationReconciler.reconcile(config, opts)
@@ -513,7 +598,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       if reading?, do: forbidden, else: api_command(exe, args, options)
     end
 
-    {:ok, blind} = DeclarationReconciler.init(Keyword.merge(opts, config: config, command_fun: refuse, interval_ms: 60_000))
+    {:ok, blind} =
+      DeclarationReconciler.init(Keyword.merge(opts, config: config, command_fun: refuse, interval_ms: 60_000))
+
     assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, blind)
   end
 
@@ -540,7 +627,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     # A real lane running somewhere other than Kubernetes is not this reconciler's business.
     TestSupport.reset_lanes!()
     on_exit(&TestSupport.reset_lanes!/0)
-    {:ok, plain} = TestSupport.create_lane_from_front_matter(%{slug: "reconciler-plain", front_matter: "tracker:\n  kind: memory", prompt: "P"})
+
+    {:ok, plain} =
+      TestSupport.create_lane_from_front_matter(%{
+        slug: "reconciler-plain",
+        front_matter: "tracker:\n  kind: memory",
+        prompt: "P"
+      })
+
     {:ok, unmanaged} = DeclarationReconciler.init(lane_id: plain.id, interval_ms: 60_000)
     assert {:noreply, _} = DeclarationReconciler.handle_info(:reconcile, unmanaged)
 
@@ -567,7 +661,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     explode = fn _exe, _args, _options -> raise "provider exploded" end
 
-    {:ok, state} = DeclarationReconciler.init(Keyword.merge(opts, config: config, command_fun: explode, interval_ms: 60_000))
+    {:ok, state} =
+      DeclarationReconciler.init(Keyword.merge(opts, config: config, command_fun: explode, interval_ms: 60_000))
+
     assert {:noreply, next} = DeclarationReconciler.handle_info(:reconcile, state)
     assert next.timer
   end
@@ -592,7 +688,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, _} = Kubernetes.start(config, intended, opts)
     destroy_host(["disk-ticket"])
     declaration = publish_declaration(record)
-    object = update_in(api_state()["hostlossdeclarations"][declaration.name], ["spec"], &Map.delete(&1, "operatorSubject"))
+
+    object =
+      update_in(api_state()["hostlossdeclarations"][declaration.name], ["spec"], &Map.delete(&1, "operatorSubject"))
+
     put_object("hostlossdeclarations", object)
 
     assert {:ok, %{refused: 1}} = DeclarationReconciler.reconcile(config, opts)
@@ -632,7 +731,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     # Silence here is expensive: an identity that is refused the status subresource retries for
     # ever, writing nothing and saying nothing about why.
-    log = ExUnit.CaptureLog.capture_log(fn -> assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, Keyword.put(opts, :command_fun, block)) end)
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, %{accepted: 1}} = DeclarationReconciler.reconcile(config, Keyword.put(opts, :command_fun, block))
+      end)
+
     assert log =~ "outcome could not be recorded"
     assert log =~ declaration.name
     refute declaration_status(declaration)
@@ -682,11 +785,17 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     end
 
     entry = Lifecycle.new(created, "cleanup", :cleanup)
-    assert {:error, _, retained} = Operations.run(Kubernetes, config, entry, :destroy, Keyword.put(opts, :command_fun, command))
+
+    assert {:error, _, retained} =
+             Operations.run(Kubernetes, config, entry, :destroy, Keyword.put(opts, :command_fun, command))
+
     ready = guard_data(record)
     assert ready["phase"] == "ReadyToFinalize"
     assert api_state()["sandboxes"][record.key]
-    assert {:ok, deleted} = Operations.run(Kubernetes, config, Lifecycle.new(retained, "retry", :cleanup), :destroy, opts)
+
+    assert {:ok, deleted} =
+             Operations.run(Kubernetes, config, Lifecycle.new(retained, "retry", :cleanup), :destroy, opts)
+
     assert deleted.absent?
     complete = guard_data(record)
     assert complete["phase"] == "Complete"
@@ -705,10 +814,21 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       if target && target["phase"] == "Complete", do: {:error, :timeout}, else: api_command(exe, args, options)
     end
 
-    assert {:error, _, _} = Operations.run(Kubernetes, config, Lifecycle.new(created, "cleanup", :cleanup), :destroy, Keyword.put(opts, :command_fun, command))
+    assert {:error, _, _} =
+             Operations.run(
+               Kubernetes,
+               config,
+               Lifecycle.new(created, "cleanup", :cleanup),
+               :destroy,
+               Keyword.put(opts, :command_fun, command)
+             )
+
     assert api_state()["sandboxes"] == %{}
     assert {:ok, [recovered]} = Kubernetes.discover(config, opts)
-    assert {:ok, deleted} = Operations.run(Kubernetes, config, Lifecycle.new(recovered, "restart", :cleanup), :destroy, opts)
+
+    assert {:ok, deleted} =
+             Operations.run(Kubernetes, config, Lifecycle.new(recovered, "restart", :cleanup), :destroy, opts)
+
     assert deleted.absent?
     assert {:ok, []} = Kubernetes.discover(config, opts)
   end
@@ -727,10 +847,15 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       end
     end
 
-    assert {:error, _, closing} = Kubernetes.put_intent(config, captured, %{desired: :absent}, Keyword.put(opts, :command_fun, command))
+    assert {:error, _, closing} =
+             Kubernetes.put_intent(config, captured, %{desired: :absent}, Keyword.put(opts, :command_fun, command))
+
     assert api_state()["sandboxes"][record.key]["metadata"]["annotations"]["symphony.dev/record"] == original
     assert guard_data(record)["record"]["desired"] == "absent"
-    assert {:ok, observed} = Operations.run(Kubernetes, config, Lifecycle.new(closing, "inspect", :cleanup), :inspect, opts)
+
+    assert {:ok, observed} =
+             Operations.run(Kubernetes, config, Lifecycle.new(closing, "inspect", :cleanup), :inspect, opts)
+
     assert observed.desired == :absent
     assert observed.metadata["volumes"] == guard_data(record)["record"]["metadata"]["volumes"]
     assert {:error, _, _} = Kubernetes.start(config, observed, opts)
@@ -771,13 +896,25 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
       if "get" in args and String.contains?(arg(args, "--raw"), "/pods?") do
         parent = api_state()["sandboxes"][record.key]
-        put_object("sandboxes", update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1)))
+
+        put_object(
+          "sandboxes",
+          update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1))
+        )
       end
 
       response
     end
 
-    assert {:ok, observed} = Operations.run(Kubernetes, config, Lifecycle.new(unresolved, "inspect", :agent), :inspect, Keyword.put(opts, :command_fun, command))
+    assert {:ok, observed} =
+             Operations.run(
+               Kubernetes,
+               config,
+               Lifecycle.new(unresolved, "inspect", :agent),
+               :inspect,
+               Keyword.put(opts, :command_fun, command)
+             )
+
     assert observed.metadata["authorized_pod_uids"] == ["pod-uid"]
     assert {:compute_unknown, _} = observed.proof
   end
@@ -787,7 +924,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     create_pod(api_state()["sandboxes"][record.key])
     remove_object("pods", record.key)
-    assert {:ok, observed} = Operations.run(Kubernetes, config, Lifecycle.new(created, "inspect", :agent), :inspect, opts)
+
+    assert {:ok, observed} =
+             Operations.run(Kubernetes, config, Lifecycle.new(created, "inspect", :agent), :inspect, opts)
+
     assert {:compute_unknown, _} = observed.proof
     assert Lifecycle.occupied?(%{Lifecycle.new(observed, "inspect", :cleanup) | phase: :stopped})
     assert {:ok, stopped} = Kubernetes.stop(config, observed, opts)
@@ -805,7 +945,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     command = late_missing_pod_after_close(record, :none)
 
-    assert {:error, failure, unresolved} = Operations.run(Kubernetes, config, deleting, :destroy, Keyword.put(opts, :command_fun, command))
+    assert {:error, failure, unresolved} =
+             Operations.run(Kubernetes, config, deleting, :destroy, Keyword.put(opts, :command_fun, command))
+
     assert {:compute_unknown, _} = unresolved.proof
     {retained, []} = Lifecycle.step(deleting, {:failed, id, failure, unresolved}, 1)
     assert Lifecycle.occupied?(retained)
@@ -821,11 +963,18 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     create_pod(api_state()["sandboxes"][record.key])
     remove_object("pods", record.key)
     parent = api_state()["sandboxes"][record.key]
-    put_object("sandboxes", update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1)))
+
+    put_object(
+      "sandboxes",
+      update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1))
+    )
+
     entry = %{Lifecycle.new(stopped, "cleanup", :cleanup) | phase: :stopped}
     {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(entry, :destroy, 0)
 
-    assert {:error, {:retryable, :kubernetes_cas_conflict} = failure, unresolved} = Operations.run(Kubernetes, config, deleting, :destroy, opts)
+    assert {:error, {:retryable, :kubernetes_cas_conflict} = failure, unresolved} =
+             Operations.run(Kubernetes, config, deleting, :destroy, opts)
+
     assert {:compute_unknown, _} = unresolved.proof
     {retained, []} = Lifecycle.step(deleting, {:failed, id, failure, unresolved}, 1)
     assert Lifecycle.occupied?(retained)
@@ -847,7 +996,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     end
 
     entry = %{Lifecycle.new(stopped, "cleanup", :cleanup) | phase: :stopped}
-    assert {:error, _, unresolved} = Operations.run(Kubernetes, config, entry, :destroy, Keyword.put(opts, :command_fun, command))
+
+    assert {:error, _, unresolved} =
+             Operations.run(Kubernetes, config, entry, :destroy, Keyword.put(opts, :command_fun, command))
+
     assert {:compute_unknown, _} = unresolved.proof
     assert Lifecycle.occupied?(%{entry | record: unresolved})
     assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
@@ -870,7 +1022,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     end
 
     entry = %{Lifecycle.new(stopped, "cleanup", :cleanup) | phase: :stopped}
-    assert {:error, _, unresolved} = Operations.run(Kubernetes, config, entry, :destroy, Keyword.put(opts, :command_fun, command))
+
+    assert {:error, _, unresolved} =
+             Operations.run(Kubernetes, config, entry, :destroy, Keyword.put(opts, :command_fun, command))
+
     assert {:compute_unknown, _} = unresolved.proof
     assert Lifecycle.occupied?(%{entry | record: unresolved})
     assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
@@ -886,7 +1041,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       {deleting, [{:provider, :destroy, id}]} = Lifecycle.step(entry, :destroy, 0)
       command = late_missing_pod_after_close(record, unquote(storage_failure))
 
-      assert {:error, failure, unresolved} = Operations.run(Kubernetes, config, deleting, :destroy, Keyword.put(opts, :command_fun, command))
+      assert {:error, failure, unresolved} =
+               Operations.run(Kubernetes, config, deleting, :destroy, Keyword.put(opts, :command_fun, command))
 
       expected =
         case unquote(storage_failure) do
@@ -913,7 +1069,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     remove_object("persistentvolumes", "pv-ticket")
     entry = %{Lifecycle.new(stopped, "inspect", :cleanup) | phase: :stopped}
 
-    assert {:error, {:unknown, :bound_pv_missing}, unresolved} = Operations.run(Kubernetes, config, entry, :inspect, opts)
+    assert {:error, {:unknown, :bound_pv_missing}, unresolved} =
+             Operations.run(Kubernetes, config, entry, :inspect, opts)
+
     assert {:compute_unknown, _} = unresolved.proof
     assert Lifecycle.occupied?(%{entry | record: unresolved})
   end
@@ -923,7 +1081,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     command = fn exe, args, options ->
       response = api_command(exe, args, options)
-      if "--path" in args and String.contains?(arg(args, "--path"), "/configmaps"), do: {:error, :timeout}, else: response
+
+      if "--path" in args and String.contains?(arg(args, "--path"), "/configmaps"),
+        do: {:error, :timeout},
+        else: response
     end
 
     assert {:ok, created} = Kubernetes.ensure(config, record, Keyword.put(opts, :command_fun, command))
@@ -985,8 +1146,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       response = api_command(exe, args, options)
 
       case api_state()["pods"][record.key] do
-        nil -> :ok
-        pod -> put_object("pods", put_in(pod, ["metadata", "annotations", "agents.x-k8s.io/create-attempt-id"], "forged"))
+        nil ->
+          :ok
+
+        pod ->
+          put_object("pods", put_in(pod, ["metadata", "annotations", "agents.x-k8s.io/create-attempt-id"], "forged"))
       end
 
       response
@@ -1047,7 +1211,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert {:error, _, unresolved} = Kubernetes.ensure(config, record, Keyword.put(opts, :command_fun, command))
     assert {:error, _, _} = Kubernetes.destroy(config, unresolved, opts)
     {_args, patch} = Process.get(:delayed_guard_patch)
-    assert {:ok, %{status: 409}} = Client.request(config, :patch, "/api/v1/namespaces/test/configmaps/" <> Guard.name(record), patch, opts)
+
+    assert {:ok, %{status: 409}} =
+             Client.request(config, :patch, "/api/v1/namespaces/test/configmaps/" <> Guard.name(record), patch, opts)
+
     assert guard_data(record)["phase"] == "Closing"
     assert guard_data(record)["operations"] == []
     assert api_state()["sandboxes"] == %{}
@@ -1136,7 +1303,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert guard_data(record)["phase"] == "Complete"
   end
 
-  for {field, value} <- [{"protocol", "unknown-v2"}, {"parentUID", "other-parent"}, {"closeRequestId", "old-close"}, {"revision", 0}, {"operationCount", 0}] do
+  for {field, value} <- [
+        {"protocol", "unknown-v2"},
+        {"parentUID", "other-parent"},
+        {"closeRequestId", "old-close"},
+        {"revision", 0},
+        {"operationCount", 0}
+      ] do
     test "wrong controller acknowledgement #{field} retains finalizer and storage" do
       {config, record, opts} = api_fixture()
       {:ok, created} = Kubernetes.ensure(config, record, opts)
@@ -1146,7 +1319,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
         if close_patch?(args) do
           parent = api_state()["sandboxes"][record.key]
-          put_object("sandboxes", put_in(parent, ["status", "creationJournal", "acknowledgement", unquote(field)], unquote(value)))
+
+          put_object(
+            "sandboxes",
+            put_in(parent, ["status", "creationJournal", "acknowledgement", unquote(field)], unquote(value))
+          )
         end
 
         response
@@ -1169,7 +1346,15 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
       if close_patch?(args) do
         parent = api_state()["sandboxes"][record.key]
-        put_object("sandboxes", update_in(parent, ["status", "creationJournal", "operations"], &Enum.map(&1, fn op -> Map.put(op, "state", "Issued") end)))
+
+        put_object(
+          "sandboxes",
+          update_in(
+            parent,
+            ["status", "creationJournal", "operations"],
+            &Enum.map(&1, fn op -> Map.put(op, "state", "Issued") end)
+          )
+        )
       end
 
       response
@@ -1184,7 +1369,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     create_pod(api_state()["sandboxes"][record.key])
     remove_object("pods", record.key)
-    assert {:error, {:unknown, {:kubernetes_pod_safety_unresolved, "pod-uid"}}, _} = Kubernetes.destroy(config, created, opts)
+
+    assert {:error, {:unknown, {:kubernetes_pod_safety_unresolved, "pod-uid"}}, _} =
+             Kubernetes.destroy(config, created, opts)
+
     assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
   end
 
@@ -1323,7 +1511,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
         api_command(exe, args, options)
       end
 
-      assert {:error, failure, unresolved} = Kubernetes.destroy(config, observed, Keyword.put(opts, :command_fun, command))
+      assert {:error, failure, unresolved} =
+               Kubernetes.destroy(config, observed, Keyword.put(opts, :command_fun, command))
+
       if unquote(storage_failure), do: assert(failure == {:unknown, :bound_pv_missing})
       assert {:compute_unknown, _} = unresolved.proof
       assert Lifecycle.occupied?(Lifecycle.new(unresolved, "cleanup", :cleanup))
@@ -1361,7 +1551,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     count = Process.get(:post_stop_inventory, 0)
 
-    if Process.get(:terminal_watch_observed, false) and "get" in args and String.contains?(path, "/persistentvolumeclaims?") do
+    if Process.get(:terminal_watch_observed, false) and "get" in args and
+         String.contains?(path, "/persistentvolumeclaims?") do
       Process.put(:post_stop_inventory, count + 1)
       if count == 1, do: json(%{"kind" => "Status", "code" => 403}), else: api_command(exe, args, options)
     else
@@ -1408,7 +1599,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     for volumes <- [["private-volume-body"], %{"invalid" => "private-volume-body"}] do
       changed = put_in(saved, ["metadata", "volumes"], volumes)
-      put_object("sandboxes", put_in(parent, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(changed)))
+
+      put_object(
+        "sandboxes",
+        put_in(parent, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(changed))
+      )
+
       assert {:error, {:unknown, {:kubernetes_invalid_owned_record, references}}} = Kubernetes.discover(config, opts)
       assert "sandbox-uid" in references
       refute inspect(references) =~ "private-volume-body"
@@ -1464,7 +1660,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     {:ok, deleted} = Kubernetes.destroy(config, created, opts)
-    pv = %{"metadata" => meta("late-pv", "late-pv-uid"), "spec" => %{"claimRef" => %{"namespace" => "test", "name" => "late-" <> record.key}}}
+
+    pv = %{
+      "metadata" => meta("late-pv", "late-pv-uid"),
+      "spec" => %{"claimRef" => %{"namespace" => "test", "name" => "late-" <> record.key}}
+    }
+
     put_object("persistentvolumes", pv)
 
     assert {:ok, [orphan]} = Kubernetes.discover(config, opts)
@@ -1522,7 +1723,16 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert {:ok, stopped} = Kubernetes.inspect(config, unresolved, opts)
     assert {:quiescent, _} = stopped.proof
     parent = api_state()["sandboxes"][record.key]
-    put_object("sandboxes", update_in(parent, ["status", "creationJournal", "operations"], &Enum.reject(&1, fn op -> op["resource"] == "pods" end)))
+
+    put_object(
+      "sandboxes",
+      update_in(
+        parent,
+        ["status", "creationJournal", "operations"],
+        &Enum.reject(&1, fn op -> op["resource"] == "pods" end)
+      )
+    )
+
     result = Kubernetes.inspect(config, stopped, opts)
     assert {:error, {:unknown, :kubernetes_controller_journal_invalid}, lost} = result
     assert {:compute_unknown, _} = lost.proof
@@ -1666,7 +1876,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     {:error, {:unknown, :kubernetes_cleanup_pending}, retained} = Kubernetes.destroy(config, created, opts)
     parent = api_state()["sandboxes"][record.key]
-    put_object("sandboxes", put_in(parent, ["status", "creationJournal", "acknowledgement", "closeRequestId"], "stale-close"))
+
+    put_object(
+      "sandboxes",
+      put_in(parent, ["status", "creationJournal", "acknowledgement", "closeRequestId"], "stale-close")
+    )
+
     result = Kubernetes.inspect(config, retained, opts)
     assert {:error, {:unknown, :kubernetes_controller_acknowledgement_invalid}, _} = result
     assert api_state()["persistentvolumes"]["pv-ticket"]
@@ -1725,7 +1940,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp close_patch?(args) do
     "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes") and
-      Enum.any?(Jason.decode!(File.read!(arg(args, "--patch-file"))), &(&1["path"] == "/spec/creationControl/closeRequestId"))
+      Enum.any?(
+        Jason.decode!(File.read!(arg(args, "--patch-file"))),
+        &(&1["path"] == "/spec/creationControl/closeRequestId")
+      )
   end
 
   test "lost Sandbox create response is recovered without duplicating retained PVCs" do
@@ -1746,11 +1964,19 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     state = api_state()
     saved = Jason.decode!(get_in(state, ["sandboxes", record.key, "metadata", "annotations", "symphony.dev/record"]))
     assert saved["metadata"]["authorized_pod_uids"] == ["pod-uid"]
-    assert Enum.any?(get_in(state, ["sandboxes", record.key, "spec", "podTemplate", "spec", "schedulingGates"]), &(&1["name"] == "symphony.dev/start-authorized"))
+
+    assert Enum.any?(
+             get_in(state, ["sandboxes", record.key, "spec", "podTemplate", "spec", "schedulingGates"]),
+             &(&1["name"] == "symphony.dev/start-authorized")
+           )
+
     assert {:ok, stopped} = Kubernetes.stop(config, attempted, opts)
     assert {:quiescent, _} = stopped.proof
     {path, patch} = Process.get(:delayed_release)
-    assert {:ok, %{status: 409}} = Client.request(config, :patch, path, patch, Keyword.put(opts, :command_fun, &api_command/3))
+
+    assert {:ok, %{status: 409}} =
+             Client.request(config, :patch, path, patch, Keyword.put(opts, :command_fun, &api_command/3))
+
     refute Enum.any?(Map.values(api_state()["pods"]), &(&1["status"]["phase"] == "Running"))
   end
 
@@ -1806,9 +2032,19 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     Process.put(:kubernetes_api, put_in(api_state(), ["sandboxes", record.key, "metadata", "uid"], "replacement"))
     assert {:error, {:unknown, :kubernetes_ownership_changed}, _} = Kubernetes.ensure(config, created, opts)
-    Process.put(:kubernetes_api, put_in(api_state(), ["sandboxes", record.key, "metadata", "uid"], created.provider_ref))
+
+    Process.put(
+      :kubernetes_api,
+      put_in(api_state(), ["sandboxes", record.key, "metadata", "uid"], created.provider_ref)
+    )
+
     {:ok, inspected} = Kubernetes.inspect(config, created, opts)
-    Process.put(:kubernetes_api, put_in(api_state(), ["persistentvolumeclaims", "workspace-se-ticket", "metadata", "uid"], "replacement"))
+
+    Process.put(
+      :kubernetes_api,
+      put_in(api_state(), ["persistentvolumeclaims", "workspace-se-ticket", "metadata", "uid"], "replacement")
+    )
+
     assert {:error, {:unknown, :retained_pvc_replaced}, _} = Kubernetes.inspect(config, inspected, opts)
   end
 
@@ -1820,7 +2056,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert {:error, {:unknown, :kubernetes_ssh_authentication_failed}} = Kubernetes.connect(config, started, opts)
     args = Process.get(:ssh_args)
     assert "StrictHostKeyChecking=yes" in args
-    hosts = Enum.find_value(args, fn arg -> if String.starts_with?(arg, "UserKnownHostsFile="), do: String.replace_prefix(arg, "UserKnownHostsFile=", "") end)
+
+    hosts =
+      Enum.find_value(args, fn arg ->
+        if String.starts_with?(arg, "UserKnownHostsFile="), do: String.replace_prefix(arg, "UserKnownHostsFile=", "")
+      end)
+
     refute File.exists?(hosts)
   end
 
@@ -1837,7 +2078,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   test "WaitForFirstConsumer claims do not block authorization of the first Pod" do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)
-    state = api_state() |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil) |> Map.put("persistentvolumes", %{})
+
+    state =
+      api_state()
+      |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil)
+      |> Map.put("persistentvolumes", %{})
+
     Process.put(:kubernetes_api, state)
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     assert {:ok, started} = Kubernetes.start(config, intended, opts)
@@ -1879,10 +2125,19 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
       pod? = is_map(api_state()["pods"]["se-ticket"])
 
-      if Path.basename(exe) == "kubectl" and is_binary(raw) and String.contains?(raw, "/sandboxes") and pod? and hidden < 1 do
+      if Path.basename(exe) == "kubectl" and is_binary(raw) and String.contains?(raw, "/sandboxes") and pod? and
+           hidden < 1 do
         Process.put(:hidden_journal, hidden + 1)
         {:ok, %{status: 0, output: body}} = result
-        {:ok, %{status: 0, output: Jason.encode!(update_in(Jason.decode!(body), ["items"], fn items -> Enum.map(items, &strip_pod_operations/1) end))}}
+
+        {:ok,
+         %{
+           status: 0,
+           output:
+             Jason.encode!(
+               update_in(Jason.decode!(body), ["items"], fn items -> Enum.map(items, &strip_pod_operations/1) end)
+             )
+         }}
       else
         result
       end
@@ -1900,7 +2155,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   test "a claim that never bound is discharged by proven absence instead of retained forever" do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)
-    state = api_state() |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil) |> Map.put("persistentvolumes", %{})
+
+    state =
+      api_state()
+      |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil)
+      |> Map.put("persistentvolumes", %{})
+
     Process.put(:kubernetes_api, state)
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     {:ok, started} = Kubernetes.start(config, intended, opts)
@@ -1914,7 +2174,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   test "an incompatible installed CRD is rejected rather than silently selecting another API" do
     {config, record, opts} = api_fixture()
-    state = update_in(api_state(), ["customresourcedefinitions", "sandboxes.agents.x-k8s.io", "spec", "versions"], fn [version] -> [Map.put(version, "name", "v1alpha1")] end)
+    versions_path = ["customresourcedefinitions", "sandboxes.agents.x-k8s.io", "spec", "versions"]
+
+    state =
+      update_in(api_state(), versions_path, fn [version] ->
+        [Map.put(version, "name", "v1alpha1")]
+      end)
+
     Process.put(:kubernetes_api, state)
     assert {:error, {:invalid, :kubernetes_schema_mismatch}, _} = Kubernetes.ensure(config, record, opts)
     assert api_state()["sandboxes"] == %{}
@@ -1925,7 +2191,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     {:ok, started} = Kubernetes.start(config, intended, opts)
-    Process.put(:kubernetes_api, put_in(api_state(), ["pods", "se-ticket", "metadata", "ownerReferences"], [%{"uid" => "foreign", "kind" => "Sandbox"}]))
+
+    Process.put(
+      :kubernetes_api,
+      put_in(api_state(), ["pods", "se-ticket", "metadata", "ownerReferences"], [
+        %{"uid" => "foreign", "kind" => "Sandbox"}
+      ])
+    )
+
     assert {:error, {:unknown, :kubernetes_child_ownership_changed}, _} = Kubernetes.inspect(config, started, opts)
   end
 
@@ -1961,7 +2234,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       json(body)
     end
 
-    assert {:ok, [%{"name" => "current"}]} = Client.list(config(), "/api/v1/namespaces/test/pods", command_fun: command, timeout_ms: 1_000)
+    assert {:ok, [%{"name" => "current"}]} =
+             Client.list(config(), "/api/v1/namespaces/test/pods", command_fun: command, timeout_ms: 1_000)
   end
 
   test "prepare donor death removes staged private keys before connection adoption" do
@@ -2008,7 +2282,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     pending = [%{verb: :start, id: "possible-release", outcome: :unknown}]
     candidate = %{created | pending: pending}
-    intent = %{desired: :stopped, attempt_id: "attempt-after-restart", issue_state: "Done", terminal_observed_at: 1_789_084_800_000}
+
+    intent = %{
+      desired: :stopped,
+      attempt_id: "attempt-after-restart",
+      issue_state: "Done",
+      terminal_observed_at: 1_789_084_800_000
+    }
+
     candidate = %{candidate | issue_identifier: "MEM-42"}
     assert {:ok, _} = Kubernetes.put_intent(config, candidate, intent, opts)
     assert {:ok, [recovered]} = Kubernetes.discover(config, opts)
@@ -2031,7 +2312,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, _} = Kubernetes.ensure(config, record, opts)
     parent = api_state()["sandboxes"][record.key]
     state = Jason.decode!(parent["metadata"]["annotations"]["symphony.dev/record"])
-    state = Map.put(state, "pending", [%{"verb" => "unrecognized-provider-action", "id" => "unknown", "outcome" => "unknown"}])
+
+    state =
+      Map.put(state, "pending", [%{"verb" => "unrecognized-provider-action", "id" => "unknown", "outcome" => "unknown"}])
+
     put_object("sandboxes", put_in(parent, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(state)))
     assert {:error, {:unknown, :kubernetes_guard_discovery_conflict}} = Kubernetes.discover(config, opts)
     assert {:error, {:unknown, :kubernetes_ownership_changed}, _} = Kubernetes.ensure(config, record, opts)
@@ -2091,7 +2375,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     {:ok, desired} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     assert {:error, {:invalid, :unqualified_kubernetes_pvc}, _} = Kubernetes.start(config, desired, opts)
-    assert %{"name" => "symphony.dev/start-authorized"} in get_in(api_state(), ["pods", record.key, "spec", "schedulingGates"])
+
+    assert %{"name" => "symphony.dev/start-authorized"} in get_in(api_state(), [
+             "pods",
+             record.key,
+             "spec",
+             "schedulingGates"
+           ])
+
     refute get_in(api_state(), ["pods", record.key, "status", "phase"]) == "Running"
   end
 
@@ -2105,7 +2396,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     candidate = %{created | metadata: metadata}
 
     foreign = %{
-      "metadata" => Map.put(meta(record.key <> "-ssh", "foreign-secret"), "ownerReferences", [%{"kind" => "Sandbox", "uid" => "foreign-parent"}]),
+      "metadata" =>
+        Map.put(meta(record.key <> "-ssh", "foreign-secret"), "ownerReferences", [
+          %{"kind" => "Sandbox", "uid" => "foreign-parent"}
+        ]),
       "data" => %{"authorized_keys" => Base.encode64("ssh-ed25519 existing\n")}
     }
 
@@ -2129,7 +2423,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   test "a scaled-to-zero controller cannot pass preflight or create an environment" do
     {config, record, opts} = api_fixture()
-    controller = api_state()["deployments"]["sandbox"] |> put_in(["spec", "replicas"], 0) |> put_in(["status", "availableReplicas"], 0)
+
+    controller =
+      api_state()["deployments"]["sandbox"]
+      |> put_in(["spec", "replicas"], 0)
+      |> put_in(["status", "availableReplicas"], 0)
+
     put_object("deployments", controller)
     assert {:error, {:invalid, :kubernetes_profile_not_qualified}} = Kubernetes.preflight(config, opts)
     assert {:error, {:invalid, :kubernetes_profile_not_qualified}, _} = Kubernetes.ensure(config, record, opts)
@@ -2298,7 +2597,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, created} = Kubernetes.ensure(config, record, opts)
 
     assert {:error, {:retryable, :kubernetes_cas_conflict}, _} =
-             Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, stale_parent_patch(record)))
+             Kubernetes.put_intent(
+               config,
+               created,
+               %{desired: :running},
+               Keyword.put(opts, :command_fun, stale_parent_patch(record))
+             )
 
     assert api_state()["sandboxes"][record.key]["spec"]["operatingMode"] == "Suspended"
     assert {:ok, observed} = Kubernetes.inspect(config, created, opts)
@@ -2314,7 +2618,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     once = stale_parent_patch(record, once: true)
 
-    assert {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, once))
+    assert {:ok, intended} =
+             Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, once))
+
     assert intended.desired == :running
     assert {:ok, observed} = Kubernetes.inspect(config, intended, opts)
     assert observed.desired == :running
@@ -2356,7 +2662,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       parent = api_state()["sandboxes"]["se-ticket"]
 
       if is_map(parent) and Path.basename(executable) == "kubectl" and "patch" in args do
-        put_object("sandboxes", update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1)))
+        put_object(
+          "sandboxes",
+          update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1))
+        )
       end
 
       result
@@ -2370,7 +2679,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       {config, record, opts} = api_fixture()
       {:ok, created} = Kubernetes.ensure(config, record, opts)
       command = stale_parent_patch(record, rewrite: rewrite)
-      assert {:error, {:unknown, _}, _} = Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, command))
+
+      assert {:error, {:unknown, _}, _} =
+               Kubernetes.put_intent(config, created, %{desired: :running}, Keyword.put(opts, :command_fun, command))
     end
   end
 
@@ -2378,17 +2689,28 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     claim = api_state()["persistentvolumeclaims"]["workspace-se-ticket"]
-    state = api_state() |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil) |> Map.put("persistentvolumes", %{})
+
+    state =
+      api_state()
+      |> put_in(["persistentvolumeclaims", "workspace-se-ticket", "spec", "volumeName"], nil)
+      |> Map.put("persistentvolumes", %{})
+
     Process.put(:kubernetes_api, state)
     {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
     {:ok, started} = Kubernetes.start(config, intended, opts)
     assert get_in(started.metadata, ["volumes", "workspace-se-ticket", "unbound"]) == true
 
-    assert {:error, reason, unresolved} = Kubernetes.destroy(config, started, Keyword.put(opts, :command_fun, unreadable_volumes()))
+    assert {:error, reason, unresolved} =
+             Kubernetes.destroy(config, started, Keyword.put(opts, :command_fun, unreadable_volumes()))
+
     refute reason == {:unknown, :unbound_pvc_provisioning_unresolved}
     assert api_state()["persistentvolumeclaims"] == %{}
 
-    orphan = %{"metadata" => %{"name" => "orphan", "uid" => "orphan-uid"}, "spec" => %{"claimRef" => %{"uid" => claim["metadata"]["uid"]}}}
+    orphan = %{
+      "metadata" => %{"name" => "orphan", "uid" => "orphan-uid"},
+      "spec" => %{"claimRef" => %{"uid" => claim["metadata"]["uid"]}}
+    }
+
     put_object("persistentvolumes", orphan)
     assert {:error, {:unknown, :unbound_pvc_provisioning_unresolved}, _} = Kubernetes.destroy(config, unresolved, opts)
     assert api_state()["persistentvolumes"]["orphan"]
@@ -2409,7 +2731,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   defp unreadable_volumes do
     fn executable, args, call_options ->
       if api_state()["persistentvolumeclaims"] == %{} and raw_path_ends_with?(args, "/persistentvolumes") do
-        {:ok, %{status: 1, output: Jason.encode!(%{"kind" => "Status", "code" => 500, "message" => "volumes unavailable"})}}
+        {:ok,
+         %{status: 1, output: Jason.encode!(%{"kind" => "Status", "code" => 500, "message" => "volumes unavailable"})}}
       else
         api_command(executable, args, call_options)
       end
@@ -2422,7 +2745,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   defp unreadable_parent_after_uncommit(record) do
     fn executable, args, call_options ->
       if Process.get(:parent_unreadable) == true and "get" in args and raw_path_ends_with?(args, "/sandboxes") do
-        {:ok, %{status: 1, output: Jason.encode!(%{"kind" => "Status", "code" => 500, "message" => "parent unavailable"})}}
+        {:ok,
+         %{status: 1, output: Jason.encode!(%{"kind" => "Status", "code" => 500, "message" => "parent unavailable"})}}
       else
         respond_then_uncommit(record, executable, args, call_options)
       end
@@ -2433,12 +2757,15 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     response = api_command(executable, args, call_options)
 
     if "patch" in args and String.starts_with?(arg(args, "patch"), "sandboxes"), do: uncommit_fixture_pod(record)
-    if "get" in args and raw_path_ends_with?(args, "/pods") and api_state()["pods"] != %{}, do: Process.put(:parent_unreadable, true)
+
+    if "get" in args and raw_path_ends_with?(args, "/pods") and api_state()["pods"] != %{},
+      do: Process.put(:parent_unreadable, true)
 
     response
   end
 
-  defp raw_path_ends_with?(args, suffix), do: "--raw" in args and String.ends_with?(URI.parse(arg(args, "--raw")).path || "", suffix)
+  defp raw_path_ends_with?(args, suffix),
+    do: "--raw" in args and String.ends_with?(URI.parse(arg(args, "--raw")).path || "", suffix)
 
   # Models the controller bumping the parent between our read and our patch: the patch is
   # rejected as prose with no body, exactly as kubectl reports a failed precondition.
@@ -2446,10 +2773,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     fn executable, args, call_options ->
       spent = options[:once] == true and Process.get(:stale_parent_patch) != nil
 
-      if Path.basename(executable) == "kubectl" and "patch" in args and Enum.any?(args, &String.starts_with?(&1, "sandboxes.")) and not spent do
+      if Path.basename(executable) == "kubectl" and "patch" in args and
+           Enum.any?(args, &String.starts_with?(&1, "sandboxes.")) and not spent do
         Process.put(:stale_parent_patch, true)
         rewrite_parent(record, options)
-        {:ok, %{status: 1, output: "The request is invalid: the server rejected our request due to an error in our request"}}
+
+        {:ok,
+         %{status: 1, output: "The request is invalid: the server rejected our request due to an error in our request"}}
       else
         api_command(executable, args, call_options)
       end
@@ -2462,11 +2792,18 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     store_parent(record, annotate_record(rewritten, options[:record_annotation]))
   end
 
-  defp store_parent(record, nil), do: Process.put(:kubernetes_api, update_in(api_state(), ["sandboxes"], &Map.delete(&1, record.key)))
+  defp store_parent(record, nil),
+    do: Process.put(:kubernetes_api, update_in(api_state(), ["sandboxes"], &Map.delete(&1, record.key)))
+
   defp store_parent(_record, parent), do: put_object("sandboxes", parent)
-  defp bump_resource_version(parent), do: update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1))
+
+  defp bump_resource_version(parent),
+    do: update_in(parent, ["metadata", "resourceVersion"], &Integer.to_string(String.to_integer(&1) + 1))
+
   defp annotate_record(object, annotation) when annotation in [nil, false], do: object
-  defp annotate_record(object, annotation), do: put_in(object, ["metadata", "annotations", "symphony.dev/record"], annotation)
+
+  defp annotate_record(object, annotation),
+    do: put_in(object, ["metadata", "annotations", "symphony.dev/record"], annotation)
 
   test "credential rotation after local key loss retains pinned host identity" do
     {config, record, opts} = api_fixture()
@@ -2529,7 +2866,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     for version <- [%{"major" => "2", "minor" => "1"}, %{"major" => "1", "minor" => "invalid"}] do
       command = fn exe, args, options ->
-        if "--raw" in args and arg(args, "--raw") == "/version", do: json(version), else: api_command(exe, args, options)
+        if "--raw" in args and arg(args, "--raw") == "/version",
+          do: json(version),
+          else: api_command(exe, args, options)
       end
 
       assert {:error, {:invalid, :kubernetes_profile_not_qualified}, _} =
@@ -2662,7 +3001,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     end
   end
 
-  defp assert_address_connection(config, record, opts, address) when address in ["172.16.1.2", "192.168.1.2", "fd00::1"] do
+  defp assert_address_connection(config, record, opts, address)
+       when address in ["172.16.1.2", "192.168.1.2", "fd00::1"] do
     assert {:ok, connection} = Kubernetes.connect(config, record, opts)
     assert :ok = Operations.close_connection(connection)
   end
@@ -2714,7 +3054,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert {:error, {:retryable, :kubernetes_waiting_for_qualified_claims}, _} =
              Kubernetes.start(config, intended, opts)
 
-    assert %{"name" => "symphony.dev/start-authorized"} in get_in(api_state(), ["pods", record.key, "spec", "schedulingGates"])
+    assert %{"name" => "symphony.dev/start-authorized"} in get_in(api_state(), [
+             "pods",
+             record.key,
+             "spec",
+             "schedulingGates"
+           ])
   end
 
   test "bound disk identity and CSI finalizer remain mandatory after stop" do
@@ -2751,7 +3096,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, created} = Kubernetes.ensure(config, record, opts)
     parent = api_state()["sandboxes"][record.key]
     durable = Jason.decode!(parent["metadata"]["annotations"]["symphony.dev/record"])
-    parent = put_in(parent, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(%{durable | "pending" => %{}}))
+
+    parent =
+      put_in(parent, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(%{durable | "pending" => %{}}))
+
     put_object("sandboxes", parent)
     assert {:error, {:unknown, :kubernetes_guard_discovery_conflict}} = Kubernetes.discover(config, opts)
     assert {:error, {:unknown, :kubernetes_ownership_changed}, _} = Kubernetes.start(config, created, opts)
@@ -2770,8 +3118,17 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   defp cancel_saved_intent do
     sandbox = api_state()["sandboxes"]["se-ticket"]
     saved = Jason.decode!(sandbox["metadata"]["annotations"]["symphony.dev/record"])
-    sandbox = put_in(sandbox, ["metadata", "annotations", "symphony.dev/record"], Jason.encode!(%{saved | "desired" => "stopped"}))
-    {guard_name, guard} = Enum.find(api_state()["configmaps"], fn {_, object} -> get_in(object, ["data", "guard.json"]) != nil end)
+
+    sandbox =
+      put_in(
+        sandbox,
+        ["metadata", "annotations", "symphony.dev/record"],
+        Jason.encode!(%{saved | "desired" => "stopped"})
+      )
+
+    {guard_name, guard} =
+      Enum.find(api_state()["configmaps"], fn {_, object} -> get_in(object, ["data", "guard.json"]) != nil end)
+
     data = Jason.decode!(guard["data"]["guard.json"])
     data = put_in(data, ["record", "desired"], "stopped")
 
@@ -2884,7 +3241,15 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   test "additional safe template volumes retain qualified execution while network profile mismatch blocks it" do
     {config, record, opts} = api_fixture()
     template = api_state()["sandboxtemplates"]["development"]
-    qualify_template(update_in(template, ["spec", "podTemplate", "spec", "volumes"], &(&1 ++ [%{"name" => "scratch", "emptyDir" => %{}}])))
+
+    qualify_template(
+      update_in(
+        template,
+        ["spec", "podTemplate", "spec", "volumes"],
+        &(&1 ++ [%{"name" => "scratch", "emptyDir" => %{}}])
+      )
+    )
+
     policy = api_state()["networkpolicies"]["private"]
     put_object("networkpolicies", put_in(policy, ["spec", "podSelector", "matchLabels", "profile"], "wrong"))
     assert {:error, {:invalid, :kubernetes_profile_not_qualified}} = Kubernetes.preflight(config, opts)
@@ -2958,7 +3323,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     end
 
     assert {:error, {:unknown, _}, _} = Kubernetes.start(config, intended, Keyword.put(opts, :command_fun, command))
-    assert %{"name" => "symphony.dev/start-authorized"} in get_in(api_state(), ["pods", record.key, "spec", "schedulingGates"])
+
+    assert %{"name" => "symphony.dev/start-authorized"} in get_in(api_state(), [
+             "pods",
+             record.key,
+             "spec",
+             "schedulingGates"
+           ])
   end
 
   test "a foreign admitted Pod is refused before its first release" do
@@ -2998,10 +3369,14 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     {:ok, started} = Kubernetes.start(config, intended, opts)
 
     command = fn exe, args, options ->
-      if "patch" in args and arg(args, "patch") == "pods", do: json(%{"kind" => "Status", "code" => 403}), else: api_command(exe, args, options)
+      if "patch" in args and arg(args, "patch") == "pods",
+        do: json(%{"kind" => "Status", "code" => 403}),
+        else: api_command(exe, args, options)
     end
 
-    assert {:error, {:denied, _}, unresolved} = Kubernetes.stop(config, started, Keyword.put(opts, :command_fun, command))
+    assert {:error, {:denied, _}, unresolved} =
+             Kubernetes.stop(config, started, Keyword.put(opts, :command_fun, command))
+
     assert unresolved.proof == :unknown
     assert get_in(api_state(), ["pods", record.key, "status", "phase"]) == "Running"
   end
@@ -3027,7 +3402,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   test "late committed ungated Pod blocks cleanup without physical evidence" do
     {config, record, opts} = api_fixture(late_cleanup_pod: :ungated)
     {:ok, created} = Kubernetes.ensure(config, record, opts)
-    assert {:error, {:unknown, {:kubernetes_pod_safety_unresolved, "pod-uid"}}, _} = Kubernetes.destroy(config, created, opts)
+
+    assert {:error, {:unknown, {:kubernetes_pod_safety_unresolved, "pod-uid"}}, _} =
+             Kubernetes.destroy(config, created, opts)
+
     assert api_state()["pods"][record.key] != nil
     assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"] != nil
   end
@@ -3119,7 +3497,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     put_object("sandboxtemplates", template)
     cm = api_state()["configmaps"]["qualification"]
     q = Jason.decode!(cm["data"]["contract.json"])
-    put_object("configmaps", put_in(cm, ["data", "contract.json"], Jason.encode!(%{q | "template_digest" => fixture_digest(template["spec"])})))
+
+    put_object(
+      "configmaps",
+      put_in(cm, ["data", "contract.json"], Jason.encode!(%{q | "template_digest" => fixture_digest(template["spec"])}))
+    )
   end
 
   defp running_parent_read?(args) do
@@ -3129,8 +3511,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp foreign_live_pod do
     case api_state()["pods"]["se-ticket"] do
-      nil -> :ok
-      pod -> put_object("pods", put_in(pod, ["metadata", "ownerReferences"], [%{"kind" => "Sandbox", "uid" => "foreign"}]))
+      nil ->
+        :ok
+
+      pod ->
+        put_object("pods", put_in(pod, ["metadata", "ownerReferences"], [%{"kind" => "Sandbox", "uid" => "foreign"}]))
     end
   end
 
@@ -3150,7 +3535,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp api_fixture(options \\ []) do
     config = %{
-      provider: Map.merge(config().provider, %{"template" => "development", "ssh_user" => "worker", "ssh_port" => 2222, "ssh_auth_volume" => "ssh-auth"}),
+      provider:
+        Map.merge(config().provider, %{
+          "template" => "development",
+          "ssh_user" => "worker",
+          "ssh_port" => 2222,
+          "ssh_auth_volume" => "ssh-auth"
+        }),
       deployment_id: "deployment",
       tracker_kind: "memory",
       kind: "kubernetes"
@@ -3167,13 +3558,26 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
           "metadata" => %{"labels" => %{"profile" => "private"}},
           "spec" => %{
             "runtimeClassName" => "isolated",
-            "containers" => [%{"name" => "worker", "image" => "qualified-worker", "volumeMounts" => [%{"name" => "ssh-auth", "mountPath" => "/ssh-auth", "readOnly" => true}]}],
+            "containers" => [
+              %{
+                "name" => "worker",
+                "image" => "qualified-worker",
+                "volumeMounts" => [%{"name" => "ssh-auth", "mountPath" => "/ssh-auth", "readOnly" => true}]
+              }
+            ],
             "volumes" => [%{"name" => "ssh-auth", "emptyDir" => %{}}],
             "schedulingGates" => [%{"name" => "operator.dev/approval"}]
           }
         },
         "volumeClaimTemplates" => [
-          %{"metadata" => %{"name" => "workspace"}, "spec" => %{"storageClassName" => "private", "accessModes" => ["ReadWriteOnce"], "resources" => %{"requests" => %{"storage" => "1Gi"}}}}
+          %{
+            "metadata" => %{"name" => "workspace"},
+            "spec" => %{
+              "storageClassName" => "private",
+              "accessModes" => ["ReadWriteOnce"],
+              "resources" => %{"requests" => %{"storage" => "1Gi"}}
+            }
+          }
         ]
       }
     }
@@ -3182,7 +3586,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     template =
       if options[:pinned_host],
-        do: put_in(template, ["spec", "podTemplate", "spec", "nodeSelector"], %{"kubernetes.io/hostname" => "worker-1"}),
+        do:
+          put_in(template, ["spec", "podTemplate", "spec", "nodeSelector"], %{"kubernetes.io/hostname" => "worker-1"}),
         else: template
 
     image = "ghcr.io/trazadera/agent-sandbox-symphony-controller@sha256:" <> String.duplicate("a", 64)
@@ -3210,7 +3615,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
     state = %{
       "sandboxtemplates" => %{"development" => template},
-      "configmaps" => %{"qualification" => %{"metadata" => meta("qualification", "qualification-uid"), "immutable" => true, "data" => %{"contract.json" => Jason.encode!(q)}}},
+      "configmaps" => %{
+        "qualification" => %{
+          "metadata" => meta("qualification", "qualification-uid"),
+          "immutable" => true,
+          "data" => %{"contract.json" => Jason.encode!(q)}
+        }
+      },
       "customresourcedefinitions" => Map.new(schemas, &{&1["metadata"]["name"], &1}),
       "deployments" => %{
         "sandbox" => %{
@@ -3220,9 +3631,21 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
         }
       },
       "runtimeclasses" => %{"isolated" => %{"metadata" => meta("isolated", "runtime-uid"), "handler" => "qualified-vm"}},
-      "storageclasses" => %{"private" => %{"metadata" => meta("private", "class-uid"), "reclaimPolicy" => "Delete", "provisioner" => "qualified.csi"}},
+      "storageclasses" => %{
+        "private" => %{
+          "metadata" => meta("private", "class-uid"),
+          "reclaimPolicy" => "Delete",
+          "provisioner" => "qualified.csi"
+        }
+      },
       "networkpolicies" => %{
-        "private" => %{"metadata" => meta("private", "policy-uid"), "spec" => %{"podSelector" => %{"matchLabels" => %{"profile" => "private"}}, "policyTypes" => ["Ingress", "Egress"]}}
+        "private" => %{
+          "metadata" => meta("private", "policy-uid"),
+          "spec" => %{
+            "podSelector" => %{"matchLabels" => %{"profile" => "private"}},
+            "policyTypes" => ["Ingress", "Egress"]
+          }
+        }
       },
       "nodes" => if(options[:pinned_host], do: %{"worker-1" => node_object()}, else: %{}),
       "hostlossdeclarations" => %{},
@@ -3383,7 +3806,8 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       pvc = journal_child(object, "persistentvolumeclaims", pvc)
 
       pv = %{
-        "metadata" => Map.put(meta("pv-ticket", "pv-uid"), "finalizers", ["external-provisioner.volume.kubernetes.io/finalizer"]),
+        "metadata" =>
+          Map.put(meta("pv-ticket", "pv-uid"), "finalizers", ["external-provisioner.volume.kubernetes.io/finalizer"]),
         "spec" => %{
           "claimRef" => %{"name" => pvc["metadata"]["name"], "namespace" => "test", "uid" => "pvc-uid"},
           "persistentVolumeReclaimPolicy" => "Delete",
@@ -3393,7 +3817,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
       put_object("persistentvolumeclaims", pvc)
       put_object("persistentvolumes", pv)
-      if option(:lost_create), do: {:error, {:unknown, :lost_create_response}}, else: json(api_state()["sandboxes"][name])
+
+      if option(:lost_create),
+        do: {:error, {:unknown, :lost_create_response}},
+        else: json(api_state()["sandboxes"][name])
     else
       json(object)
     end
@@ -3457,7 +3884,12 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     metadata = Map.merge(parent["spec"]["podTemplate"]["metadata"], child_meta(parent, parent["metadata"]["name"], uid))
     pod = Map.put(parent["spec"]["podTemplate"], "metadata", metadata) |> Map.put("kind", "Pod")
     pod = journal_child(parent, "pods", pod)
-    pod = if option(:strip_network_profile), do: update_in(pod, ["metadata", "labels"], &Map.delete(&1, "profile")), else: pod
+
+    pod =
+      if option(:strip_network_profile),
+        do: update_in(pod, ["metadata", "labels"], &Map.delete(&1, "profile")),
+        else: pod
+
     put_object("pods", pod)
     mutate_pvc_admission()
   end
@@ -3478,14 +3910,21 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     put_object("pods", Map.put(updated, "status", status))
     parent = api_state()["sandboxes"]["se-ticket"]
     condition = %{"type" => "Ready", "status" => "True", "observedGeneration" => parent["metadata"]["generation"]}
-    put_object("sandboxes", Map.update(parent, "status", %{"conditions" => [condition]}, &Map.put(&1, "conditions", [condition])))
+
+    put_object(
+      "sandboxes",
+      Map.update(parent, "status", %{"conditions" => [condition]}, &Map.put(&1, "conditions", [condition]))
+    )
   end
 
   defp apply_patch(nil, _patch), do: :conflict
 
   defp apply_patch(object, patch) do
     Enum.reduce_while(patch, {:ok, object}, fn operation, {:ok, current} ->
-      path = operation["path"] |> String.split("/", trim: true) |> Enum.map(&String.replace(String.replace(&1, "~1", "/"), "~0", "~"))
+      path =
+        operation["path"]
+        |> String.split("/", trim: true)
+        |> Enum.map(&String.replace(String.replace(&1, "~1", "/"), "~0", "~"))
 
       case operation["op"] do
         "test" -> compare_patch(current, path, operation["value"])
@@ -3526,12 +3965,19 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp delete_effect("pods", name, object) do
     if not option(:missing_termination) do
-      terminated = %{"finishedAt" => "2026-09-11T00:00:00Z", "containerID" => "containerd://worker", "reason" => "Completed"}
+      terminated = %{
+        "finishedAt" => "2026-09-11T00:00:00Z",
+        "containerID" => "containerd://worker",
+        "reason" => "Completed"
+      }
+
       statuses = [%{"name" => "worker", "state" => %{"terminated" => terminated}}]
 
       terminal =
         object
-        |> put_in(["metadata", "managedFields"], [%{"manager" => option(:status_field_manager) || "kubelet", "subresource" => "status"}])
+        |> put_in(["metadata", "managedFields"], [
+          %{"manager" => option(:status_field_manager) || "kubelet", "subresource" => "status"}
+        ])
         |> Map.put("status", %{"phase" => "Succeeded", "containerStatuses" => statuses})
 
       put_event("pods", name, %{"type" => "MODIFIED", "object" => terminal})
@@ -3547,7 +3993,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     # A claim that never bound has no volume to release, so only a provisioned one emits a
     # deletion event. Without this the fixture raises instead of modelling the real API.
     if is_map(pv) and not option(:delay_pv) do
-      put_event("persistentvolumes", "pv-ticket", %{"type" => "DELETED", "object" => put_in(pv, ["metadata", "finalizers"], [])})
+      put_event("persistentvolumes", "pv-ticket", %{
+        "type" => "DELETED",
+        "object" => put_in(pv, ["metadata", "finalizers"], [])
+      })
+
       remove_object("persistentvolumes", "pv-ticket")
     end
   end
@@ -3561,7 +4011,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp strip_pod_operations(sandbox) do
     if get_in(sandbox, ["status", "creationJournal", "operations"]) do
-      update_in(sandbox, ["status", "creationJournal", "operations"], &Enum.reject(&1, fn op -> op["resource"] == "pods" end))
+      update_in(
+        sandbox,
+        ["status", "creationJournal", "operations"],
+        &Enum.reject(&1, fn op -> op["resource"] == "pods" end)
+      )
     else
       sandbox
     end
@@ -3609,7 +4063,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       "objectUID" => object["metadata"]["uid"]
     }
 
-    journal = get_in(parent, ["status", "creationJournal"]) || %{"parentUID" => parent["metadata"]["uid"], "phase" => "Open", "revision" => 1, "operations" => []}
+    journal =
+      get_in(parent, ["status", "creationJournal"]) ||
+        %{"parentUID" => parent["metadata"]["uid"], "phase" => "Open", "revision" => 1, "operations" => []}
+
     journal = journal |> Map.update!("operations", &(&1 ++ [operation])) |> Map.update!("revision", &(&1 + 1))
     put_object("sandboxes", put_in(parent, ["status", "creationJournal"], journal))
 
@@ -3646,7 +4103,13 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   defp child_meta(parent, name, uid),
     do:
       Map.put(meta(name, uid), "ownerReferences", [
-        %{"apiVersion" => "agents.x-k8s.io/v1beta1", "kind" => "Sandbox", "uid" => parent["metadata"]["uid"], "name" => parent["metadata"]["name"], "controller" => true}
+        %{
+          "apiVersion" => "agents.x-k8s.io/v1beta1",
+          "kind" => "Sandbox",
+          "uid" => parent["metadata"]["uid"],
+          "name" => parent["metadata"]["name"],
+          "controller" => true
+        }
       ])
 
   defp kubernetes_front_matter do
@@ -3690,7 +4153,11 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       "destroyedAt" => "2026-09-19T00:00:00Z"
     }
 
-    put_object("configmaps", %{"metadata" => meta("symphony-destruction-receipt-3070466", "receipt-uid"), "immutable" => true, "data" => %{"receipt.json" => Jason.encode!(body)}})
+    put_object("configmaps", %{
+      "metadata" => meta("symphony-destruction-receipt-3070466", "receipt-uid"),
+      "immutable" => true,
+      "data" => %{"receipt.json" => Jason.encode!(body)}
+    })
   end
 
   defp refusal(config, record, opts, overrides \\ %{}) do
@@ -3708,7 +4175,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
       "host" => Map.take(saved["hostBinding"], ~w(node_name node_uid machine_id system_uuid)),
       "environmentKeys" => [record.key],
       "obligationUIDs" => Enum.sort(saved["record"]["metadata"]["authorized_pod_uids"] ++ ["pvc-uid"]),
-      "guards" => %{record.key => %{"uid" => guard["metadata"]["uid"], "resourceVersion" => guard["metadata"]["resourceVersion"]}},
+      "guards" => %{
+        record.key => %{"uid" => guard["metadata"]["uid"], "resourceVersion" => guard["metadata"]["resourceVersion"]}
+      },
       "receiptName" => "symphony-destruction-receipt-3070466",
       "operatorSubject" => "operator@example.test",
       "chunkIndex" => 0,
@@ -3729,18 +4198,38 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
 
   defp declaration_status(declaration), do: get_in(api_state(), ["hostlossdeclarations", declaration.name, "status"])
 
-  defp meta(name, uid), do: %{"name" => name, "uid" => uid, "resourceVersion" => "1", "generation" => 1, "namespace" => "test"}
-  defp put_object(resource, object), do: Process.put(:kubernetes_api, put_in(api_state(), [resource, object["metadata"]["name"]], object))
-  defp remove_object(resource, name), do: Process.put(:kubernetes_api, Map.update!(api_state(), resource, &Map.delete(&1, name)))
-  defp put_event(resource, name, event), do: Process.put(:kubernetes_events, Map.update(Process.get(:kubernetes_events), {resource, name}, [event], &(&1 ++ [event])))
+  defp meta(name, uid),
+    do: %{"name" => name, "uid" => uid, "resourceVersion" => "1", "generation" => 1, "namespace" => "test"}
+
+  defp put_object(resource, object),
+    do: Process.put(:kubernetes_api, put_in(api_state(), [resource, object["metadata"]["name"]], object))
+
+  defp remove_object(resource, name),
+    do: Process.put(:kubernetes_api, Map.update!(api_state(), resource, &Map.delete(&1, name)))
+
+  defp put_event(resource, name, event),
+    do:
+      Process.put(
+        :kubernetes_events,
+        Map.update(Process.get(:kubernetes_events), {resource, name}, [event], &(&1 ++ [event]))
+      )
+
   defp api_state, do: Process.get(:kubernetes_api)
   defp option(key), do: Keyword.get(Process.get(:kubernetes_options), key, false)
   defp arg(args, flag), do: Enum.at(args, Enum.find_index(args, &(&1 == flag)) + 1)
   # arg/2 raises when the flag is absent, and a kubectl patch has no --raw at all.
   defp raw_path?(args, fragment), do: "--raw" in args and String.contains?(arg(args, "--raw"), fragment)
   defp json(body), do: {:ok, %{status: 0, output: Jason.encode!(body)}}
-  defp fixture_digest(value), do: :crypto.hash(:sha256, Jason.encode!(canonical_fixture(value))) |> Base.encode16(case: :lower) |> binary_part(0, 40)
-  defp canonical_fixture(map) when is_map(map), do: map |> Enum.map(fn {key, value} -> [key, canonical_fixture(value)] end) |> Enum.sort()
+
+  defp fixture_digest(value),
+    do:
+      :crypto.hash(:sha256, Jason.encode!(canonical_fixture(value)))
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, 40)
+
+  defp canonical_fixture(map) when is_map(map),
+    do: map |> Enum.map(fn {key, value} -> [key, canonical_fixture(value)] end) |> Enum.sort()
+
   defp canonical_fixture(list) when is_list(list), do: Enum.map(list, &canonical_fixture/1)
   defp canonical_fixture(value), do: value
 
@@ -3763,7 +4252,10 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
   defp sandbox do
     %{
       "metadata" => %{"uid" => "sandbox-uid", "generation" => 2},
-      "spec" => %{"operatingMode" => "Suspended", "podTemplate" => %{"spec" => %{"schedulingGates" => [%{"name" => "symphony.dev/start-authorized"}]}}},
+      "spec" => %{
+        "operatingMode" => "Suspended",
+        "podTemplate" => %{"spec" => %{"schedulingGates" => [%{"name" => "symphony.dev/start-authorized"}]}}
+      },
       "status" => %{"conditions" => [%{"type" => "Suspended", "status" => "True", "observedGeneration" => 2}]}
     }
   end

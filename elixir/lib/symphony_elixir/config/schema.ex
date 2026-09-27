@@ -366,7 +366,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     case validate_worker_source(attrs) do
       :ok ->
-        parse_attributes(attrs, error_format)
+        parse_attributes(attrs, error_format, Keyword.get(opts, :resolve_secrets, true))
 
       {:error, {path, message}} ->
         errors =
@@ -379,13 +379,13 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp parse_attributes(attrs, error_format) do
+  defp parse_attributes(attrs, error_format, resolve_secrets?) do
     attrs
     |> drop_nil_values()
     |> changeset()
     |> apply_action(:validate)
     |> case do
-      {:ok, settings} -> {:ok, finalize_settings(settings)}
+      {:ok, settings} -> {:ok, finalize_settings(settings, resolve_secrets?)}
       {:error, changeset} -> {:error, {:invalid_workflow_config, format_errors(changeset, error_format)}}
     end
   end
@@ -501,7 +501,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:server, with: &Server.changeset/2)
   end
 
-  defp finalize_settings(settings) do
+  defp finalize_settings(settings, resolve_secrets?) do
     provider = normalize_optional_map(settings.tracker.provider) || %{}
 
     {api_key, assignee, provider, secret_environment_names} =
@@ -514,11 +514,15 @@ defmodule SymphonyElixir.Config.Schema do
             |> Map.put_new("project_slug", settings.tracker.project_slug)
             |> Map.put_new("assignee", settings.tracker.assignee)
 
-          resolved_api_key =
-            resolve_secret_setting(linear_provider["api_key"], System.get_env("LINEAR_API_KEY"))
-
-          resolved_assignee =
-            resolve_secret_setting(linear_provider["assignee"], System.get_env("LINEAR_ASSIGNEE"))
+          {resolved_api_key, resolved_assignee} =
+            if resolve_secrets? do
+              {
+                resolve_secret_setting(linear_provider["api_key"], System.get_env("LINEAR_API_KEY")),
+                resolve_secret_setting(linear_provider["assignee"], System.get_env("LINEAR_ASSIGNEE"))
+              }
+            else
+              {linear_provider["api_key"], linear_provider["assignee"]}
+            end
 
           {
             resolved_api_key,
@@ -531,17 +535,7 @@ defmodule SymphonyElixir.Config.Schema do
           {settings.tracker.api_key, settings.tracker.assignee, provider, []}
       end
 
-    {active_states, terminal_states} =
-      case settings.tracker.kind do
-        kind when kind in ["linear", "memory"] ->
-          {
-            settings.tracker.active_states || @linear_active_states,
-            settings.tracker.terminal_states || @linear_terminal_states
-          }
-
-        _ ->
-          {settings.tracker.active_states, settings.tracker.terminal_states}
-      end
+    {active_states, terminal_states} = tracker_states(settings.tracker)
 
     tracker = %{
       settings.tracker
@@ -569,6 +563,12 @@ defmodule SymphonyElixir.Config.Schema do
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
   end
 
+  defp tracker_states(%{kind: kind} = tracker) when kind in ["linear", "memory"] do
+    {tracker.active_states || @linear_active_states, tracker.terminal_states || @linear_terminal_states}
+  end
+
+  defp tracker_states(tracker), do: {tracker.active_states, tracker.terminal_states}
+
   defp normalize_keys(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, raw_value}, normalized ->
       Map.put(normalized, normalize_key(key), normalize_keys(raw_value))
@@ -579,7 +579,10 @@ defmodule SymphonyElixir.Config.Schema do
   defp normalize_keys(value), do: value
 
   defp stringify_structs(%{__struct__: _} = value), do: value |> Map.from_struct() |> stringify_structs()
-  defp stringify_structs(value) when is_map(value), do: Map.new(value, fn {key, item} -> {to_string(key), stringify_structs(item)} end)
+
+  defp stringify_structs(value) when is_map(value),
+    do: Map.new(value, fn {key, item} -> {to_string(key), stringify_structs(item)} end)
+
   defp stringify_structs(value) when is_list(value), do: Enum.map(value, &stringify_structs/1)
   defp stringify_structs(value), do: value
 

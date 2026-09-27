@@ -2,8 +2,9 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.ExecutionEnvironment
-  alias SymphonyElixir.ExecutionEnvironment.{Operations, Record, Workstations}
+  alias SymphonyElixir.ExecutionEnvironment.{Credentials, Operations, Record, Workstations}
   alias SymphonyElixir.ExecutionEnvironment.Workstations.Client
+  alias SymphonyElixir.GoogleCredentials
   alias SymphonyElixir.SSH
 
   test "STOPPED with no listed operations cannot erase an unknown start" do
@@ -33,7 +34,10 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     stopped = Workstations.normalize(record, workstation(), [operation("stop", true)])
     assert {:quiescent, _} = stopped.proof
     assert stopped.phase == :stopped
-    assert Workstations.normalize(record, Map.put(workstation(), "uid", "replacement"), [operation("stop", true)]).proof == :unknown
+
+    assert Workstations.normalize(record, Map.put(workstation(), "uid", "replacement"), [operation("stop", true)]).proof ==
+             :unknown
+
     failed = Map.put(operation("stop", true), "error", %{"code" => 13})
     assert Workstations.normalize(record, workstation(), [failed]).proof == :unknown
   end
@@ -45,8 +49,12 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     observed = Workstations.normalize(record, workstation(), [op])
     assert [%{id: id, outcome: :succeeded}] = observed.pending
     assert id == operation_name()
-    assert Workstations.normalize(record, workstation(), [put_in(op, ["metadata", "target"], name() <> "-other")]).pending == [marker]
-    assert Workstations.normalize(record, workstation(), [op, Map.put(op, "name", operation_name() <> "2")]).pending == [marker]
+
+    assert Workstations.normalize(record, workstation(), [put_in(op, ["metadata", "target"], name() <> "-other")]).pending ==
+             [marker]
+
+    assert Workstations.normalize(record, workstation(), [op, Map.put(op, "name", operation_name() <> "2")]).pending ==
+             [marker]
   end
 
   test "client never replays an ambiguous mutation and redacts transport failures" do
@@ -76,7 +84,11 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   end
 
   test "page two orphan disk blocks discovery rather than manufacturing issue identity" do
-    disk = %{"id" => "123", "selfLink" => "https://www.googleapis.com/compute/v1/projects/p/zones/z/disks/orphan", "labels" => labels()}
+    disk = %{
+      "id" => "123",
+      "selfLink" => "https://www.googleapis.com/compute/v1/projects/p/zones/z/disks/orphan",
+      "labels" => labels()
+    }
 
     request = fn req ->
       cond do
@@ -100,7 +112,12 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   end
 
   test "parent 404 with a labeled disk remains billable cleanup, never absence" do
-    disk = %{"id" => "456", "selfLink" => "https://www.googleapis.com/compute/v1/projects/p/zones/z/disks/d", "labels" => labels()}
+    disk = %{
+      "id" => "456",
+      "selfLink" => "https://www.googleapis.com/compute/v1/projects/p/zones/z/disks/d",
+      "labels" => labels()
+    }
+
     pending = [%{verb: :delete, id: operation_name(), outcome: :succeeded}]
     record = %{record() | pending: pending, provider_ref: %{name: name(), uid: "ws-uid"}}
 
@@ -166,7 +183,10 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "stop LRO error never certifies cancellation" do
     {_server, request} = provider(%{stop_error: true})
     assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
-    assert {:error, {:unknown, {:operation_failed, :stop, 13}}, failed} = Workstations.stop(config(), created, opts(request))
+
+    assert {:error, {:unknown, {:operation_failed, :stop, 13}}, failed} =
+             Workstations.stop(config(), created, opts(request))
+
     assert failed.proof == :unknown
     refute failed.absent?
   end
@@ -201,15 +221,88 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     assert {:ok, %{status: 200}} = Client.request(config(), :get, "/v1/" <> operation_name(), [], nil, options)
     assert {:ok, %{status: 200}} = Client.request(config(), :get, "/v1/" <> operation_name(), [], nil, options)
     assert Process.get(:tokens) == 2
-    assert {:ok, %{status: 401}} = Client.request(config(), :get, "/v1/" <> operation_name(), [], nil, Keyword.put(options, :request_fun, fn _ -> response(401, %{}) end))
+
+    assert {:ok, %{status: 401}} =
+             Client.request(
+               config(),
+               :get,
+               "/v1/" <> operation_name(),
+               [],
+               nil,
+               Keyword.put(options, :request_fun, fn _ -> response(401, %{}) end)
+             )
+
     assert Process.get(:tokens) == 2
+  end
+
+  test "lifecycle requests share bounded credential caching without losing impersonation" do
+    parent = self()
+
+    token_fun = fn identity, _ ->
+      send(parent, {:token_identity, identity})
+      {:ok, "shared-lifecycle-token"}
+    end
+
+    options = [token_fun: token_fun, timeout_ms: 1_000]
+    assert {:ok, "shared-lifecycle-token"} = GoogleCredentials.token(config().provider, options)
+
+    request = fn options ->
+      assert {"authorization", "Bearer shared-lifecycle-token"} in options[:headers]
+      response(200, %{"done" => true})
+    end
+
+    assert {:ok, %{status: 200}} =
+             Client.request(
+               config(),
+               :get,
+               "/v1/" <> operation_name(),
+               [],
+               nil,
+               Keyword.put(options, :request_fun, request)
+             )
+
+    assert_receive {:token_identity, identity}
+    assert identity["credential_configuration"] == "deploy"
+    assert identity["impersonate_service_account"] == "sa@example.com"
+    refute_receive {:token_identity, _}
+  end
+
+  test "missing lifecycle impersonation cannot fall back to controller credentials" do
+    invalid = update_in(config(), [:provider], &Map.delete(&1, "impersonate_service_account"))
+    parent = self()
+
+    options = [
+      token_fun: fn _, _ ->
+        send(parent, :unscoped_token)
+        {:ok, "unscoped-token"}
+      end,
+      request_fun: fn _ -> response(200, %{"done" => true}) end
+    ]
+
+    assert {:error, {:denied, :workstations_credentials}} =
+             Client.request(invalid, :get, "/v1/" <> operation_name(), [], nil, options)
+
+    refute_receive :unscoped_token
+  end
+
+  test "tunnel startup rejects missing lifecycle impersonation before accepting a connection" do
+    {running, options} = tunnel_fixture("read ignored")
+    invalid = update_in(config(), [:provider], &Map.delete(&1, "impersonate_service_account"))
+    assert {:error, {:denied, :workstations_credentials}} = Workstations.connect(invalid, running, options)
   end
 
   test "an expired lifecycle deadline cannot issue a provider request" do
     request = fn _ -> flunk("provider request after deadline") end
 
     assert {:error, {:unknown, :workstations_deadline}} =
-             Client.request(config(), :post, "/v1/" <> name() <> ":start", [], %{}, Keyword.put(opts(request), :deadline, System.monotonic_time(:millisecond) - 1))
+             Client.request(
+               config(),
+               :post,
+               "/v1/" <> name() <> ":start",
+               [],
+               %{},
+               Keyword.put(opts(request), :deadline, System.monotonic_time(:millisecond) - 1)
+             )
   end
 
   test "configuration page two finds retained resources after configured name changes" do
@@ -246,7 +339,12 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
           if req[:method] == :get, do: {:error, :timeout}, else: response(200, Map.put(body, "done", false))
 
         {:ok, %{status: 200, body: %{"operations" => operations}}} ->
-          response(200, %{"operations" => Enum.map(operations, fn op -> if get_in(op, ["metadata", "verb"]) == "update", do: Map.put(op, "done", false), else: op end)})
+          response(200, %{
+            "operations" =>
+              Enum.map(operations, fn op ->
+                if get_in(op, ["metadata", "verb"]) == "update", do: Map.put(op, "done", false), else: op
+              end)
+          })
 
         other ->
           other
@@ -303,10 +401,132 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     assert {:ok, connection} = Task.await(task)
     assert :ok == GenServer.call(connection.owner, {:validate_connection, connection.id, connection.target})
     assert {:ok, {"authenticated-worker\n", 0}} = SSH.run(connection.target, "true")
-    hosts = Enum.find_value(connection.target.prefix, fn value -> if String.starts_with?(value, "UserKnownHostsFile="), do: String.replace_prefix(value, "UserKnownHostsFile=", "") end)
+
+    hosts =
+      Enum.find_value(connection.target.prefix, fn value ->
+        if String.starts_with?(value, "UserKnownHostsFile="),
+          do: String.replace_prefix(value, "UserKnownHostsFile=", "")
+      end)
+
     assert File.exists?(hosts)
     assert :ok == Operations.close_connection(connection)
     refute File.exists?(hosts)
+  end
+
+  test "SSH readiness retries pre-handshake failures without replacing pinned trust" do
+    script = """
+    if [ ! -s "$hosts" ]; then printf 'pinned-test-key\\n' > "$hosts"; fi
+    [ "$(cat "$hosts")" = pinned-test-key ] || exit 92
+    case "$(wc -l < "$attempts" | tr -d ' ')" in
+      1) printf 'kex_exchange_identification: read: Connection reset by peer\\nConnection reset by 127.0.0.1 port 2222\\n' >&2; exit 255 ;;
+      2) printf 'ssh: connect to host 127.0.0.1 port 2222: Connection refused\\n' >&2; exit 255 ;;
+      3) printf 'kex_exchange_identification: Connection closed by remote host\\nConnection closed by 127.0.0.1 port 2222\\n' >&2; exit 255 ;;
+      *) printf 'authenticated-worker\\n' ;;
+    esac
+    """
+
+    {running, options, directory} = ssh_readiness_fixture(script)
+    options = Keyword.put(options, :poll_interval_ms, 10)
+    assert {:ok, connection} = Workstations.connect(config(), running, options)
+    assert File.read!(Path.join(directory, "attempts")) == "attempt\nattempt\nattempt\nattempt\n"
+    hosts = File.read!(Path.join(directory, "hosts-path"))
+    assert File.read!(hosts) == "pinned-test-key\n"
+    assert "StrictHostKeyChecking=yes" in connection.target.prefix
+    assert {:ok, {"authenticated-worker\n", 0}} = SSH.run(connection.target, "true")
+    assert :ok == Operations.close_connection(connection)
+    refute File.exists?(Path.dirname(hosts))
+  end
+
+  test "SSH readiness polling consumes the existing deadline and removes staged trust" do
+    {running, options, directory} =
+      ssh_readiness_fixture(
+        "printf 'pinned-test-key\\n' > \"$hosts\"\nprintf 'kex_exchange_identification: read: Connection reset by peer\\n' >&2\nexit 255"
+      )
+
+    prime_tunnel_executables(options)
+
+    started = System.monotonic_time(:millisecond)
+    options = Keyword.merge(options, deadline: started + 500, poll_interval_ms: 5_000)
+
+    assert {:error, {:unknown, {:workstations_ssh_not_ready, :transport, 255}}} =
+             Workstations.connect(config(), running, options)
+
+    elapsed = System.monotonic_time(:millisecond) - started
+    assert elapsed >= 500
+    assert elapsed < 2_000
+    assert File.read!(Path.join(directory, "attempts")) == "attempt\n"
+    refute File.exists?(Path.dirname(File.read!(Path.join(directory, "hosts-path"))))
+  end
+
+  for {failure, diagnostic, status} <- [
+        {:authentication, "user@127.0.0.1: Permission denied (publickey).", 255},
+        {:remote_exit, "kex_exchange_identification: read: Connection reset by peer", 7},
+        {:mixed, "Host key verification failed.\nkex_exchange_identification: read: Connection reset by peer", 255}
+      ] do
+    test "SSH readiness does not retry #{failure} failures or expose diagnostics" do
+      {running, options, directory} =
+        ssh_readiness_fixture("printf '%s\\n' '#{unquote(diagnostic)}' >&2\nexit #{unquote(status)}")
+
+      assert {:error, {:unknown, {:workstations_ssh_not_ready, :exit, unquote(status)}}} =
+               Workstations.connect(config(), running, options)
+
+      assert File.read!(Path.join(directory, "attempts")) == "attempt\n"
+      refute File.exists?(Path.dirname(File.read!(Path.join(directory, "hosts-path"))))
+    end
+  end
+
+  test "SSH command timeout is bounded by the original deadline and redacts partial output" do
+    {running, options, directory} = ssh_readiness_fixture("printf 'private remote output\\n'\nread ignored")
+    prime_tunnel_executables(options)
+    started = System.monotonic_time(:millisecond)
+    options = Keyword.put(options, :deadline, started + 500)
+
+    assert {:error, {:unknown, {:workstations_ssh_not_ready, :timeout, nil}}} =
+             Workstations.connect(config(), running, options)
+
+    assert System.monotonic_time(:millisecond) - started < 2_000
+    assert File.read!(Path.join(directory, "attempts")) == "attempt\n"
+    refute File.exists?(Path.dirname(File.read!(Path.join(directory, "hosts-path"))))
+  end
+
+  test "SSH output limit is not retried and partial output stays private" do
+    {running, options, directory} = ssh_readiness_fixture("printf '%70000s' private-value\nread ignored")
+
+    assert {:error, {:unknown, {:workstations_ssh_not_ready, :output_limit, nil}}} =
+             Workstations.connect(config(), running, options)
+
+    assert File.read!(Path.join(directory, "attempts")) == "attempt\n"
+    refute File.exists?(Path.dirname(File.read!(Path.join(directory, "hosts-path"))))
+  end
+
+  test "SSH success without a pinned host file fails without another SSH attempt" do
+    {running, options, directory} = ssh_readiness_fixture("exit 0")
+
+    assert {:error, {:unknown, :workstations_ssh_not_ready}} =
+             Workstations.connect(config(), running, options)
+
+    assert File.read!(Path.join(directory, "attempts")) == "attempt\n"
+    refute File.exists?(Path.dirname(File.read!(Path.join(directory, "hosts-path"))))
+  end
+
+  test "failed SSH reports when private trust cleanup cannot be confirmed" do
+    script = """
+    printf 'pinned-test-key\\n' > "$hosts"
+    chmod 0555 "$(dirname "$hosts")"
+    printf 'user@127.0.0.1: Permission denied (publickey).\\n' >&2
+    exit 255
+    """
+
+    {running, options, directory} = ssh_readiness_fixture(script)
+
+    on_exit(fn ->
+      path = Path.dirname(File.read!(Path.join(directory, "hosts-path")))
+      File.chmod!(path, 0o700)
+      File.rm_rf!(path)
+    end)
+
+    assert {:error, {:unknown, :local_cleanup_unconfirmed}} =
+             Workstations.connect(config(), running, options)
   end
 
   test "abnormal prepare death removes staged trust before connection promotion" do
@@ -420,7 +640,12 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     File.mkdir!(directory)
     on_exit(fn -> File.rm_rf!(directory) end)
     executable = Path.join(directory, "gcloud")
-    File.write!(executable, "#!/bin/sh\ntest \"$WORKSTATION_TEST_CONTEXT\" = scoped || exit 3\ntest \"$CLOUDSDK_CORE_DISABLE_PROMPTS\" = 1 || exit 4\nprintf 'scripted-access-token\\n'\n")
+
+    File.write!(
+      executable,
+      "#!/bin/sh\ntest \"$WORKSTATION_TEST_CONTEXT\" = scoped || exit 3\ntest \"$CLOUDSDK_CORE_DISABLE_PROMPTS\" = 1 || exit 4\nprintf 'scripted-access-token\\n'\n"
+    )
+
     File.chmod!(executable, 0o700)
     supervisor = start_supervised!(Task.Supervisor)
     request = fn _ -> response(200, %{"observed" => true}) end
@@ -1140,10 +1365,10 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     assert {:error, _} = Workstations.connect(config(), running, Keyword.put(options, :gcloud_executable, missing))
   end
 
-  test "invalid tunnel authentication configuration is redacted at the connection boundary" do
+  test "invalid authentication configuration is rejected before tunnel startup" do
     {running, options} = tunnel_fixture("read ignored")
     invalid = put_in(config(), [:provider, "credential_configuration"], nil)
-    assert {:error, {:unknown, :workstations_tunnel_failed}} = Workstations.connect(invalid, running, options)
+    assert {:error, {:denied, :workstations_credentials}} = Workstations.connect(invalid, running, options)
   end
 
   test "local SSH launch exception is redacted after authenticated tunnel readiness" do
@@ -1179,7 +1404,7 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   test "failed tunnel process cannot promote a connection" do
     {running, options} = tunnel_fixture("exit 3")
 
-    assert {:error, {:unknown, :workstations_tunnel_not_ready}} =
+    assert {:error, {:unknown, _reason}} =
              Workstations.connect(config(), running, options)
   end
 
@@ -1205,6 +1430,33 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
              Workstations.connect(config(), running, options)
   end
 
+  defp ssh_readiness_fixture(script) do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(listener)
+    on_exit(fn -> :gen_tcp.close(listener) end)
+    {running, options} = tunnel_fixture("printf 'Listening on port [#{port}].\\n'\nread ignored")
+    directory = Path.dirname(Keyword.fetch!(options, :gcloud_executable))
+    ssh = Path.join(directory, "ssh")
+
+    File.write!(ssh, """
+    #!/bin/sh
+    if [ "$1" = --symphony-fixture-prime ]; then exit 0; fi
+    for required in BatchMode=yes ForwardAgent=no IdentityAgent=none PubkeyAuthentication=no PreferredAuthentications=none PasswordAuthentication=no KbdInteractiveAuthentication=no GlobalKnownHostsFile=/dev/null; do
+      case " $* " in *" $required "*) ;; *) exit 91 ;; esac
+    done
+    for arg in "$@"; do
+      case "$arg" in UserKnownHostsFile=*) hosts=${arg#UserKnownHostsFile=} ;; esac
+    done
+    attempts='#{directory}/attempts'
+    printf 'attempt\\n' >> "$attempts"
+    printf '%s' "$hosts" > '#{directory}/hosts-path'
+    #{script}
+    """)
+
+    File.chmod!(ssh, 0o700)
+    {running, Keyword.put(options, :ssh_executable, ssh), directory}
+  end
+
   defp tunnel_fixture(script) do
     {_server, request} = provider()
     assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
@@ -1214,10 +1466,17 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     File.mkdir!(directory)
     on_exit(fn -> File.rm_rf!(directory) end)
     gcloud = Path.join(directory, "gcloud")
-    File.write!(gcloud, "#!/bin/sh\n" <> script <> "\n")
+    File.write!(gcloud, "#!/bin/sh\nif [ \"$1\" = --symphony-fixture-prime ]; then exit 0; fi\n" <> script <> "\n")
     File.chmod!(gcloud, 0o700)
     supervisor = start_supervised!(Task.Supervisor)
     {running, tunnel_options(request, gcloud, "/usr/bin/false", supervisor)}
+  end
+
+  defp prime_tunnel_executables(options) do
+    for key <- [:gcloud_executable, :ssh_executable] do
+      assert {:ok, %{status: 0, output: ""}} =
+               ExecutionEnvironment.Command.run(Keyword.fetch!(options, key), ["--symphony-fixture-prime"], options)
+    end
   end
 
   defp pending_response({:ok, %{body: body}}), do: response(200, Map.put(body, "done", false))
@@ -1237,7 +1496,9 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
   defp change_annotation(server, change) do
     Agent.update(server, fn state ->
-      update_in(state, [:workstation, "annotations", "symphony.dev/record"], fn value -> value |> Jason.decode!() |> change.() |> Jason.encode!() end)
+      update_in(state, [:workstation, "annotations", "symphony.dev/record"], fn value ->
+        value |> Jason.decode!() |> change.() |> Jason.encode!()
+      end)
     end)
   end
 
@@ -1284,6 +1545,366 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     end
   end
 
+  test "Codex preflight requires authoritative Features markers and matching dedicated secret" do
+    {server, request} = provider()
+    enabled = Map.put(config(), :codex_credentials, codex_references())
+    assert {:error, {:invalid, :codex_profile}} = Workstations.preflight(enabled, opts(request))
+
+    markers = %{
+      "SYMPHONY_PROFILE" => "features",
+      "SYMPHONY_CODEX_ENABLED" => "1",
+      "SYMPHONY_CODEX_SECRET" => codex_references()["secret"]
+    }
+
+    Agent.update(server, &put_in(&1, [:template, "container", "env"], markers))
+    assert :ok = Workstations.preflight(enabled, opts(request))
+    Agent.update(server, &put_in(&1, [:template, "container", "env", "SYMPHONY_PROFILE"], "bugs"))
+    assert {:error, {:invalid, :codex_profile}} = Workstations.preflight(enabled, opts(request))
+  end
+
+  test "direct credential start cannot create or launch without current cloud authority" do
+    {server, request} = provider()
+    enabled = Map.put(config(), :codex_credentials, codex_references())
+    options = Keyword.put(opts(request), :request, fn _, _, _, _ -> {:ok, 404, [], %{}} end)
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} =
+             Workstations.start(enabled, %{record() | desired: :running}, options)
+
+    assert Agent.get(server, & &1.creates) == 0
+    assert Agent.get(server, & &1.workstation) == nil
+  end
+
+  test "direct desired absent and resumed credential deletion refuse an unresolved cache" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    enabled = Map.put(config(), :codex_credentials, codex_references())
+    options = Keyword.put(opts(request), :request, fn _, _, _, _ -> {:ok, 404, [], %{}} end)
+
+    for candidate <- [
+          created,
+          %{created | desired: :absent, metadata: Map.put(created.metadata, "symphony_cleanup_hook_completed", true)},
+          %{
+            created
+            | desired: :absent,
+              pending: created.pending ++ [%{verb: :delete, id: operation_name(), outcome: :unknown}]
+          }
+        ] do
+      assert {:error, {:unknown, :credential_outcome_unknown}, retained} =
+               Workstations.destroy(enabled, candidate, options)
+
+      refute retained.absent?
+    end
+
+    assert Agent.get(server, & &1.workstation["uid"]) == "ws-uid"
+    refute Agent.get(server, &Enum.any?(&1.operations, fn operation -> operation["metadata"]["verb"] == "delete" end))
+  end
+
+  test "credential assignment env is read back before start and retained reopen cannot revive an old claim" do
+    {server, cloud, enabled, options} = codex_provider()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
+    assert Agent.get(server, & &1.workstation) == nil
+    assert {:ok, created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, bound} = Credentials.bind(enabled, created, :agent, options)
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} =
+             Workstations.start(enabled, %{bound | desired: :running}, options)
+
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+
+    assert Jason.decode!(Agent.get(server, & &1.workstation["env"]["SYMPHONY_CODEX_ASSIGNMENT"])) ==
+             Credentials.assignment(bound)
+
+    assert {:ok, running} = Workstations.start(enabled, assigned, options)
+    assert {:ok, stopped} = Workstations.stop(enabled, running, options)
+
+    receipt =
+      Map.merge(Credentials.assignment(bound), %{
+        "secret_version" => codex_references()["secret"] <> "/versions/2",
+        "sha256" => String.duplicate("b", 64),
+        "admission" => "sealed"
+      })
+
+    assert {:ok, checkpointed} = Credentials.checkpoint(enabled, stopped, receipt, options)
+    assert {:ok, released} = Credentials.release(enabled, checkpointed, options)
+    assert Agent.get(cloud, & &1.record["last_handoff"]["resource_acknowledged"]) == false
+    assert {:ok, committed} = Operations.reconcile_credentials(Workstations, enabled, released, options)
+    assert Agent.get(cloud, & &1.record["last_handoff"]["resource_acknowledged"])
+    assert {:ok, [durable]} = Workstations.discover(enabled, options)
+    assert Credentials.resolved?(durable)
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} = Workstations.start(enabled, assigned, options)
+    assert {:ok, deleted} = Workstations.destroy(enabled, committed, options)
+    assert deleted.absent?
+  end
+
+  for verb <- [:start, :delete] do
+    @tag :final_credential_guard
+    test "a final #{verb} credential refusal is durable and permits a later physical stop" do
+      verb = unquote(verb)
+      {server, cloud, enabled, options, ready} = credential_mutation_fixture(verb)
+      authority = Agent.get(cloud, & &1)
+      refused_options = refuse_final_credential_guard(server, options, verb)
+
+      assert {:error, {:unknown, :credential_outcome_unknown}, refused} =
+               credential_mutation(verb, enabled, ready, refused_options)
+
+      refute_receive {:submitted, ^verb}
+      assert [%{id: nil, outcome: :failed}] = Enum.filter(refused.pending, &(&1.verb == verb))
+      assert Credentials.assignment(refused) == Credentials.assignment(ready)
+      assert Agent.get(cloud, & &1) == authority
+      assert {:ok, [durable]} = Workstations.discover(enabled, options)
+      assert [%{id: nil, outcome: :failed}] = Enum.filter(durable.pending, &(&1.verb == verb))
+      assert Credentials.assignment(durable) == Credentials.assignment(ready)
+      assert {:ok, stopped} = Workstations.stop(enabled, durable, options)
+      assert {:quiescent, %{uid: "ws-uid"}} = stopped.proof
+      assert Credentials.assignment(stopped) == Credentials.assignment(ready)
+    end
+  end
+
+  @tag :final_credential_guard
+  test "a final credential refusal preserves an older unresolved operation found during correction" do
+    {server, cloud, enabled, options, ready} = credential_mutation_fixture(:start)
+    authority = Agent.get(cloud, & &1)
+
+    older = %{
+      "verb" => "start",
+      "id" => nil,
+      "outcome" => "unknown",
+      "from" => "2026-09-11T10:00:00Z",
+      "until" => "2026-09-11T10:01:00Z"
+    }
+
+    refused_options =
+      refuse_final_credential_guard(server, options, :start, fn ->
+        change_annotation(server, &Map.update!(&1, "pending", fn pending -> pending ++ [older] end))
+      end)
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, refused} =
+             Workstations.start(enabled, ready, refused_options)
+
+    refute_receive {:submitted, :start}
+    assert Enum.count(refused.pending, &(&1.verb == :start and &1.outcome == :failed)) == 1
+    assert {:ok, [durable]} = Workstations.discover(enabled, options)
+    assert Enum.count(durable.pending, &(&1.verb == :start and &1.outcome == :failed)) == 1
+    assert Enum.any?(durable.pending, &(&1.verb == :start and &1.outcome == :unknown and &1.from == older["from"]))
+    assert {:error, {:unknown, :uncorrelated_mutation}, blocked} = Workstations.stop(enabled, durable, options)
+    assert Credentials.assignment(blocked) == Credentials.assignment(ready)
+    assert Agent.get(cloud, & &1) == authority
+  end
+
+  @tag :final_credential_guard
+  test "an unconfirmed correction of a final credential refusal keeps physical stop blocked" do
+    {server, cloud, enabled, options, ready} = credential_mutation_fixture(:start)
+    authority = Agent.get(cloud, & &1)
+    refused_options = refuse_final_credential_guard(server, options, :start)
+    transport = refused_options[:request_fun]
+
+    uncertain_correction = fn request ->
+      annotation = get_in(request[:json] || %{}, ["annotations", "symphony.dev/record"])
+      pending = if annotation, do: Jason.decode!(annotation)["pending"], else: []
+
+      if request[:method] == :patch and Enum.any?(pending, &(&1["verb"] == "start" and &1["outcome"] == "failed")) do
+        send(self(), :correction_attempted)
+        {:error, :timeout}
+      else
+        transport.(request)
+      end
+    end
+
+    assert {:error, {:unknown, _}, refused} =
+             Workstations.start(enabled, ready, Keyword.put(refused_options, :request_fun, uncertain_correction))
+
+    assert_received :correction_attempted
+    refute_receive {:submitted, :start}
+    assert Enum.any?(refused.pending, &(&1.verb == :start and &1.outcome == :unknown))
+    assert {:ok, [durable]} = Workstations.discover(enabled, options)
+    assert Enum.any?(durable.pending, &(&1.verb == :start and &1.outcome == :unknown))
+    assert {:error, {:unknown, _}, _} = Workstations.stop(enabled, refused, options)
+    assert {:error, {:unknown, :uncorrelated_mutation}, blocked} = Workstations.stop(enabled, durable, options)
+    assert Credentials.assignment(blocked) == Credentials.assignment(ready)
+    assert Agent.get(cloud, & &1) == authority
+  end
+
+  test "annotation readback cannot conceal lost assignment env or override a recover fence" do
+    {server, _cloud, enabled, options} = codex_provider()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
+    assert {:ok, created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, bound} = Credentials.bind(enabled, created, :agent, options)
+    transport = options[:request_fun]
+
+    missing_env = fn request ->
+      result = transport.(request)
+
+      if request[:method] == :patch,
+        do: Agent.update(server, &Map.update!(&1, :workstation, fn ws -> Map.delete(ws, "env") end))
+
+      result
+    end
+
+    assert {:error, {:unknown, _}, _} =
+             Workstations.put_intent(
+               enabled,
+               bound,
+               %{desired: :running},
+               Keyword.put(options, :request_fun, missing_env)
+             )
+
+    assert Agent.get(server, & &1.workstation["state"]) == "STATE_STOPPED"
+
+    assert {:ok, recovery} =
+             Workstations.put_intent(
+               enabled,
+               Credentials.put(bound, %{"mode" => "recover"}),
+               %{desired: :running},
+               options
+             )
+
+    assert {:error, {:unknown, _}, _} =
+             Workstations.put_intent(
+               enabled,
+               Credentials.put(recovery, %{"mode" => "execute"}),
+               %{desired: :running},
+               options
+             )
+
+    assert Agent.get(server, & &1.workstation["env"]["SYMPHONY_CODEX_MODE"]) == "recover"
+  end
+
+  test "restart between create and UID bind recovers only the durable original unbound owner" do
+    {server, cloud, enabled, options} = codex_provider()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
+    assert {:ok, _created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, [durable]} = Workstations.discover(enabled, options)
+    assert Agent.get(cloud, & &1.record["owner"]["workstation_uid"]) == nil
+    restored = %{durable | attempt_id: "new-recovery-entry"}
+    assert {:ok, recovered} = Credentials.reconcile(enabled, restored, options)
+    assert {:ok, bound} = Credentials.bind(enabled, recovered, :cleanup, options)
+    assert bound.metadata["codex_credentials"]["assignment"]["owner"]["attempt_id"] == "original"
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    assert Agent.get(server, & &1.workstation["env"]["SYMPHONY_CODEX_MODE"]) == "recover"
+    assert {:ok, running} = Workstations.start(enabled, assigned, options)
+    assert running.phase == :running
+    assert Agent.get(cloud, & &1.record["owner"]["workstation_uid"]) == "ws-uid"
+  end
+
+  defp credential_mutation_fixture(verb) do
+    {server, cloud, enabled, options} = codex_provider()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
+    assert {:ok, created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, bound} = Credentials.bind(enabled, created, :agent, options)
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+
+    ready =
+      if verb == :delete do
+        assert {:ok, stopped} = Workstations.stop(enabled, assigned, options)
+
+        receipt =
+          Map.merge(Credentials.assignment(bound), %{
+            "secret_version" => codex_references()["secret"] <> "/versions/2",
+            "sha256" => String.duplicate("b", 64),
+            "admission" => "sealed"
+          })
+
+        assert {:ok, checkpointed} = Credentials.checkpoint(enabled, stopped, receipt, options)
+        assert {:ok, released} = Credentials.release(enabled, checkpointed, options)
+        assert {:ok, committed} = Operations.reconcile_credentials(Workstations, enabled, released, options)
+        committed
+      else
+        assigned
+      end
+
+    {server, cloud, enabled, options, ready}
+  end
+
+  defp credential_mutation(:start, config, record, options), do: Workstations.start(config, record, options)
+  defp credential_mutation(:delete, config, record, options), do: Workstations.destroy(config, record, options)
+
+  defp refuse_final_credential_guard(server, options, verb, on_refusal \\ fn -> :ok end) do
+    cloud_request = options[:request]
+    transport = options[:request_fun]
+    parent = self()
+
+    request = fn method, url, headers, body ->
+      journal = Agent.get(server, &Jason.decode!(&1.workstation["annotations"]["symphony.dev/record"]))
+
+      if Enum.any?(journal["pending"], &(&1["verb"] == Atom.to_string(verb) and &1["outcome"] == "unknown")) do
+        on_refusal.()
+        {:ok, 503, [], %{}}
+      else
+        cloud_request.(method, url, headers, body)
+      end
+    end
+
+    request_fun = fn request ->
+      if (verb == :start and request[:method] == :post and String.ends_with?(request[:url], ":start")) or
+           (verb == :delete and request[:method] == :delete),
+         do: send(parent, {:submitted, verb})
+
+      transport.(request)
+    end
+
+    Keyword.merge(options, request: request, request_fun: request_fun)
+  end
+
+  defp codex_provider do
+    {server, transport} = provider()
+    enabled = Map.put(config(), :codex_credentials, codex_references())
+
+    env = %{
+      "SYMPHONY_PROFILE" => "features",
+      "SYMPHONY_CODEX_ENABLED" => "1",
+      "SYMPHONY_CODEX_SECRET" => codex_references()["secret"]
+    }
+
+    Agent.update(server, &put_in(&1, [:template, "container", "env"], env))
+
+    seed =
+      SymphonyElixir.CodexCredentials.Record.initial(
+        "features-personal-codex",
+        1,
+        codex_references()["secret"] <> "/versions/1"
+      )
+
+    cloud = start_supervised!({Agent, fn -> %{record: seed, generation: 1} end}, id: make_ref())
+
+    request = fn method, url, _, body ->
+      query = URI.decode_query(URI.parse(url).query || "")
+
+      Agent.get_and_update(cloud, &codex_cloud_response(method, url, query, body, &1))
+    end
+
+    options = Keyword.put(opts(transport), :request, request)
+    assert :ok = Workstations.preflight(enabled, options)
+    {server, cloud, enabled, options}
+  end
+
+  defp codex_cloud_response(method, url, query, body, state) do
+    cond do
+      String.contains?(url, "secretmanager.googleapis.com") ->
+        {{:ok, 200, [], %{"name" => codex_references()["secret"] <> "/versions/2", "state" => "ENABLED"}}, state}
+
+      method == :get and query["alt"] == "media" ->
+        assert query["generation"] == Integer.to_string(state.generation)
+        {{:ok, 200, [], Jason.encode!(state.record)}, state}
+
+      method == :get ->
+        {{:ok, 200, [], %{"generation" => Integer.to_string(state.generation)}}, state}
+
+      method == :post ->
+        assert query["ifGenerationMatch"] == Integer.to_string(state.generation)
+        next = %{state | record: Jason.decode!(body), generation: state.generation + 1}
+        {{:ok, 200, [], %{"generation" => Integer.to_string(next.generation)}}, next}
+    end
+  end
+
+  defp codex_references do
+    %{
+      "credential_id" => "features-personal-codex",
+      "secret" => "projects/123456/secrets/features-codex",
+      "control_bucket" => "fixture-codex-control",
+      "control_object" => "features/authority.json"
+    }
+  end
+
   defp provider(overrides \\ %{}) do
     template = %{
       "name" => "projects/p/locations/l/workstationClusters/c/workstationConfigs/cfg",
@@ -1293,10 +1914,19 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
       "host" => %{"gceInstance" => %{"poolSize" => 0}},
       "idleTimeout" => "0s",
       "runningTimeout" => "0s",
-      "persistentDirectories" => [%{"mountPath" => "/home", "gcePd" => %{"reclaimPolicy" => "DELETE", "archiveTimeout" => "0s"}}]
+      "persistentDirectories" => [
+        %{"mountPath" => "/home", "gcePd" => %{"reclaimPolicy" => "DELETE", "archiveTimeout" => "0s"}}
+      ]
     }
 
-    {:ok, server} = Agent.start_link(fn -> Map.merge(%{template: template, workstation: nil, operations: [], creates: 0, lose_create: false, stop_error: false}, overrides) end)
+    {:ok, server} =
+      Agent.start_link(fn ->
+        Map.merge(
+          %{template: template, workstation: nil, operations: [], creates: 0, lose_create: false, stop_error: false},
+          overrides
+        )
+      end)
+
     request = fn req -> Agent.get_and_update(server, &respond(req, &1)) end
     {server, request}
   end
@@ -1387,6 +2017,98 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   defp stamp_etag(nil, _version), do: nil
   defp stamp_etag(workstation, version), do: Map.put(workstation, "etag", "etag-" <> Integer.to_string(version))
 
+  test "operator credential inventory cannot hide unlabelled or foreign Features instances" do
+    for labels <- [%{}, %{"symphony-deployment" => "foreign"}] do
+      unknown = Map.put(workstation(), "labels", labels)
+
+      request = fn req ->
+        cond do
+          String.ends_with?(req[:url], "/workstationConfigs") ->
+            response(200, %{"workstationConfigs" => [%{"name" => String.split(name(), "/workstations/") |> hd()}]})
+
+          String.ends_with?(req[:url], "/workstations") ->
+            response(200, %{"workstations" => [unknown]})
+
+          true ->
+            response(200, %{})
+        end
+      end
+
+      assert {:ok, []} = Workstations.discover(config(), opts(request))
+
+      assert {:error, {:unknown, :credential_inventory_unaccounted}} =
+               Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+    end
+  end
+
+  test "operator inventory rejects credential-bearing instances in retained configs" do
+    retained = String.replace(name(), "/cfg/", "/retained/")
+    unknown = workstation() |> Map.put("name", retained) |> Map.put("env", %{"SYMPHONY_CODEX_ASSIGNMENT" => "{}"})
+
+    request = fn req ->
+      cond do
+        String.ends_with?(req[:url], "/workstationConfigs") ->
+          response(200, %{"workstationConfigs" => [%{"name" => String.split(retained, "/workstations/") |> hd()}]})
+
+        String.ends_with?(req[:url], "/workstations") ->
+          response(200, %{"workstations" => [unknown]})
+
+        true ->
+          response(200, %{})
+      end
+    end
+
+    assert {:error, {:unknown, :credential_inventory_unaccounted}} =
+             Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+  end
+
+  test "operator inventory rejects malformed resource identities instead of filtering them away" do
+    request = fn req ->
+      cond do
+        String.ends_with?(req[:url], "/workstationConfigs") ->
+          response(200, %{"workstationConfigs" => [%{"name" => String.split(name(), "/workstations/") |> hd()}]})
+
+        String.ends_with?(req[:url], "/workstations") ->
+          response(200, %{"workstations" => [%{"state" => "STATE_RUNNING"}]})
+
+        true ->
+          response(200, %{})
+      end
+    end
+
+    assert {:error, {:unknown, :credential_inventory_unaccounted}} =
+             Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+  end
+
+  test "operator inventory refuses pending create before its workstation becomes visible" do
+    request = fn req ->
+      cond do
+        String.ends_with?(req[:url], "/workstationConfigs") ->
+          response(200, %{"workstationConfigs" => [%{"name" => String.split(name(), "/workstations/") |> hd()}]})
+
+        String.ends_with?(req[:url], "/operations") ->
+          response(200, %{"operations" => [operation("create", false)]})
+
+        true ->
+          response(200, %{})
+      end
+    end
+
+    assert {:error, {:unknown, :credential_inventory_unaccounted}} =
+             Workstations.discover(config(), Keyword.put(opts(request), :credential_inventory, true))
+  end
+
+  test "operator inventory cannot certify empty after omitting the existing configured template" do
+    {_server, request} = provider()
+
+    omit_template = fn req ->
+      if String.ends_with?(req[:url], "/workstationConfigs"), do: response(200, %{}), else: request.(req)
+    end
+
+    assert {:error, {:unknown, :credential_inventory_unaccounted}} =
+             Workstations.preflight(config(), Keyword.put(opts(omit_template), :credential_inventory, true))
+  end
+
   defp config do
     %{
       kind: "google_workstations",
@@ -1423,9 +2145,22 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
   defp name, do: "projects/p/locations/l/workstationClusters/c/workstationConfigs/cfg/workstations/" <> record().key
   defp operation_name, do: "projects/p/locations/l/operations/op"
-  defp workstation, do: %{"name" => name(), "uid" => "ws-uid", "etag" => "v2", "state" => "STATE_STOPPED", "reconciling" => false}
-  defp operation(verb, done), do: %{"name" => operation_name(), "done" => done, "metadata" => %{"target" => name(), "verb" => verb}}
-  defp labels, do: %{"symphony-managed" => "true", "symphony-deployment" => :crypto.hash(:sha256, "deployment") |> Base.encode16(case: :lower) |> binary_part(0, 32), "symphony-ticket" => record().key}
+
+  defp workstation,
+    do: %{"name" => name(), "uid" => "ws-uid", "etag" => "v2", "state" => "STATE_STOPPED", "reconciling" => false}
+
+  defp operation(verb, done),
+    do: %{"name" => operation_name(), "done" => done, "metadata" => %{"target" => name(), "verb" => verb}}
+
+  defp labels,
+    do: %{
+      "symphony-managed" => "true",
+      "symphony-deployment" => :crypto.hash(:sha256, "deployment") |> Base.encode16(case: :lower) |> binary_part(0, 32),
+      "symphony-ticket" => record().key
+    }
+
   defp response(status, body), do: {:ok, %{status: status, body: body}}
-  defp opts(request), do: [request_fun: request, token_fun: fn _, _ -> {:ok, "test-token"} end, timeout_ms: 10_000, poll_interval_ms: 0]
+
+  defp opts(request),
+    do: [request_fun: request, token_fun: fn _, _ -> {:ok, "test-token"} end, timeout_ms: 10_000, poll_interval_ms: 0]
 end

@@ -12,10 +12,16 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
       {name, name_errors} = required_text(params["name"], "name") |> result_pair()
       description = if String.trim(params["description"] || "") == "", do: nil, else: params["description"]
 
-      {%{"name" => name, "description" => description, "workspace_base" => workspace_base, "worker" => worker}, name_errors}
+      {%{"name" => name, "description" => description, "workspace_base" => workspace_base, "worker" => worker},
+       name_errors}
     else
       {:error, errors} ->
-        {%{"name" => params["name"], "description" => params["description"], "workspace_base" => params["workspace_base"], "worker" => original}, List.wrap(errors)}
+        {%{
+           "name" => params["name"],
+           "description" => params["description"],
+           "workspace_base" => params["workspace_base"],
+           "worker" => original
+         }, List.wrap(errors)}
     end
   end
 
@@ -96,7 +102,9 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
 
   @spec duration_input(term()) :: String.t()
   def duration_input(nil), do: ""
-  def duration_input(milliseconds) when is_integer(milliseconds) and milliseconds < 0, do: "-" <> duration_input(-milliseconds)
+
+  def duration_input(milliseconds) when is_integer(milliseconds) and milliseconds < 0,
+    do: "-" <> duration_input(-milliseconds)
 
   def duration_input(milliseconds) when is_integer(milliseconds) do
     whole = div(milliseconds, 1_000)
@@ -136,7 +144,8 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
     end
   end
 
-  def parse_duration(_value, path), do: {:error, %{path: path, message: "must be a nonnegative decimal number of seconds"}}
+  def parse_duration(_value, path),
+    do: {:error, %{path: path, message: "must be a nonnegative decimal number of seconds"}}
 
   @spec safe_json(term()) :: String.t()
   def safe_json(value), do: value |> safe_value() |> Jason.encode!(pretty: true)
@@ -151,24 +160,43 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
     with {:ok, provider} <- decode_provider(params["provider_json"], original),
          {:ok, worker} <- worker_mode_attributes(params, original),
          {:ok, environment} <- environment_attributes(params, provider, original) do
-      worker = if params["worker_mode"] == "managed", do: Map.put(worker, "environment", environment), else: Map.delete(worker, "environment")
+      worker =
+        if params["worker_mode"] == "managed",
+          do: Map.put(worker, "environment", environment),
+          else: Map.delete(worker, "environment")
+
       {:ok, worker}
     end
   end
 
-  defp worker_mode_attributes(%{"worker_mode" => "local"}, original), do: {:ok, original |> Map.delete("ssh_hosts") |> Map.delete("max_concurrent_agents_per_host")}
+  defp worker_mode_attributes(%{"worker_mode" => "local"}, original),
+    do: {:ok, original |> Map.delete("ssh_hosts") |> Map.delete("max_concurrent_agents_per_host")}
 
   defp worker_mode_attributes(%{"worker_mode" => "ssh"} = params, original) do
-    hosts = params["ssh_hosts"] |> String.split(~r/[\r\n,]+/, trim: true) |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
+    hosts =
+      params["ssh_hosts"]
+      |> String.split(~r/[\r\n,]+/, trim: true)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
 
-    with {:ok, limit} <- optional_integer(params["max_concurrent_agents_per_host"], "worker.max_concurrent_agents_per_host") do
+    with {:ok, limit} <-
+           optional_integer(params["max_concurrent_agents_per_host"], "worker.max_concurrent_agents_per_host") do
       worker = original |> Map.delete("environment") |> Map.put("ssh_hosts", hosts)
-      {:ok, if(limit, do: Map.put(worker, "max_concurrent_agents_per_host", limit), else: Map.delete(worker, "max_concurrent_agents_per_host"))}
+
+      {:ok,
+       if(limit,
+         do: Map.put(worker, "max_concurrent_agents_per_host", limit),
+         else: Map.delete(worker, "max_concurrent_agents_per_host")
+       )}
     end
   end
 
-  defp worker_mode_attributes(%{"worker_mode" => "managed"}, original), do: {:ok, original |> Map.delete("ssh_hosts") |> Map.delete("max_concurrent_agents_per_host")}
-  defp worker_mode_attributes(_params, _original), do: {:error, [%{path: "worker_mode", message: "must be local, static SSH, or managed"}]}
+  defp worker_mode_attributes(%{"worker_mode" => "managed"}, original),
+    do: {:ok, original |> Map.delete("ssh_hosts") |> Map.delete("max_concurrent_agents_per_host")}
+
+  defp worker_mode_attributes(_params, _original),
+    do: {:error, [%{path: "worker_mode", message: "must be local, static SSH, or managed"}]}
 
   defp environment_attributes(params, provider, original) do
     if params["worker_mode"] != "managed" do
@@ -198,9 +226,14 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
     original_provider = Map.get(original_environment(original), "provider", %{})
 
     case Jason.decode(value || "") do
-      {:ok, provider} when is_map(provider) -> Configuration.restore_redacted(provider, original_provider, "worker.environment.provider")
-      {:ok, _} -> {:error, [%{path: "worker.environment.provider", message: "must be a JSON object"}]}
-      {:error, reason} -> {:error, [%{path: "worker.environment.provider", message: "invalid JSON: #{Exception.message(reason)}"}]}
+      {:ok, provider} when is_map(provider) ->
+        Configuration.restore_redacted(provider, original_provider, "worker.environment.provider")
+
+      {:ok, _} ->
+        {:error, [%{path: "worker.environment.provider", message: "must be a JSON object"}]}
+
+      {:error, reason} ->
+        {:error, [%{path: "worker.environment.provider", message: "invalid JSON: #{Exception.message(reason)}"}]}
     end
   end
 
@@ -212,7 +245,9 @@ defmodule SymphonyElixirWeb.ConfigurationFields do
   end
 
   defp required_text(value, path) when is_binary(value) do
-    if String.trim(value) == "", do: {:error, %{path: path, message: "must not be blank"}}, else: {:ok, String.trim(value)}
+    if String.trim(value) == "",
+      do: {:error, %{path: path, message: "must not be blank"}},
+      else: {:ok, String.trim(value)}
   end
 
   defp required_text(_value, path), do: {:error, %{path: path, message: "must be a string"}}

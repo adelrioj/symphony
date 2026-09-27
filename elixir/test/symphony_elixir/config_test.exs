@@ -155,7 +155,8 @@ defmodule SymphonyElixir.ConfigTest do
 
   test "schema errors identify invalid fields in changesets and early worker validation" do
     cases = [
-      {%{"polling" => %{"interval_ms" => "nope"}, "server" => %{"port" => "nope"}}, ["polling.interval_ms", "server.port"]},
+      {%{"polling" => %{"interval_ms" => "nope"}, "server" => %{"port" => "nope"}},
+       ["polling.interval_ms", "server.port"]},
       {%{"worker" => %{"environment" => %{}, "ssh_hosts" => []}}, ["worker"]},
       {%{"worker" => %{"environment" => nil}}, ["worker.environment"]},
       {%{"worker" => %{"environment" => %{}}}, ["worker.environment"]},

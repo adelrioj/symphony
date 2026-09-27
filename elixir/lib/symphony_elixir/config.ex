@@ -176,12 +176,12 @@ defmodule SymphonyElixir.Config do
   end
 
   @doc false
-  @spec validate_settings(Schema.t()) :: :ok | {:error, term()}
-  def validate_settings(settings) do
+  @spec validate_settings(Schema.t(), :runtime | :structure) :: :ok | {:error, term()}
+  def validate_settings(settings, validation \\ :runtime) when validation in [:runtime, :structure] do
     if is_nil(settings.tracker.kind) do
       {:error, :missing_tracker_kind}
     else
-      with :ok <- Tracker.validate_config(settings.tracker),
+      with :ok <- Tracker.validate_config(settings.tracker, validation),
            :ok <- validate_environment(settings) do
         validate_backend_commands(settings)
       end

@@ -17,7 +17,8 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLive do
   end
 
   @impl true
-  def handle_info(message, socket) when message in [:profiles_updated, :observability_updated], do: {:noreply, assign_profiles(socket)}
+  def handle_info(message, socket) when message in [:profiles_updated, :observability_updated],
+    do: {:noreply, assign_profiles(socket)}
 
   @impl true
   def render(assigns) do

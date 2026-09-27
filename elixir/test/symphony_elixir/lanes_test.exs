@@ -8,6 +8,7 @@ defmodule SymphonyElixir.LanesTest do
 
   @front_matter "tracker:\n  kind: memory\ncodex:\n  command: codex app-server"
   @fixtures Path.expand("../fixtures/lanes", __DIR__)
+  @offline_linear "tracker:\n  kind: linear\n  api_key: $LINEAR_API_KEY\n  project_slug: offline-project"
 
   setup do
     TestSupport.reset_lanes!()
@@ -39,7 +40,12 @@ defmodule SymphonyElixir.LanesTest do
 
   @tag :tmp_dir
   test "export and current content use the effective raw configuration", %{tmp_dir: root} do
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Raw export", workspace_base: root, worker: %{"api_key" => "literal-worker-secret"}})
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Raw export",
+        workspace_base: root,
+        worker: %{"api_key" => "literal-worker-secret"}
+      })
 
     {:ok, lane} =
       Lanes.create(%{
@@ -73,13 +79,48 @@ defmodule SymphonyElixir.LanesTest do
   end
 
   test "invalid config and invalid metadata never write a lane or a version" do
-    assert {:error, errors} = Lanes.create(%{slug: "bugs", execution_profile_id: profile_id(), config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => "nope"}}, prompt: ""})
+    assert {:error, errors} =
+             Lanes.create(%{
+               slug: "bugs",
+               execution_profile_id: profile_id(),
+               config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => "nope"}},
+               prompt: ""
+             })
+
     assert Enum.any?(errors, &(&1.path == "polling.interval_ms"))
-    assert {:error, [%{path: "config", message: _}]} = Lanes.create(%{slug: "sequence", execution_profile_id: profile_id(), config: []})
-    assert {:error, [%{path: "tracker.kind"}]} = Lanes.create(%{slug: "unsupported", execution_profile_id: profile_id(), config: %{"tracker" => %{"kind" => "unsupported"}}})
-    assert {:error, [%{path: "slug"}]} = Lanes.create(%{slug: "Bad Slug", execution_profile_id: profile_id(), config: %{"tracker" => %{"kind" => "memory"}}})
-    assert {:error, [%{path: "slug"}]} = Lanes.create(%{slug: "x", execution_profile_id: profile_id(), config: %{"tracker" => %{"kind" => "memory"}}})
-    assert {:error, [%{path: "executor", message: _}]} = Lanes.create(%{slug: "okay", executor: "kubernetes", execution_profile_id: profile_id(), config: %{"tracker" => %{"kind" => "memory"}}})
+
+    assert {:error, [%{path: "config", message: _}]} =
+             Lanes.create(%{slug: "sequence", execution_profile_id: profile_id(), config: []})
+
+    assert {:error, [%{path: "tracker.kind"}]} =
+             Lanes.create(%{
+               slug: "unsupported",
+               execution_profile_id: profile_id(),
+               config: %{"tracker" => %{"kind" => "unsupported"}}
+             })
+
+    assert {:error, [%{path: "slug"}]} =
+             Lanes.create(%{
+               slug: "Bad Slug",
+               execution_profile_id: profile_id(),
+               config: %{"tracker" => %{"kind" => "memory"}}
+             })
+
+    assert {:error, [%{path: "slug"}]} =
+             Lanes.create(%{
+               slug: "x",
+               execution_profile_id: profile_id(),
+               config: %{"tracker" => %{"kind" => "memory"}}
+             })
+
+    assert {:error, [%{path: "executor", message: _}]} =
+             Lanes.create(%{
+               slug: "okay",
+               executor: "kubernetes",
+               execution_profile_id: profile_id(),
+               config: %{"tracker" => %{"kind" => "memory"}}
+             })
+
     assert Lanes.list() == []
     assert Repo.aggregate(LaneVersion, :count) == 0
   end
@@ -100,7 +141,16 @@ defmodule SymphonyElixir.LanesTest do
   test "wrong JSON types return field errors and cannot overwrite a current version" do
     {:ok, lane} = create_lane(%{slug: "typed", front_matter: @front_matter, prompt: "original"})
 
-    for {field, value} <- [{"slug", nil}, {"name", []}, {"enabled", "false"}, {"enabled", nil}, {"executor", %{}}, {"front_matter", nil}, {"prompt", []}, {"note", false}] do
+    for {field, value} <- [
+          {"slug", nil},
+          {"name", []},
+          {"enabled", "false"},
+          {"enabled", nil},
+          {"executor", %{}},
+          {"front_matter", nil},
+          {"prompt", []},
+          {"note", false}
+        ] do
       assert {:error, errors} = Lanes.update(lane, %{field => value})
       assert Enum.any?(errors, &(&1.path == field))
     end
@@ -118,11 +168,25 @@ defmodule SymphonyElixir.LanesTest do
     {:ok, renamed} = Lanes.update(original, %{name: "Renamed"})
     assert renamed.current_version_id == original.current_version_id
     {:ok, second} = Lanes.update(original, %{prompt: "second"})
-    {:ok, third} = Lanes.update(original, %{config: %{"tracker" => %{"kind" => "memory"}, "codex" => %{"command" => "codex app-server"}, "polling" => %{"interval_ms" => 2000}}})
+
+    {:ok, third} =
+      Lanes.update(original, %{
+        config: %{
+          "tracker" => %{"kind" => "memory"},
+          "codex" => %{"command" => "codex app-server"},
+          "polling" => %{"interval_ms" => 2000}
+        }
+      })
+
     assert third.name == "Renamed"
     assert [%LaneVersion{prompt: "second"}, %LaneVersion{id: second_id}, %LaneVersion{}] = Lanes.versions(third)
     assert second_id == second.current_version_id
-    assert {:error, [%{path: "polling.interval_ms"}]} = Lanes.update(original, %{config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => -1}}})
+
+    assert {:error, [%{path: "polling.interval_ms"}]} =
+             Lanes.update(original, %{
+               config: %{"tracker" => %{"kind" => "memory"}, "polling" => %{"interval_ms" => -1}}
+             })
+
     assert Lanes.get!(original.id).current_version_id == third.current_version_id
   end
 
@@ -157,13 +221,23 @@ defmodule SymphonyElixir.LanesTest do
   @tag :tmp_dir
   test "retained workspaces reject identity changes without committing metadata or versions", %{tmp_dir: root} do
     {:ok, profile} = ExecutionProfiles.create(%{name: "Retained owner", workspace_base: root, worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "guarded", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}, prompt: "original"})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "guarded",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}},
+        prompt: "original"
+      })
+
     {:ok, settings} = LaneStore.settings(lane.id)
     File.mkdir_p!(settings.workspace.root)
     retained = Path.join(settings.workspace.root, "checkout")
     File.write!(retained, "keep")
 
-    assert {:error, [%{path: "worker.environment"}]} = Lanes.update(lane, %{workspace_subdir: "moved", name: "must roll back", prompt: "must roll back"})
+    assert {:error, [%{path: "worker.environment"}]} =
+             Lanes.update(lane, %{workspace_subdir: "moved", name: "must roll back", prompt: "must roll back"})
+
     assert Lanes.get!(lane.id).workspace_subdir == "guarded"
     assert Lanes.get!(lane.id).name == "guarded"
     assert [%LaneVersion{prompt: "original"}] = Lanes.versions(lane)
@@ -175,8 +249,16 @@ defmodule SymphonyElixir.LanesTest do
 
   @tag :tmp_dir
   test "publication rejects an externally changed identity and rolls back metadata", %{tmp_dir: root} do
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Publication owner", workspace_base: Path.join(root, "original"), worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "publication-guard", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, profile} =
+      ExecutionProfiles.create(%{name: "Publication owner", workspace_base: Path.join(root, "original"), worker: %{}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "publication-guard",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, published} = LaneStore.lookup(lane.id)
     File.mkdir_p!(published.settings.workspace.root)
     retained = Path.join(published.settings.workspace.root, "checkout")
@@ -211,7 +293,10 @@ defmodule SymphonyElixir.LanesTest do
     assert :error = LaneStore.lookup(stale.id)
     assert is_nil(Lanes.get_by_slug("lifecycle"))
     assert Repo.get!(Lane, stale.id).deleted_at
-    assert {:error, [%{path: "slug", message: "has already been taken"}]} = create_lane(%{slug: "lifecycle", front_matter: @front_matter})
+
+    assert {:error, [%{path: "slug", message: "has already been taken"}]} =
+             create_lane(%{slug: "lifecycle", front_matter: @front_matter})
+
     assert {:error, [%{path: "lane"}]} = Lanes.update(stale, %{prompt: "resurrect"})
   end
 
@@ -270,13 +355,123 @@ defmodule SymphonyElixir.LanesTest do
     assert Enum.any?(validated.warnings, &String.contains?(&1, "ignored"))
     assert is_nil(validated.settings.server.port)
     assert {:error, [%{path: "file"}]} = Lanes.import_file("/nope/WORKFLOW.md", slug: "missing")
-    assert {:error, [%{path: "slug"}]} = Lanes.import_file(Path.join(@fixtures, "example.md"), slug: nil, name: "Missing slug")
+
+    assert {:error, [%{path: "slug"}]} =
+             Lanes.import_file(Path.join(@fixtures, "example.md"), slug: nil, name: "Missing slug")
+
     assert Enum.map(Lanes.list(), & &1.slug) == ["features", "example"]
     assert {:error, :no_version} = Lanes.export(%Lane{current_version_id: nil})
   end
 
+  @tag :tmp_dir
+  test "credential-free imports preserve raw references and remain disabled across edits and rollback", %{
+    tmp_dir: tmp_dir
+  } do
+    System.delete_env("LINEAR_API_KEY")
+    path = Path.join(tmp_dir, "offline.md")
+    File.write!(path, "---\n#{@offline_linear}\n---\nOffline prompt\n")
+
+    assert {:ok, lane, _warnings} = Lanes.import_file(path, slug: "offline")
+    refute lane.enabled
+    assert {:ok, exported} = Lanes.export(lane)
+    assert exported =~ "$LINEAR_API_KEY"
+    assert Lanes.current_version(lane).front_matter =~ "$LINEAR_API_KEY"
+    assert {:ok, %{settings: %{tracker: %{api_key: "$LINEAR_API_KEY"}}}} = Lanes.resolve_lane(lane, nil, :structure)
+    assert {:ok, updated, _warnings} = Lanes.import_file(path, slug: "offline")
+    assert {:ok, %{enabled: false}} = Lanes.activate_version(updated, lane.current_version_id)
+    assert {:error, [%{path: "config", message: ":missing_linear_api_token"}]} = Lanes.set_enabled(lane, true)
+    assert {:error, [%{path: "config"}]} = Lanes.resolve_lane(%{lane | enabled: true})
+    refute Lanes.get!(lane.id).enabled
+  end
+
+  @tag :tmp_dir
+  test "enabled records cannot use offline import or version mutation to bypass credentials", %{tmp_dir: tmp_dir} do
+    System.delete_env("LINEAR_API_KEY")
+    path = Path.join(tmp_dir, "offline.md")
+    File.write!(path, "---\n#{@offline_linear}\n---\n")
+
+    assert {:ok, lane, _warnings} = Lanes.import_file(path, slug: "enabled-existing")
+    Repo.update!(Ecto.Changeset.change(lane, enabled: true))
+    assert {:error, _} = Lanes.import_file(path, slug: lane.slug)
+    assert {:error, [%{path: "config"}]} = Lanes.update(lane, %{prompt: "must not save"})
+    assert {:error, [%{path: "config"}]} = Lanes.activate_version(lane, lane.current_version_id)
+    assert [%LaneVersion{prompt: ""}] = Lanes.versions(lane)
+    assert {:ok, %{enabled: false}} = Lanes.set_enabled(lane, false)
+  end
+
+  test "offline validation rejects malformed tracker, managed provider and backend settings without credentials" do
+    System.delete_env("LINEAR_API_KEY")
+    {:ok, %{config: base}} = Workflow.parse_parts(@offline_linear, "")
+
+    for {slug, config} <- [
+          {"bad-scope",
+           put_in(base, ["tracker", "provider"], %{"team_keys" => "wrong"})
+           |> update_in(["tracker"], &Map.delete(&1, "project_slug"))},
+          {"bad-key", put_in(base, ["tracker", "api_key"], [])},
+          {"bad-provider-key", put_in(base, ["tracker", "provider"], %{"api_key" => []})},
+          {"bad-backend", Map.put(base, "codex", %{"command" => " "})}
+        ] do
+      assert {:error, [_ | _]} = Lanes.create(%{slug: slug, execution_profile_id: profile_id(), config: config})
+    end
+
+    managed = %{
+      "environment" => %{
+        "kind" => "google_workstations",
+        "deployment_id" => "offline",
+        "startup_timeout_ms" => 1000,
+        "shutdown_timeout_ms" => 1000,
+        "provider" => %{"project" => "offline"}
+      }
+    }
+
+    {:ok, profile} =
+      ExecutionProfiles.create(%{name: "Bad provider", workspace_base: System.tmp_dir!(), worker: managed})
+
+    assert {:error, [%{message: "invalid worker.environment provider configuration"} | _]} =
+             Lanes.create(%{slug: "bad-provider", execution_profile_id: profile.id, config: base})
+
+    assert Lanes.list() == []
+    assert Repo.aggregate(LaneVersion, :count) == 0
+  end
+
+  test "all tracker adapters defer credential readiness but retain provider validation for disabled lanes" do
+    for name <- ["LINEAR_API_KEY", "GITHUB_TOKEN", "GITLAB_PAT", "ASANA_PAT", "JIRA_API_TOKEN", "JIRA_EMAIL"] do
+      previous = System.get_env(name)
+      System.delete_env(name)
+      on_exit(fn -> TestSupport.restore_env(name, previous) end)
+    end
+
+    for {kind, provider, active, terminal, invalid_provider} <- [
+          {"linear", %{"project_slug" => "offline"}, ["Todo"], ["Done"], %{"team_keys" => "wrong"}},
+          {"github", %{"repo" => "owner/repo"}, ["open"], ["closed"], %{"repo" => "not-a-repo"}},
+          {"gitlab", %{"project_path" => "group/repo"}, ["opened"], ["closed"], %{"project_path" => "group / repo"}},
+          {"asana", %{"project_gid" => "123"}, ["Todo"], ["Done"], %{"project_gid" => 123}},
+          {"jira", %{"base_url" => "https://example.atlassian.net", "project_key" => "OFF"}, ["Todo"], ["Done"],
+           %{"base_url" => "http://insecure"}}
+        ] do
+      tracker = %{"kind" => kind, "provider" => provider, "active_states" => active, "terminal_states" => terminal}
+
+      assert {:ok, lane} =
+               Lanes.create(%{
+                 slug: "offline-#{kind}",
+                 execution_profile_id: profile_id(),
+                 config: %{"tracker" => tracker}
+               })
+
+      assert {:error, [%{path: "config"}]} = Lanes.set_enabled(lane, true)
+
+      assert {:error, [_ | _]} =
+               Lanes.update(lane, %{config: %{"tracker" => %{tracker | "provider" => invalid_provider}}})
+
+      refute Lanes.get!(lane.id).enabled
+      assert [%LaneVersion{}] = Lanes.versions(lane)
+    end
+  end
+
   test "error formatting retains actionable field paths" do
-    assert [%{path: "worker"}] = Lanes.errors_for({:invalid_workflow_config, "managed and static worker settings conflict"})
+    assert [%{path: "worker"}] =
+             Lanes.errors_for({:invalid_workflow_config, "managed and static worker settings conflict"})
+
     assert {:error, structured_error} = Schema.parse(%{"polling" => %{"interval_ms" => "invalid"}}, errors: :list)
     assert [%{path: "polling.interval_ms"}] = Lanes.errors_for(structured_error)
     assert [%{path: "codex.command"}] = Lanes.errors_for({:invalid_workflow_config, "codex.command can't be blank"})
@@ -288,10 +483,16 @@ defmodule SymphonyElixir.LanesTest do
   test "profile references must exist before a lane or version can be committed" do
     for profile_id <- [nil, 0, 9_223_372_036_854_775_807] do
       assert {:error, [%{path: "execution_profile_id"}]} =
-               Lanes.create(%{slug: "missing-profile", execution_profile_id: profile_id, config: %{"tracker" => %{"kind" => "memory"}}})
+               Lanes.create(%{
+                 slug: "missing-profile",
+                 execution_profile_id: profile_id,
+                 config: %{"tracker" => %{"kind" => "memory"}}
+               })
     end
 
-    assert {:error, [%{path: "execution_profile_id"}]} = Lanes.create(%{slug: "missing-profile", config: %{"tracker" => %{"kind" => "memory"}}})
+    assert {:error, [%{path: "execution_profile_id"}]} =
+             Lanes.create(%{slug: "missing-profile", config: %{"tracker" => %{"kind" => "memory"}}})
+
     assert Lanes.list() == []
     assert Repo.aggregate(LaneVersion, :count) == 0
   end
@@ -324,9 +525,20 @@ defmodule SymphonyElixir.LanesTest do
     assert File.read!(Path.join(owned, "checkout")) == "keep"
 
     Repo.update!(Ecto.Changeset.change(Lanes.current_version(updated), front_matter: "tracker: ["))
-    Repo.update!(Ecto.Changeset.change(ExecutionProfiles.get(updated.execution_profile_id), repair_error: "unrecoverable legacy infrastructure"))
+
+    Repo.update!(
+      Ecto.Changeset.change(ExecutionProfiles.get(updated.execution_profile_id),
+        repair_error: "unrecoverable legacy infrastructure"
+      )
+    )
+
     profile_count = length(ExecutionProfiles.list())
-    File.write!(path, Workflow.render(Workflow.encode_config(put_in(config, ["workspace", "root"], Path.join(root, "other"))), "other"))
+
+    File.write!(
+      path,
+      Workflow.render(Workflow.encode_config(put_in(config, ["workspace", "root"], Path.join(root, "other"))), "other")
+    )
+
     assert {:error, _errors} = Lanes.import_file(path, slug: "offline-other")
     assert is_nil(Lanes.get_by_slug("offline-other"))
     assert length(ExecutionProfiles.list()) == profile_count
@@ -365,7 +577,7 @@ defmodule SymphonyElixir.LanesTest do
 
     File.write!(path, Workflow.render(Workflow.encode_config(config), "managed prompt"))
     assert {:ok, lane, _warnings} = Lanes.import_file(path, slug: "managed-reimport")
-    assert {:ok, %{settings: original_settings}} = Lanes.resolve_lane(lane)
+    assert {:ok, %{settings: original_settings}} = Lanes.resolve_lane(lane, nil, :structure)
     original_identity = EnvironmentConfig.identity(original_settings)
     assert is_binary(original_identity)
 
@@ -377,7 +589,11 @@ defmodule SymphonyElixir.LanesTest do
     assert settings.tracker.kind == "linear"
     assert EnvironmentConfig.identity(settings) == original_identity
 
-    File.write!(path, Workflow.render(Workflow.encode_config(Map.put(config, "tracker", %{"kind" => "memory"})), "changed tracker"))
+    File.write!(
+      path,
+      Workflow.render(Workflow.encode_config(Map.put(config, "tracker", %{"kind" => "memory"})), "changed tracker")
+    )
+
     assert {:error, errors} = Lanes.import_file(path, slug: lane.slug)
     assert Enum.any?(errors, &(&1.path == "worker.environment"))
     assert Lanes.get!(lane.id).current_version_id == reimported.current_version_id
@@ -387,7 +603,14 @@ defmodule SymphonyElixir.LanesTest do
   @tag :tmp_dir
   test "offline deletion retains ownership until local inventory is empty", %{tmp_dir: root} do
     {:ok, profile} = ExecutionProfiles.create(%{name: "Offline deletion", workspace_base: root, worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "offline-delete", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "offline-delete",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, settings} = LaneStore.settings(lane.id)
     File.mkdir_p!(settings.workspace.root)
     retained = Path.join(settings.workspace.root, "checkout")
@@ -425,13 +648,32 @@ defmodule SymphonyElixir.LanesTest do
     end)
 
     overlap = Path.join(root, "overlap.md")
-    File.write!(overlap, Workflow.render(Workflow.encode_config(%{"workspace" => %{"root" => owned_root}, "tracker" => %{"kind" => "memory"}}), ""))
+
+    File.write!(
+      overlap,
+      Workflow.render(
+        Workflow.encode_config(%{"workspace" => %{"root" => owned_root}, "tracker" => %{"kind" => "memory"}}),
+        ""
+      )
+    )
+
     assert {:error, overlap_errors} = Lanes.import_file(overlap, slug: "offline-overlap")
     assert Enum.any?(overlap_errors, &String.contains?(&1.message, "conflicts"))
     assert is_nil(Lanes.get_by_slug("offline-overlap"))
 
     moved = Path.join(root, "moved.md")
-    File.write!(moved, Workflow.render(Workflow.encode_config(%{"workspace" => %{"root" => Path.join(root, "moved")}, "tracker" => %{"kind" => "memory"}}), ""))
+
+    File.write!(
+      moved,
+      Workflow.render(
+        Workflow.encode_config(%{
+          "workspace" => %{"root" => Path.join(root, "moved")},
+          "tracker" => %{"kind" => "memory"}
+        }),
+        ""
+      )
+    )
+
     assert {:error, identity_errors} = Lanes.import_file(moved, slug: lane.slug)
     assert Enum.any?(identity_errors, &String.contains?(&1.message, "guarded field"))
     assert Lanes.get!(lane.id).execution_profile_id == profile.id
@@ -445,7 +687,10 @@ defmodule SymphonyElixir.LanesTest do
     lanes =
       Enum.map(["first", "second", "third", "fourth"], fn slug ->
         workspace_root = Path.join(root, slug)
-        front_matter = Workflow.encode_config(%{"tracker" => %{"kind" => "memory"}, "workspace" => %{"root" => workspace_root}})
+
+        front_matter =
+          Workflow.encode_config(%{"tracker" => %{"kind" => "memory"}, "workspace" => %{"root" => workspace_root}})
+
         {:ok, lane} = create_lane(%{slug: slug, workspace_subdir: ".", front_matter: front_matter})
         lane
       end)
@@ -476,7 +721,12 @@ defmodule SymphonyElixir.LanesTest do
     assert Lanes.get!(fourth.id) == fourth
 
     first_root = ExecutionProfiles.get(first.execution_profile_id).workspace_base
-    File.write!(path, Workflow.render(Workflow.encode_config(put_in(config, ["workspace", "root"], first_root)), "collision"))
+
+    File.write!(
+      path,
+      Workflow.render(Workflow.encode_config(put_in(config, ["workspace", "root"], first_root)), "collision")
+    )
+
     profiles = ExecutionProfiles.list()
     assert {:error, errors} = Lanes.import_file(path, slug: fourth.slug)
     assert Enum.any?(errors, &String.contains?(&1.message, "conflicts"))
@@ -484,7 +734,12 @@ defmodule SymphonyElixir.LanesTest do
     assert ExecutionProfiles.list() == profiles
 
     fourth_root = Path.join(root, "repaired-fourth")
-    File.write!(path, Workflow.render(Workflow.encode_config(put_in(config, ["workspace", "root"], fourth_root)), "repaired fourth"))
+
+    File.write!(
+      path,
+      Workflow.render(Workflow.encode_config(put_in(config, ["workspace", "root"], fourth_root)), "repaired fourth")
+    )
+
     assert {:ok, repaired_fourth, _warnings} = Lanes.import_file(path, slug: fourth.slug)
     assert repaired_fourth.id == fourth.id
     refute repaired_fourth.enabled
@@ -570,7 +825,9 @@ defmodule SymphonyElixir.LanesTest do
     {:ok, profile} =
       ExecutionProfiles.create(%{
         name: "Test #{Map.fetch!(attrs, :slug)} #{System.unique_integer([:positive])}",
-        workspace_base: profile_attrs["workspace_base"] || Path.join(System.tmp_dir!(), "symphony-workspaces-#{System.unique_integer([:positive])}"),
+        workspace_base:
+          profile_attrs["workspace_base"] ||
+            Path.join(System.tmp_dir!(), "symphony-workspaces-#{System.unique_integer([:positive])}"),
         worker: profile_attrs["worker"] || %{}
       })
 
