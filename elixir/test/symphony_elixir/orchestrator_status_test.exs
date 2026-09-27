@@ -2040,7 +2040,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "snapshot queue leaves out candidates this lane would never dispatch" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", max_concurrent_agents: 1, tracker_required_labels: ["symphony"])
+    workflow = [tracker_kind: "memory", max_concurrent_agents: 1, tracker_required_labels: ["symphony"]]
+    write_workflow_file!(Workflow.workflow_file_path(), workflow)
     running = %Issue{id: "r-run", identifier: "R-1", title: "Runs", state: "Todo", labels: ["symphony"], priority: 1, dispatchable: true}
     waiting = %Issue{id: "r-wait", identifier: "R-2", title: "Waits", state: "Todo", labels: ["symphony"], priority: 2, dispatchable: true}
     unrouted = %Issue{id: "r-other", identifier: "R-3", title: "Not ours", state: "Todo", labels: [], priority: 1, dispatchable: true}
