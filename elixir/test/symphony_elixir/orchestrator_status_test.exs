@@ -2039,6 +2039,28 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert [%{title: "Runs now", labels: ["api"], attempt_id: ^attempt_id}] = payload.running
   end
 
+  test "snapshot queue leaves out candidates this lane would never dispatch" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", max_concurrent_agents: 1, tracker_required_labels: ["symphony"])
+    running = %Issue{id: "r-run", identifier: "R-1", title: "Runs", state: "Todo", labels: ["symphony"], priority: 1, dispatchable: true}
+    waiting = %Issue{id: "r-wait", identifier: "R-2", title: "Waits", state: "Todo", labels: ["symphony"], priority: 2, dispatchable: true}
+    unrouted = %Issue{id: "r-other", identifier: "R-3", title: "Not ours", state: "Todo", labels: [], priority: 1, dispatchable: true}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [running, waiting, unrouted])
+    parent = self()
+
+    runner = fn issue, _recipient, _opts ->
+      send(parent, {:dispatched, issue.id})
+
+      receive do
+        :finish -> :ok
+      end
+    end
+
+    {:ok, pid} = start_test_orchestrator(name: Module.concat(__MODULE__, RoutedQueue), runner_fun: runner)
+    assert_receive {:dispatched, "r-run"}, 5_000
+    snapshot = wait_for_snapshot(pid, &(&1.queued != []), 5_000)
+    assert [%{issue_id: "r-wait"}] = snapshot.queued
+  end
+
   test "blocked and retrying snapshot entries carry ticket titles when known" do
     # The default fixture lane is Linear, so background polls fail and never overwrite `candidates`.
     {:ok, pid} = start_test_orchestrator(name: Module.concat(__MODULE__, TitledEntries))

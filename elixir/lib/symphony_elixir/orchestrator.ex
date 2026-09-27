@@ -2885,8 +2885,12 @@ defmodule SymphonyElixir.Orchestrator do
 
     taken = state.claimed |> MapSet.union(MapSet.new(Map.keys(state.running) ++ Map.keys(state.blocked) ++ Map.keys(state.retry_attempts)))
 
+    {active_states, terminal_states} = {active_state_set(), terminal_state_set()}
+
     queued =
-      for %Issue{id: id} = issue <- sort_issues_for_dispatch(state.candidates), not MapSet.member?(taken, id) do
+      for %Issue{id: id} = issue <- sort_issues_for_dispatch(state.candidates),
+          not MapSet.member?(taken, id),
+          candidate_issue?(issue, active_states, terminal_states) do
         %{
           issue_id: id,
           identifier: issue.identifier,
