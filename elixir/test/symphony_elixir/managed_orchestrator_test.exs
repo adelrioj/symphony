@@ -640,7 +640,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     payload = Presenter.state_payload(owner, 1_000)
     assert payload.environment_discovery == %{provider_kind: "google_workstations", status: :blocked, error_code: :denied}
     assert payload.environments == []
-    assert payload.counts == %{running: 0, retrying: 0, blocked: 0}
+    assert payload.counts == %{running: 0, retrying: 0, blocked: 0, queued: 0}
     snapshot = Orchestrator.snapshot(owner, 1_000)
     rendered = StatusDashboard.format_snapshot_content_for_test({:ok, snapshot}, 0, 160)
     assert rendered =~ "Managed discovery"

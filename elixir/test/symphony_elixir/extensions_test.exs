@@ -550,7 +550,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert state_payload["counts"] == %{
              "running" => length(state_payload["running"]),
              "retrying" => length(state_payload["retrying"]),
-             "blocked" => length(state_payload["blocked"])
+             "blocked" => length(state_payload["blocked"]),
+             "queued" => length(state_payload["queued"])
            }
 
     conn = get(api_conn(), "/api/v1/MT-HTTP")
@@ -814,7 +815,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state", headers: [{"authorization", "Bearer test-token"}])
     assert response.status == 200
-    assert hd(response.body["lanes"])["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
+    assert hd(response.body["lanes"])["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1, "queued" => 0}
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200

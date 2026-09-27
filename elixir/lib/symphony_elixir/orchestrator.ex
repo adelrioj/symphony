@@ -71,6 +71,7 @@ defmodule SymphonyElixir.Orchestrator do
       blocked: %{},
       retry_attempts: %{},
       turn_exhaustions: %{},
+      candidates: [],
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -498,9 +499,9 @@ defmodule SymphonyElixir.Orchestrator do
 
     with true <- managed_dispatch_ready?(state),
          :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+         {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states) do
+      state = %{state | candidates: issues}
+      if available_slots(state) > 0, do: choose_issues(issues, state), else: state
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Tracker API token missing in WORKFLOW.md")
@@ -2824,6 +2825,9 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: metadata.identifier,
           issue_url: metadata.issue.url,
           state: metadata.issue.state,
+          title: metadata.issue.title,
+          labels: metadata.issue.labels,
+          attempt_id: Map.get(metadata, :attempt_id),
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
           session_id: metadata.session_id,
@@ -2848,6 +2852,9 @@ defmodule SymphonyElixir.Orchestrator do
           attempt: attempt,
           due_in_ms: max(0, due_at_ms - now_ms),
           identifier: Map.get(retry, :identifier),
+          title: candidate_field(state.candidates, issue_id, :title),
+          state: candidate_field(state.candidates, issue_id, :state),
+          labels: candidate_field(state.candidates, issue_id, :labels) || [],
           issue_url: Map.get(retry, :issue_url),
           error: Map.get(retry, :error),
           worker_host: Map.get(retry, :worker_host),
@@ -2863,6 +2870,8 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: Map.get(metadata, :identifier),
           issue_url: blocked_issue_url(metadata),
           state: blocked_issue_state(metadata),
+          title: blocked_issue_field(metadata, :title),
+          labels: blocked_issue_field(metadata, :labels) || [],
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
           session_id: Map.get(metadata, :session_id),
@@ -2874,11 +2883,28 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    taken = state.claimed |> MapSet.union(MapSet.new(Map.keys(state.running) ++ Map.keys(state.blocked) ++ Map.keys(state.retry_attempts)))
+
+    queued =
+      for %Issue{id: id} = issue <- sort_issues_for_dispatch(state.candidates), not MapSet.member?(taken, id) do
+        %{
+          issue_id: id,
+          identifier: issue.identifier,
+          title: issue.title,
+          state: issue.state,
+          labels: issue.labels,
+          issue_url: issue.url,
+          priority: issue.priority,
+          blocked_by: blocker_identifiers(issue.blocked_by)
+        }
+      end
+
     {:reply,
      %{
        running: running,
        retrying: retrying,
        blocked: blocked,
+       queued: queued,
        claimed: MapSet.size(state.claimed),
        environments: Enum.map(state.environment_entries, fn {_id, entry} -> environment_snapshot(entry) end),
        environment_discovery: environment_discovery_snapshot(state),
@@ -2920,6 +2946,23 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp blocked_issue_url(%{issue: %Issue{url: url}}), do: url
   defp blocked_issue_url(_metadata), do: nil
+
+  defp blocked_issue_field(%{issue: %Issue{} = issue}, field), do: Map.fetch!(issue, field)
+  defp blocked_issue_field(_metadata, _field), do: nil
+
+  defp candidate_field(candidates, issue_id, field) do
+    case Enum.find(candidates, &(&1.id == issue_id)) do
+      %Issue{} = issue -> Map.fetch!(issue, field)
+      nil -> nil
+    end
+  end
+
+  defp blocker_identifiers(blockers) do
+    Enum.flat_map(blockers, fn
+      %{identifier: identifier} when is_binary(identifier) -> [identifier]
+      _ -> []
+    end)
+  end
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     running_entry = reset_turn_token_usage(running_entry, update)
