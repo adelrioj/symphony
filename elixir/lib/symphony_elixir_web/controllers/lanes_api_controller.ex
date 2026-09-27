@@ -24,6 +24,9 @@ defmodule SymphonyElixirWeb.LanesApiController do
     end)
   end
 
+  @spec repair_fixed_root(Conn.t(), map()) :: Conn.t()
+  def repair_fixed_root(conn, _params), do: with_lane(conn, &lane_response(conn, Lanes.repair_fixed_root(&1)))
+
   @spec activate(Conn.t(), map()) :: Conn.t()
   def activate(conn, _params) do
     with_lane(conn, fn lane ->

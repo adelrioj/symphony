@@ -81,7 +81,13 @@ defmodule SymphonyElixir.ExecutionProfiles do
   end
 
   defp update_profile(id, attrs) do
-    with {:ok, profile} <- fetch_profile(id) do
+    with {:ok, profile} <- fetch_profile(id),
+         :ok <-
+           Lanes.validate_profile_workspaces(
+             profile_attrs(profile),
+             Map.merge(profile_attrs(profile), attrs),
+             live_lanes(profile)
+           ) do
       case Repo.update(Profile.changeset(profile, attrs)) do
         {:ok, updated} -> {:ok, {:batch, updated, linked_lane_ids(updated)}}
         {:error, changeset} -> {:error, Lanes.errors_for(changeset)}
@@ -111,6 +117,10 @@ defmodule SymphonyElixir.ExecutionProfiles do
   end
 
   defp broadcast_result(error), do: error
+
+  # Soft-deleted lanes keep their workspace_subdir but can no longer be edited, so they must not
+  # block a profile change they would never run under.
+  defp live_lanes(%Profile{} = profile), do: profile |> linked_lanes() |> Enum.filter(&is_nil(&1.deleted_at))
 
   defp linked_lane_ids(%Profile{} = profile), do: linked_lanes(profile) |> Enum.map(& &1.id)
 

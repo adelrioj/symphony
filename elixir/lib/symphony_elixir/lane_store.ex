@@ -140,6 +140,11 @@ defmodule SymphonyElixir.LaneStore do
     end
   end
 
+  @doc "Atomically repairs a disabled fixed-root lane against a caller-verified empty inventory snapshot."
+  @spec repair_fixed_root(lane_id(), Entry.t(), ((Schema.t() -> :ok | {:error, term()}) -> term())) :: term()
+  def repair_fixed_root(lane_id, snapshot, fun),
+    do: GenServer.call(__MODULE__, {:repair_fixed_root, lane_id, snapshot, fun}, :infinity)
+
   @spec protect_environment(lane_id(), binary() | nil) :: {:ok, reference()} | {:error, term()}
   def protect_environment(lane_id, identity), do: GenServer.call(__MODULE__, {:protect_environment, lane_id, identity})
 
@@ -211,6 +216,17 @@ defmodule SymphonyElixir.LaneStore do
   def handle_call({:mutate, lane_id, fun, reason}, _from, state) do
     result = Repo.transaction(fn -> prepare_mutation(lane_id, fun, state) end)
     publish_mutation(result, reason, state)
+  end
+
+  def handle_call({:repair_fixed_root, id, snapshot, fun}, _from, state) do
+    case release_empty_fixed_root(state, id, snapshot) do
+      {:ok, released} ->
+        result = Repo.transaction(fn -> prepare_mutation(id, fun, released) end)
+        publish_mutation(result, nil, if(match?({:ok, _}, result), do: released, else: state))
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:refresh, id}, _from, state) do
@@ -906,6 +922,35 @@ defmodule SymphonyElixir.LaneStore do
       end)
 
     %{state | monitors: monitors}
+  end
+
+  defp release_empty_fixed_root(state, id, snapshot) do
+    with {:ok,
+          %Entry{
+            enabled: false,
+            error: nil,
+            workspace_base: base,
+            workspace_subdir: subdir,
+            settings: %Schema{} = settings,
+            generation: generation
+          }} <- lookup(id),
+         %Entry{
+           generation: ^generation,
+           settings: ^settings,
+           workspace_base: ^base,
+           workspace_subdir: ^subdir
+         } <- snapshot,
+         true <- is_binary(base) and Path.expand(base) == "/state/workspace/worker" and subdir != ".",
+         %{identity: identity, settings: %Schema{}} = guard <- Map.get(state.guards, id),
+         true <- identity == effective_identity(settings) and not Map.get(guard, :released?, false),
+         false <- LaneSupervisor.running?(id),
+         false <- Map.has_key?(state.pending_preflights, id),
+         false <- Enum.any?(state.reservations, fn {_token, reservation} -> reservation.lane_id == id end),
+         %{kind: "kubernetes", provider: %{"template" => "worker-slot"}} <- EnvironmentConfig.runtime(settings) do
+      {:ok, put_in(state.guards[id], %{guard | token: nil} |> Map.put(:released?, true))}
+    else
+      _ -> {:error, :fixed_root_repair_unsafe}
+    end
   end
 
   defp identity_check(state, id, identity, settings \\ nil)

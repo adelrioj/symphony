@@ -164,6 +164,275 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     assert Lanes.get_by_slug("typed-lane").current_version_id == version
   end
 
+  @tag :tmp_dir
+  test "invalid fixed-root workspace updates preserve the active version", %{tmp_dir: root} do
+    kubeconfig = Path.join(root, "kubeconfig")
+    File.write!(kubeconfig, "test")
+
+    provider = %{
+      "kubeconfig" => kubeconfig,
+      "context" => "test",
+      "namespace" => "test",
+      "template" => "worker-slot",
+      "ssh_user" => "worker",
+      "ssh_auth_volume" => "ssh",
+      "ssh_port" => 22
+    }
+
+    environment = %{
+      "kind" => "kubernetes",
+      "deployment_id" => "test",
+      "provider" => provider,
+      "startup_timeout_ms" => 1_000,
+      "shutdown_timeout_ms" => 1_000
+    }
+
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Fixed-root API",
+        workspace_base: "/state/workspace/worker/",
+        worker: %{"environment" => environment}
+      })
+
+    attrs = %{
+      slug: "fixed-root-api",
+      name: "Fixed",
+      execution_profile_id: profile.id,
+      workspace_subdir: ".",
+      config: @config,
+      prompt: "work"
+    }
+
+    invalid = Map.put(attrs, :workspace_subdir, "tra-features")
+    create_errors = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(invalid)), 422)["errors"]
+    assert Enum.any?(create_errors, &(&1["path"] == "workspace_subdir"))
+    assert is_nil(Lanes.get_by_slug("fixed-root-api"))
+    %{"current_version_id" => version} = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs)), 201)
+
+    errors =
+      json_response(
+        put(api_conn(), "/api/v1/lanes/fixed-root-api", Jason.encode!(%{workspace_subdir: "tra-features"})),
+        422
+      )["errors"]
+
+    assert Enum.any?(errors, &(&1["path"] == "workspace_subdir"))
+    assert Lanes.get_by_slug("fixed-root-api").current_version_id == version
+  end
+
+  @tag :tmp_dir
+  test "an env-referenced fixed-root base is still guarded", %{tmp_dir: root} do
+    kubeconfig = Path.join(root, "kubeconfig")
+    File.write!(kubeconfig, "test")
+    System.put_env("SYMPHONY_TEST_FIXED_ROOT_BASE", "/state/workspace/worker")
+    on_exit(fn -> System.delete_env("SYMPHONY_TEST_FIXED_ROOT_BASE") end)
+
+    provider = %{
+      "kubeconfig" => kubeconfig,
+      "context" => "test",
+      "namespace" => "test",
+      "template" => "worker-slot",
+      "ssh_user" => "worker",
+      "ssh_auth_volume" => "ssh",
+      "ssh_port" => 22
+    }
+
+    environment = %{
+      "kind" => "kubernetes",
+      "deployment_id" => "test",
+      "provider" => provider,
+      "startup_timeout_ms" => 1_000,
+      "shutdown_timeout_ms" => 1_000
+    }
+
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Env fixed root",
+        workspace_base: "$SYMPHONY_TEST_FIXED_ROOT_BASE",
+        worker: %{"environment" => environment}
+      })
+
+    attrs = %{
+      slug: "env-root",
+      name: "Env",
+      execution_profile_id: profile.id,
+      workspace_subdir: "tra-features",
+      config: @config,
+      prompt: "work"
+    }
+
+    errors = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs)), 422)["errors"]
+    assert Enum.any?(errors, &(&1["path"] == "workspace_subdir"))
+    assert is_nil(Lanes.get_by_slug("env-root"))
+  end
+
+  @tag :tmp_dir
+  test "a deleted lane does not block converting its profile to the fixed root", %{tmp_dir: root} do
+    kubeconfig = Path.join(root, "kubeconfig")
+    File.write!(kubeconfig, "test")
+
+    provider = %{
+      "kubeconfig" => kubeconfig,
+      "context" => "test",
+      "namespace" => "test",
+      "template" => "worker-slot",
+      "ssh_user" => "worker",
+      "ssh_auth_volume" => "ssh",
+      "ssh_port" => 22
+    }
+
+    environment = %{
+      "kind" => "kubernetes",
+      "deployment_id" => "test",
+      "provider" => provider,
+      "startup_timeout_ms" => 1_000,
+      "shutdown_timeout_ms" => 1_000
+    }
+
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Convertible",
+        workspace_base: Path.join(root, "workspaces"),
+        worker: %{"environment" => environment}
+      })
+
+    attrs = %{
+      slug: "nested-lane",
+      name: "Nested",
+      execution_profile_id: profile.id,
+      workspace_subdir: "nested",
+      config: @config,
+      prompt: "work"
+    }
+
+    json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs)), 201)
+
+    # A live nested lane still blocks the conversion.
+    assert {:error, errors} = ExecutionProfiles.update(profile, %{workspace_base: "/state/workspace/worker"})
+    assert Enum.any?(errors, &String.ends_with?(&1.path, "workspace_subdir"))
+
+    # Lanes.delete/1 soft-deletes; set the same field without its provider-inventory precondition,
+    # which a test kubeconfig cannot satisfy.
+    lane = Lanes.get_by_slug("nested-lane")
+    Repo.update!(Ecto.Changeset.change(lane, deleted_at: DateTime.utc_now() |> DateTime.truncate(:second)))
+    # Other guards may still refuse (the runtime entry keeps its environment identity), but the
+    # deleted lane's nested subdir must no longer be a reason.
+    case ExecutionProfiles.update(profile, %{workspace_base: "/state/workspace/worker"}) do
+      {:ok, _} -> :ok
+      {:error, errors} -> refute Enum.any?(errors, &String.ends_with?(&1.path, "workspace_subdir"))
+    end
+  end
+
+  @tag :tmp_dir
+  test "disabled persisted fixed-root lane repairs only after empty provider inventory", %{tmp_dir: root} do
+    kubeconfig = Path.join(root, "kubeconfig")
+    File.write!(kubeconfig, "test")
+    kubectl = Path.join(root, "kubectl")
+    File.write!(kubectl, "#!/bin/sh\nprintf '%s\\n' '{\"metadata\":{\"resourceVersion\":\"1\"},\"items\":[]}'\n")
+    File.chmod!(kubectl, 0o755)
+    original_path = System.get_env("PATH")
+    System.put_env("PATH", root <> ":" <> original_path)
+    on_exit(fn -> System.put_env("PATH", original_path) end)
+
+    provider = %{
+      "kubeconfig" => kubeconfig,
+      "context" => "test",
+      "namespace" => "test",
+      "template" => "worker-slot",
+      "ssh_user" => "worker",
+      "ssh_auth_volume" => "ssh",
+      "ssh_port" => 22
+    }
+
+    environment = %{
+      "kind" => "kubernetes",
+      "deployment_id" => "test",
+      "provider" => provider,
+      "startup_timeout_ms" => 1_000,
+      "shutdown_timeout_ms" => 1_000
+    }
+
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Persisted fixed root",
+        workspace_base: "/state/workspace/worker",
+        worker: %{"environment" => environment}
+      })
+
+    {:ok, lane} =
+      Lanes.create(%{slug: "persisted-root", execution_profile_id: profile.id, workspace_subdir: ".", config: @config})
+
+    Repo.update!(Ecto.Changeset.change(lane, workspace_subdir: "tra-features"))
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, LaneStore)
+    {:ok, _} = Supervisor.restart_child(SymphonyElixir.Supervisor, LaneStore)
+
+    assert Enum.any?(
+             json_response(
+               put(api_conn(), "/api/v1/lanes/persisted-root", Jason.encode!(%{workspace_subdir: "."})),
+               422
+             )["errors"],
+             &(&1["path"] == "worker.environment")
+           )
+
+    before_version = Lanes.get!(lane.id).current_version_id
+    File.write!(kubectl, "#!/bin/sh\nexit 1\n")
+
+    assert Enum.any?(
+             json_response(post(api_conn(), "/api/v1/lanes/persisted-root/repair-fixed-root", ""), 422)["errors"],
+             &(&1["path"] == "workspace_subdir")
+           )
+
+    assert Lanes.get!(lane.id).workspace_subdir == "tra-features"
+    assert Lanes.get!(lane.id).current_version_id == before_version
+    started = Path.join(root, "discovery-started")
+    resume = Path.join(root, "resume-discovery")
+
+    File.write!(
+      kubectl,
+      "#!/bin/sh\ntouch '#{started}'\nwhile [ ! -f '#{resume}' ]; do sleep 0.05; done\nprintf '%s\\n' '{\"metadata\":{\"resourceVersion\":\"1\"},\"items\":[]}'\n"
+    )
+
+    pending = Task.async(fn -> post(api_conn(), "/api/v1/lanes/persisted-root/repair-fixed-root", "") end)
+
+    assert Enum.any?(1..100, fn _ ->
+             Process.sleep(10)
+             File.exists?(started)
+           end)
+
+    {:ok, healthy_profile} = ExecutionProfiles.create(%{name: "Other lane", workspace_base: root, worker: %{}})
+    {:ok, healthy} = Lanes.create(%{slug: "other-lane", execution_profile_id: healthy_profile.id, config: @config})
+    healthy_update = Task.async(fn -> Lanes.update(healthy, %{name: "Still responsive"}) end)
+    changed = Task.async(fn -> Lanes.update(lane, %{name: "Changed during discovery"}) end)
+    quick = Task.yield(healthy_update, 1_000)
+    changed_result = Task.yield(changed, 1_000)
+    File.write!(resume, "go")
+    assert {:ok, {:ok, _}} = quick
+    assert {:ok, {:ok, _}} = changed_result
+    assert Enum.any?(json_response(Task.await(pending, 10_000), 422)["errors"], &(&1["path"] == "workspace_subdir"))
+    assert Lanes.get!(lane.id).workspace_subdir == "tra-features"
+    File.write!(kubectl, "#!/bin/sh\nprintf '%s\\n' '{\"metadata\":{\"resourceVersion\":\"1\"},\"items\":[]}'\n")
+    repaired = json_response(post(api_conn(), "/api/v1/lanes/persisted-root/repair-fixed-root", ""), 200)
+    assert repaired["workspace_subdir"] == "."
+    assert repaired["enabled"] == false
+    assert repaired["current_version_id"] == before_version
+    assert {:ok, %{settings: %{workspace: %{root: "/state/workspace/worker"}}}} = LaneStore.lookup(lane.id)
+
+    assert Enum.any?(
+             json_response(post(api_conn(), "/api/v1/lanes/persisted-root/repair-fixed-root", ""), 422)["errors"],
+             &(&1["path"] == "workspace_subdir")
+           )
+  end
+
+  test "fixed-root repair rejects unrelated lanes" do
+    {:ok, lane} = Lanes.create(attrs("unrelated-root"))
+
+    assert Enum.any?(
+             json_response(post(api_conn(), "/api/v1/lanes/unrelated-root/repair-fixed-root", ""), 422)["errors"],
+             &(&1["path"] == "workspace_subdir")
+           )
+
+    assert Lanes.get!(lane.id).workspace_subdir == "."
+  end
+
   test "version activation rejects invalid IDs and versions belonging to another lane" do
     {:ok, lane} = Lanes.create(attrs("version-lane"))
     {:ok, other} = Lanes.create(attrs("other-lane"))

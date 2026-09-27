@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Lanes do
   import Ecto.Query, only: [from: 2]
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ExecutionEnvironment.Config, as: EnvironmentConfig
+  alias SymphonyElixir.ExecutionEnvironment.Kubernetes
   alias SymphonyElixir.{ExecutionProfiles, LaneStore, LaneSupervisor, Repo, Workflow, Workspace}
   alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.ExecutionProfiles.Profile
@@ -130,6 +131,37 @@ defmodule SymphonyElixir.Lanes do
       {:ok, put_in(settings.tracker.kind, kind)}
     else
       _ -> {:error, :environment_identity_in_use}
+    end
+  end
+
+  @spec repair_fixed_root(Lane.t()) :: {:ok, Lane.t()} | {:error, [error()]}
+  def repair_fixed_root(%Lane{id: id}) do
+    with {:ok, %{enabled: false, error: nil, settings: %Schema{} = settings} = snapshot} <- LaneStore.lookup(id),
+         %{workspace_base: base, workspace_subdir: subdir} <- snapshot,
+         true <- is_binary(base) and Path.expand(base) == "/state/workspace/worker" and subdir != ".",
+         %{kind: "kubernetes", provider: %{"template" => "worker-slot"}} = config <- EnvironmentConfig.runtime(settings),
+         :ok <- empty_provider_inventory(config) do
+      LaneStore.repair_fixed_root(
+        id,
+        snapshot,
+        &transact_mutation(fn check -> update_lane(id, %{"workspace_subdir" => "."}, check) end, &1)
+      )
+      |> mutation_result()
+    else
+      _ -> {:error, errors_for(:fixed_root_repair_unsafe)}
+    end
+  end
+
+  defp empty_provider_inventory(config) do
+    with {:ok, supervisor} <- Task.Supervisor.start_link() do
+      try do
+        case Kubernetes.discover(config, task_supervisor: supervisor, authority: self()) do
+          {:ok, []} -> :ok
+          _ -> {:error, :fixed_root_repair_unsafe}
+        end
+      after
+        Supervisor.stop(supervisor)
+      end
     end
   end
 
@@ -273,6 +305,15 @@ defmodule SymphonyElixir.Lanes do
   def errors_for(:lane_resources_retained),
     do: [
       %{path: "lane", message: "cannot delete while workspaces, managed resources, or unresolved operations may remain"}
+    ]
+
+  def errors_for(:fixed_root_repair_unsafe),
+    do: [
+      %{
+        path: "workspace_subdir",
+        message:
+          "repair requires a disabled fixed-root Kubernetes lane, empty provider inventory, and no unresolved operations"
+      }
     ]
 
   def errors_for(:missing_tracker_kind), do: [%{path: "tracker.kind", message: "can't be blank"}]
@@ -605,7 +646,11 @@ defmodule SymphonyElixir.Lanes do
 
   defp mutate(lane_id, fun, reason \\ nil) do
     LaneStore.mutate(lane_id, &transact_mutation(fun, &1), reason)
-    |> case do
+    |> mutation_result()
+  end
+
+  defp mutation_result(result) do
+    case result do
       {:ok, lane} -> {:ok, lane}
       {:error, :lane_active} = error -> error
       {:error, reason} -> {:error, errors_for(reason)}
@@ -642,10 +687,48 @@ defmodule SymphonyElixir.Lanes do
     cached_root = cached_root(lane_id, attrs, subdir)
     validation = if enabled?, do: :runtime, else: :structure
 
-    with {:ok, validated} <- Configuration.resolve(attrs, config, subdir, prompt, cached_root, validation),
+    with :ok <- fixed_root_workspace(attrs, subdir),
+         {:ok, validated} <- Configuration.resolve(attrs, config, subdir, prompt, cached_root, validation),
          :ok <- check.(validated.settings) do
       {:ok, validated}
     end
+  end
+
+  defp fixed_root_workspace(
+         %{
+           "workspace_base" => base,
+           "worker" => %{"environment" => %{"kind" => "kubernetes", "provider" => %{"template" => "worker-slot"}}}
+         },
+         subdir
+       )
+       when is_binary(base) do
+    # Compare the resolved base, as the repair path does: an env reference such as
+    # $SYMPHONY_WORKER_BASE must not bypass the guard.
+    if Path.expand(Configuration.workspace_base(%{"workspace_base" => base}) || "") == "/state/workspace/worker" and
+         subdir != "." do
+      {:error, [%{path: "workspace_subdir", message: "must be . for the fixed-root Kubernetes worker"}]}
+    else
+      :ok
+    end
+  end
+
+  defp fixed_root_workspace(_profile, _subdir), do: :ok
+
+  @doc false
+  @spec validate_profile_workspaces(map(), map(), [Lane.t()]) :: :ok | {:error, [error()]}
+  def validate_profile_workspaces(before, after_attrs, lanes) do
+    Enum.reduce_while(lanes, :ok, fn lane, :ok ->
+      previous = fixed_root_workspace(before, lane.workspace_subdir)
+      candidate = fixed_root_workspace(after_attrs, lane.workspace_subdir)
+
+      case {previous, candidate} do
+        {:ok, {:error, errors}} ->
+          {:halt, {:error, Enum.map(errors, &%{&1 | path: "lanes.#{lane.id}.#{&1.path}"})}}
+
+        _ ->
+          {:cont, :ok}
+      end
+    end)
   end
 
   @doc false

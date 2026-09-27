@@ -74,6 +74,7 @@ defmodule SymphonyElixirWeb.Router do
     put("/lanes/:slug", LanesApiController, :update)
     delete("/lanes/:slug", LanesApiController, :delete)
     get("/lanes/:slug/export", LanesApiController, :export)
+    post("/lanes/:slug/repair-fixed-root", LanesApiController, :repair_fixed_root)
     post("/lanes/:slug/versions/:id/activate", LanesApiController, :activate)
     get("/lanes/:slug/:issue_identifier", ObservabilityApiController, :lane_issue)
 
@@ -83,6 +84,7 @@ defmodule SymphonyElixirWeb.Router do
     match(:*, "/lanes/:slug", ObservabilityApiController, :method_not_allowed)
     match(:*, "/lanes/:slug/export", ObservabilityApiController, :method_not_allowed)
     match(:*, "/lanes/:slug/versions/:id/activate", ObservabilityApiController, :method_not_allowed)
+    match(:*, "/lanes/:slug/repair-fixed-root", ObservabilityApiController, :method_not_allowed)
     match(:*, "/lanes/:slug/:issue_identifier", ObservabilityApiController, :method_not_allowed)
     get("/:issue_identifier", ObservabilityApiController, :issue)
     match(:*, "/:issue_identifier", ObservabilityApiController, :method_not_allowed)
