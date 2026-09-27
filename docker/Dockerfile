@@ -15,8 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential autoconf m4 libncurses-dev libssl-dev \
   && rm -rf /var/lib/apt/lists/*
 
-# Codex CLI — the default agent backend the workflow launches (`codex ... app-server`)
-RUN npm install --global @openai/codex
+# Codex CLI — the default agent backend the workflow launches (`codex ... app-server`).
+# Pinned: this layer is cached across commits, so an unpinned install froze whatever version
+# happened to be cached, and downstream images (trazadera worker locks) inherit it.
+ARG CODEX_VERSION=0.157.1
+RUN npm install --global "@openai/codex@${CODEX_VERSION}"
 
 # mise reads the repo's own mise.toml, so the container toolchain can't drift from local dev
 RUN curl -fsSL https://mise.run | sh
