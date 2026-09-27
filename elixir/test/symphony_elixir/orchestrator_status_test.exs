@@ -168,7 +168,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert environment.occupies_slot
     assert environment.unresolved.category == :unknown
     assert environment.unresolved.operation == :stop
-    assert payload.counts == %{running: 0, retrying: 0, blocked: 0}
+    assert payload.counts == %{running: 0, retrying: 0, blocked: 0, queued: 0}
 
     assert {:ok, issue} = Presenter.issue_payload(record.issue_identifier, orchestrator, 1_000)
     encoded = Jason.encode!(%{state: payload, issue: issue})
@@ -2063,6 +2063,153 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert rendered =~ "app_status=offline"
     refute rendered =~ "Timestamp:"
+  end
+
+  test "snapshot lists undispatched candidates from the last poll and titles live entries" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", max_concurrent_agents: 1)
+
+    running = %Issue{
+      id: "q-run",
+      identifier: "Q-1",
+      title: "Runs now",
+      state: "Todo",
+      labels: ["api"],
+      priority: 1,
+      dispatchable: true
+    }
+
+    waiting = %Issue{
+      id: "q-wait",
+      identifier: "Q-2",
+      title: "Waits",
+      state: "Todo",
+      priority: 2,
+      dispatchable: true,
+      blocked_by: [%{id: "q-0", identifier: "Q-0", state: "Todo"}, %{id: "no-identifier"}]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [running, waiting])
+    parent = self()
+
+    runner = fn issue, _recipient, _opts ->
+      send(parent, {:dispatched, issue.id})
+
+      receive do
+        :finish -> :ok
+      end
+    end
+
+    {:ok, pid} = start_test_orchestrator(name: Module.concat(__MODULE__, QueuedSnapshot), runner_fun: runner)
+    assert_receive {:dispatched, "q-run"}, 5_000
+    snapshot = wait_for_snapshot(pid, &(&1.queued != []), 5_000)
+
+    assert [%{issue_id: "q-run", title: "Runs now", labels: ["api"], attempt_id: attempt_id}] = snapshot.running
+    assert is_binary(attempt_id)
+
+    assert [%{issue_id: "q-wait", identifier: "Q-2", title: "Waits", state: "Todo", priority: 2, blocked_by: ["Q-0"]}] =
+             snapshot.queued
+
+    payload = Presenter.state_payload(pid, 1_000)
+    assert payload.counts.queued == 1
+    assert [%{issue_identifier: "Q-2", title: "Waits", blocked_by: ["Q-0"]}] = payload.queued
+    assert [%{title: "Runs now", labels: ["api"], attempt_id: ^attempt_id}] = payload.running
+  end
+
+  test "snapshot queue leaves out candidates this lane would never dispatch" do
+    workflow = [tracker_kind: "memory", max_concurrent_agents: 1, tracker_required_labels: ["symphony"]]
+    write_workflow_file!(Workflow.workflow_file_path(), workflow)
+
+    running = %Issue{
+      id: "r-run",
+      identifier: "R-1",
+      title: "Runs",
+      state: "Todo",
+      labels: ["symphony"],
+      priority: 1,
+      dispatchable: true
+    }
+
+    waiting = %Issue{
+      id: "r-wait",
+      identifier: "R-2",
+      title: "Waits",
+      state: "Todo",
+      labels: ["symphony"],
+      priority: 2,
+      dispatchable: true
+    }
+
+    unrouted = %Issue{
+      id: "r-other",
+      identifier: "R-3",
+      title: "Not ours",
+      state: "Todo",
+      labels: [],
+      priority: 1,
+      dispatchable: true
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [running, waiting, unrouted])
+    parent = self()
+
+    runner = fn issue, _recipient, _opts ->
+      send(parent, {:dispatched, issue.id})
+
+      receive do
+        :finish -> :ok
+      end
+    end
+
+    {:ok, pid} = start_test_orchestrator(name: Module.concat(__MODULE__, RoutedQueue), runner_fun: runner)
+    assert_receive {:dispatched, "r-run"}, 5_000
+    snapshot = wait_for_snapshot(pid, &(&1.queued != []), 5_000)
+    assert [%{issue_id: "r-wait"}] = snapshot.queued
+  end
+
+  test "blocked and retrying snapshot entries carry ticket titles when known" do
+    # The default fixture lane is Linear, so background polls fail and never overwrite `candidates`.
+    {:ok, pid} = start_test_orchestrator(name: Module.concat(__MODULE__, TitledEntries))
+
+    blocked_issue = %Issue{
+      id: "b-1",
+      identifier: "B-1",
+      title: "Needs approval",
+      state: "Blocked / Needs Attention",
+      labels: ["db"]
+    }
+
+    retry_issue = %Issue{id: "r-1", identifier: "R-1", title: "Try again", state: "Todo", labels: []}
+    due = System.monotonic_time(:millisecond) + 60_000
+
+    blocked_state = %{
+      "b-1" => %{identifier: "B-1", issue: blocked_issue, blocked_at: DateTime.utc_now()},
+      "b-2" => %{identifier: "B-2"}
+    }
+
+    retry_state = %{
+      "r-1" => %{attempt: 2, due_at_ms: due, identifier: "R-1"},
+      "r-2" => %{attempt: 1, due_at_ms: due, identifier: "R-2"}
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{state | blocked: blocked_state, retry_attempts: retry_state, candidates: [retry_issue]}
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    sorted_blocked = Enum.sort_by(snapshot.blocked, & &1.issue_id)
+    sorted_retrying = Enum.sort_by(snapshot.retrying, & &1.issue_id)
+
+    assert [%{issue_id: "b-1", title: "Needs approval", labels: ["db"]}, %{issue_id: "b-2", title: nil, labels: []}] =
+             sorted_blocked
+
+    [first_retrying, second_retrying] = sorted_retrying
+    assert %{issue_id: "r-1", title: "Try again", state: "Todo"} = first_retrying
+    assert %{issue_id: "r-2", title: nil, state: nil, labels: []} = second_retrying
+    assert snapshot.queued == []
+
+    payload = Presenter.state_payload(pid, 1_000)
+    assert [%{title: "Try again", state: "Todo", labels: []} | _] = Enum.sort_by(payload.retrying, & &1.issue_id)
+    assert [%{title: "Needs approval", labels: ["db"]} | _] = Enum.sort_by(payload.blocked, & &1.issue_id)
   end
 
   defp status_environment_record do

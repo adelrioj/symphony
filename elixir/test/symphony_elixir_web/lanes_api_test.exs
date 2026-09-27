@@ -273,7 +273,7 @@ defmodule SymphonyElixirWeb.LanesApiTest do
              json_response(put(api_conn(), "/api/v1/lanes/live-lane", Jason.encode!(%{enabled: true})), 200)
 
     live_payload = await_snapshot("live-lane", 100)
-    assert live_payload["counts"] == %{"running" => 0, "retrying" => 0, "blocked" => 0}
+    assert live_payload["counts"] == %{"running" => 0, "retrying" => 0, "blocked" => 0, "queued" => 0}
 
     assert %{"lanes" => [%{"lane" => "live-lane", "queued" => true}]} =
              json_response(post(api_conn(), "/api/v1/refresh", ""), 202)

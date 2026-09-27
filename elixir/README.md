@@ -1238,7 +1238,8 @@ Tracker links use only tracker-provided `http`/`https` URLs.
 | Route | Surface |
 | --- | --- |
 | `/login` | Operator-token login |
-| `/` | Lane list, health, enable/disable controls |
+| `/` | Operator console: live agents per lane, tickets by run status or tracker state, run detail, Stop / Retry now / Approve / Reply |
+| `/lanes` | Lane list, health, enable/disable controls |
 | `/execution-profiles` | List, create, edit and delete execution profiles |
 | `/execution-profiles/:id` | Profile details, linked lanes and safe worker summary |
 | `/lanes/new` | Create a disabled lane with structured sections |
@@ -1246,6 +1247,11 @@ Tracker links use only tracker-provided `http`/`https` URLs.
 | `/lanes/:slug/edit` | Structured Work selection, Execution, Workflow and Limits editor |
 | `/lanes/:slug/versions` | Immutable version history and activation |
 | `/runs/:attempt_id` | Durable attempt details, token totals and event timeline |
+
+Approve and Reply apply only to a ticket that is still blocked (held blocked by the lane, or in
+`agent.blocked_state` in the tracker). They move it back to the lane's first non-blocked active state
+through the tracker (Reply posts a comment first) and release the lane's block; the next attempt sees
+the comment only if its prompt or tools read comments.
 
 Browser requests without authentication redirect to `/login`; API requests return `401`.
 Login establishes an HTTP-only signed session; bearer authentication can also seed a browser session.

@@ -654,7 +654,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
            }
 
     assert payload.environments == []
-    assert payload.counts == %{running: 0, retrying: 0, blocked: 0}
+    assert payload.counts == %{running: 0, retrying: 0, blocked: 0, queued: 0}
     snapshot = Orchestrator.snapshot(owner, 1_000)
     rendered = StatusDashboard.format_snapshot_content_for_test({:ok, snapshot}, 0, 160)
     assert rendered =~ "Managed discovery"

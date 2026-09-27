@@ -39,11 +39,13 @@ defmodule SymphonyElixirWeb.Presenter do
           counts: %{
             running: length(snapshot.running),
             retrying: length(snapshot.retrying),
-            blocked: length(Map.get(snapshot, :blocked, []))
+            blocked: length(Map.get(snapshot, :blocked, [])),
+            queued: length(Map.get(snapshot, :queued, []))
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
+          queued: Enum.map(Map.get(snapshot, :queued, []), &queued_entry_payload/1),
           environments: Map.get(snapshot, :environments, []),
           environment_discovery: Map.get(snapshot, :environment_discovery),
           codex_totals: snapshot.codex_totals,
@@ -137,6 +139,9 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_identifier: entry.identifier,
       issue_url: Map.get(entry, :issue_url),
       state: entry.state,
+      title: Map.get(entry, :title),
+      labels: Map.get(entry, :labels) || [],
+      attempt_id: Map.get(entry, :attempt_id),
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
       session_id: entry.session_id,
@@ -158,6 +163,9 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       issue_url: Map.get(entry, :issue_url),
+      title: Map.get(entry, :title),
+      state: Map.get(entry, :state),
+      labels: Map.get(entry, :labels) || [],
       attempt: entry.attempt,
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error,
@@ -172,6 +180,8 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_identifier: entry.identifier,
       issue_url: Map.get(entry, :issue_url),
       state: entry.state,
+      title: Map.get(entry, :title),
+      labels: Map.get(entry, :labels) || [],
       error: entry.error,
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
@@ -180,6 +190,19 @@ defmodule SymphonyElixirWeb.Presenter do
       last_event: entry.last_codex_event,
       last_message: summarize_message(entry.last_codex_message),
       last_event_at: iso8601(entry.last_codex_timestamp)
+    }
+  end
+
+  defp queued_entry_payload(entry) do
+    %{
+      issue_id: entry.issue_id,
+      issue_identifier: entry.identifier,
+      title: entry.title,
+      state: entry.state,
+      labels: entry.labels,
+      issue_url: entry.issue_url,
+      priority: entry.priority,
+      blocked_by: entry.blocked_by
     }
   end
 

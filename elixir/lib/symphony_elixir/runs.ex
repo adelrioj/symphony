@@ -35,6 +35,7 @@ defmodule SymphonyElixir.Runs do
          executor: Map.get(snapshot, :executor),
          issue_id: issue.id,
          issue_identifier: issue.identifier,
+         issue_title: issue.title,
          issue_state: issue.state,
          attempt_id: attempt_id,
          attempt: Map.get(attrs, :attempt),
@@ -73,10 +74,30 @@ defmodule SymphonyElixir.Runs do
     Repo.all(from(e in Event, where: e.run_id == ^run_id, order_by: e.id))
   end
 
+  @doc "The run's latest `limit` events, oldest first."
+  @spec recent_events(integer(), pos_integer()) :: [Event.t()]
+  def recent_events(run_id, limit) do
+    flush()
+    Enum.reverse(Repo.all(from(e in Event, where: e.run_id == ^run_id, order_by: [desc: e.id], limit: ^limit)))
+  end
+
   @spec list_for_lane(term(), pos_integer()) :: [Run.t()]
   def list_for_lane(lane_id, limit) do
     flush()
     Repo.all(from(r in Run, where: r.lane_id == ^lane_id, order_by: [desc: r.started_at, desc: r.id], limit: ^limit))
+  end
+
+  @spec for_issue(term(), String.t(), pos_integer()) :: [Run.t()]
+  def for_issue(lane_id, issue_id, limit) when is_binary(issue_id) do
+    flush()
+
+    Repo.all(
+      from(r in Run,
+        where: r.lane_id == ^lane_id and r.issue_id == ^issue_id,
+        order_by: [desc: r.started_at, desc: r.id],
+        limit: ^limit
+      )
+    )
   end
 
   @doc "Synchronously prunes events only, serialized with history writes. Failures return zero and warn."

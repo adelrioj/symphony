@@ -1797,10 +1797,21 @@ Installation settings and authentication:
 
 #### 13.7.1 Human-Readable Dashboard (`/`)
 
-- Host the lane list at `/`, execution profiles at `/execution-profiles` with creation at
-  `/execution-profiles/new`, per-lane creation at `/lanes/new`, per-lane runtime at `/lanes/:slug`,
-  editing at `/lanes/:slug/edit`, versions at `/lanes/:slug/versions`, attempt details at
-  `/runs/:attempt_id`, and login at `/login`.
+- Host the operator console at `/`: live agents per lane, one ticket list grouped by run status or
+  tracker state, and a run detail panel. Host the lane list at `/lanes`, execution profiles at
+  `/execution-profiles` with creation at `/execution-profiles/new`, per-lane creation at
+  `/lanes/new`, per-lane runtime at `/lanes/:slug`, editing at `/lanes/:slug/edit`, versions at
+  `/lanes/:slug/versions`, attempt details at `/runs/:attempt_id`, and login at `/login`.
+- The console MAY offer operator actions: stop a running attempt (recorded as `stopped`, claim
+  released, workspace kept), run a pending retry immediately, and resume a blocked ticket by
+  optionally commenting and moving it to the first active state other than the blocked state,
+  through the tracker adapter, then releasing the orchestrator's block on it. Resume applies only
+  to a blocked ticket (held blocked by the orchestrator, or in the blocked state in the tracker) and
+  is refused otherwise. Resuming MUST NOT bypass normal reconciliation; the next attempt is
+  dispatched by the usual poll. A stopped attempt may likewise be dispatched again on the next poll
+  while its ticket stays in an active state.
+- The console MAY offer a control that requests an immediate poll of the lanes in view, with the
+  same semantics as `POST /api/v1/refresh`.
 - Show per-lane sessions, retries, totals, events, health/error indicators and durable attempt history.
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
   consumes the JSON API below.
@@ -1814,6 +1825,9 @@ Minimum endpoints:
 - `GET /api/v1/state`
   - Returns `{"generated_at": "...", "lanes": [...]}`. Each element carries `"lane"` (the slug)
     plus that lane's sessions, retry queue, totals, rate limits, health and extension fields.
+  - Implementations MAY add a `queued` list: the last poll's candidates that are not running,
+    claimed, blocked or retrying, in dispatch order, with blocker identifiers. Live entries MAY carry
+    the ticket `title` and `labels`.
   - Suggested response shape:
 
     ```json
