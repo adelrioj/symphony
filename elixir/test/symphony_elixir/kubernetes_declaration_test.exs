@@ -35,7 +35,8 @@ defmodule SymphonyElixir.KubernetesDeclarationTest do
   end
 
   test "a spec missing a required immutable field is rejected" do
-    for field <- ~w(schemaVersion deploymentId host environmentKeys obligationUIDs guards receiptName operatorSubject chunkIndex chunkTotal) do
+    for field <-
+          ~w(schemaVersion deploymentId host environmentKeys obligationUIDs guards receiptName operatorSubject chunkIndex chunkTotal) do
       assert {:error, _} = Declaration.decode(Map.delete(spec(%{}), field)), "#{field} was accepted as absent"
     end
   end
@@ -48,7 +49,14 @@ defmodule SymphonyElixir.KubernetesDeclarationTest do
 
   test "more than sixty-four environment keys is rejected" do
     keys = Enum.map(1..65, &"se-#{&1}")
-    assert {:error, _} = Declaration.decode(spec(%{"environmentKeys" => keys, "guards" => Map.new(keys, &{&1, %{"uid" => "g", "resourceVersion" => "1"}})}))
+
+    assert {:error, _} =
+             Declaration.decode(
+               spec(%{
+                 "environmentKeys" => keys,
+                 "guards" => Map.new(keys, &{&1, %{"uid" => "g", "resourceVersion" => "1"}})
+               })
+             )
   end
 
   test "more than five hundred and twelve obligation uids is rejected" do
@@ -61,7 +69,9 @@ defmodule SymphonyElixir.KubernetesDeclarationTest do
 
   test "an environment key with no guard reference is rejected, and a guard reference with no key too" do
     assert {:error, _} = Declaration.decode(spec(%{"environmentKeys" => ["se-ticket", "se-other"]}))
-    assert {:error, _} = Declaration.decode(spec(%{"guards" => %{"se-other" => %{"uid" => "guard-uid", "resourceVersion" => "7"}}}))
+
+    assert {:error, _} =
+             Declaration.decode(spec(%{"guards" => %{"se-other" => %{"uid" => "guard-uid", "resourceVersion" => "7"}}}))
   end
 
   test "a chunk index outside its total is rejected" do
@@ -120,7 +130,11 @@ defmodule SymphonyElixir.KubernetesDeclarationTest do
         overrides
       )
 
-    %{"metadata" => %{"name" => "symphony-destruction-receipt-3070466"}, "immutable" => true, "data" => %{"receipt.json" => Jason.encode!(body)}}
+    %{
+      "metadata" => %{"name" => "symphony-destruction-receipt-3070466"},
+      "immutable" => true,
+      "data" => %{"receipt.json" => Jason.encode!(body)}
+    }
   end
 
   defp spec(overrides) do
@@ -128,7 +142,12 @@ defmodule SymphonyElixir.KubernetesDeclarationTest do
       %{
         "schemaVersion" => 1,
         "deploymentId" => "deployment",
-        "host" => %{"node_name" => "worker-1", "node_uid" => "node-uid", "machine_id" => "machine", "system_uuid" => "system"},
+        "host" => %{
+          "node_name" => "worker-1",
+          "node_uid" => "node-uid",
+          "machine_id" => "machine",
+          "system_uuid" => "system"
+        },
         "environmentKeys" => ["se-ticket"],
         "obligationUIDs" => ["pod-uid"],
         "guards" => %{"se-ticket" => %{"uid" => "guard-uid", "resourceVersion" => "7"}},

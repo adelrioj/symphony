@@ -83,7 +83,8 @@ defmodule SymphonyElixir.TestSupport do
     :ok = SymphonyElixir.LaneStore.put_entry(%{entry | enabled: true})
 
     ExUnit.Callbacks.start_supervised!(
-      {SymphonyElixir.AgentRuntimeSupervisor, Keyword.merge(opts, name: runtime_name, task_supervisor_name: task_name, orchestrator_name: name)},
+      {SymphonyElixir.AgentRuntimeSupervisor,
+       Keyword.merge(opts, name: runtime_name, task_supervisor_name: task_name, orchestrator_name: name)},
       id: runtime_name
     )
 
@@ -105,7 +106,9 @@ defmodule SymphonyElixir.TestSupport do
          {:ok, profile} <-
            ExecutionProfiles.create(%{
              name: "Test #{Map.fetch!(attrs, :slug)} #{System.unique_integer([:positive])}",
-             workspace_base: profile_attrs["workspace_base"] || Path.join(SymphonyElixir.Config.data_root(), "workspaces-#{Map.fetch!(attrs, :slug)}"),
+             workspace_base:
+               profile_attrs["workspace_base"] ||
+                 Path.join(SymphonyElixir.Config.data_root(), "workspaces-#{Map.fetch!(attrs, :slug)}"),
              worker: profile_attrs["worker"] || %{}
            }) do
       attrs =
@@ -200,7 +203,13 @@ defmodule SymphonyElixir.TestSupport do
                  workspace_base: profile_workspace_base(profile_attrs),
                  worker: profile_attrs["worker"] || %{}
                }) do
-          SymphonyElixir.Lanes.create(%{slug: default_lane_slug(), execution_profile_id: profile.id, workspace_subdir: ".", config: config, prompt: prompt})
+          SymphonyElixir.Lanes.create(%{
+            slug: default_lane_slug(),
+            execution_profile_id: profile.id,
+            workspace_subdir: ".",
+            config: config,
+            prompt: prompt
+          })
         end
 
       lane ->

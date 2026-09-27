@@ -19,7 +19,13 @@ defmodule SymphonyElixir.LaneStoreTest do
   test "registry isolates roles and lanes" do
     assert {:via, Registry, {LaneRegistry, {3, :orchestrator}}} = LaneRegistry.via(3, :orchestrator)
     assert is_nil(LaneRegistry.whereis(3, :orchestrator))
-    registered = start_supervised!(%{id: :registry_agent, start: {Agent, :start_link, [fn -> :healthy end, [name: LaneRegistry.via(3, :orchestrator)]]}})
+
+    registered =
+      start_supervised!(%{
+        id: :registry_agent,
+        start: {Agent, :start_link, [fn -> :healthy end, [name: LaneRegistry.via(3, :orchestrator)]]}
+      })
+
     assert LaneRegistry.whereis(3, :orchestrator) == registered
     assert Agent.get(registered, & &1) == :healthy
     assert is_nil(LaneRegistry.whereis(3, :runtime))
@@ -59,9 +65,14 @@ defmodule SymphonyElixir.LaneStoreTest do
     Process.flag(:trap_exit, true)
     assert {:error, {:workflow_parse_error, _}} = LaneStore.start_link(file: path)
 
-    assert {:ok, lane} = create_lane(%{slug: "offline", front_matter: "tracker:\n  kind: memory", prompt: "imported offline"})
+    assert {:ok, lane} =
+             create_lane(%{slug: "offline", front_matter: "tracker:\n  kind: memory", prompt: "imported offline"})
+
     assert {:ok, updated} = Lanes.update(lane, %{prompt: "\nsaved offline\n"})
-    assert {:error, [%{path: "front_matter", message: _}]} = Lanes.update(updated, %{name: "must roll back", front_matter: "tracker: ["})
+
+    assert {:error, [%{path: "front_matter", message: _}]} =
+             Lanes.update(updated, %{name: "must roll back", front_matter: "tracker: ["})
+
     assert Lanes.get!(lane.id).name == "offline"
     assert {:ok, exported} = Lanes.export(Lanes.get!(lane.id))
     assert {:ok, parsed} = Workflow.parse(exported)
@@ -90,11 +101,22 @@ defmodule SymphonyElixir.LaneStoreTest do
   end
 
   test "a persisted lane without a version is disabled until a valid version repairs it" do
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Missing version #{System.unique_integer([:positive])}", workspace_base: Path.join(System.tmp_dir!(), "symphony_workspaces"), worker: %{}})
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Missing version #{System.unique_integer([:positive])}",
+        workspace_base: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+        worker: %{}
+      })
 
     lane =
       %Lane{}
-      |> Lane.changeset(%{slug: "missing-version", name: "Missing version", enabled: true, execution_profile_id: profile.id, workspace_subdir: "missing-version"})
+      |> Lane.changeset(%{
+        slug: "missing-version",
+        name: "Missing version",
+        enabled: true,
+        execution_profile_id: profile.id,
+        workspace_subdir: "missing-version"
+      })
       |> Repo.insert!()
 
     assert :ok = LaneStore.refresh(lane.id)
@@ -136,11 +158,21 @@ defmodule SymphonyElixir.LaneStoreTest do
   end
 
   test "refresh keeps the effective last good version, and startup disables invalid DB lanes visibly" do
-    {:ok, lane} = create_lane(%{slug: "reload", enabled: true, front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 2000", prompt: "one"})
+    {:ok, lane} =
+      create_lane(%{
+        slug: "reload",
+        enabled: true,
+        front_matter: "tracker:\n  kind: memory\npolling:\n  interval_ms: 2000",
+        prompt: "one"
+      })
+
     version = Lanes.current_version(lane)
     Repo.update!(Ecto.Changeset.change(version, front_matter: "polling:\n  interval_ms: nope"))
     assert :ok = LaneStore.refresh(lane.id)
-    assert {:ok, %Entry{settings: %Schema{polling: %{interval_ms: 2000}}, workflow: %{prompt: "one"}, error: error}} = LaneStore.lookup(lane.id)
+
+    assert {:ok, %Entry{settings: %Schema{polling: %{interval_ms: 2000}}, workflow: %{prompt: "one"}, error: error}} =
+             LaneStore.lookup(lane.id)
+
     assert error =~ "polling.interval_ms"
     replace_store([])
     assert {:ok, %Entry{settings: nil, enabled: false, error: error}} = LaneStore.lookup(lane.id)
@@ -153,13 +185,19 @@ defmodule SymphonyElixir.LaneStoreTest do
 
   @tag :remediation
   @tag :tmp_dir
-  test "remediation: missing tracker credentials after restart cannot abandon retained ownership during repair", %{tmp_dir: root} do
+  test "remediation: missing tracker credentials after restart cannot abandon retained ownership during repair", %{
+    tmp_dir: root
+  } do
     previous_key = System.get_env("LINEAR_API_KEY")
     System.put_env("LINEAR_API_KEY", "original-token")
     on_exit(fn -> TestSupport.restore_env("LINEAR_API_KEY", previous_key) end)
 
-    {:ok, original_profile} = ExecutionProfiles.create(%{name: "Original location", workspace_base: Path.join(root, "original"), worker: %{}})
-    {:ok, next_profile} = ExecutionProfiles.create(%{name: "Next location", workspace_base: Path.join(root, "next"), worker: %{}})
+    {:ok, original_profile} =
+      ExecutionProfiles.create(%{name: "Original location", workspace_base: Path.join(root, "original"), worker: %{}})
+
+    {:ok, next_profile} =
+      ExecutionProfiles.create(%{name: "Next location", workspace_base: Path.join(root, "next"), worker: %{}})
+
     config = %{"tracker" => %{"kind" => "linear", "api_key" => "$LINEAR_API_KEY", "project_slug" => "test-project"}}
 
     {:ok, lane} = Lanes.create(%{slug: "credential-repair", execution_profile_id: original_profile.id, config: config})
@@ -201,7 +239,9 @@ defmodule SymphonyElixir.LaneStoreTest do
       ] do
     @tag :remediation
     @tag :tmp_dir
-    test "remediation: a migration-marked #{field} repair preserves known local ownership after restart", %{tmp_dir: root} do
+    test "remediation: a migration-marked #{field} repair preserves known local ownership after restart", %{
+      tmp_dir: root
+    } do
       {:ok, profile} = ExecutionProfiles.create(%{name: "Migrated local owner", workspace_base: root, worker: %{}})
       config = %{"tracker" => %{"kind" => "memory"}, "codex" => %{"command" => "codex app-server"}}
       {:ok, lane} = Lanes.create(%{slug: "migrated-repair", execution_profile_id: profile.id, config: config})
@@ -209,7 +249,13 @@ defmodule SymphonyElixir.LaneStoreTest do
       retained = Path.join(original_settings.workspace.root, "retained")
       File.mkdir_p!(retained)
       File.write!(Path.join(retained, "work"), "keep")
-      Repo.update!(Ecto.Changeset.change(Lanes.current_version(lane), front_matter: Workflow.encode_config(unquote(Macro.escape(invalid_config)))))
+
+      Repo.update!(
+        Ecto.Changeset.change(Lanes.current_version(lane),
+          front_matter: Workflow.encode_config(unquote(Macro.escape(invalid_config)))
+        )
+      )
+
       Repo.update!(Ecto.Changeset.change(profile, repair_error: "legacy configuration requires repair"))
 
       replace_store([])
@@ -234,7 +280,14 @@ defmodule SymphonyElixir.LaneStoreTest do
     previous = System.get_env(key)
     System.put_env(key, "original-token")
     on_exit(fn -> TestSupport.restore_env(key, previous) end)
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Managed credential owner", workspace_base: "/managed/credential-repair", worker: managed_worker()})
+
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Managed credential owner",
+        workspace_base: "/managed/credential-repair",
+        worker: managed_worker()
+      })
+
     config = %{"tracker" => %{"kind" => "linear", "api_key" => "$" <> key, "project_slug" => "test-project"}}
     {:ok, lane} = Lanes.create(%{slug: "managed-credential-repair", execution_profile_id: profile.id, config: config})
     {:ok, original_settings} = LaneStore.settings(lane.id)
@@ -261,16 +314,33 @@ defmodule SymphonyElixir.LaneStoreTest do
   for mutation <- [:create, :relink, :profile] do
     @tag :remediation
     @tag :tmp_dir
-    test "remediation: #{mutation} cannot claim a credential-invalid startup lane's retained workspace", %{tmp_dir: root} do
+    test "remediation: #{mutation} cannot claim a credential-invalid startup lane's retained workspace", %{
+      tmp_dir: root
+    } do
       key = "LINEAR_API_KEY"
       previous = System.get_env(key)
       System.put_env(key, "original-token")
       on_exit(fn -> TestSupport.restore_env(key, previous) end)
-      {:ok, profile} = ExecutionProfiles.create(%{name: "Retained owner", workspace_base: Path.join(root, "owned"), worker: %{}})
-      {:ok, other_profile} = ExecutionProfiles.create(%{name: "Healthy neighbor", workspace_base: Path.join(root, "other"), worker: %{}})
+
+      {:ok, profile} =
+        ExecutionProfiles.create(%{name: "Retained owner", workspace_base: Path.join(root, "owned"), worker: %{}})
+
+      {:ok, other_profile} =
+        ExecutionProfiles.create(%{name: "Healthy neighbor", workspace_base: Path.join(root, "other"), worker: %{}})
+
       config = %{"tracker" => %{"kind" => "linear", "api_key" => "$" <> key, "project_slug" => "test-project"}}
-      {:ok, owner} = Lanes.create(%{slug: "retained-owner", execution_profile_id: profile.id, workspace_subdir: ".", config: config})
-      {:ok, neighbor} = Lanes.create(%{slug: "healthy-neighbor", execution_profile_id: other_profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+
+      {:ok, owner} =
+        Lanes.create(%{slug: "retained-owner", execution_profile_id: profile.id, workspace_subdir: ".", config: config})
+
+      {:ok, neighbor} =
+        Lanes.create(%{
+          slug: "healthy-neighbor",
+          execution_profile_id: other_profile.id,
+          workspace_subdir: ".",
+          config: %{"tracker" => %{"kind" => "memory"}}
+        })
+
       {:ok, owner_settings} = LaneStore.settings(owner.id)
       retained = Path.join(owner_settings.workspace.root, "retained/work")
       File.mkdir_p!(Path.dirname(retained))
@@ -284,9 +354,19 @@ defmodule SymphonyElixir.LaneStoreTest do
 
       result =
         case unquote(mutation) do
-          :create -> Lanes.create(%{slug: "intruder", execution_profile_id: profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
-          :relink -> Lanes.update(neighbor, %{execution_profile_id: profile.id})
-          :profile -> ExecutionProfiles.update(other_profile, %{workspace_base: profile.workspace_base})
+          :create ->
+            Lanes.create(%{
+              slug: "intruder",
+              execution_profile_id: profile.id,
+              workspace_subdir: ".",
+              config: %{"tracker" => %{"kind" => "memory"}}
+            })
+
+          :relink ->
+            Lanes.update(neighbor, %{execution_profile_id: profile.id})
+
+          :profile ->
+            ExecutionProfiles.update(other_profile, %{workspace_base: profile.workspace_base})
         end
 
       assert {:error, errors} = result
@@ -303,13 +383,21 @@ defmodule SymphonyElixir.LaneStoreTest do
   for invalid_first? <- [true, false] do
     @tag :remediation
     @tag :tmp_dir
-    test "remediation: startup protects invalid retained ownership when invalid lane sorts first=#{invalid_first?}", %{tmp_dir: root} do
+    test "remediation: startup protects invalid retained ownership when invalid lane sorts first=#{invalid_first?}", %{
+      tmp_dir: root
+    } do
       key = "LINEAR_API_KEY"
       previous = System.get_env(key)
       System.put_env(key, "original-token")
       on_exit(fn -> TestSupport.restore_env(key, previous) end)
       {:ok, profile} = ExecutionProfiles.create(%{name: "Startup owners", workspace_base: root, worker: %{}})
-      invalid = %{slug: "invalid-owner", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "linear", "api_key" => "$" <> key, "project_slug" => "test-project"}}}
+
+      invalid = %{
+        slug: "invalid-owner",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "linear", "api_key" => "$" <> key, "project_slug" => "test-project"}}
+      }
+
       valid = %{slug: "valid-neighbor", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}}
       ordered = if unquote(invalid_first?), do: [invalid, valid], else: [valid, invalid]
 
@@ -345,7 +433,13 @@ defmodule SymphonyElixir.LaneStoreTest do
 
   @tag :remediation
   test "remediation: missing managed tracker identity cannot be reconstructed as the memory tracker" do
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Unknown managed tracker", workspace_base: "/managed/unknown-tracker", worker: managed_worker()})
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Unknown managed tracker",
+        workspace_base: "/managed/unknown-tracker",
+        worker: managed_worker()
+      })
+
     config = %{"tracker" => %{"kind" => "linear", "api_key" => "token", "project_slug" => "test-project"}}
     {:ok, lane} = Lanes.create(%{slug: "unknown-managed-tracker", execution_profile_id: profile.id, config: config})
     Repo.update!(Ecto.Changeset.change(Lanes.current_version(lane), front_matter: "tracker: {}"))
@@ -366,7 +460,11 @@ defmodule SymphonyElixir.LaneStoreTest do
     config = %{"tracker" => %{"kind" => "memory"}}
     {:ok, lane} = Lanes.create(%{slug: "sanitized-worker", execution_profile_id: profile.id, config: config})
     legacy_config = Map.merge(config, %{"worker" => "broken", "workspace" => %{"root" => root}})
-    Repo.update!(Ecto.Changeset.change(Lanes.current_version(lane), front_matter: Workflow.encode_config(legacy_config)))
+
+    Repo.update!(
+      Ecto.Changeset.change(Lanes.current_version(lane), front_matter: Workflow.encode_config(legacy_config))
+    )
+
     Repo.update!(Ecto.Changeset.change(profile, repair_error: "legacy configuration requires repair"))
 
     replace_store([])
@@ -383,7 +481,15 @@ defmodule SymphonyElixir.LaneStoreTest do
   @tag :tmp_dir
   test "remediation: unknown startup worker ownership does not authorize a second lane at its root", %{tmp_dir: root} do
     {:ok, profile} = ExecutionProfiles.create(%{name: "Unknown owner", workspace_base: root, worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "unknown-owner", execution_profile_id: profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "unknown-owner",
+        execution_profile_id: profile.id,
+        workspace_subdir: ".",
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     retained = Path.join(root, "retained")
     File.mkdir_p!(root)
     File.write!(retained, "keep")
@@ -392,18 +498,40 @@ defmodule SymphonyElixir.LaneStoreTest do
     replace_store([])
 
     assert {:error, {:lane_invalid, _}} = LaneStore.settings(lane.id)
-    {:ok, replacement} = ExecutionProfiles.create(%{name: "Apparent local replacement", workspace_base: root, worker: %{}})
-    assert {:error, [_ | _]} = Lanes.create(%{slug: "unknown-intruder", execution_profile_id: replacement.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, replacement} =
+      ExecutionProfiles.create(%{name: "Apparent local replacement", workspace_base: root, worker: %{}})
+
+    assert {:error, [_ | _]} =
+             Lanes.create(%{
+               slug: "unknown-intruder",
+               execution_profile_id: replacement.id,
+               workspace_subdir: ".",
+               config: %{"tracker" => %{"kind" => "memory"}}
+             })
+
     assert is_nil(Lanes.get_by_slug("unknown-intruder"))
     assert File.read!(retained) == "keep"
   end
 
   @tag :remediation
   @tag :tmp_dir
-  test "remediation: malformed startup location identity fails closed instead of permitting a profile switch", %{tmp_dir: root} do
-    {:ok, original_profile} = ExecutionProfiles.create(%{name: "Malformed owner", workspace_base: Path.join(root, "original"), worker: %{}})
-    {:ok, next_profile} = ExecutionProfiles.create(%{name: "Valid replacement", workspace_base: Path.join(root, "next"), worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "malformed-owner", execution_profile_id: original_profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+  test "remediation: malformed startup location identity fails closed instead of permitting a profile switch", %{
+    tmp_dir: root
+  } do
+    {:ok, original_profile} =
+      ExecutionProfiles.create(%{name: "Malformed owner", workspace_base: Path.join(root, "original"), worker: %{}})
+
+    {:ok, next_profile} =
+      ExecutionProfiles.create(%{name: "Valid replacement", workspace_base: Path.join(root, "next"), worker: %{}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "malformed-owner",
+        execution_profile_id: original_profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, settings} = LaneStore.settings(lane.id)
     File.mkdir_p!(settings.workspace.root)
     retained = Path.join(settings.workspace.root, "retained")
@@ -466,7 +594,9 @@ defmodule SymphonyElixir.LaneStoreTest do
     assert {:error, {:lane_invalid, _}} = LaneStore.reserve_dispatch(third.id)
     assert {:error, {:lane_invalid, _}} = LaneStore.reserve_dispatch(fourth.id)
 
-    assert {:error, errors} = ExecutionProfiles.update(fourth_profile, %{workspace_base: first_entry.settings.workspace.root})
+    assert {:error, errors} =
+             ExecutionProfiles.update(fourth_profile, %{workspace_base: first_entry.settings.workspace.root})
+
     assert Enum.any?(errors, &String.contains?(&1.message, "conflicts"))
     assert ExecutionProfiles.get(fourth_profile.id).workspace_base == fourth_profile.workspace_base
 
@@ -491,10 +621,33 @@ defmodule SymphonyElixir.LaneStoreTest do
     entries = LaneStore.list()
     occupied_root = ExecutionProfiles.get(first.execution_profile_id).workspace_base
 
-    assert {:ok, profile} = ExecutionProfiles.create(%{name: "Unlinked repair option", workspace_base: occupied_root, worker: %{}})
+    assert {:ok, profile} =
+             ExecutionProfiles.create(%{name: "Unlinked repair option", workspace_base: occupied_root, worker: %{}})
+
     assert ExecutionProfiles.get(profile.id)
     assert LaneStore.list() == entries
     refute Enum.any?(Lanes.list(), &(&1.execution_profile_id == profile.id))
+  end
+
+  test "startup refuses persisted enabled lanes whose tracker credentials are unavailable" do
+    previous_key = System.get_env("LINEAR_API_KEY")
+    System.delete_env("LINEAR_API_KEY")
+    on_exit(fn -> TestSupport.restore_env("LINEAR_API_KEY", previous_key) end)
+
+    {:ok, lane} =
+      create_lane(%{
+        slug: "missing-credential",
+        front_matter: "tracker:\n  kind: linear\n  api_key: $LINEAR_API_KEY\n  project_slug: offline"
+      })
+
+    Repo.update!(Ecto.Changeset.change(lane, enabled: true))
+    replace_store([])
+
+    assert {:ok, %Entry{enabled: false, settings: nil, error: error}} = LaneStore.lookup(lane.id)
+    assert error =~ "missing_linear_api_token"
+    assert {:error, {:lane_invalid, ^error}} = LaneStore.validate(lane.id)
+    refute Lanes.get!(lane.id).enabled
+    refute SymphonyElixir.LaneSupervisor.running?(lane.id)
   end
 
   test "scheduler reads stay available while a DB write is blocked" do
@@ -547,15 +700,25 @@ defmodule SymphonyElixir.LaneStoreTest do
 
   @tag :tmp_dir
   test "cyclic profile locations remain visible for repair without authorizing deletion", %{tmp_dir: root} do
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Broken location", workspace_base: Path.join(root, "original"), worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "cyclic-location", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, profile} =
+      ExecutionProfiles.create(%{name: "Broken location", workspace_base: Path.join(root, "original"), worker: %{}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "cyclic-location",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     loop = Path.join(root, "loop")
     :ok = File.ln_s("loop", loop)
     Repo.update!(Ecto.Changeset.change(profile, workspace_base: loop))
 
     replace_store([])
 
-    assert {:ok, %Entry{settings: nil, enabled: false, profile_name: "Broken location", workspace_base: ^loop}} = LaneStore.lookup(lane.id)
+    assert {:ok, %Entry{settings: nil, enabled: false, profile_name: "Broken location", workspace_base: ^loop}} =
+             LaneStore.lookup(lane.id)
+
     assert {:error, {:lane_invalid, _}} = LaneStore.settings(lane.id)
     assert {:error, [%{path: "lane"}]} = Lanes.delete(lane)
     assert is_nil(Lanes.get!(lane.id).deleted_at)
@@ -565,7 +728,13 @@ defmodule SymphonyElixir.LaneStoreTest do
   test "a repair-marked profile with unknown legacy infrastructure stays visible but cannot be dispatched or discarded" do
     {:ok, lane} = create_lane(%{slug: "profile-repair", front_matter: "tracker:\n  kind: memory"})
     profile = ExecutionProfiles.get(lane.execution_profile_id)
-    Repo.update!(Ecto.Changeset.change(Lanes.current_version(lane), front_matter: "tracker:\n  kind: memory\nworker: [unknown-target]"))
+
+    Repo.update!(
+      Ecto.Changeset.change(Lanes.current_version(lane),
+        front_matter: "tracker:\n  kind: memory\nworker: [unknown-target]"
+      )
+    )
+
     Repo.update!(Ecto.Changeset.change(profile, repair_error: "legacy infrastructure could not be recovered"))
     replace_store([])
 
@@ -603,7 +772,10 @@ defmodule SymphonyElixir.LaneStoreTest do
     lanes =
       Enum.map(["first", "second", "third", "fourth"], fn slug ->
         workspace_root = Path.join(root, slug)
-        front_matter = Workflow.encode_config(%{"tracker" => %{"kind" => "memory"}, "workspace" => %{"root" => workspace_root}})
+
+        front_matter =
+          Workflow.encode_config(%{"tracker" => %{"kind" => "memory"}, "workspace" => %{"root" => workspace_root}})
+
         {:ok, lane} = create_lane(%{slug: slug, workspace_subdir: ".", front_matter: front_matter})
         lane
       end)
@@ -649,7 +821,9 @@ defmodule SymphonyElixir.LaneStoreTest do
     {:ok, profile} =
       ExecutionProfiles.create(%{
         name: "Test #{Map.fetch!(attrs, :slug)} #{System.unique_integer([:positive])}",
-        workspace_base: profile_attrs["workspace_base"] || Path.join(System.tmp_dir!(), "symphony-workspaces-#{System.unique_integer([:positive])}"),
+        workspace_base:
+          profile_attrs["workspace_base"] ||
+            Path.join(System.tmp_dir!(), "symphony-workspaces-#{System.unique_integer([:positive])}"),
         worker: profile_attrs["worker"] || %{}
       })
 

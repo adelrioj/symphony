@@ -12,7 +12,8 @@ defmodule SymphonyElixir.OperatorActions do
   def stop(orchestrator, issue_id) when is_binary(issue_id), do: call(orchestrator, {:operator_stop, issue_id})
 
   @spec retry_now(GenServer.server(), String.t()) :: :ok | {:error, :not_retrying | :unavailable}
-  def retry_now(orchestrator, issue_id) when is_binary(issue_id), do: call(orchestrator, {:operator_retry_now, issue_id})
+  def retry_now(orchestrator, issue_id) when is_binary(issue_id),
+    do: call(orchestrator, {:operator_retry_now, issue_id})
 
   @spec resume(GenServer.server(), String.t(), String.t() | nil) :: :ok | {:error, term()}
   def resume(orchestrator, issue_id, message) when is_binary(issue_id) do

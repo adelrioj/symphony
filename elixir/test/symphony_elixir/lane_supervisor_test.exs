@@ -48,7 +48,14 @@ defmodule SymphonyElixir.LaneSupervisorTest do
     assert %{} = Orchestrator.snapshot(orchestrator, 1000)
     eventually(fn -> match?({:ok, %{runtime: %{started_at: %DateTime{}}}}, LaneStore.lookup(lane.id)) end)
     attempt_id = "disable-#{System.unique_integer([:positive])}"
-    Runs.started(%{lane_id: lane.id, issue: %Issue{id: "issue-disable", identifier: "TEAM-1", state: "Todo"}, attempt_id: attempt_id, owner_pid: orchestrator})
+
+    Runs.started(%{
+      lane_id: lane.id,
+      issue: %Issue{id: "issue-disable", identifier: "TEAM-1", state: "Todo"},
+      attempt_id: attempt_id,
+      owner_pid: orchestrator
+    })
+
     assert %{status: "running"} = Runs.get_by_attempt(attempt_id)
     assert :ok = Lanes.disable(lane.id, "explicit stop")
     refute LaneSupervisor.running?(lane.id)
@@ -68,7 +75,9 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "invalid tracker scope disables the lane with actionable provider reasons" do
-    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "invalid-scope", front_matter: @linear, enabled: true})
+    {:ok, lane} =
+      TestSupport.create_lane_from_front_matter(%{slug: "invalid-scope", front_matter: @linear, enabled: true})
+
     assert_receive {:preflight, worker}, 1000
     finish_preflight(worker, {:ok, %{"data" => %{"teams" => %{"nodes" => []}}}})
     refute Lanes.get!(lane.id).enabled
@@ -79,7 +88,10 @@ defmodule SymphonyElixir.LaneSupervisorTest do
 
   test "raised and thrown preflight failures fail closed without poisoning later enable attempts" do
     owner = Process.whereis(LaneStore)
-    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "preflight-exceptions", front_matter: @linear, enabled: true})
+
+    {:ok, lane} =
+      TestSupport.create_lane_from_front_matter(%{slug: "preflight-exceptions", front_matter: @linear, enabled: true})
+
     assert_receive {:preflight, raising_worker}, 1000
     finish_preflight(raising_worker, {:raise, "credential refresh failed"})
     refute Lanes.get!(lane.id).enabled
@@ -109,7 +121,11 @@ defmodule SymphonyElixir.LaneSupervisorTest do
 
     try do
       assert {:ok, _} = Lanes.set_enabled(lane, true)
-      eventually(fn -> match?({:ok, %{enabled: false, error: error}} when is_binary(error), LaneStore.lookup(lane.id)) end)
+
+      eventually(fn ->
+        match?({:ok, %{enabled: false, error: error}} when is_binary(error), LaneStore.lookup(lane.id))
+      end)
+
       refute Lanes.get!(lane.id).enabled
       assert {:ok, %{error: message}} = LaneStore.lookup(lane.id)
       assert message =~ "runtime failed to start"
@@ -127,7 +143,9 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "a stale failing preflight cannot disable a newer valid version" do
-    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "stale-failure", front_matter: @linear, enabled: true})
+    {:ok, lane} =
+      TestSupport.create_lane_from_front_matter(%{slug: "stale-failure", front_matter: @linear, enabled: true})
+
     assert_receive {:preflight, old_worker}, 1000
     {:ok, current} = TestSupport.update_lane_from_front_matter(lane, %{front_matter: @memory, prompt: "new version"})
     eventually(fn -> LaneSupervisor.running?(lane.id) end)
@@ -139,7 +157,9 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "pending tracker failure survives metadata and prompt saves on an already running lane" do
-    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "pending-save", front_matter: @memory, enabled: true})
+    {:ok, lane} =
+      TestSupport.create_lane_from_front_matter(%{slug: "pending-save", front_matter: @memory, enabled: true})
+
     eventually(fn -> LaneSupervisor.running?(lane.id) end)
     original_runtime = LaneRegistry.whereis(lane.id, :runtime)
     {:ok, _} = TestSupport.update_lane_from_front_matter(lane, %{front_matter: @linear})
@@ -169,7 +189,9 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "queued explicit stop during runtime startup does not consume crash allowance after reenable" do
-    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "queued-stop", front_matter: @linear, enabled: true})
+    {:ok, lane} =
+      TestSupport.create_lane_from_front_matter(%{slug: "queued-stop", front_matter: @linear, enabled: true})
+
     assert_receive {:preflight, worker}, 1000
     :ok = :sys.suspend(LaneSupervisor)
 
@@ -194,7 +216,9 @@ defmodule SymphonyElixir.LaneSupervisorTest do
     end)
 
     refute LaneSupervisor.running?(lane.id)
-    assert {:ok, %{enabled: false, runtime: %{started_at: nil, restarts: 0, last_crash: nil}}} = LaneStore.lookup(lane.id)
+
+    assert {:ok, %{enabled: false, runtime: %{started_at: nil, restarts: 0, last_crash: nil}}} =
+             LaneStore.lookup(lane.id)
 
     {:ok, _} = Lanes.set_enabled(lane, true)
     assert_receive {:preflight, replacement_worker}, 1000
@@ -207,7 +231,9 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "normal runtime shutdown clears health without counting a crash" do
-    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "normal-stop", front_matter: @memory, enabled: true})
+    {:ok, lane} =
+      TestSupport.create_lane_from_front_matter(%{slug: "normal-stop", front_matter: @memory, enabled: true})
+
     eventually(fn -> match?({:ok, %{runtime: %{started_at: %DateTime{}}}}, LaneStore.lookup(lane.id)) end)
     runtime = LaneRegistry.whereis(lane.id, :runtime)
     assert :ok = Supervisor.stop(runtime, :normal)
@@ -217,7 +243,9 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "a stale successful preflight cannot start a newer generation still awaiting preflight" do
-    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "stale-success", front_matter: @linear, enabled: true})
+    {:ok, lane} =
+      TestSupport.create_lane_from_front_matter(%{slug: "stale-success", front_matter: @linear, enabled: true})
+
     assert_receive {:preflight, old_worker}, 1000
     {:ok, _} = Lanes.update(lane, %{prompt: "second"})
     assert_receive {:preflight, new_worker}, 1000
@@ -278,7 +306,13 @@ defmodule SymphonyElixir.LaneSupervisorTest do
     eventually(fn -> LaneSupervisor.running?(lane.id) end)
     old_runtime = LaneRegistry.whereis(lane.id, :runtime)
     attempt_id = "orphan-#{System.unique_integer([:positive])}"
-    Runs.started(%{lane_id: lane.id, issue: %Issue{id: "issue-orphan", identifier: "TEAM-2", state: "Todo"}, attempt_id: attempt_id})
+
+    Runs.started(%{
+      lane_id: lane.id,
+      issue: %Issue{id: "issue-orphan", identifier: "TEAM-2", state: "Todo"},
+      attempt_id: attempt_id
+    })
+
     assert %{status: "running"} = Runs.get_by_attempt(attempt_id)
     assert {:ok, _} = TestSupport.update_lane_from_front_matter(lane, %{front_matter: @linear})
     assert_receive {:preflight, old_worker}, 1000
@@ -303,7 +337,9 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   test "disabling a crashed lane fences its queued restart" do
-    {:ok, lane} = TestSupport.create_lane_from_front_matter(%{slug: "cancel-restart", front_matter: @memory, enabled: true})
+    {:ok, lane} =
+      TestSupport.create_lane_from_front_matter(%{slug: "cancel-restart", front_matter: @memory, enabled: true})
+
     eventually(fn -> LaneSupervisor.running?(lane.id) end)
     runtime = LaneRegistry.whereis(lane.id, :runtime)
     monitor = Process.monitor(runtime)
@@ -402,7 +438,8 @@ defmodule SymphonyElixir.LaneSupervisorTest do
         handler,
         [:symphony_elixir, :repo, :query],
         fn _, _, metadata, _ ->
-          if self() != old_store and self() == Process.whereis(LaneStore) and metadata.params == [barrier_lane.current_version_id, barrier_lane.id] do
+          if self() != old_store and self() == Process.whereis(LaneStore) and
+               metadata.params == [barrier_lane.current_version_id, barrier_lane.id] do
             send(parent, {:restoring_remaining_lane, self()})
 
             receive do
@@ -524,7 +561,14 @@ defmodule SymphonyElixir.LaneSupervisorTest do
   end
 
   defp success do
-    {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"key" => "TEAM", "states" => %{"nodes" => [%{"name" => "Todo"}, %{"name" => "Done"}]}}]}}}}
+    {:ok,
+     %{
+       "data" => %{
+         "teams" => %{
+           "nodes" => [%{"key" => "TEAM", "states" => %{"nodes" => [%{"name" => "Todo"}, %{"name" => "Done"}]}}]
+         }
+       }
+     }}
   end
 
   defp finish_preflight(worker, result) do

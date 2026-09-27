@@ -19,7 +19,9 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     @impl true
     def handle_call(:snapshot, _from, state), do: {:reply, state.snapshot, state}
     def handle_call({:operator_blocked?, _issue_id}, _from, state), do: {:reply, state.blocked?, state}
-    def handle_call(:request_refresh, _from, state), do: {:reply, %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: []}, state}
+
+    def handle_call(:request_refresh, _from, state),
+      do: {:reply, %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: []}, state}
 
     def handle_call(message, _from, state) do
       send(state.parent, {:orchestrator_call, message})
@@ -28,21 +30,41 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
   end
 
   setup context do
-    {:ok, fake} = FakeOrchestrator.start_link(%{snapshot: Map.get(context, :snapshot, snapshot()), parent: self(), reply: Map.get(context, :reply, :ok), blocked?: Map.get(context, :blocked?, true)})
+    {:ok, fake} =
+      FakeOrchestrator.start_link(%{
+        snapshot: Map.get(context, :snapshot, snapshot()),
+        parent: self(),
+        reply: Map.get(context, :reply, :ok),
+        blocked?: Map.get(context, :blocked?, true)
+      })
+
     previous = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
-    Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, Keyword.merge(previous, server: false, secret_key_base: String.duplicate("s", 64), orchestrator: fake))
+
+    Application.put_env(
+      :symphony_elixir,
+      SymphonyElixirWeb.Endpoint,
+      Keyword.merge(previous, server: false, secret_key_base: String.duplicate("s", 64), orchestrator: fake)
+    )
+
     on_exit(fn -> Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous) end)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
 
     {:ok, profile} =
-      ExecutionProfiles.create(%{name: "Console #{System.unique_integer([:positive])}", workspace_base: Path.join(System.tmp_dir!(), "console-#{System.unique_integer([:positive])}"), worker: %{}})
+      ExecutionProfiles.create(%{
+        name: "Console #{System.unique_integer([:positive])}",
+        workspace_base: Path.join(System.tmp_dir!(), "console-#{System.unique_integer([:positive])}"),
+        worker: %{}
+      })
 
     {:ok, lane} =
       Lanes.create(%{
         slug: "ops",
         name: "Ops",
         execution_profile_id: profile.id,
-        config: %{"tracker" => %{"kind" => "memory", "active_states" => ["Todo", "In Progress"]}, "agent" => %{"max_concurrent_agents" => 2}}
+        config: %{
+          "tracker" => %{"kind" => "memory", "active_states" => ["Todo", "In Progress"]},
+          "agent" => %{"max_concurrent_agents" => 2}
+        }
       })
 
     {:ok, entry} = LaneStore.lookup(lane.id)
@@ -183,7 +205,15 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
   test "finished rows show run status and the panel labels the stored state", %{conn: conn, lane: lane} do
     issue = %Issue{id: "old-2", identifier: "OPS-7", title: "Shipped last week", state: "In Progress"}
     :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "old-2-att", attempt: 1})
-    :ok = Runs.event("old-2-att", %{event: :usage}, %{input_tokens: 5_000_000, output_tokens: 2_600, total_tokens: 5_002_600}, 3)
+
+    :ok =
+      Runs.event(
+        "old-2-att",
+        %{event: :usage},
+        %{input_tokens: 5_000_000, output_tokens: 2_600, total_tokens: 5_002_600},
+        3
+      )
+
     :ok = Runs.finished("old-2-att", "done")
     :ok = Runs.flush()
 
@@ -343,7 +373,11 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
   end
 
   test "a lane without another active state cannot resume", %{conn: conn, lane: lane} do
-    {:ok, _} = Lanes.update(lane, %{config: %{"tracker" => %{"kind" => "memory", "active_states" => ["Blocked / Needs Attention"]}}})
+    {:ok, _} =
+      Lanes.update(lane, %{
+        config: %{"tracker" => %{"kind" => "memory", "active_states" => ["Blocked / Needs Attention"]}}
+      })
+
     {:ok, entry} = LaneStore.lookup(lane.id)
     :ok = LaneStore.put_entry(%{entry | enabled: true})
     {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Ablk-1")

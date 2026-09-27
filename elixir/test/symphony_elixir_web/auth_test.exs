@@ -13,7 +13,13 @@ defmodule SymphonyElixirWeb.AuthTest do
 
   setup do
     original = Application.get_env(:symphony_elixir, @endpoint, [])
-    Application.put_env(:symphony_elixir, @endpoint, Keyword.merge(original, server: false, secret_key_base: Config.operator_session_secret()))
+
+    Application.put_env(
+      :symphony_elixir,
+      @endpoint,
+      Keyword.merge(original, server: false, secret_key_base: Config.operator_session_secret())
+    )
+
     on_exit(fn -> Application.put_env(:symphony_elixir, @endpoint, original) end)
     start_supervised!({@endpoint, []})
     :ok
@@ -29,7 +35,13 @@ defmodule SymphonyElixirWeb.AuthTest do
   end
 
   test "all API routes including method and path fallbacks require authentication" do
-    for path <- ["/api/v1/state", "/api/v1/lanes", "/api/v1/execution-profiles", "/api/v1/refresh", "/api/v1/unknown/deeper"] do
+    for path <- [
+          "/api/v1/state",
+          "/api/v1/lanes",
+          "/api/v1/execution-profiles",
+          "/api/v1/refresh",
+          "/api/v1/unknown/deeper"
+        ] do
       assert %{"error" => %{"code" => "unauthorized"}} = json_response(get(build_conn(), path), 401)
       assert %{"error" => %{"code" => "unauthorized"}} = json_response(post(build_conn(), path, %{}), 401)
     end
@@ -62,7 +74,9 @@ defmodule SymphonyElixirWeb.AuthTest do
     assert html_response(post(conn, "/login", %{"_csrf_token" => csrf}), 400) =~ "Token required"
 
     {conn, csrf} = login_form()
-    assert html_response(post(conn, "/login", %{"_csrf_token" => csrf, "token" => ["test-token"]}), 400) =~ "Token required"
+
+    assert html_response(post(conn, "/login", %{"_csrf_token" => csrf, "token" => ["test-token"]}), 400) =~
+             "Token required"
 
     {conn, csrf} = login_form()
     logged_in = post(conn, "/login", %{"token" => "test-token", "_csrf_token" => csrf})
@@ -76,7 +90,12 @@ defmodule SymphonyElixirWeb.AuthTest do
     {conn, csrf} = login_form()
     logged_in = post(conn, "/login", %{"token" => "test-token", "_csrf_token" => csrf})
 
-    {:ok, profile} = ExecutionProfiles.create(%{name: "CSRF profile", workspace_base: Path.join(System.tmp_dir!(), "csrf-profile"), worker: %{}})
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "CSRF profile",
+        workspace_base: Path.join(System.tmp_dir!(), "csrf-profile"),
+        worker: %{}
+      })
 
     attrs = %{
       "slug" => "csrf-lane",
@@ -87,7 +106,10 @@ defmodule SymphonyElixirWeb.AuthTest do
     }
 
     cookie_conn = logged_in |> recycle() |> put_private(:plug_skip_csrf_protection, false)
-    assert %{"error" => %{"code" => "invalid_csrf_token"}} = json_response(post(cookie_conn, "/api/v1/lanes", attrs), 403)
+
+    assert %{"error" => %{"code" => "invalid_csrf_token"}} =
+             json_response(post(cookie_conn, "/api/v1/lanes", attrs), 403)
+
     refute SymphonyElixir.Lanes.get_by_slug("csrf-lane")
 
     cookie_conn = logged_in |> recycle() |> put_private(:plug_skip_csrf_protection, false)
@@ -95,10 +117,17 @@ defmodule SymphonyElixirWeb.AuthTest do
     cookie_conn = put_req_header(cookie_conn, "authorization", "Bearer wrong")
     assert json_response(post(cookie_conn, "/api/v1/lanes", attrs), 403)
 
-    cookie_conn = logged_in |> recycle() |> put_private(:plug_skip_csrf_protection, false) |> put_req_header("x-csrf-token", csrf)
+    cookie_conn =
+      logged_in |> recycle() |> put_private(:plug_skip_csrf_protection, false) |> put_req_header("x-csrf-token", csrf)
+
     assert %{"slug" => "csrf-lane"} = json_response(post(cookie_conn, "/api/v1/lanes", attrs), 201)
 
-    bearer_conn = logged_in |> recycle() |> put_private(:plug_skip_csrf_protection, false) |> put_req_header("authorization", "Bearer test-token")
+    bearer_conn =
+      logged_in
+      |> recycle()
+      |> put_private(:plug_skip_csrf_protection, false)
+      |> put_req_header("authorization", "Bearer test-token")
+
     assert response(delete(bearer_conn, "/api/v1/lanes/csrf-lane"), 204) == ""
   end
 
@@ -126,7 +155,9 @@ defmodule SymphonyElixirWeb.AuthTest do
     forged =
       Plug.Test.conn(:get, "/")
       |> Map.put(:secret_key_base, String.duplicate("s", 64))
-      |> Plug.Session.call(Plug.Session.init(store: :cookie, key: "_symphony_elixir_key", signing_salt: "symphony-session"))
+      |> Plug.Session.call(
+        Plug.Session.init(store: :cookie, key: "_symphony_elixir_key", signing_salt: "symphony-session")
+      )
       |> fetch_session()
       |> put_session(:operator, true)
       |> send_resp(200, "")
@@ -152,7 +183,10 @@ defmodule SymphonyElixirWeb.AuthTest do
 
   defp login_form do
     conn = get(secure_conn(), "/login")
-    [csrf] = conn |> html_response(200) |> Floki.parse_document!() |> Floki.attribute("input[name=_csrf_token]", "value")
+
+    [csrf] =
+      conn |> html_response(200) |> Floki.parse_document!() |> Floki.attribute("input[name=_csrf_token]", "value")
+
     {conn |> recycle() |> put_private(:plug_skip_csrf_protection, false), csrf}
   end
 end

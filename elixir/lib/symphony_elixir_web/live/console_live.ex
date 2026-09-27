@@ -42,7 +42,10 @@ defmodule SymphonyElixirWeb.ConsoleLive do
     %{entries: entries, nav: nav} = socket.assigns
 
     refreshed =
-      for entry <- entries, is_nil(nav.lane) or entry.slug == nav.lane, match?({:ok, _}, Presenter.refresh_payload(Presenter.orchestrator_for(entry))), do: entry
+      for entry <- entries,
+          is_nil(nav.lane) or entry.slug == nav.lane,
+          match?({:ok, _}, Presenter.refresh_payload(Presenter.orchestrator_for(entry))),
+          do: entry
 
     socket =
       if refreshed == [],
@@ -195,10 +198,27 @@ defmodule SymphonyElixirWeb.ConsoleLive do
   defp load(socket) do
     %{nav: nav} = socket.assigns
     entries = LaneStore.list()
-    views = Enum.map(entries, &%{entry: &1, payload: Presenter.lane_payload(&1, @snapshot_timeout_ms), runs: Runs.list_for_lane(&1.lane_id, @history_limit)})
+
+    views =
+      Enum.map(
+        entries,
+        &%{
+          entry: &1,
+          payload: Presenter.lane_payload(&1, @snapshot_timeout_ms),
+          runs: Runs.list_for_lane(&1.lane_id, @history_limit)
+        }
+      )
+
     tickets = Console.tickets(views)
     scoped = Enum.filter(entries, &(is_nil(nav.lane) or &1.slug == nav.lane))
-    visible = Enum.filter(tickets, &((is_nil(nav.lane) or &1.lane == nav.lane) and (not nav.attention or (not &1.history and &1.status == "blocked"))))
+
+    visible =
+      Enum.filter(
+        tickets,
+        &((is_nil(nav.lane) or &1.lane == nav.lane) and
+            (not nav.attention or (not &1.history and &1.status == "blocked")))
+      )
+
     ticket = Enum.find(tickets, &(&1.key == nav.selected))
 
     assign(socket,

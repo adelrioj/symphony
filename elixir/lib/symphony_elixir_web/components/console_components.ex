@@ -12,7 +12,12 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
 
     query =
       Enum.reject(
-        [lane: nav.lane, group: if(nav.group in [:tracker, "tracker"], do: "tracker"), attention: if(nav.attention, do: "1"), ticket: nav.selected],
+        [
+          lane: nav.lane,
+          group: if(nav.group in [:tracker, "tracker"], do: "tracker"),
+          attention: if(nav.attention, do: "1"),
+          ticket: nav.selected
+        ],
         fn {_key, value} -> is_nil(value) end
       )
 
@@ -140,7 +145,8 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
 
   defp backend(assigns), do: ~H(<span class={"console-backend console-backend--#{@name}"}>{@name}</span>)
 
-  defp count(tickets, slug, status), do: Enum.count(tickets, &(&1.lane == slug and not &1.history and &1.status == status))
+  defp count(tickets, slug, status),
+    do: Enum.count(tickets, &(&1.lane == slug and not &1.history and &1.status == status))
 
   defp lane_health(entry, tickets) do
     cond do

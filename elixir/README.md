@@ -223,6 +223,11 @@ existing slug while selecting a new dedicated profile and preserving enabled sta
 profile name is printed as an import warning. These commands open only the database, not schedulers.
 They are offline tools: importing in another process while serve runs is not applied live until
 restart; use the UI/API instead.
+Disabled imports validate tracker scope, provider configuration, and selected backend commands
+without requiring tracker credentials or `SYMPHONY_OPERATOR_TOKEN`. Credential references such as
+`$LINEAR_API_KEY` remain raw in SQLite and exports; imports do not substitute a secret into the saved
+workflow. Enabling a lane, editing or reimporting an already enabled lane, and runtime startup still
+require valid resolved tracker credentials. A disabled import is not a runtime-readiness check.
 For import, UI creation, and API create/update, lane slugs must match `^[a-z][a-z0-9-]{1,40}$`.
 The exact slug `new` is reserved for the creation page at `/lanes/new`; use an ordinary slug such as
 `main` or `new-work`. A rejected slug produces a field error without saving a lane or version.
@@ -460,6 +465,113 @@ rebuilds accepted identities from SQLite before restarting enabled lanes. A comp
 remains fenced; rejected identity edits never reach the database and cannot become accepted
 merely because the store restarted.
 
+#### Personal Codex credentials
+
+An optional `worker.environment.codex_credentials` map coordinates one personal Codex
+credential across Features Workstations. Omit it to retain existing behavior. It is
+not valid for Kubernetes. These are operator-owned references, not deployable defaults:
+
+```yaml
+codex_credentials:
+  credential_id: features-personal-codex
+  secret: projects/123456789/secrets/features-codex
+  control_bucket: example-codex-control
+  control_object: features/authority.json
+```
+
+All four values are required when the map is present; extra keys, version aliases,
+project-ID secret names, and unsafe object paths are rejected. The secret uses its
+canonical **numeric project number**. All four references participate in captured
+configuration and reload identity. Provider preflight verifies authoritative config
+environment `SYMPHONY_PROFILE=features`, `SYMPHONY_CODEX_ENABLED=1`, and the matching
+`SYMPHONY_CODEX_SECRET`; per-instance overrides cannot contradict them.
+
+The controller reads current cloud authority before claiming, claims before resource
+creation, binds the observed Workstation UID, and persists and separately reads back
+the instance assignment and mode before starting it. SSH readiness alone is not agent
+admission: the worker management CLI must echo the exact assignment with `READY` and
+open admission. Token bytes are never copied into environment variables, resource
+annotations, SQLite, status responses, or controller logs.
+
+Controller-owned stop closes admission and checkpoints while SSH remains usable.
+Seal is capped at 30 seconds; combined credential work uses at most 45 seconds and
+half of the remaining operation deadline, retaining time for physical safety stop.
+A failed or timed-out checkpoint still attempts physical stop, but retains credential
+ownership and disk recovery state. A clean handoff requires the checkpoint candidate,
+correlated UID/original-attempt stop evidence, cloud head commit, durable exact resource
+disposition, and handoff acknowledgement. No workflow hook or elapsed timer substitutes
+for these checks. Missing cloud authority is never seeded from restored local state.
+
+Cleanup-only startup sets `recover` **before** start and does not admit an agent or
+replace uncertain retained cache. A recovery Entry may have a new scheduler attempt;
+its credential assignment retains the original owning attempt. Recover mode cannot
+be changed back to execute for the same unresolved claim. Reopen requires resolved
+prior disposition before acquiring a new claim. Direct, desired-absent, and resumed
+deletion paths enforce the same credential disposition checks.
+
+A definite busy credential before any resource, pending operation, or retained
+claim exists keeps only the local reservation for retry. Cancellation drops that
+reservation without changing cloud ownership. Once a claim or resource is retained,
+busy-shaped failures cannot take that unallocated shortcut.
+
+Environment snapshots expose only bounded credential stages (`claimed`, `bound`,
+`ready`, `checkpointed`, `committed`, `recovery_required`) and bounded reason codes.
+An unresolved credential remains occupied even if compute is physically stopped.
+Inspect the retained resource and current cloud authority through the managed
+operations path; do not delete its disk, restore an old head, or use an API-key
+fallback to unblock dispatch. Operator recovery, infrastructure changes, real login,
+refresh, model checks, image publication, and enabling a production lane require
+their separate approvals.
+
+The isolated operator boundary is:
+
+```text
+symphony credentials reconcile --data-root /state --workflow /private/Features.md
+  --action inspect|checkpoint|reseed-stop|reseed-commit
+  [--resource FULL_WORKSTATION_NAME]
+  [--expected-epoch INTEGER --expected-generation DECIMAL]
+  [--receipt-file /private/receipt.json]
+```
+
+`inspect` is the default and does not change provider metadata or cloud authority.
+All actions strictly verify the inherited operator-mode descriptor 200 on the real
+controller-volume lock. Environment flags alone cannot authorize them. The database
+must already exist; it is opened read-only without Repo, migrations, or schedulers.
+Every persisted lane, including deleted rows, must be disabled. The supplied workflow's
+parsed front matter and prompt must match the current persisted Features version;
+tracker/operator secrets are not resolved. An arbitrary file-mode workflow is not a
+maintenance installation.
+
+Every mutation requires the exact resource and current epoch/generation. `checkpoint`
+also requires a private, singly linked mode-0600 receipt in a mode-0700 directory.
+The receipt must match the original assignment and either an authoritative checkpoint
+candidate or the authenticated recovery worker checkpoint. The command never reads
+credential payloads. It rechecks provider stop evidence before the conditional handoff,
+persists the exact resource disposition, and acknowledges that durable handoff.
+An operator can explicitly reconcile quarantine this way; ordinary transitions cannot.
+
+`reseed-stop` inventories the configured cluster through the existing Workstations
+provider and proves all accounted former credential users stopped with settled operations.
+Unknown Features instances, credential-bearing retained instances without ownership,
+mismatched UIDs, or incomplete provider inventory block the operation. The safety stop
+does not checkpoint, release ownership, or authorize deletion. Inventory is limited to
+the validated provider scope; it does not certify unrelated projects or out-of-scope users.
+
+After the separately authorized operator publishes and verifies the new numeric version
+and performs the epoch+1 authority CAS, `reseed-commit` checks current physical evidence
+again. A bound original owner stays in the new authority's unacknowledged `last_handoff`,
+blocking new claims until resource disposition is durably read back. Resource metadata
+retains the original assignment epoch and attempt, with a separate `resolved_epoch`.
+Retry against the **current** generation after either a lost disposition write or a lost
+final acknowledgement-metadata write; do not upload another seed or invent a new owner.
+An epoch increase alone never resolves an old claim.
+
+Successful output is one JSON object (`ok`, plus `result` containing `action`, validated
+`authority`, allowlisted `resources`, and `admission: "maintenance"`), limited to 1 MiB.
+Failures exit nonzero with only `ok: false` and a bounded `reason` code. Output is
+diagnostic evidence, not a reusable user-authored physical-stop certificate. The engine
+never initializes absent authority, enables lanes, or restarts the controller.
+
 #### Recovery, capacity, retention, and hooks
 
 Startup performs provider preflight and complete owned-resource discovery before dispatch. Denied,
@@ -507,9 +619,16 @@ executables if routing to both backends, Docker/Compose, Testcontainers prerequi
 dependencies. Remote Claude also needs its configured Symphony MCP executable. Preserve the repo's
 unchanged setup/test commands. Readiness checks the selected backend, authenticated SSH, a mounted
 writable workspace, actual GNU `realpath -m --` behavior (including nonexistent path components),
-and a usable local Unix Docker endpoint with writable Docker data. Cleanup preparation does not
-require an agent executable. These probes are not independent proof of persistence or daemon
-isolation: qualify those properties in the infrastructure/image.
+and a usable local Unix Docker endpoint whose data directory is on a non-root mount. The SSH user
+does not need direct write access to Docker's internal storage. Qualify actual daemon writes,
+persistence, and isolation in the infrastructure/image. Cleanup preparation does not require an
+agent executable.
+
+Workstations can report `RUNNING` before SSH is ready. The connection waits for known pre-handshake
+transport failures within the original startup deadline. Authentication, host-key, and other
+permanent failures do not retry. Host trust remains pinned across attempts. The controller requires
+an external `kill` executable to terminate owned processes; a shell builtin is insufficient.
+Unconfirmed local cleanup returns `local_cleanup_unconfirmed`, not an ordinary readiness failure.
 
 Local macOS development tests that exercise managed path safety also need GNU coreutils `realpath`
 on `PATH` (for example, the coreutils `gnubin` directory ahead of the system tools). A BSD utility or
@@ -528,9 +647,11 @@ impersonation permission, and read-only project-wide Compute instance/disk inven
 Do not grant worker code those lifecycle or inventory credentials.
 
 Use distinct lifecycle and worker VM identities. Never attach the lifecycle service account to a
-worker VM or put its credentials in the image. Qualification must demonstrate **provider-enforced**
-isolation from usable cloud metadata credentials for privileged ticket code, or report the profile
-unavailable. An in-worker firewall controlled by root is not such an isolation boundary.
+worker VM or put its credentials in the image. The qualification harness defaults to
+**provider-enforced** denial of usable cloud metadata credentials, including for privileged
+ticket code. Its explicit development-only `scoped_gcp` policy instead verifies the narrow
+worker permissions described below. Neither policy is a production Config safety switch;
+an in-worker firewall controlled by root is not an isolation boundary.
 
 The qualified config must persist `/home`, with the checkout and private Docker data on persistent
 storage, `gcePd.reclaimPolicy: DELETE`, `archiveTimeout: 0s`, no normal or boost warm pool, no suspension
@@ -1220,6 +1341,15 @@ creates a replacement version instead of rewriting history.
 make all
 ```
 
+Both `make all` coverage runs require at least 80% coverage. The second run
+sets `SYMPHONY_COVER_REVIEW_MODULES=1` to include the review modules; it does
+not replace the first run.
+
+The formatter and strict Credo checks use a 120-column line limit. Run `mix format`
+before `mix lint`. Public function specs must be adjacent to the first declaration,
+including a bodyless declaration with default arguments. A later clause does not
+supply a missing declaration spec.
+
 The suite uses a shared in-memory SQLite database and runs serially. The test harness resets lane
 state between tests; `TestSupport.write_workflow_file!/2` updates the current test lane immediately,
 not a file watcher. Do not point tests at an installation's persistent data root.
@@ -1377,6 +1507,8 @@ production provider mode or an authorization bypass:
 | `authorized_node_uids` | Kubernetes only: explicit nonempty allowlist of dedicated node UIDs; unrelated workload sharing is rejected. |
 | `denied_identity` | Kubernetes only: deliberately denied, non-`system:` Kubernetes username that the authorized caller can impersonate for the real stop-rejection probe, without impersonated groups. |
 | `candidate_pins` | Kubernetes only, and **required** there: the operator's pinned candidate identity, exactly the map the candidate runner consumes. Its `deployment_id` selects the run's deployment id, and its `contract.worker_image` must equal `worker_image`. Absent it the Kubernetes path stays blocked on the unproven v1.0.1 cleanup ordering; Workstations runs must omit it. |
+| `metadata_policy` | Omitted or `deny_all`: unchanged strict metadata-token denial. `scoped_gcp`: Workstations-only development permission qualification, requiring the complete scope below. All other values fail before allocation. |
+| `permission_scope` | Required only for `scoped_gcp`; exact resource references, never secret values, executable paths, proxy settings or arbitrary request URLs. |
 
 The rest of the workflow must satisfy the normal provider configuration and credential
 requirements documented above. Its `hooks.after_create` must clone an authorized
@@ -1398,6 +1530,116 @@ Returned tokens are never printed. A denied connection/authorization is distinct
 an unexpected usable credential response; ambiguous successful responses fail the check.
 Workstations prerequisite reads also require Compute regional quota visibility and an
 installed `gcloud` CLI whose JSON version output can be observed.
+
+#### Scoped development permission qualification
+
+`permission_scope` has exactly these keys; unknown keys (including nested keys) fail:
+
+| Key | Required value |
+| --- | --- |
+| `service_account` | Expected worker VM service-account email. Independently checked against both current config and actual owned Compute VM API data. |
+| `allowed_secret_versions` | One to sixteen unique, full `projects/.../secrets/.../versions/<number>` references to harmless approved values; no `latest` aliases. |
+| `denied_secret_versions` | One to sixteen unique, disjoint, existing harmless secret versions independently readable by the verifier. |
+| `image_repository` | Object with exactly `name` (`projects/.../locations/.../repositories/...`) and `image` (digest-pinned `LOCATION-docker.pkg.dev/PROJECT/REPOSITORY/IMAGE@sha256:...`). Must match the actual worker config image. |
+| `denied_image_repository` | Same object shape, naming a different existing private repository and harmless digest-pinned manifest. The registry host, project and repository must match the resource name. |
+| `denied_backup_object` | Exactly `bucket`, `object` and decimal-string `generation`, referring to an existing harmless versioned object in a denied control bucket. |
+| `denied_workstation` | Full resource name of an existing unrelated scratch workstation in a different config. It is used only for reads, permission queries and an access-token denial probe, never lifecycle mutations. |
+| `iam_review_reference` | Absolute path on the trusted runner to a private, bounded JSON effective-IAM review (regular file, mode `0600` or stricter, at most 1 MiB). It is read only during explicit live preflight and never copied into public evidence. |
+
+The trusted runner requires Python 3 and a separately authorized, noninteractive verifier:
+`SYMPHONY_PERMISSION_VERIFIER_CONFIGURATION` selects its existing gcloud configuration and
+`SYMPHONY_PERMISSION_VERIFIER_SERVICE_ACCOUNT` selects its impersonated service account.
+The verifier account must differ from both the worker and controller lifecycle identities.
+Do not add ordinary backup or production-data permissions to the controller for this test.
+Verifier token output remains in process memory; no worker metadata token is written to disk,
+arguments, evidence, or logs. The verifier's own existing gcloud authentication remains an
+operator prerequisite, not a credential bootstrap performed by this harness.
+
+The private review is independent operator evidence, not an automatically inferred security
+approval. It must cover conditional, inherited, direct and group-derived bindings, custom-role
+expansion, all relevant identities, and forbidden capabilities outside the sampled resources.
+Its JSON protocol is:
+
+- `worker_service_account`, `verifier_service_account`: the exact identities above.
+- `scope_sha256`: SHA-256 of the complete scope encoded as sorted-key, compact JSON.
+- `reviewed_at`, `expires_at`: Unix seconds, a current review no older than 24 hours,
+  with expiry no later than 24 hours after review.
+- `compute_instances`: one to sixteen existing scratch Compute instance resource names
+  (`projects/.../zones/.../instances/...`) on which write permissions must be absent.
+- `service_accounts`: three to sixteen unique full `projects/.../serviceAccounts/<email>`
+  resources, including worker, controller and verifier and every additional identity found
+  by the effective-binding review.
+- `resource_fingerprints`: exact resource-name-to-SHA-256 map of current read responses,
+  encoded as sorted-key, compact JSON. Include the worker config, denied config and
+  workstation, both repositories, named Compute instances and service accounts, denied
+  bucket, each config's cluster, every secret parent, and the projects of those resources.
+- `forbidden_permissions`: the exact sorted `FORBIDDEN` list from the reviewed
+  `test/support/managed_environment_fixture/gcp_permission_probe.py`. This is the
+  diagnostic query set, not the complete capability boundary.
+- `effective_bindings`: exactly the same resource keys. Each value has `ancestry`
+  (nonempty resource-reference array), `bindings` (IAM role/member binding objects,
+  retaining any conditions), and `effective_permissions` (the worker's expanded effective
+  permission names on that resource). Only the fixed Artifact Registry Reader
+  permissions on the approved repository and Secret Accessor permissions on approved
+  secret parents are accepted. All other effective grants, including unknown/future
+  permission names, block preflight. A missing resource, expired review, unreadable
+  control or changed resource fingerprint also blocks preflight. The fixed reader
+  permissions follow the [published role](https://docs.cloud.google.com/iam/docs/roles-permissions/artifactregistry#artifactregistry.reader);
+  a role change requires a new source review.
+
+The verifier must independently collect these snapshots and evaluate IAM before authorizing
+a run. The harness verifies current resource existence, config identity and image, review
+coverage and hashes, reads **all** harmless controls with the independent verifier, and
+records only fingerprints and fixed permission-query recipes. It repeats those checks
+immediately before isolation and rejects changed receipts. This does not prove that an
+operator-authored IAM analysis is correct; independent review remains a mandatory gate.
+
+Worker probes run as the ordinary SSH user, `sudo -n` root, ordinary Docker and privileged
+host-network Docker. The digest-pinned worker image must already be loaded in each private
+Docker daemon and contain Python 3; `--pull=never` prevents an implicit mutable download.
+Each context must read every approved secret and the permitted manifest, match their
+independent fingerprints, and receive authenticated **403** on every denied secret,
+manifest, generation-pinned object and scratch Workstations gateway-token request.
+A 401, 404, redirect, timeout, malformed token/JSON, failed positive control, missing
+context or missing check is not authorization denial. AWS and Azure credentials remain
+forbidden. Host socket/credential-file and peer Docker/SSH isolation checks remain in place.
+HTTP status alone is insufficient. Secret Manager and Workstations require a structured
+IAM denial for the requested permission. Registry denials must identify download denial
+on the exact repository; Storage requires the documented access-denied reason.
+Malformed, unknown, billing, service, quota or authentication errors are inconclusive.
+Error bodies are bounded and classified only in memory, never emitted as evidence.
+
+Only fixed Google API hosts and validated resource-derived paths are used, with redirects,
+proxy discovery and retries disabled and bounded responses/deadlines. Access and identity
+tokens are used only in memory. Identity-token claims are a guest consistency check, not
+signature verification or a replacement for controller-side config/VM identity reads.
+The staged probe's SHA-256 enters evidence, but execution uses the trusted runner's reviewed
+bytes directly with Python `-I -S`, never checkout/user-site modules or an agent-editable
+repository fixture. Output contains only fixed check IDs, HTTP statuses, completion,
+expected identity and bounded fingerprints.
+
+Mutation denial uses service-specific `testIamPermissions` diagnostics on existing resources:
+Artifact Registry repositories, Workstations configs/workstation, Secret Manager
+secret parents, Compute instances, IAM service accounts and the denied Storage bucket.
+Project queries cover project-scoped create/policy and cluster capabilities; they do not
+replace resource-level queries or effective-IAM review. Workstation clusters have
+[no IAM query method](https://docs.cloud.google.com/workstations/docs/reference/rest/v1/projects.locations.workstationClusters):
+their current identities and inherited bindings are independently reviewed instead.
+Queries require HTTP 200 and an explicit
+`permissions` array containing no requested forbidden permission; errors and missing arrays
+are inconclusive. No production mutation is attempted.
+[Workstations config queries](https://docs.cloud.google.com/workstations/docs/reference/rest/v1/projects.locations.workstationClusters.workstationConfigs/testIamPermissions)
+can fail open or return an empty set for nonexistent resources: they are **diagnostics, not
+an authorization boundary**. See also the resource-specific
+[Compute](https://docs.cloud.google.com/compute/docs/reference/rest/v1/instances/testIamPermissions),
+[IAM](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/testIamPermissions)
+and [Storage](https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/testIamPermissions)
+methods; Storage uses GET query parameters rather than the other services' POST JSON.
+
+Local synthetic-transport tests and nonnetwork smoke are not live IAM qualification.
+Live permission qualification, image rebuilds and deployment remain blocked pending
+independent evidence and explicit authorization. Lifecycle checks, the final `qualified?`
+rule, runner fencing, five-worker/session budgets, cleanup and inventory are unchanged.
 
 The physical-fault helper protocol is `fault_driver --request <private-json-file>`.
 Its JSON contains `scenario` (`storage_deletion`, `node_disconnection`, or `all`),

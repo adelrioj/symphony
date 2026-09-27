@@ -69,18 +69,30 @@ defmodule SymphonyElixir.OperatorActionsTest do
 
   test "resume skips the blocked state and refuses when no other active state exists" do
     put_blocked_issue_in_tracker("op-blocked")
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", tracker_active_states: ["Blocked / Needs Attention", "In Progress"])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Blocked / Needs Attention", "In Progress"]
+    )
+
     assert :ok = OperatorActions.resume(:missing_orchestrator, "op-blocked", nil)
     assert_receive {:memory_tracker_state_update, "op-blocked", "In Progress"}
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", tracker_active_states: ["Blocked / Needs Attention"])
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Blocked / Needs Attention"]
+    )
+
     assert {:error, :no_active_state} = OperatorActions.resume(:missing_orchestrator, "op-blocked", nil)
   end
 
   test "resume stops at the first tracker failure" do
     put_blocked_issue_in_tracker("op-blocked")
     Memory.fail(:create_comment)
-    assert {:error, {:memory_tracker_failed, :create_comment}} = OperatorActions.resume(:missing_orchestrator, "op-blocked", "hello")
+
+    assert {:error, {:memory_tracker_failed, :create_comment}} =
+             OperatorActions.resume(:missing_orchestrator, "op-blocked", "hello")
+
     refute_receive {:memory_tracker_state_update, _, _}, 50
   end
 

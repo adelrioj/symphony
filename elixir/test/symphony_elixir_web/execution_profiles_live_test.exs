@@ -121,7 +121,9 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
     assert html =~ "$REDACTED"
     refute html =~ "literal-secret"
     redacted_view |> form("#profile-form", profile: %{name: "Modes renamed"}) |> render_submit()
-    assert get_in(ExecutionProfiles.get(profile.id).worker, ["environment", "provider", "credential"]) == "literal-secret"
+
+    assert get_in(ExecutionProfiles.get(profile.id).worker, ["environment", "provider", "credential"]) ==
+             "literal-secret"
   end
 
   test "quoted managed durations display seconds without changing raw values on name edits", %{conn: conn} do
@@ -141,7 +143,15 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
 
   test "referenced profile deletion is rejected without leaving the detail page or changing data", %{conn: conn} do
     {:ok, profile} = profile("Referenced")
-    {:ok, lane} = Lanes.create(%{slug: "profile-delete-lane", execution_profile_id: profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "profile-delete-lane",
+        execution_profile_id: profile.id,
+        workspace_subdir: ".",
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, view, _html} = live(conn, "/execution-profiles/#{profile.id}")
 
     view |> element("button[phx-click='prepare_delete']") |> render_click()
@@ -156,7 +166,15 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
 
   test "an error on a referenced profile keeps the affected lane visible", %{conn: conn} do
     {:ok, profile} = profile("Shared")
-    {:ok, _lane} = Lanes.create(%{slug: "affected-profile-lane", execution_profile_id: profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, _lane} =
+      Lanes.create(%{
+        slug: "affected-profile-lane",
+        execution_profile_id: profile.id,
+        workspace_subdir: ".",
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, duplicate} = profile("Duplicate")
     {:ok, view, _html} = live(conn, "/execution-profiles/#{profile.id}/edit")
 
@@ -169,7 +187,12 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
   end
 
   test "unrelated name edits preserve unexposed nested worker maps", %{conn: conn} do
-    worker = %{"ssh_hosts" => ["worker-1"], "max_concurrent_agents_per_host" => 2, "extension" => %{"nested" => [true, nil, 7]}}
+    worker = %{
+      "ssh_hosts" => ["worker-1"],
+      "max_concurrent_agents_per_host" => 2,
+      "extension" => %{"nested" => [true, nil, 7]}
+    }
+
     {:ok, profile} = profile("Original", worker)
     {:ok, view, _html} = live(conn, "/execution-profiles/#{profile.id}/edit")
 
@@ -198,28 +221,60 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
     assert has_element?(view, "#execution-profile-#{local.id} td:nth-child(3)", "Local")
     assert has_element?(view, "#execution-profile-#{ssh.id} td:nth-child(3)", "Static SSH")
     assert has_element?(view, "#execution-profile-#{managed.id} td:nth-child(3)", "Existing managed environment")
-    assert view |> element("#execution-profile-#{local.id} .numeric") |> render() |> Floki.parse_fragment!() |> Floki.text() == "0"
 
-    {:ok, lane} = Lanes.create(%{slug: "listed-profile-lane", execution_profile_id: local.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    assert view
+           |> element("#execution-profile-#{local.id} .numeric")
+           |> render()
+           |> Floki.parse_fragment!()
+           |> Floki.text() == "0"
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "listed-profile-lane",
+        execution_profile_id: local.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, local} = ExecutionProfiles.update(local, %{name: "Renamed listed local", description: "Updated externally"})
 
     assert has_element?(view, "#execution-profile-#{local.id} a", "Renamed listed local")
     assert has_element?(view, "#execution-profile-#{local.id}", "Updated externally")
-    assert view |> element("#execution-profile-#{local.id} .numeric") |> render() |> Floki.parse_fragment!() |> Floki.text() == "1"
+
+    assert view
+           |> element("#execution-profile-#{local.id} .numeric")
+           |> render()
+           |> Floki.parse_fragment!()
+           |> Floki.text() == "1"
+
     assert :ok = ExecutionProfiles.delete(ssh)
     refute has_element?(view, "#execution-profile-#{ssh.id}")
 
-    [href] = view |> element("#execution-profile-#{local.id} a") |> render() |> Floki.parse_fragment!() |> Floki.attribute("href")
+    [href] =
+      view
+      |> element("#execution-profile-#{local.id} a")
+      |> render()
+      |> Floki.parse_fragment!()
+      |> Floki.attribute("href")
+
     {:ok, detail, _html} = live(conn, href)
     assert has_element?(detail, "h1", "Renamed listed local")
     assert has_element?(detail, "#profile-lanes a[href='/lanes/#{lane.slug}']")
   end
 
   @tag :remediation
-  test "remediation: unrelated profile notifications preserve dirty input while refreshing linked-lane impact", %{conn: conn} do
+  test "remediation: unrelated profile notifications preserve dirty input while refreshing linked-lane impact", %{
+    conn: conn
+  } do
     {:ok, edited} = profile("Editing")
     {:ok, destination} = profile("Relink destination")
-    {:ok, old_lane} = Lanes.create(%{slug: "old-profile-impact", execution_profile_id: edited.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, old_lane} =
+      Lanes.create(%{
+        slug: "old-profile-impact",
+        execution_profile_id: edited.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, view, _html} = live(conn, "/execution-profiles/#{edited.id}/edit")
 
     view
@@ -227,7 +282,14 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
     |> render_change()
 
     assert {:ok, _relocated} = Lanes.update(old_lane, %{execution_profile_id: destination.id})
-    {:ok, new_lane} = Lanes.create(%{slug: "new-profile-impact", execution_profile_id: edited.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, new_lane} =
+      Lanes.create(%{
+        slug: "new-profile-impact",
+        execution_profile_id: edited.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, _unrelated} = profile("Unrelated notification")
 
     assert has_element?(view, "#profile-name[value='Unsaved name']")
@@ -256,7 +318,17 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
 
   @tag :remediation
   test "remediation: an unrelated profile edit restores provider credentials inside nested arrays", %{conn: conn} do
-    provider = managed_provider(%{"groups" => [%{"accounts" => [%{"token" => "profile-array-secret", "api_key" => "$PROFILE_CREDENTIAL", "label" => "primary"}]}]})
+    provider =
+      managed_provider(%{
+        "groups" => [
+          %{
+            "accounts" => [
+              %{"token" => "profile-array-secret", "api_key" => "$PROFILE_CREDENTIAL", "label" => "primary"}
+            ]
+          }
+        ]
+      })
+
     {:ok, edited} = profile("Nested credentials", managed_worker(provider))
     {:ok, view, html} = live(conn, "/execution-profiles/#{edited.id}/edit")
     refute html =~ "profile-array-secret"
@@ -273,14 +345,18 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
         {"scalar replaced by object", %{"account" => "plain"}, %{"account" => %{"token" => "$REDACTED"}}}
       ] do
     @tag :remediation
-    test "remediation: profile redaction forgery with #{scenario} returns an error without discarding the draft", %{conn: conn} do
+    test "remediation: profile redaction forgery with #{scenario} returns an error without discarding the draft", %{
+      conn: conn
+    } do
       provider = managed_provider(unquote(Macro.escape(original)))
       {:ok, edited} = profile("Forged credentials", managed_worker(provider))
       {:ok, view, _html} = live(conn, "/execution-profiles/#{edited.id}/edit")
       forged = provider |> Map.put("extension", unquote(Macro.escape(forged))) |> Jason.encode!()
 
       view
-      |> form("#profile-form", profile: %{name: "Keep forged name", description: "Keep forged description", provider_json: forged})
+      |> form("#profile-form",
+        profile: %{name: "Keep forged name", description: "Keep forged description", provider_json: forged}
+      )
       |> render_change()
 
       assert has_element?(view, "#profile-errors[role='alert']", "worker.environment.provider")
@@ -340,7 +416,17 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
     assert ExecutionProfiles.get(profile.id).name == "New canonical name"
 
     view |> form("#profile-form", profile: %{worker_mode: "managed"}) |> render_change()
-    render_submit(view, "save", %{"profile" => %{"environment_kind" => "unsupported", "deployment_id" => "existing", "startup_timeout" => "1", "shutdown_timeout" => "2", "terminal_retention" => "0"}})
+
+    render_submit(view, "save", %{
+      "profile" => %{
+        "environment_kind" => "unsupported",
+        "deployment_id" => "existing",
+        "startup_timeout" => "1",
+        "shutdown_timeout" => "2",
+        "terminal_retention" => "0"
+      }
+    })
+
     assert has_element?(view, "#profile-errors", "worker.environment")
     assert ExecutionProfiles.get(profile.id).worker == %{}
   end
@@ -349,14 +435,25 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
     {:ok, profile} = profile("Invalid SSH limit")
     {:ok, view, _html} = live(conn, "/execution-profiles/#{profile.id}/edit")
     view |> form("#profile-form", profile: %{worker_mode: "ssh"}) |> render_change()
-    view |> form("#profile-form", profile: %{ssh_hosts: "worker-a", max_concurrent_agents_per_host: "1.5"}) |> render_submit()
+
+    view
+    |> form("#profile-form", profile: %{ssh_hosts: "worker-a", max_concurrent_agents_per_host: "1.5"})
+    |> render_submit()
+
     assert has_element?(view, "#profile-host-limit + .field-error[role='alert']")
     assert ExecutionProfiles.get(profile.id).worker == %{}
   end
 
   test "invalid linked lane capacity is excluded and profile errors navigate to the lane", %{conn: conn} do
     {:ok, profile} = profile("Repair linked lane")
-    {:ok, lane} = Lanes.create(%{slug: "invalid-profile-lane", execution_profile_id: profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "invalid-profile-lane",
+        execution_profile_id: profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     version = Lanes.current_version(lane)
     SymphonyElixir.Repo.update!(Ecto.Changeset.change(version, front_matter: "tracker: ["))
     :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.LaneStore)
@@ -364,7 +461,12 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
 
     {:ok, detail, _html} = live(conn, "/execution-profiles/#{profile.id}")
     assert has_element?(detail, "#profile-lane-#{lane.id}")
-    assert detail |> element(".metric-card:nth-child(3) .metric-value") |> render() |> Floki.parse_fragment!() |> Floki.text() == "0"
+
+    assert detail
+           |> element(".metric-card:nth-child(3) .metric-value")
+           |> render()
+           |> Floki.parse_fragment!()
+           |> Floki.text() == "0"
 
     {:ok, editor, _html} = live(conn, "/execution-profiles/#{profile.id}/edit")
     editor |> form("#profile-form", profile: %{description: "Must not persist"}) |> render_submit()
@@ -378,7 +480,12 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
     {:ok, destination} = profile("Membership destination")
     {:ok, view, _html} = live(conn, "/execution-profiles")
 
-    {:ok, lane} = Lanes.create(%{slug: "membership-count", execution_profile_id: source.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "membership-count",
+        execution_profile_id: source.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
 
     assert rendered_text(view, "#execution-profile-#{source.id} .numeric") == "1"
     assert rendered_text(view, "#execution-profile-#{destination.id} .numeric") == "0"
@@ -433,7 +540,13 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
     |> form("#profile-form", profile: %{name: "Unsaved impact name", description: "Unsaved impact description"})
     |> render_change()
 
-    {:ok, lane} = Lanes.create(%{slug: "dirty-lane-impact", name: "New impact lane", execution_profile_id: edited.id, config: %{"tracker" => %{"kind" => "memory"}}})
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "dirty-lane-impact",
+        name: "New impact lane",
+        execution_profile_id: edited.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
 
     assert has_element?(view, ".affected-lanes a[href='/lanes/#{lane.slug}']", "New impact lane")
     assert has_element?(view, ".affected-lanes .section-copy", "1 linked lane")
@@ -470,7 +583,10 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
       ] do
     @tag :remediation
     @tag :tmp_dir
-    test "remediation: persisted repair profile with #{scenario} mounts safely and cannot be accepted by default", %{conn: conn, tmp_dir: root} do
+    test "remediation: persisted repair profile with #{scenario} mounts safely and cannot be accepted by default", %{
+      conn: conn,
+      tmp_dir: root
+    } do
       stub_ssh_canonicalization(root)
 
       worker =
@@ -481,7 +597,9 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
         |> put_in(unquote(path), unquote(Macro.escape(invalid)))
 
       {profile, lane, version} = persisted_repair_profile(worker, "/remote/repair")
-      error_path = if unquote(mode) == :managed, do: "worker.environment", else: Enum.join(["worker" | unquote(path)], ".")
+
+      error_path =
+        if unquote(mode) == :managed, do: "worker.environment", else: Enum.join(["worker" | unquote(path)], ".")
 
       {:ok, detail, _html} = live(conn, "/execution-profiles/#{profile.id}")
       assert has_element?(detail, "[role='alert']", error_path)
@@ -505,9 +623,16 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
 
   @tag :remediation
   @tag :tmp_dir
-  test "remediation: structured repair corrects malformed SSH concurrency without changing ownership or historical bytes", %{conn: conn, tmp_dir: root} do
+  test "remediation: structured repair corrects malformed SSH concurrency without changing ownership or historical bytes",
+       %{conn: conn, tmp_dir: root} do
     stub_ssh_canonicalization(root)
-    {profile, lane, version} = persisted_repair_profile(%{"ssh_hosts" => ["worker-a"], "max_concurrent_agents_per_host" => %{"limit" => 2}}, "/remote/repair")
+
+    {profile, lane, version} =
+      persisted_repair_profile(
+        %{"ssh_hosts" => ["worker-a"], "max_concurrent_agents_per_host" => %{"limit" => 2}},
+        "/remote/repair"
+      )
+
     {:ok, editor, _html} = live(conn, "/execution-profiles/#{profile.id}/edit")
 
     assert has_element?(editor, "#profile-errors", "worker.max_concurrent_agents_per_host")
@@ -531,10 +656,29 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
     unique = System.unique_integer([:positive])
 
     # Persist the quarantined shape retained by migration, without ever publishing a valid ownership guard.
-    profile = Repo.insert!(%Profile{name: "Legacy repair #{unique}", workspace_base: base, worker: worker, repair_error: "legacy configuration requires repair"})
-    lane = Repo.insert!(%Lane{slug: "legacy-repair-#{unique}", name: "Legacy repair", execution_profile_id: profile.id, workspace_subdir: ".", enabled: false})
-    front_matter = Jason.encode!(%{"tracker" => %{"kind" => "memory"}, "workspace" => %{"root" => base}, "worker" => worker})
-    version = Repo.insert!(%LaneVersion{lane_id: lane.id, front_matter: front_matter, prompt: "Original migration prompt\n"})
+    profile =
+      Repo.insert!(%Profile{
+        name: "Legacy repair #{unique}",
+        workspace_base: base,
+        worker: worker,
+        repair_error: "legacy configuration requires repair"
+      })
+
+    lane =
+      Repo.insert!(%Lane{
+        slug: "legacy-repair-#{unique}",
+        name: "Legacy repair",
+        execution_profile_id: profile.id,
+        workspace_subdir: ".",
+        enabled: false
+      })
+
+    front_matter =
+      Jason.encode!(%{"tracker" => %{"kind" => "memory"}, "workspace" => %{"root" => base}, "worker" => worker})
+
+    version =
+      Repo.insert!(%LaneVersion{lane_id: lane.id, front_matter: front_matter, prompt: "Original migration prompt\n"})
+
     lane = Repo.update!(Ecto.Changeset.change(lane, current_version_id: version.id))
     LaneStore.refresh(lane.id)
     {profile, lane, version}
@@ -543,13 +687,19 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
   defp stub_ssh_canonicalization(root) do
     fake_ssh = Path.join(root, "ssh")
     previous_path = System.get_env("PATH")
-    File.write!(fake_ssh, "#!/bin/sh\ncase \"$*\" in *\"find \"*) exit 0 ;; esac\nprintf '/remote/repair\\t/remote/repair\\n'\n")
+
+    File.write!(
+      fake_ssh,
+      "#!/bin/sh\ncase \"$*\" in *\"find \"*) exit 0 ;; esac\nprintf '/remote/repair\\t/remote/repair\\n'\n"
+    )
+
     File.chmod!(fake_ssh, 0o755)
     System.put_env("PATH", root <> ":" <> (previous_path || ""))
     on_exit(fn -> if previous_path, do: System.put_env("PATH", previous_path), else: System.delete_env("PATH") end)
   end
 
-  defp rendered_text(view, selector), do: view |> element(selector) |> render() |> Floki.parse_fragment!() |> Floki.text()
+  defp rendered_text(view, selector),
+    do: view |> element(selector) |> render() |> Floki.parse_fragment!() |> Floki.text()
 
   defp managed_provider(extension) do
     %{
@@ -578,6 +728,10 @@ defmodule SymphonyElixirWeb.ExecutionProfilesLiveTest do
   end
 
   defp profile(name, worker \\ %{}) do
-    ExecutionProfiles.create(%{name: name, workspace_base: Path.join(System.tmp_dir!(), "profile-#{System.unique_integer([:positive])}"), worker: worker})
+    ExecutionProfiles.create(%{
+      name: name,
+      workspace_base: Path.join(System.tmp_dir!(), "profile-#{System.unique_integer([:positive])}"),
+      worker: worker
+    })
   end
 end

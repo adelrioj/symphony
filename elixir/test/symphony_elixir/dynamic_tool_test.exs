@@ -78,7 +78,8 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
         end
       )
 
-    assert_received {:bound_linear_client_called, "query Viewer { viewer { id } }", %{}, [tracker_settings: tracker_settings]}
+    assert_received {:bound_linear_client_called, "query Viewer { viewer { id } }", %{},
+                     [tracker_settings: tracker_settings]}
 
     assert tracker_settings.api_key == "session-token"
     assert tracker_settings.project_slug == "session-project"
@@ -252,7 +253,8 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
-               "message" => "`linear_graphql` expects either a GraphQL query string or an object with `query` and optional `variables`."
+               "message" =>
+                 "`linear_graphql` expects either a GraphQL query string or an object with `query` and optional `variables`."
              }
            }
   end
@@ -288,7 +290,8 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(missing_token["output"]) == %{
              "error" => %{
-               "message" => "Symphony is missing Linear auth. Set `tracker.provider.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`."
+               "message" =>
+                 "Symphony is missing Linear auth. Set `tracker.provider.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`."
              }
            }
 
@@ -423,7 +426,8 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
-               "message" => "`linear_fetch_attachment` only downloads Linear attachment URLs (https://uploads.linear.app/...)."
+               "message" =>
+                 "`linear_fetch_attachment` only downloads Linear attachment URLs (https://uploads.linear.app/...)."
              }
            }
 
@@ -476,7 +480,8 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(missing_token["output"]) == %{
              "error" => %{
-               "message" => "Symphony is missing Linear auth. Set `tracker.provider.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`."
+               "message" =>
+                 "Symphony is missing Linear auth. Set `tracker.provider.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`."
              }
            }
 

@@ -66,7 +66,11 @@ defmodule SymphonyElixir.LaneSupervisor do
     else
       spec =
         Supervisor.child_spec(
-          {AgentRuntimeSupervisor, lane_id: id, name: LaneRegistry.via(id, :runtime), task_supervisor_name: LaneRegistry.via(id, :tasks), orchestrator_name: LaneRegistry.via(id, :orchestrator)},
+          {AgentRuntimeSupervisor,
+           lane_id: id,
+           name: LaneRegistry.via(id, :runtime),
+           task_supervisor_name: LaneRegistry.via(id, :tasks),
+           orchestrator_name: LaneRegistry.via(id, :orchestrator)},
           id: {:lane, id},
           restart: :temporary
         )

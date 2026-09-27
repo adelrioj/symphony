@@ -62,16 +62,22 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Declaration do
   defp host?(host), do: is_map(host) and Enum.all?(@host_fields, &nonempty?(host[&1]))
 
   # An empty declaration would discharge nothing while still claiming a machine.
-  defp keys?(keys), do: is_list(keys) and keys != [] and length(keys) <= @max_keys and Enum.all?(keys, &nonempty?/1) and unique?(keys)
+  defp keys?(keys),
+    do: is_list(keys) and keys != [] and length(keys) <= @max_keys and Enum.all?(keys, &nonempty?/1) and unique?(keys)
 
   # A duplicate would let one obligation stand in for another under the exact-cover check.
-  defp obligations?(uids), do: is_list(uids) and uids != [] and length(uids) <= @max_obligations and Enum.all?(uids, &nonempty?/1) and unique?(uids)
+  defp obligations?(uids),
+    do:
+      is_list(uids) and uids != [] and length(uids) <= @max_obligations and Enum.all?(uids, &nonempty?/1) and
+        unique?(uids)
 
   # Exact cover both ways: every declared environment carries its guard reference, and no
   # reference names an environment the declaration does not claim.
   defp guards?(guards, keys) do
     is_map(guards) and Enum.sort(Map.keys(guards)) == Enum.sort(keys) and
-      Enum.all?(guards, fn {_, reference} -> is_map(reference) and nonempty?(reference["uid"]) and nonempty?(reference["resourceVersion"]) end)
+      Enum.all?(guards, fn {_, reference} ->
+        is_map(reference) and nonempty?(reference["uid"]) and nonempty?(reference["resourceVersion"])
+      end)
   end
 
   defp chunk?(index, total), do: is_integer(index) and is_integer(total) and total >= 1 and index >= 0 and index < total
@@ -83,6 +89,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.Declaration do
   # because one environment's obligations can exceed a single declaration's bound.
   defp name(spec) do
     identity = [spec["deploymentId"], spec["host"]["node_uid"], Enum.sort(spec["environmentKeys"]), spec["chunkIndex"]]
-    "symphony-loss-" <> (:crypto.hash(:sha256, Jason.encode!(identity)) |> Base.encode16(case: :lower) |> binary_part(0, 40))
+
+    "symphony-loss-" <>
+      (:crypto.hash(:sha256, Jason.encode!(identity)) |> Base.encode16(case: :lower) |> binary_part(0, 40))
   end
 end

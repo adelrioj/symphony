@@ -30,7 +30,12 @@ defmodule SymphonyElixirWeb.RunLive do
 
         {:ok,
          socket
-         |> assign(run: run, lane_slug: lane_slug, now: DateTime.utc_now(), last_event_id: Enum.reduce(events, 0, &max(&1.id, &2)))
+         |> assign(
+           run: run,
+           lane_slug: lane_slug,
+           now: DateTime.utc_now(),
+           last_event_id: Enum.reduce(events, 0, &max(&1.id, &2))
+         )
          |> stream(:events, events)}
     end
   end
