@@ -188,7 +188,7 @@ defmodule SymphonyElixirWeb.ConsoleLive do
 
     events =
       case attempts do
-        [latest | _] -> latest.id |> Runs.events() |> Enum.take(-@event_limit)
+        [latest | _] -> Runs.recent_events(latest.id, @event_limit)
         [] -> []
       end
 

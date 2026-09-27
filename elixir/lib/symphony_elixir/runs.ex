@@ -74,6 +74,13 @@ defmodule SymphonyElixir.Runs do
     Repo.all(from(e in Event, where: e.run_id == ^run_id, order_by: e.id))
   end
 
+  @doc "The run's latest `limit` events, oldest first."
+  @spec recent_events(integer(), pos_integer()) :: [Event.t()]
+  def recent_events(run_id, limit) do
+    flush()
+    Enum.reverse(Repo.all(from(e in Event, where: e.run_id == ^run_id, order_by: [desc: e.id], limit: ^limit)))
+  end
+
   @spec list_for_lane(term(), pos_integer()) :: [Run.t()]
   def list_for_lane(lane_id, limit) do
     flush()

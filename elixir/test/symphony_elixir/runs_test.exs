@@ -42,6 +42,7 @@ defmodule SymphonyElixir.RunsTest do
     assert_receive {:run_event, %Event{kind: "usage", payload: %{"cached_tokens" => 4, "total_tokens" => 15}}}
     assert_receive {:run_updated, "ordered"}
     assert ["turn_started", "turn_finished", "usage"] == Enum.map(Runs.events(run.id), & &1.kind)
+    assert ["turn_finished", "usage"] == Enum.map(Runs.recent_events(run.id, 2), & &1.kind)
     assert [%Run{attempt_id: "ordered"}] = Runs.list_for_lane(lane_id, 10)
   end
 
