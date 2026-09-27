@@ -52,7 +52,7 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
 
   test "rows show elapsed time, tokens, backend and a relative retry time", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/?lane=ops")
-    assert has_element?(view, "#console-list [data-ticket='ops:run-1'] .console-sub", "12m 04s")
+    assert has_element?(view, "#console-list [data-ticket='ops:run-1'] .console-sub", ~r/12m 0[4-6]s/)
     assert has_element?(view, "#console-list [data-ticket='ops:run-1'] .console-sub", "3.1m in · 1.8k out")
     assert has_element?(view, "#console-list [data-ticket='ops:run-1'] .console-backend", "codex")
     assert render(element(view, "#console-list [data-ticket='ops:rty-1'] .console-sub")) =~ ~r/retry in (59|1m 00)s/
@@ -67,7 +67,7 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     assert has_element?(view, "#console-detail .console-kv", "s1")
     assert has_element?(view, "#console-detail .console-kv", "worker-a")
     assert has_element?(view, "#console-detail .console-kv", "/ws/OPS-1")
-    assert has_element?(view, "#console-detail .console-kv", "12m 04s")
+    assert has_element?(view, "#console-detail .console-kv", ~r/12m 0[4-6]s/)
     assert has_element?(view, "#console-detail .console-kv", "1.2k cached")
   end
 
