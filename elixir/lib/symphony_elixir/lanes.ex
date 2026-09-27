@@ -136,9 +136,8 @@ defmodule SymphonyElixir.Lanes do
 
   @spec repair_fixed_root(Lane.t()) :: {:ok, Lane.t()} | {:error, [error()]}
   def repair_fixed_root(%Lane{id: id}) do
-    with {:ok,
-          %{enabled: false, error: nil, workspace_base: base, workspace_subdir: subdir, settings: %Schema{} = settings} =
-            snapshot} <- LaneStore.lookup(id),
+    with {:ok, %{enabled: false, error: nil, settings: %Schema{} = settings} = snapshot} <- LaneStore.lookup(id),
+         %{workspace_base: base, workspace_subdir: subdir} <- snapshot,
          true <- is_binary(base) and Path.expand(base) == "/state/workspace/worker" and subdir != ".",
          %{kind: "kubernetes", provider: %{"template" => "worker-slot"}} = config <- EnvironmentConfig.runtime(settings),
          :ok <- empty_provider_inventory(config) do
