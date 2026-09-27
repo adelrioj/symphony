@@ -5,7 +5,7 @@ defmodule SymphonyElixirWeb.ConsoleLive do
 
   import SymphonyElixirWeb.ConsoleComponents
 
-  alias SymphonyElixir.{LaneStore, Runs}
+  alias SymphonyElixir.{LaneStore, OperatorActions, Runs}
   alias SymphonyElixirWeb.{Console, ObservabilityPubSub, Presenter}
 
   @snapshot_timeout_ms 2_000
@@ -33,6 +33,18 @@ defmodule SymphonyElixirWeb.ConsoleLive do
   @impl true
   # ponytail: reloads every lane on each broadcast; debounce here if many lanes make this slow.
   def handle_info(:observability_updated, socket), do: {:noreply, load(socket)}
+
+  @impl true
+  def handle_event("panel", %{"panel" => panel}, socket) when panel in ["stop", "reply"],
+    do: {:noreply, assign(socket, :panel, panel)}
+
+  def handle_event("cancel", _params, socket), do: {:noreply, assign(socket, :panel, nil)}
+  def handle_event("stop", _params, socket), do: act(socket, "stopped", &OperatorActions.stop/2)
+  def handle_event("retry_now", _params, socket), do: act(socket, "dispatched", &OperatorActions.retry_now/2)
+  def handle_event("approve", _params, socket), do: act(socket, "resumed", &OperatorActions.resume(&1, &2, nil))
+
+  def handle_event("reply", %{"message" => message}, socket),
+    do: act(socket, "resumed with your reply", &OperatorActions.resume(&1, &2, message))
 
   @impl true
   def render(assigns) do
@@ -94,7 +106,54 @@ defmodule SymphonyElixirWeb.ConsoleLive do
             </ol>
           </section>
           <footer class="console-actions">
-            <a :if={@detail.attempts != []} class="subtle-button" href={"/runs/#{hd(@detail.attempts).attempt_id}"}>Full run log</a>
+            <div :if={@panel == "stop"} class="console-confirm" id="stop-confirm">
+              <p>
+                <strong>Stop this run?</strong>
+                The agent session ends now and the workspace is kept. The ticket stays in
+                "{@ticket.tracker_state}" and is dispatched again on the next poll unless you move it.
+              </p>
+              <p>
+                <button type="button" class="subtle-button" phx-click="cancel">Keep running</button>
+                <button type="button" class="danger-button" phx-click="stop">Stop run</button>
+              </p>
+            </div>
+            <form :if={@panel == "reply"} id="reply-form" class="console-reply" phx-submit="reply">
+              <label for="reply-message">
+                Message to the agent. It is posted on the ticket, and the ticket moves back to an active state.
+              </label>
+              <textarea id="reply-message" name="message" required></textarea>
+              <p>
+                <button type="button" class="subtle-button" phx-click="cancel">Cancel</button>
+                <button type="submit">Send and resume</button>
+              </p>
+            </form>
+            <button :if={is_nil(@panel) and @ticket.status == "blocked"} type="button" phx-click="approve">
+              Approve &amp; resume
+            </button>
+            <button
+              :if={is_nil(@panel) and @ticket.status == "blocked"}
+              type="button"
+              class="subtle-button"
+              phx-click="panel"
+              phx-value-panel="reply"
+            >
+              Reply to agent
+            </button>
+            <button :if={is_nil(@panel) and @ticket.status == "retrying"} type="button" phx-click="retry_now">
+              Retry now
+            </button>
+            <button
+              :if={is_nil(@panel) and @ticket.status == "running"}
+              type="button"
+              class="danger-button"
+              phx-click="panel"
+              phx-value-panel="stop"
+            >
+              Stop run
+            </button>
+            <a :if={is_nil(@panel) and @detail.attempts != []} class="subtle-button" href={"/runs/#{hd(@detail.attempts).attempt_id}"}>
+              Full run log
+            </a>
           </footer>
         </div>
       </aside>
@@ -138,4 +197,22 @@ defmodule SymphonyElixirWeb.ConsoleLive do
 
   defp blank_to_nil(value) when value in [nil, ""], do: nil
   defp blank_to_nil(value), do: value
+
+  defp act(%{assigns: %{ticket: %{} = ticket, detail: %{entry: entry}}} = socket, verb, action) do
+    socket =
+      case action.(Presenter.orchestrator_for(entry), ticket.issue_id) do
+        :ok -> put_flash(socket, :info, "#{ticket.identifier} #{verb}.")
+        {:error, reason} -> put_flash(socket, :error, "#{ticket.identifier} was not changed: #{reason_text(reason)}.")
+      end
+
+    {:noreply, socket |> assign(:panel, nil) |> load()}
+  end
+
+  defp act(socket, _verb, _action), do: {:noreply, put_flash(socket, :error, "Select a ticket first.")}
+
+  defp reason_text(:not_running), do: "its run already ended"
+  defp reason_text(:not_retrying), do: "it is no longer waiting to retry"
+  defp reason_text(:unavailable), do: "the lane is not running"
+  defp reason_text(:no_active_state), do: "the lane has no active state to move it to"
+  defp reason_text(reason), do: "the tracker returned #{inspect(reason)}"
 end

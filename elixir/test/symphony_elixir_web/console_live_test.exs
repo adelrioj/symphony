@@ -4,7 +4,7 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, Runs}
+  alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, Runs, Tracker.Memory}
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -144,6 +144,94 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
   test "a lane running agents with nothing blocked shows the active dot", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/?lane=ops")
     assert has_element?(view, "#lane-nav-ops .console-dot--on")
+  end
+
+  test "the detail panel shows attempts and the latest activity", %{conn: conn, lane: lane} do
+    issue = %Issue{id: "run-1", identifier: "OPS-1", title: "Cache deps in CI", state: "In Progress"}
+    :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "att-1", attempt: 1})
+    :ok = Runs.event("att-1", %{event: :notification, message: "Reading make-all.yml"}, %{}, 1)
+    :ok = Runs.flush()
+
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Arun-1")
+    assert has_element?(view, "#console-detail a[href='/runs/att-1']", "Full run log")
+    assert has_element?(view, "#console-detail a[href='/runs/att-1']", "attempt 1 · running")
+    assert has_element?(view, "#console-detail .console-events", "Reading make-all.yml")
+    assert has_element?(view, "#console-detail", "3 / 20")
+  end
+
+  test "stop asks for confirmation, then calls the lane orchestrator", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Arun-1")
+    view |> element("#console-detail button", "Stop run") |> render_click()
+    assert has_element?(view, "#stop-confirm")
+    view |> element("#stop-confirm button", "Keep running") |> render_click()
+    refute has_element?(view, "#stop-confirm")
+
+    view |> element("#console-detail button", "Stop run") |> render_click()
+    view |> element("#stop-confirm button", "Stop run") |> render_click()
+    assert_receive {:orchestrator_call, {:operator_stop, "run-1"}}
+    assert has_element?(view, "#flash-info", "OPS-1 stopped.")
+  end
+
+  @tag reply: {:error, :not_retrying}
+  test "a stale action explains why nothing changed", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Arty-1")
+    view |> element("#console-detail button", "Retry now") |> render_click()
+    assert_receive {:orchestrator_call, {:operator_retry_now, "rty-1"}}
+    assert has_element?(view, "#flash-error", "OPS-3 was not changed: it is no longer waiting to retry.")
+  end
+
+  test "approve and reply resume a blocked ticket through the tracker", %{conn: conn} do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Ablk-1")
+
+    view |> element("#console-detail button", "Approve") |> render_click()
+    assert_receive {:memory_tracker_state_update, "blk-1", "Todo"}
+    assert has_element?(view, "#flash-info", "OPS-2 resumed.")
+
+    view |> element("#console-detail button", "Reply to agent") |> render_click()
+    view |> element("#reply-form button", "Cancel") |> render_click()
+    refute has_element?(view, "#reply-form")
+
+    view |> element("#console-detail button", "Reply to agent") |> render_click()
+    view |> form("#reply-form", message: "Palette is in tokens/dark.json") |> render_submit()
+    assert_receive {:memory_tracker_comment, "blk-1", "Palette is in tokens/dark.json"}
+    assert has_element?(view, "#flash-info", "OPS-2 resumed with your reply.")
+  end
+
+  @tag reply: {:error, :unavailable}
+  test "unknown tickets show the empty panel and actions need a selection", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?ticket=ops%3Agone")
+    assert has_element?(view, "#console-detail", "Select a ticket")
+    assert render_hook(view, "approve", %{}) =~ "Select a ticket first."
+
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Arun-1")
+    view |> element("#console-detail button", "Stop run") |> render_click()
+    view |> element("#stop-confirm button", "Stop run") |> render_click()
+    assert has_element?(view, "#flash-error", "OPS-1 was not changed: the lane is not running.")
+  end
+
+  @tag reply: {:error, :not_running}
+  test "stopping a finished run says so", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Arun-1")
+    view |> element("#console-detail button", "Stop run") |> render_click()
+    view |> element("#stop-confirm button", "Stop run") |> render_click()
+    assert has_element?(view, "#flash-error", "its run already ended")
+  end
+
+  test "resume failures name the cause", %{conn: conn} do
+    Memory.fail(:update_issue_state)
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Ablk-1")
+    view |> element("#console-detail button", "Approve") |> render_click()
+    assert has_element?(view, "#flash-error", "the tracker returned {:memory_tracker_failed, :update_issue_state}")
+  end
+
+  test "a lane without another active state cannot resume", %{conn: conn, lane: lane} do
+    {:ok, _} = Lanes.update(lane, %{config: %{"tracker" => %{"kind" => "memory", "active_states" => ["Blocked / Needs Attention"]}}})
+    {:ok, entry} = LaneStore.lookup(lane.id)
+    :ok = LaneStore.put_entry(%{entry | enabled: true})
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Ablk-1")
+    view |> element("#console-detail button", "Approve") |> render_click()
+    assert has_element?(view, "#flash-error", "the lane has no active state to move it to")
   end
 
   defp snapshot do
