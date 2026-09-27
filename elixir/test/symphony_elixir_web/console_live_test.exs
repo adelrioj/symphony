@@ -157,6 +157,30 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     assert has_element?(view, "#console-detail", "Select a ticket")
   end
 
+  @tag snapshot: %{
+         @recovery_snapshot
+         | queued: [
+             %{
+               issue_id: "bon-143",
+               identifier: "BON-143",
+               title: "Run the judges",
+               state: "In Progress",
+               issue_url: "https://linear.app/example/issue/BON-143",
+               labels: [],
+               priority: nil,
+               blocked_by: []
+             }
+           ]
+       }
+  test "a queued issue with a recovery blocker remains in the attention view", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?lane=ops&attention=1&ticket=ops%3Abon-143")
+    assert has_element?(view, "#console-list [data-group='blocked'] [data-ticket='ops:bon-143']", "Run the judges")
+    assert has_element?(view, "#console-detail .console-kv", "In Progress")
+    assert has_element?(view, "#environment-detail", "checkpoint_failed")
+    refute has_element?(view, "#queued-note")
+    refute has_element?(view, "#console-detail button")
+  end
+
   @tag snapshot: @recovery_snapshot
   test "environment-only selections reject forged agent actions and panels", %{conn: conn} do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())

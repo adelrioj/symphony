@@ -28,6 +28,8 @@ preparation failed before an agent attempt started. Select the issue to see the 
 desired state, slot occupancy and credential recovery reason. These entries are not live agents.
 They have no agent approval, reply, retry or stop controls. Use the deployment's supported
 credential recovery procedure; an issue's tracker state does not prove that an agent is running.
+A queued tracker entry does not hide a recovery blocker. Its current title and tracker state remain
+visible until recovery is complete.
 
 Use `/execution-profiles` to create and edit shared worker/workspace settings. A profile edit validates
 all linked lanes, including disabled lanes, and publishes them atomically. Per-lane concurrency and

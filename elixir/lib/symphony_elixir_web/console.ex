@@ -175,9 +175,15 @@ defmodule SymphonyElixirWeb.Console do
         payload
         |> Map.get(String.to_existing_atom(status), [])
         |> Enum.map(fn item ->
-          entry
-          |> live_ticket(status, item)
-          |> Map.put(:environment, Map.get(environments, item.issue_id))
+          environment = Map.get(environments, item.issue_id)
+
+          if status == "queued" and is_map(environment) and environment_attention?(environment) do
+            environment_ticket(entry, environment, item)
+          else
+            entry
+            |> live_ticket(status, item)
+            |> Map.put(:environment, environment)
+          end
         end)
       end)
 
@@ -206,14 +212,15 @@ defmodule SymphonyElixirWeb.Console do
     match?(%{stage: "recovery_required"}, environment[:credential]) or is_map(environment[:unresolved])
   end
 
-  defp environment_ticket(entry, environment) do
+  defp environment_ticket(entry, environment, tracker_item \\ nil) do
     reason = get_in(environment, [:credential, :reason]) || get_in(environment, [:unresolved, :code])
 
     entry
-    |> live_ticket("blocked", environment)
+    |> live_ticket("blocked", tracker_item || environment)
     |> Map.merge(%{
       source: :environment,
       environment: environment,
+      workspace_path: Map.get(environment, :workspace_path),
       error: if(is_nil(reason), do: nil, else: to_string(reason))
     })
   end

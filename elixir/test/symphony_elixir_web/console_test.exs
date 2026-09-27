@@ -140,6 +140,39 @@ defmodule SymphonyElixirWeb.ConsoleTest do
              Console.strip(entry("main"), tickets)
   end
 
+  test "a queued tracker issue cannot hide its workstation recovery blocker" do
+    environment = recovery_environment()
+
+    queued = %{
+      issue_id: "bon-143",
+      issue_identifier: "BON-143",
+      title: "Run the judges",
+      state: "In Progress",
+      issue_url: "https://linear.app/example/issue/BON-143"
+    }
+
+    view = %{entry: entry("main"), payload: %{queued: [queued], environments: [environment]}, runs: []}
+
+    assert [
+             %{
+               source: :environment,
+               status: "blocked",
+               title: "Run the judges",
+               tracker_state: "In Progress",
+               url: "https://linear.app/example/issue/BON-143",
+               error: "checkpoint_failed",
+               environment: ^environment
+             } = ticket
+           ] = Console.tickets([view])
+
+    assert %{tickets: [^ticket]} = Enum.find(Console.groups([ticket], :status, []), &(&1.key == "blocked"))
+
+    healthy = %{environment | phase: :stopped, credential: nil, unresolved: nil, occupies_slot: false}
+
+    assert [%{source: :runtime, status: "queued", title: "Run the judges", error: nil}] =
+             Console.tickets([%{view | payload: %{queued: [queued], environments: [healthy]}}])
+  end
+
   test "environment recovery suppresses older history without borrowing tracker metadata" do
     tickets =
       Console.tickets([
