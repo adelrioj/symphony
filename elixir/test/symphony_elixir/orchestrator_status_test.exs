@@ -2046,18 +2046,27 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     retry_issue = %Issue{id: "r-1", identifier: "R-1", title: "Try again", state: "Todo", labels: []}
     due = System.monotonic_time(:millisecond) + 60_000
 
+    blocked_state = %{
+      "b-1" => %{identifier: "B-1", issue: blocked_issue, blocked_at: DateTime.utc_now()},
+      "b-2" => %{identifier: "B-2"}
+    }
+
+    retry_state = %{
+      "r-1" => %{attempt: 2, due_at_ms: due, identifier: "R-1"},
+      "r-2" => %{attempt: 1, due_at_ms: due, identifier: "R-2"}
+    }
+
     :sys.replace_state(pid, fn state ->
-      %{
-        state
-        | blocked: %{"b-1" => %{identifier: "B-1", issue: blocked_issue, blocked_at: DateTime.utc_now()}, "b-2" => %{identifier: "B-2"}},
-          retry_attempts: %{"r-1" => %{attempt: 2, due_at_ms: due, identifier: "R-1"}, "r-2" => %{attempt: 1, due_at_ms: due, identifier: "R-2"}},
-          candidates: [retry_issue]
-      }
+      %{state | blocked: blocked_state, retry_attempts: retry_state, candidates: [retry_issue]}
     end)
 
     snapshot = GenServer.call(pid, :snapshot)
-    assert [%{issue_id: "b-1", title: "Needs approval", labels: ["db"]}, %{issue_id: "b-2", title: nil, labels: []}] = Enum.sort_by(snapshot.blocked, & &1.issue_id)
-    assert [%{issue_id: "r-1", title: "Try again", state: "Todo"}, %{issue_id: "r-2", title: nil, state: nil, labels: []}] = Enum.sort_by(snapshot.retrying, & &1.issue_id)
+    sorted_blocked = Enum.sort_by(snapshot.blocked, & &1.issue_id)
+    sorted_retrying = Enum.sort_by(snapshot.retrying, & &1.issue_id)
+    assert [%{issue_id: "b-1", title: "Needs approval", labels: ["db"]}, %{issue_id: "b-2", title: nil, labels: []}] = sorted_blocked
+    [first_retrying, second_retrying] = sorted_retrying
+    assert %{issue_id: "r-1", title: "Try again", state: "Todo"} = first_retrying
+    assert %{issue_id: "r-2", title: nil, state: nil, labels: []} = second_retrying
     assert snapshot.queued == []
 
     payload = Presenter.state_payload(pid, 1_000)
