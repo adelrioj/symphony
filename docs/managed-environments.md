@@ -37,3 +37,11 @@ receipts; unknown creates remain retained rather than being replayed or treated 
 Production Kubernetes allocation remains unconditionally blocked. This implementation does not approve
 a replacement controller image/schema baseline, qualify infrastructure, or authorize deployment.
 Examples reference operator-created infrastructure; the existing VM remains independent of this gate.
+
+The opt-in live qualification harness defaults to strict metadata credential denial.
+Its Workstations-only `scoped_gcp` development policy requires independently verified
+harmless controls, current VM/config identity and private effective-IAM review, plus
+positive/negative permission probes in ordinary, root, Docker and privileged-Docker
+contexts. This is not a production Config switch and does not relax lifecycle or
+cleanup gates. See the [qualification contract](../elixir/README.md#scoped-development-permission-qualification).
+Local policy/probe tests do not establish live IAM qualification.

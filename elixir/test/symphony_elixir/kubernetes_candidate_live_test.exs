@@ -33,13 +33,23 @@ defmodule SymphonyElixir.KubernetesCandidateLiveTest do
     if model_run? do
       probes = evidence["dispatches"] |> Map.values() |> Enum.filter(&is_binary(&1["probe_finished_at"]))
       assert length(probes) == expected_sessions
-      assert Enum.all?(probes, &(&1["artifact_matched"] == true and &1["dispatch"] == "ok" and &1["backend"] == config["backend"]))
+
+      assert Enum.all?(
+               probes,
+               &(&1["artifact_matched"] == true and &1["dispatch"] == "ok" and &1["backend"] == config["backend"])
+             )
 
       if config["worker_count"] > 1 do
         intervals =
           Enum.map(probes, fn probe ->
             started = Enum.find(probe["lifecycle"], &(&1["event"] == "session_started"))
-            completed = Enum.find(probe["lifecycle"], &(&1["event"] in ["completed", "turn_completed"] and &1["session_id"] == started["session_id"]))
+
+            completed =
+              Enum.find(
+                probe["lifecycle"],
+                &(&1["event"] in ["completed", "turn_completed"] and &1["session_id"] == started["session_id"])
+              )
+
             {started["observed_monotonic_ms"], completed["observed_monotonic_ms"]}
           end)
 

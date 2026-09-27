@@ -83,7 +83,10 @@ defmodule SymphonyElixir.Jira.AdapterTest do
     assert {:error, :missing_jira_project_key} =
              JiraClient.validate_settings(tracker_settings(%{"project_key" => 123}))
 
-    assert JiraClient.secret_environment_names(tracker_settings(%{"api_token" => "$SYMPHONY_JIRA_TOKEN"})) == ["JIRA_API_TOKEN", "SYMPHONY_JIRA_TOKEN"]
+    assert JiraClient.secret_environment_names(tracker_settings(%{"api_token" => "$SYMPHONY_JIRA_TOKEN"})) == [
+             "JIRA_API_TOKEN",
+             "SYMPHONY_JIRA_TOKEN"
+           ]
   end
 
   test "client normalizes Jira issue fields and projects ADF description text" do
@@ -414,7 +417,8 @@ defmodule SymphonyElixir.Jira.AdapterTest do
       )
 
     expected_call =
-      {:jira_tool_called, "POST", "/rest/api/3/issue/10001/comment", %{"expand" => "renderedBody"}, %{"body" => %{"type" => "doc"}}, [tracker_settings: tracker_settings]}
+      {:jira_tool_called, "POST", "/rest/api/3/issue/10001/comment", %{"expand" => "renderedBody"},
+       %{"body" => %{"type" => "doc"}}, [tracker_settings: tracker_settings]}
 
     assert_received ^expected_call
 

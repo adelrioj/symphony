@@ -93,7 +93,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     required = ["kubeconfig", "context", "namespace", "template", "ssh_user", "ssh_auth_volume"]
 
     if Enum.all?(required, &(is_binary(provider[&1]) and String.trim(provider[&1]) != "")) and
-         is_integer(provider["ssh_port"]) and provider["ssh_port"] in 1..65_535 and File.regular?(provider["kubeconfig"]) and
+         is_integer(provider["ssh_port"]) and provider["ssh_port"] in 1..65_535 and
+         File.regular?(provider["kubeconfig"]) and
          Regex.match?(~r/^[a-z_][a-z0-9_-]*[$]?$/, provider["ssh_user"]) do
       :ok
     else
@@ -193,7 +194,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp collect_owned(record, acc), do: {:cont, {:ok, acc ++ owned_obligations(record)}}
 
   defp exact_cover(owned, declared) do
-    if Enum.sort(owned) == Enum.sort(declared), do: :ok, else: {:error, {:invalid, :kubernetes_declared_obligations_inexact}}
+    if Enum.sort(owned) == Enum.sort(declared),
+      do: :ok,
+      else: {:error, {:invalid, :kubernetes_declared_obligations_inexact}}
   end
 
   defp owned_obligations(record) do
@@ -279,7 +282,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp discharge_stamp(declaration),
-    do: %{"deleted" => true, "discharge" => "destruction_receipt", "declaration" => declaration.name, "receipt" => declaration.spec["receiptName"]}
+    do: %{
+      "deleted" => true,
+      "discharge" => "destruction_receipt",
+      "declaration" => declaration.name,
+      "receipt" => declaration.spec["receiptName"]
+    }
 
   # The compute half of the same evidence. A destroyed machine cannot still be running a container,
   # so the receipt terminates every authorized Pod on it. The kind stays distinct from anything an
@@ -474,7 +482,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   # raises and preparation dies as {:invalid, :managed_execution_context}, so an environment is
   # allocated and then never usable. Bind on entry so the durable copy written to the guard and
   # every later identity comparison see the same value.
-  defp bind_template_identity(%Record{template_identity: nil} = record, q), do: %{record | template_identity: q["template_uid"]}
+  defp bind_template_identity(%Record{template_identity: nil} = record, q),
+    do: %{record | template_identity: q["template_uid"]}
+
   defp bind_template_identity(record, _q), do: record
 
   defp ensure_observed(config, record, existing, objects, q, opts) do
@@ -655,7 +665,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
            true <- current.phase == :running,
            {:ok, sandbox} <- fetch_parent(config, current, opts),
            {:ok, pods} <- Client.list(config, collection(config, "pods"), opts),
-           [pod] <- Enum.filter(children(pods, current, sandbox), &(uid(&1) in Map.get(current.metadata, "authorized_pod_uids", []) and ready_pod?(&1))),
+           [pod] <-
+             Enum.filter(
+               children(pods, current, sandbox),
+               &(uid(&1) in Map.get(current.metadata, "authorized_pod_uids", []) and ready_pod?(&1))
+             ),
            {:ok, secret} <- Client.lookup(config, collection(config, "secrets"), secret_name(current), opts),
            :ok <- guarded_secret(config, secret, current, sandbox, opts),
            {:ok, host_public} <- secret_value(secret, "ssh_host_ed25519_key.pub"),
@@ -728,7 +742,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
     result =
       with {:ok, q} <- qualification(config, opts),
-           {:ok, guard} <- Guard.close(config, %{record | desired: :absent}, encode_record(%{record | desired: :absent}), opts),
+           {:ok, guard} <-
+             Guard.close(config, %{record | desired: :absent}, encode_record(%{record | desired: :absent}), opts),
            {:ok, guard} <- Guard.settle(config, record, guard, opts),
            :ok <- Guard.drained(guard),
            {:ok, current} <- decode_guard_record(guard.data, config) do
@@ -817,7 +832,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
          {:ok, guard} <- Guard.fetch(config, deleting, opts),
          evidence = cleanup_evidence(deleting, journal, guard),
          true <- complete_evidence?(%{guard | data: Map.put(guard.data, "evidence", evidence)}, deleting),
-         {:ok, ready} <- Guard.transition(config, deleting, guard, "ReadyToFinalize", encode_record(deleting), evidence, opts) do
+         {:ok, ready} <-
+           Guard.transition(config, deleting, guard, "ReadyToFinalize", encode_record(deleting), evidence, opts) do
       finalize_ready(config, deleting, ready, opts)
     else
       false -> {:error, {:unknown, :kubernetes_cleanup_pending}, stopped}
@@ -875,7 +891,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp physical_failure(reason, record, sandbox) do
     evidence = record.metadata["termination_evidence"] || %{}
-    authorized_stopped? = Enum.all?(record.metadata["authorized_pod_uids"] || [], &termination_proof?(evidence[&1], &1, record))
+
+    authorized_stopped? =
+      Enum.all?(record.metadata["authorized_pod_uids"] || [], &termination_proof?(evidence[&1], &1, record))
 
     if authorized_stopped? and committed_pods_accounted?(record, sandbox, evidence),
       do: {:error, reason},
@@ -917,7 +935,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     with true <- control["protocol"] == @protocol and control["closeRequestId"] in [nil, close_id],
          true <- @finalizer in (get_in(sandbox, ["metadata", "finalizers"]) || []) do
       if control["closeRequestId"] == nil do
-        patch = cas(sandbox) ++ [%{"op" => "add", "path" => "/spec/creationControl/closeRequestId", "value" => close_id}]
+        patch =
+          cas(sandbox) ++ [%{"op" => "add", "path" => "/spec/creationControl/closeRequestId", "value" => close_id}]
+
         api(config, :patch, object_path(config, "sandboxes", sandbox), patch, opts)
       end
 
@@ -999,7 +1019,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     annotations = get_in(object, ["metadata", "annotations"]) || %{}
     kinds = %{"pods" => "Pod", "persistentvolumeclaims" => "PersistentVolumeClaim", "services" => "Service"}
 
-    uid(object) == operation["objectUID"] and name(object) == operation["name"] and object["kind"] == kinds[operation["resource"]] and
+    uid(object) == operation["objectUID"] and name(object) == operation["name"] and
+      object["kind"] == kinds[operation["resource"]] and
       get_in(object, ["metadata", "namespace"]) == operation["namespace"] and
       annotations["agents.x-k8s.io/create-protocol"] == @protocol and
       annotations["agents.x-k8s.io/create-parent-uid"] == operation["parentUID"] and
@@ -1100,7 +1121,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp put_pod_safety(record, pod_uid, safety),
-    do: %{record | metadata: Map.update(record.metadata, "pod_safety", %{pod_uid => safety}, &Map.put(&1, pod_uid, safety))}
+    do: %{
+      record
+      | metadata: Map.update(record.metadata, "pod_safety", %{pod_uid => safety}, &Map.put(&1, pod_uid, safety))
+    }
 
   defp terminal_kind(%{"kind" => "host_destroyed"}), do: "host_destroyed"
   defp terminal_kind(_), do: "terminated"
@@ -1147,7 +1171,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   # Either the provisioned volume's deletion was observed, or the claim provably never bound and
   # no volume was ever provisioned for it. Only discharge_unbound/5 sets the latter, and only
   # after an authoritative read shows the claim absent with no PersistentVolume claiming its UID.
-  defp deleted_volume?(volume), do: volume["deleted"] == true and (is_binary(volume["pv_uid"]) or volume["unbound"] == true)
+  defp deleted_volume?(volume),
+    do: volume["deleted"] == true and (is_binary(volume["pv_uid"]) or volume["unbound"] == true)
 
   defp authorized_pods_terminated?(record, evidence) do
     Enum.all?(record.metadata["authorized_pod_uids"] || [], &termination_proof?(evidence[&1], &1, record))
@@ -1178,7 +1203,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp denied_candidate_for_guard?(object, record) do
     labeled_candidate?(object, record) or
-      Enum.any?(get_in(object, ["metadata", "ownerReferences"]) || [], &(&1["uid"] == record.provider_ref or &1["name"] == record.key))
+      Enum.any?(
+        get_in(object, ["metadata", "ownerReferences"]) || [],
+        &(&1["uid"] == record.provider_ref or &1["name"] == record.key)
+      )
   end
 
   defp finalize_ready(config, record, ready, opts) do
@@ -1205,14 +1233,22 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp complete_guard(config, record, ready, opts) do
-    with {:ok, complete} <- Guard.transition(config, record, ready, "Complete", encode_record(record), ready.data["evidence"], opts),
+    with {:ok, complete} <-
+           Guard.transition(config, record, ready, "Complete", encode_record(record), ready.data["evidence"], opts),
          {:ok, confirmed} <- Guard.confirm(config, record, complete, opts) do
       {:ok, completed_record(record, confirmed)}
     end
   end
 
   defp completed_record(record, guard),
-    do: %{record | desired: :absent, absent?: true, phase: :stopped, pending: [], proof: {:quiescent, %{parent_uid: guard.data["parentUID"], guard_uid: uid(guard.object), protocol: @protocol}}}
+    do: %{
+      record
+      | desired: :absent,
+        absent?: true,
+        phase: :stopped,
+        pending: [],
+        proof: {:quiescent, %{parent_uid: guard.data["parentUID"], guard_uid: uid(guard.object), protocol: @protocol}}
+    }
 
   @spec normalize(Record.t(), map(), [map()], map()) :: Record.t()
   def normalize(record, sandbox, pods, termination_evidence) do
@@ -1237,7 +1273,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     end
   end
 
-  defp declared_lost?(record), do: is_map(record.metadata["loss_declaration"]) and record.metadata["loss_declaration"] != %{}
+  defp declared_lost?(record),
+    do: is_map(record.metadata["loss_declaration"]) and record.metadata["loss_declaration"] != %{}
 
   defp stopped_sandbox?(record, sandbox, pods, evidence) do
     suspension_acknowledged?(record, sandbox) and blueprint_gated?(sandbox) and
@@ -1262,7 +1299,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     journal = get_in(sandbox, ["status", "creationJournal"]) || %{}
     operations = journal["operations"]
 
-    if get_in(sandbox, ["spec", "creationControl", "protocol"]) == @protocol and journal_membership_valid?(journal, sandbox) do
+    if get_in(sandbox, ["spec", "creationControl", "protocol"]) == @protocol and
+         journal_membership_valid?(journal, sandbox) do
       {:ok, Enum.filter(operations, &(&1["resource"] == "pods"))}
     else
       {:error, {:unknown, :kubernetes_controller_journal_invalid}}
@@ -1287,7 +1325,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       valid_operation_identity?(operation, parent_uid, namespace)
   end
 
-  defp valid_journal_member?(operation, parent_uid, namespace), do: valid_controller_operation?(operation, parent_uid, namespace)
+  defp valid_journal_member?(operation, parent_uid, namespace),
+    do: valid_controller_operation?(operation, parent_uid, namespace)
 
   defp with_pod_obligations(record, sandbox, pods, q, callback) do
     with {:ok, observed} <- capture_pod_obligations(record, sandbox, pods, q) do
@@ -1309,7 +1348,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp capture_pod_obligations(record, sandbox, pods, q) do
     with {:ok, operations} <- pod_operations(sandbox),
          true <- prior_pod_operations_preserved?(record, operations) do
-      record = %{record | metadata: Map.put(record.metadata, "controller_pod_operations", Map.new(operations, &{&1["id"], &1}))}
+      record = %{
+        record
+        | metadata: Map.put(record.metadata, "controller_pod_operations", Map.new(operations, &{&1["id"], &1}))
+      }
 
       observed =
         Enum.reduce(operations, record, fn operation, current ->
@@ -1340,7 +1382,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
           false
 
         current ->
-          current == prior or (prior["state"] == "Issued" and current["state"] == "Committed" and Map.drop(current, ["state", "objectUID"]) == Map.delete(prior, "state"))
+          current == prior or
+            (prior["state"] == "Issued" and current["state"] == "Committed" and
+               Map.drop(current, ["state", "objectUID"]) == Map.delete(prior, "state"))
       end
     end)
   end
@@ -1398,26 +1442,37 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     with {:ok, baseline} <- baseline(config, opts),
          {:ok, %{status: 200, body: version}} <- Client.request(config, :get, "/version", nil, opts),
          true <- kubernetes_version?(version),
-         {:ok, template} when is_map(template) <- Client.lookup(config, collection(config, "sandboxtemplates"), config.provider["template"], opts),
-         qualification_name when is_binary(qualification_name) <- get_in(template, ["metadata", "annotations", @qualification]),
+         {:ok, template} when is_map(template) <-
+           Client.lookup(config, collection(config, "sandboxtemplates"), config.provider["template"], opts),
+         qualification_name when is_binary(qualification_name) <-
+           get_in(template, ["metadata", "annotations", @qualification]),
          {:ok, cm} when is_map(cm) <- Client.lookup(config, collection(config, "configmaps"), qualification_name, opts),
          true <- cm["immutable"] == true,
          {:ok, q} <- Jason.decode(get_in(cm, ["data", "contract.json"]) || ""),
-         true <- q["release"] == baseline.release and q["template_uid"] == uid(template) and q["template_digest"] == digest(template["spec"]),
+         true <-
+           q["release"] == baseline.release and q["template_uid"] == uid(template) and
+             q["template_digest"] == digest(template["spec"]),
          true <- is_binary(q["qualification_report"]) and String.trim(q["qualification_report"]) != "",
          true <- q["termination_contract"] == baseline.termination_contract,
          :ok <- candidate_contract(config, q, template, baseline, opts),
          {:ok, crds} <- Client.list(config, "/apis/apiextensions.k8s.io/v1/customresourcedefinitions", opts),
          :ok <- schemas(crds, baseline),
-         {:ok, deployments} <- Client.list(config, "/apis/apps/v1/namespaces/#{segment(q["controller_namespace"])}/deployments", opts),
+         {:ok, deployments} <-
+           Client.list(config, "/apis/apps/v1/namespaces/#{segment(q["controller_namespace"])}/deployments", opts),
          controller when is_map(controller) <- Enum.find(deployments, &(name(&1) == q["controller_name"])),
          true <- uid(controller) == q["controller_uid"] and controller_image?(controller, q, baseline),
          {:ok, runtimes} <- Client.list(config, "/apis/node.k8s.io/v1/runtimeclasses", opts),
-         runtime when is_map(runtime) <- Enum.find(runtimes, &(name(&1) == get_in(template, ["spec", "podTemplate", "spec", "runtimeClassName"]))),
+         runtime when is_map(runtime) <-
+           Enum.find(runtimes, &(name(&1) == get_in(template, ["spec", "podTemplate", "spec", "runtimeClassName"]))),
          true <- uid(runtime) == q["runtime_class_uid"] and runtime["handler"] == q["runtime_handler"],
          {:ok, classes} <- Client.list(config, "/apis/storage.k8s.io/v1/storageclasses", opts),
          :ok <- storage_classes(template, classes, q),
-         {:ok, policies} <- Client.list(config, "/apis/networking.k8s.io/v1/namespaces/#{segment(config.provider["namespace"])}/networkpolicies", opts),
+         {:ok, policies} <-
+           Client.list(
+             config,
+             "/apis/networking.k8s.io/v1/namespaces/#{segment(config.provider["namespace"])}/networkpolicies",
+             opts
+           ),
          true <- network_policy?(template, policies, q),
          :ok <- safe_template(template, config, q) do
       {:ok, Map.merge(q, %{"uid" => uid(cm), "template" => template})}
@@ -1482,7 +1537,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       claims != [] and
         Enum.all?(claims, fn claim ->
           class = Enum.find(classes, &(name(&1) == get_in(claim, ["spec", "storageClassName"])))
-          class != nil and class["reclaimPolicy"] == "Delete" and class["provisioner"] == q["csi_driver"] and uid(class) in Map.get(q, "storage_class_uids", [])
+
+          class != nil and class["reclaimPolicy"] == "Delete" and class["provisioner"] == q["csi_driver"] and
+            uid(class) in Map.get(q, "storage_class_uids", [])
         end)
 
     if valid, do: :ok, else: {:error, {:invalid, :kubernetes_storage_not_qualified}}
@@ -1539,7 +1596,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       claim = get_in(pv, ["spec", "claimRef"]) || %{}
 
       labeled_candidate?(pv, record) or (claim["uid"] != nil and claim["uid"] in pvc_uids) or
-        (claim["namespace"] == record.scope["namespace"] and is_binary(claim["name"]) and String.ends_with?(claim["name"], "-" <> record.key))
+        (claim["namespace"] == record.scope["namespace"] and is_binary(claim["name"]) and
+           String.ends_with?(claim["name"], "-" <> record.key))
     end)
   end
 
@@ -1550,7 +1608,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     ]
 
     Enum.any?(metadata, fn item ->
-      Enum.any?(Map.keys(item["annotations"] || %{}), &(String.starts_with?(&1, "agents.x-k8s.io/create-") or String.starts_with?(&1, "symphony.dev/create-")))
+      Enum.any?(
+        Map.keys(item["annotations"] || %{}),
+        &(String.starts_with?(&1, "agents.x-k8s.io/create-") or String.starts_with?(&1, "symphony.dev/create-"))
+      )
     end)
   end
 
@@ -1631,13 +1692,29 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       })
 
     pod = %{pod | "spec" => spec} |> Map.put("metadata", stamp(Map.get(pod, "metadata", %{}), record))
-    claims = Enum.map(blueprint["volumeClaimTemplates"], &Map.update!(&1, "metadata", fn metadata -> stamp(metadata, record) end))
-    blueprint = Map.merge(blueprint, %{"podTemplate" => pod, "volumeClaimTemplates" => claims, "operatingMode" => "Suspended", "creationControl" => %{"protocol" => @protocol}})
+
+    claims =
+      Enum.map(
+        blueprint["volumeClaimTemplates"],
+        &Map.update!(&1, "metadata", fn metadata -> stamp(metadata, record) end)
+      )
+
+    blueprint =
+      Map.merge(blueprint, %{
+        "podTemplate" => pod,
+        "volumeClaimTemplates" => claims,
+        "operatingMode" => "Suspended",
+        "creationControl" => %{"protocol" => @protocol}
+      })
 
     sandbox = %{
       "apiVersion" => @api,
       "kind" => "Sandbox",
-      "metadata" => stamp(%{"name" => record.key, "namespace" => config.provider["namespace"], "finalizers" => [@finalizer]}, record),
+      "metadata" =>
+        stamp(
+          %{"name" => record.key, "namespace" => config.provider["namespace"], "finalizers" => [@finalizer]},
+          record
+        ),
       "spec" => blueprint
     }
 
@@ -1659,9 +1736,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp labeled_candidate?(object, record),
     do: get_in(object, ["metadata", "labels", "symphony.dev/environment"]) == record.key
 
-  defp with_deadline(opts), do: Keyword.put_new_lazy(opts, :deadline, fn -> System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, 20_000) end)
+  defp with_deadline(opts),
+    do:
+      Keyword.put_new_lazy(opts, :deadline, fn ->
+        System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, 20_000)
+      end)
 
-  defp command_options(opts), do: Keyword.put(opts, :timeout_ms, max(0, opts[:deadline] - System.monotonic_time(:millisecond)))
+  defp command_options(opts),
+    do: Keyword.put(opts, :timeout_ms, max(0, opts[:deadline] - System.monotonic_time(:millisecond)))
 
   defp wait_authorization(config, record, q, opts) do
     if opts[:deadline] <= System.monotonic_time(:millisecond) do
@@ -1767,7 +1849,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp owned_pods(pods, record, sandbox) do
-    if Enum.all?(children(pods, record, sandbox), &(child_ownership(&1, record, sandbox) == :ok)), do: :ok, else: {:error, {:unknown, :kubernetes_child_ownership_changed}}
+    if Enum.all?(children(pods, record, sandbox), &(child_ownership(&1, record, sandbox) == :ok)),
+      do: :ok,
+      else: {:error, {:unknown, :kubernetes_child_ownership_changed}}
   end
 
   defp save_observation(config, record, opts) do
@@ -1783,7 +1867,10 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
          {:ok, record} <- capture_storage(record, sandbox, objects, q),
          true <-
            Enum.all?(get_in(q, ["template", "spec", "volumeClaimTemplates"]) || [], fn claim ->
-             Enum.any?(objects["persistentvolumeclaims"], &(name(&1) == get_in(claim, ["metadata", "name"]) <> "-" <> name(sandbox)))
+             Enum.any?(
+               objects["persistentvolumeclaims"],
+               &(name(&1) == get_in(claim, ["metadata", "name"]) <> "-" <> name(sandbox))
+             )
            end) do
       record_release(config, record, sandbox, pod, q, opts)
     else
@@ -1795,7 +1882,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp record_release(config, record, sandbox, pod, q, opts) do
     pod_uid = uid(pod)
     reference = %{"name" => name(pod), "uid" => pod_uid, "resourceVersion" => rv(pod)}
-    metadata = record.metadata |> Map.update("authorized_pod_uids", [pod_uid], &Enum.uniq([pod_uid | &1])) |> Map.update("authorized_pods", %{pod_uid => reference}, &Map.put(&1, pod_uid, reference))
+
+    metadata =
+      record.metadata
+      |> Map.update("authorized_pod_uids", [pod_uid], &Enum.uniq([pod_uid | &1]))
+      |> Map.update("authorized_pods", %{pod_uid => reference}, &Map.put(&1, pod_uid, reference))
+
     record = %{record | metadata: metadata, pending: [%{verb: :start, id: pod_uid, outcome: :pending}]}
 
     with :ok <- Guard.open(config, record, opts),
@@ -1809,13 +1901,18 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
          true <- observed.pending == saved.pending and running_intent?(observed, current),
          :ok <- Guard.open(config, saved, opts),
          :ok <- safe_live_pod(pod, q),
-         index when is_integer(index) <- Enum.find_index(get_in(pod, ["spec", "schedulingGates"]) || [], &(&1["name"] == @gate)),
+         index when is_integer(index) <-
+           Enum.find_index(get_in(pod, ["spec", "schedulingGates"]) || [], &(&1["name"] == @gate)),
          {:ok, _} <-
            api(
              config,
              :patch,
              object_path(config, "pods", pod),
-             cas(pod) ++ [%{"op" => "test", "path" => "/spec/schedulingGates/#{index}/name", "value" => @gate}, %{"op" => "remove", "path" => "/spec/schedulingGates/#{index}"}],
+             cas(pod) ++
+               [
+                 %{"op" => "test", "path" => "/spec/schedulingGates/#{index}/name", "value" => @gate},
+                 %{"op" => "remove", "path" => "/spec/schedulingGates/#{index}"}
+               ],
              opts
            ) do
       {:ok, %{saved | pending: [%{verb: :start, id: pod_uid, outcome: :succeeded}]}}
@@ -1852,7 +1949,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp replacement_safe(record, pods) do
     evidence = Map.get(record.metadata, "termination_evidence", %{})
-    unresolved = Enum.reject(Map.get(record.metadata, "authorized_pod_uids", []), &termination_proof?(evidence[&1], &1, record))
+
+    unresolved =
+      Enum.reject(Map.get(record.metadata, "authorized_pod_uids", []), &termination_proof?(evidence[&1], &1, record))
 
     if unresolved == [] or (length(pods) == 1 and unresolved == [uid(hd(pods))]) do
       :ok
@@ -1957,8 +2056,18 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp capture_storage(record, sandbox, objects, q) do
-    claims = Map.new(get_in(q, ["template", "spec", "volumeClaimTemplates"]) || [], &{get_in(&1, ["metadata", "name"]) <> "-" <> name(sandbox), &1})
-    pvcs = Enum.filter(objects["persistentvolumeclaims"], &(Map.has_key?(claims, name(&1)) or child_candidate?(&1, record, sandbox)))
+    claims =
+      Map.new(
+        get_in(q, ["template", "spec", "volumeClaimTemplates"]) || [],
+        &{get_in(&1, ["metadata", "name"]) <> "-" <> name(sandbox), &1}
+      )
+
+    pvcs =
+      Enum.filter(
+        objects["persistentvolumeclaims"],
+        &(Map.has_key?(claims, name(&1)) or child_candidate?(&1, record, sandbox))
+      )
+
     known = Map.get(record.metadata, "volumes", %{})
 
     Enum.reduce_while(pvcs, {:ok, known}, fn pvc, {:ok, acc} ->
@@ -2124,13 +2233,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp existing_secret_ownership(_config, nil, _record, _sandbox, _opts), do: :ok
-  defp existing_secret_ownership(config, secret, record, sandbox, opts), do: guarded_secret(config, secret, record, sandbox, opts)
+
+  defp existing_secret_ownership(config, secret, record, sandbox, opts),
+    do: guarded_secret(config, secret, record, sandbox, opts)
 
   defp guarded_secret(config, secret, record, sandbox, opts) do
     with :ok <- child_ownership(secret, record, sandbox),
          {:ok, guard} <- Guard.fetch(config, record, opts),
          {:ok, guard} <- Guard.settle(config, record, guard, opts),
-         true <- Enum.any?(guard.data["operations"], &(&1["resource"] == "secrets" and &1["state"] == "Committed" and Guard.matches?(secret, &1))) do
+         true <-
+           Enum.any?(
+             guard.data["operations"],
+             &(&1["resource"] == "secrets" and &1["state"] == "Committed" and Guard.matches?(secret, &1))
+           ) do
       :ok
     else
       false -> {:error, {:unknown, :kubernetes_create_attribution_conflict}}
@@ -2177,13 +2292,20 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
          {:ok, record} <- capture_pod_obligations(record, sandbox, pods, q),
          {:ok, record} <- save_observation(config, record, opts),
          {:ok, sandbox} <- fetch_parent(config, record, opts) do
-      observed = normalize(record, sandbox, children(pods, record, sandbox), Map.get(record.metadata, "termination_evidence", %{}))
+      observed =
+        normalize(
+          record,
+          sandbox,
+          children(pods, record, sandbox),
+          Map.get(record.metadata, "termination_evidence", %{})
+        )
 
       cond do
         observed.phase == :stopped ->
           {:ok, observed, sandbox}
 
-        get_in(sandbox, ["spec", "operatingMode"]) != "Suspended" or opts[:deadline] <= System.monotonic_time(:millisecond) ->
+        get_in(sandbox, ["spec", "operatingMode"]) != "Suspended" or
+            opts[:deadline] <= System.monotonic_time(:millisecond) ->
           {:error, {:unknown, :client_key_rotation_requires_stop}}
 
         true ->
@@ -2268,7 +2390,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp host_data(secret, _path, _command, _opts) do
-    with {:ok, _} <- secret_value(secret, "ssh_host_ed25519_key.pub"), {:ok, _} <- secret_value(secret, "ssh_host_ed25519_key"), do: {:ok, secret["data"]}
+    with {:ok, _} <- secret_value(secret, "ssh_host_ed25519_key.pub"),
+         {:ok, _} <- secret_value(secret, "ssh_host_ed25519_key"),
+         do: {:ok, secret["data"]}
   end
 
   defp secret_value(secret, key) do
@@ -2377,7 +2501,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp inventory(config, opts) do
-    Enum.reduce_while(["sandboxes" | @children] ++ ["persistentvolumes", "configmaps"], {:ok, %{}}, fn resource, {:ok, objects} ->
+    Enum.reduce_while(["sandboxes" | @children] ++ ["persistentvolumes", "configmaps"], {:ok, %{}}, fn resource,
+                                                                                                       {:ok, objects} ->
       case Client.list(config, collection(config, resource), opts) do
         {:ok, items} -> {:cont, {:ok, Map.put(objects, resource, items)}}
         error -> {:halt, error}
@@ -2412,7 +2537,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     end
   end
 
-  defp ownership(object, record), do: if(owned?(object, record), do: :ok, else: {:error, {:unknown, :kubernetes_ownership_changed}})
+  defp ownership(object, record),
+    do: if(owned?(object, record), do: :ok, else: {:error, {:unknown, :kubernetes_ownership_changed}})
 
   defp owned?(object, record) do
     labels = get_in(object || %{}, ["metadata", "labels"]) || %{}
@@ -2434,14 +2560,18 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp child_candidate?(item, record, sandbox) do
     labels = get_in(item, ["metadata", "labels"]) || %{}
-    labels["symphony.dev/environment"] == record.key or Enum.any?(get_in(item, ["metadata", "ownerReferences"]) || [], &(&1["uid"] == uid(sandbox)))
+
+    labels["symphony.dev/environment"] == record.key or
+      Enum.any?(get_in(item, ["metadata", "ownerReferences"]) || [], &(&1["uid"] == uid(sandbox)))
   end
 
   defp child_ownership(child, record, sandbox) when is_map(child) do
     refs = get_in(child, ["metadata", "ownerReferences"]) || []
 
     if Enum.any?(refs, &(&1["uid"] == uid(sandbox) and &1["kind"] == "Sandbox")) and
-         get_in(child, ["metadata", "labels", "symphony.dev/environment"]) in [nil, record.key], do: :ok, else: {:error, {:unknown, :kubernetes_child_ownership_changed}}
+         get_in(child, ["metadata", "labels", "symphony.dev/environment"]) in [nil, record.key],
+       do: :ok,
+       else: {:error, {:unknown, :kubernetes_child_ownership_changed}}
   end
 
   defp child_ownership(_, _, _), do: {:error, {:unknown, :kubernetes_child_missing}}
@@ -2453,13 +2583,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       {"qualification_uid", "uid"}
     ]
 
-    if Enum.all?(identity, fn {saved, qualified} -> record.metadata[saved] in [nil, q[qualified]] end), do: :ok, else: {:error, {:invalid, :retained_template_changed}}
+    if Enum.all?(identity, fn {saved, qualified} -> record.metadata[saved] in [nil, q[qualified]] end),
+      do: :ok,
+      else: {:error, {:invalid, :retained_template_changed}}
   end
 
   defp persist(config, record, sandbox, extra, opts) do
     with {:ok, guard} <- Guard.save(config, record, encode_record(record), opts),
          {:ok, durable} <- decode_guard_record(guard.data, config) do
-      durable = %{durable | metadata: Map.merge(durable.metadata, Map.take(record.metadata, ["client_key_directory", "client_key_lease"]))}
+      durable = %{
+        durable
+        | metadata: Map.merge(durable.metadata, Map.take(record.metadata, ["client_key_directory", "client_key_lease"]))
+      }
+
       apply_state(config, durable, sandbox, extra, opts, @persist_attempts)
     end
   end
@@ -2489,9 +2625,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   # write on, re-apply against the fresh parent. A moved annotation means another
   # writer owns the record, and that conflict is still surfaced to the caller.
   defp retry_state(config, durable, sandbox, extra, opts, attempts) do
-    with {:ok, observed} when is_map(observed) <- Client.lookup(config, collection(config, "sandboxes"), name(sandbox), opts),
+    with {:ok, observed} when is_map(observed) <-
+           Client.lookup(config, collection(config, "sandboxes"), name(sandbox), opts),
          true <- uid(observed) == uid(sandbox),
-         true <- get_in(observed, ["metadata", "annotations", @state]) == get_in(sandbox, ["metadata", "annotations", @state]) do
+         true <-
+           get_in(observed, ["metadata", "annotations", @state]) == get_in(sandbox, ["metadata", "annotations", @state]) do
       apply_state(config, durable, observed, extra, opts, attempts - 1)
     else
       _ -> {:error, {:retryable, :kubernetes_cas_conflict}}
@@ -2519,7 +2657,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp persisted_intent?(observed, annotations, extra) do
     get_in(observed, ["metadata", "annotations", @state]) == annotations[@state] and
-      Enum.all?(extra, fn %{"op" => "add", "path" => path, "value" => value} -> get_in(observed, String.split(path, "/", trim: true)) == value end)
+      Enum.all?(extra, fn %{"op" => "add", "path" => path, "value" => value} ->
+        get_in(observed, String.split(path, "/", trim: true)) == value
+      end)
   end
 
   defp durable_metadata(metadata), do: Map.drop(metadata, ["client_key_directory", "client_key_lease"])
@@ -2528,7 +2668,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp guard_record(config, record, guard, sandbox) do
     with {:ok, saved} <- decode_guard_record(guard.data, config) do
-      saved = %{saved | metadata: Map.merge(saved.metadata, Map.take(record.metadata, ["client_key_directory", "client_key_lease"]))}
+      saved = %{
+        saved
+        | metadata: Map.merge(saved.metadata, Map.take(record.metadata, ["client_key_directory", "client_key_lease"]))
+      }
+
       {:ok, bind_parent(saved, sandbox)}
     end
   end
@@ -2566,7 +2710,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
 
   defp decode_record(object, config) do
     with {:ok, fields, lifecycle} <- decode_annotation(object),
-         true <- fields["deployment_id"] == config.deployment_id and fields["scope"] == Config.scope(config) and fields["kind"] == "kubernetes",
+         true <-
+           fields["deployment_id"] == config.deployment_id and fields["scope"] == Config.scope(config) and
+             fields["kind"] == "kubernetes",
          true <- Enum.all?(["key", "tracker_kind", "issue_id", "workspace_path"], &is_binary(fields[&1])) do
       record = %Record{
         key: fields["key"],
@@ -2586,7 +2732,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp decode_annotation(object) do
-    with {:ok, fields} when is_map(fields) <- Jason.decode(get_in(object || %{}, ["metadata", "annotations", @state]) || ""),
+    with {:ok, fields} when is_map(fields) <-
+           Jason.decode(get_in(object || %{}, ["metadata", "annotations", @state]) || ""),
          {:ok, desired} <- enum(fields["desired"], [:running, :stopped, :absent]),
          {:ok, pending} <- decode_pending(fields["pending"]),
          true <- is_map(fields["metadata"]),
@@ -2648,11 +2795,30 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       "symphony.dev/tracker" => record.tracker_kind
     }
 
-  defp owner_reference(sandbox), do: %{"apiVersion" => @api, "kind" => "Sandbox", "name" => name(sandbox), "uid" => uid(sandbox), "controller" => true, "blockOwnerDeletion" => true}
-  defp cas(object), do: [%{"op" => "test", "path" => "/metadata/uid", "value" => uid(object)}, %{"op" => "test", "path" => "/metadata/resourceVersion", "value" => rv(object)}]
+  defp owner_reference(sandbox),
+    do: %{
+      "apiVersion" => @api,
+      "kind" => "Sandbox",
+      "name" => name(sandbox),
+      "uid" => uid(sandbox),
+      "controller" => true,
+      "blockOwnerDeletion" => true
+    }
+
+  defp cas(object),
+    do: [
+      %{"op" => "test", "path" => "/metadata/uid", "value" => uid(object)},
+      %{"op" => "test", "path" => "/metadata/resourceVersion", "value" => rv(object)}
+    ]
 
   defp delete(config, resource, object, opts) do
-    body = %{"apiVersion" => "v1", "kind" => "DeleteOptions", "preconditions" => %{"uid" => uid(object), "resourceVersion" => rv(object)}, "propagationPolicy" => "Foreground"}
+    body = %{
+      "apiVersion" => "v1",
+      "kind" => "DeleteOptions",
+      "preconditions" => %{"uid" => uid(object), "resourceVersion" => rv(object)},
+      "propagationPolicy" => "Foreground"
+    }
+
     with {:ok, _} <- api(config, :delete, object_path(config, resource, object), body, opts), do: :ok
   end
 
@@ -2666,8 +2832,12 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     end
   end
 
-  defp collection(config, "sandboxes"), do: "/apis/#{@api}/namespaces/#{segment(config.provider["namespace"])}/sandboxes"
-  defp collection(config, "sandboxtemplates"), do: "/apis/#{@extensions}/namespaces/#{segment(config.provider["namespace"])}/sandboxtemplates"
+  defp collection(config, "sandboxes"),
+    do: "/apis/#{@api}/namespaces/#{segment(config.provider["namespace"])}/sandboxes"
+
+  defp collection(config, "sandboxtemplates"),
+    do: "/apis/#{@extensions}/namespaces/#{segment(config.provider["namespace"])}/sandboxtemplates"
+
   defp collection(_config, "persistentvolumes"), do: "/api/v1/persistentvolumes"
   defp collection(config, resource), do: "/api/v1/namespaces/#{segment(config.provider["namespace"])}/#{resource}"
   defp object_path(config, resource, object), do: collection(config, resource) <> "/" <> segment(name(object))
@@ -2677,26 +2847,47 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp name(object), do: get_in(object || %{}, ["metadata", "name"])
   defp rv_from_record(record), do: to_string(record.version)
   defp secret_name(record), do: record.key <> "-ssh"
-  defp digest(value), do: :crypto.hash(:sha256, Jason.encode!(canonical(value))) |> Base.encode16(case: :lower) |> binary_part(0, 40)
-  defp canonical(map) when is_map(map), do: map |> Enum.map(fn {key, value} -> [key, canonical(value)] end) |> Enum.sort()
+
+  defp digest(value),
+    do: :crypto.hash(:sha256, Jason.encode!(canonical(value))) |> Base.encode16(case: :lower) |> binary_part(0, 40)
+
+  defp canonical(map) when is_map(map),
+    do: map |> Enum.map(fn {key, value} -> [key, canonical(value)] end) |> Enum.sort()
+
   defp canonical(list) when is_list(list), do: Enum.map(list, &canonical/1)
   defp canonical(value), do: value
-  defp gated?(pod), do: get_in(pod, ["spec", "nodeName"]) in [nil, ""] and Enum.any?(get_in(pod, ["spec", "schedulingGates"]) || [], &(&1["name"] == @gate))
-  defp blueprint_gated?(sandbox), do: Enum.any?(get_in(sandbox, ["spec", "podTemplate", "spec", "schedulingGates"]) || [], &(&1["name"] == @gate))
+
+  defp gated?(pod),
+    do:
+      get_in(pod, ["spec", "nodeName"]) in [nil, ""] and
+        Enum.any?(get_in(pod, ["spec", "schedulingGates"]) || [], &(&1["name"] == @gate))
+
+  defp blueprint_gated?(sandbox),
+    do: Enum.any?(get_in(sandbox, ["spec", "podTemplate", "spec", "schedulingGates"]) || [], &(&1["name"] == @gate))
 
   defp condition?(sandbox, type),
-    do: Enum.any?(get_in(sandbox, ["status", "conditions"]) || [], &(&1["type"] == type and &1["status"] == "True" and &1["observedGeneration"] == get_in(sandbox, ["metadata", "generation"])))
+    do:
+      Enum.any?(
+        get_in(sandbox, ["status", "conditions"]) || [],
+        &(&1["type"] == type and &1["status"] == "True" and
+            &1["observedGeneration"] == get_in(sandbox, ["metadata", "generation"]))
+      )
 
   defp ready_pod?(pod),
     do:
       get_in(pod, ["status", "phase"]) == "Running" and get_in(pod, ["metadata", "deletionTimestamp"]) == nil and
         Enum.any?(get_in(pod, ["status", "conditions"]) || [], &(&1["type"] == "Ready" and &1["status"] == "True"))
 
-  defp save_evidence(record, pod_uid, proof), do: %{record | metadata: Map.update(record.metadata, "termination_evidence", %{pod_uid => proof}, &Map.put(&1, pod_uid, proof))}
+  defp save_evidence(record, pod_uid, proof),
+    do: %{
+      record
+      | metadata: Map.update(record.metadata, "termination_evidence", %{pod_uid => proof}, &Map.put(&1, pod_uid, proof))
+    }
 
   defp termination_proof?(proof, pod_uid, record) when is_map(proof),
     do:
-      proof["kind"] in ["kubelet_terminated", "never_released", "host_destroyed"] and proof["uid"] == pod_uid and is_binary(proof["resourceVersion"]) and proof["qualification_uid"] != nil and
+      proof["kind"] in ["kubelet_terminated", "never_released", "host_destroyed"] and proof["uid"] == pod_uid and
+        is_binary(proof["resourceVersion"]) and proof["qualification_uid"] != nil and
         proof["qualification_uid"] == record.metadata["qualification_uid"]
 
   defp termination_proof?(_, _, _), do: false

@@ -11,8 +11,8 @@ defmodule SymphonyElixir.GitLab.Adapter do
   @active_states ["opened"]
   @terminal_states ["closed"]
 
-  @spec validate_config(map()) :: :ok | {:error, term()}
-  def validate_config(tracker_settings) do
+  @spec validate_config(map(), :runtime | :structure) :: :ok | {:error, term()}
+  def validate_config(tracker_settings, validation \\ :runtime) when validation in [:runtime, :structure] do
     with :ok <-
            validate_states(
              tracker_settings.active_states,
@@ -25,7 +25,7 @@ defmodule SymphonyElixir.GitLab.Adapter do
              @terminal_states,
              :missing_gitlab_terminal_states
            ) do
-      Client.validate_settings(tracker_settings)
+      Client.validate_settings(tracker_settings, validation)
     end
   end
 

@@ -8,11 +8,11 @@ defmodule SymphonyElixir.Jira.Adapter do
   alias SymphonyElixir.Jira.{AgentTool, Client}
   alias SymphonyElixir.Tracker.Issue
 
-  @spec validate_config(map()) :: :ok | {:error, term()}
-  def validate_config(tracker_settings) do
+  @spec validate_config(map(), :runtime | :structure) :: :ok | {:error, term()}
+  def validate_config(tracker_settings, validation \\ :runtime) when validation in [:runtime, :structure] do
     with :ok <- validate_states(tracker_settings.active_states, :missing_jira_active_states),
          :ok <- validate_states(tracker_settings.terminal_states, :missing_jira_terminal_states) do
-      Client.validate_settings(tracker_settings)
+      Client.validate_settings(tracker_settings, validation)
     end
   end
 

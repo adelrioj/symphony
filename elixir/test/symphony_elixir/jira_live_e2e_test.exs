@@ -84,8 +84,11 @@ defmodule SymphonyElixir.Jira.LiveE2ETest do
                  max_turns: 3,
                  execution_context:
                    case SymphonyElixir.Config.settings!().worker.ssh_hosts do
-                     [] -> SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
-                     [host | _] -> SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, host)
+                     [] ->
+                       SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root())
+
+                     [host | _] ->
+                       SymphonyElixir.ExecutionContext.ssh(SymphonyElixir.Config.settings!().workspace.root, host)
                    end
                )
 
@@ -315,7 +318,13 @@ defmodule SymphonyElixir.Jira.LiveE2ETest do
     end
   end
 
-  defp get_issue!(base_url, email, api_token, issue_id, fields \\ "summary,description,status,labels,assignee,created,updated,project") do
+  defp get_issue!(
+         base_url,
+         email,
+         api_token,
+         issue_id,
+         fields \\ "summary,description,status,labels,assignee,created,updated,project"
+       ) do
     response =
       jira_request!(
         :get,

@@ -258,7 +258,8 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
         end
       )
 
-    assert_received {:github_tool_called, "POST", "/repos/octo/repo/issues/42/comments", %{"per_page" => 10}, %{"body" => "hello"}, [tracker_settings: ^tracker_settings]}
+    assert_received {:github_tool_called, "POST", "/repos/octo/repo/issues/42/comments", %{"per_page" => 10},
+                     %{"body" => "hello"}, [tracker_settings: ^tracker_settings]}
 
     assert response["success"] == true
     assert Jason.decode!(response["output"]) == %{"status" => 201, "body" => %{"id" => 9}}

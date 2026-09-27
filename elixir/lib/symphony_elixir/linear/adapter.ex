@@ -81,13 +81,13 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
-  @spec validate_config(map()) :: :ok | {:error, term()}
-  def validate_config(tracker_settings) do
+  @spec validate_config(map(), :runtime | :structure) :: :ok | {:error, term()}
+  def validate_config(tracker_settings, validation \\ :runtime) when validation in [:runtime, :structure] do
     cond do
       not present_string?(tracker_settings.endpoint) ->
         {:error, :invalid_linear_endpoint}
 
-      not present_string?(tracker_settings.api_key) ->
+      missing_credential?(tracker_settings.api_key, validation) ->
         {:error, :missing_linear_api_token}
 
       not is_nil(tracker_settings.assignee) and not present_string?(tracker_settings.assignee) ->
@@ -97,6 +97,9 @@ defmodule SymphonyElixir.Linear.Adapter do
         Scope.validate(tracker_settings)
     end
   end
+
+  defp missing_credential?(nil, validation), do: validation == :runtime
+  defp missing_credential?(value, _validation), do: not present_string?(value)
 
   @doc """
   Resolves the configured Linear scope against the workspace once at startup.
@@ -231,7 +234,9 @@ defmodule SymphonyElixir.Linear.Adapter do
       teams
       |> Enum.filter(&is_nil(&1["activeCycle"]))
       |> Enum.each(fn team ->
-        Logger.warning("Linear team #{inspect(team["key"])} has no active cycle; scope current_cycle will match nothing until a cycle starts")
+        Logger.warning(
+          "Linear team #{inspect(team["key"])} has no active cycle; scope current_cycle will match nothing until a cycle starts"
+        )
       end)
     end
 
@@ -326,7 +331,10 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp state_reason(_state, present, [], _unprovable) when present != [], do: []
 
   defp state_reason(state, present, absent, _unprovable) when present != [] do
-    Logger.warning("Linear state #{inspect(state)} is absent from team(s) #{inspect(absent)}; those teams will match nothing for it")
+    Logger.warning(
+      "Linear state #{inspect(state)} is absent from team(s) #{inspect(absent)}; those teams will match nothing for it"
+    )
+
     []
   end
 
@@ -379,7 +387,8 @@ defmodule SymphonyElixir.Linear.Adapter do
     warn_partial_label(label, kind, absent)
   end
 
-  defp label_reason(label, _kind, [], _absent, []), do: ["label #{inspect(label)} does not exist in any listed Linear team"]
+  defp label_reason(label, _kind, [], _absent, []),
+    do: ["label #{inspect(label)} does not exist in any listed Linear team"]
 
   defp label_reason(label, _kind, [], _absent, unprovable) do
     Logger.warning(
@@ -390,12 +399,18 @@ defmodule SymphonyElixir.Linear.Adapter do
   end
 
   defp warn_partial_label(label, :required, missing) do
-    Logger.warning("Linear required label #{inspect(label)} is absent from team(s) #{inspect(missing)}; those teams will contribute no issues at all")
+    Logger.warning(
+      "Linear required label #{inspect(label)} is absent from team(s) #{inspect(missing)}; those teams will contribute no issues at all"
+    )
+
     []
   end
 
   defp warn_partial_label(label, :any, missing) do
-    Logger.warning("Linear label #{inspect(label)} is absent from team(s) #{inspect(missing)}; those teams will match nothing for it")
+    Logger.warning(
+      "Linear label #{inspect(label)} is absent from team(s) #{inspect(missing)}; those teams will match nothing for it"
+    )
+
     []
   end
 

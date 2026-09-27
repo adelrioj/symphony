@@ -38,7 +38,12 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
         id: task_supervisor_name
       ),
       Supervisor.child_spec(
-        {SymphonyElixir.Orchestrator, Keyword.merge(Keyword.take(opts, [:environment_operation_fun, :runner_fun]), lane_id: lane_id, name: orchestrator_name, task_supervisor: task_supervisor_name)},
+        {SymphonyElixir.Orchestrator,
+         Keyword.merge(Keyword.take(opts, [:environment_operation_fun, :runner_fun]),
+           lane_id: lane_id,
+           name: orchestrator_name,
+           task_supervisor: task_supervisor_name
+         )},
         id: orchestrator_name
       ),
       # Resolves its own environment each pass and idles unless this lane runs on Kubernetes, so

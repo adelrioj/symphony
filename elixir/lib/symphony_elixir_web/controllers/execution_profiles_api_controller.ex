@@ -56,8 +56,13 @@ defmodule SymphonyElixirWeb.ExecutionProfilesApiController do
     case parse_id(conn.path_params["id"]) do
       {:ok, id} ->
         case ExecutionProfiles.get(id) do
-          nil -> conn |> put_status(404) |> json(%{error: %{code: "execution_profile_not_found", message: "Execution profile not found"}})
-          %Profile{} = profile -> fun.(profile)
+          nil ->
+            conn
+            |> put_status(404)
+            |> json(%{error: %{code: "execution_profile_not_found", message: "Execution profile not found"}})
+
+          %Profile{} = profile ->
+            fun.(profile)
         end
 
       :error ->

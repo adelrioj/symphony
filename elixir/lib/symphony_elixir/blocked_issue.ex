@@ -20,7 +20,9 @@ defmodule SymphonyElixir.BlockedIssue do
         park_state(issue_id, identifier)
 
       {:error, reason} ->
-        Logger.error("Blocked comment failed for #{issue_context(issue_id, identifier)}: #{inspect(reason)} (state NOT changed; will retry on next poll)")
+        Logger.error(
+          "Blocked comment failed for #{issue_context(issue_id, identifier)}: #{inspect(reason)} (state NOT changed; will retry on next poll)"
+        )
 
         :ok
     end
@@ -34,7 +36,9 @@ defmodule SymphonyElixir.BlockedIssue do
         Logger.info("Parked blocked issue #{issue_context(issue_id, identifier)} state=#{blocked_state}")
 
       {:error, reason} ->
-        Logger.error("Blocked state update failed for #{issue_context(issue_id, identifier)}: #{inspect(reason)} (comment posted; will retry on next poll)")
+        Logger.error(
+          "Blocked state update failed for #{issue_context(issue_id, identifier)}: #{inspect(reason)} (comment posted; will retry on next poll)"
+        )
     end
 
     :ok

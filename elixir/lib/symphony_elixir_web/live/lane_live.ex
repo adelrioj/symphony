@@ -6,7 +6,7 @@ defmodule SymphonyElixirWeb.LaneLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias SymphonyElixir.{LaneStore, Runs}
-  alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
+  alias SymphonyElixirWeb.{Console, Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
   @impl true
@@ -397,7 +397,7 @@ defmodule SymphonyElixirWeb.LaneLive do
   attr(:url, :string, default: nil)
 
   defp issue_identifier(assigns) do
-    assigns = assign(assigns, :href, external_issue_url(assigns.url))
+    assigns = assign(assigns, :href, Console.external_url(assigns.url))
 
     ~H"""
     <%= if @href do %>
@@ -413,21 +413,6 @@ defmodule SymphonyElixirWeb.LaneLive do
     <% end %>
     """
   end
-
-  defp external_issue_url(url) when is_binary(url) do
-    url = String.trim(url)
-
-    case URI.parse(url) do
-      %URI{scheme: scheme, host: host}
-      when scheme in ["http", "https"] and is_binary(host) and host != "" ->
-        url
-
-      _ ->
-        nil
-    end
-  end
-
-  defp external_issue_url(_url), do: nil
 
   defp completed_runtime_seconds(payload) do
     payload.codex_totals.seconds_running || 0
