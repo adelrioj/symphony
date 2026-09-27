@@ -58,8 +58,25 @@ defmodule SymphonyElixir.ExecutionProfileConfigurationTest do
   test "stored fixed-root Kubernetes workspaces remain resolvable for ownership", %{tmp_dir: root} do
     kubeconfig = Path.join(root, "kubeconfig")
     File.write!(kubeconfig, "test")
-    provider = %{"kubeconfig" => kubeconfig, "context" => "test", "namespace" => "test", "template" => "worker-slot", "ssh_user" => "worker", "ssh_auth_volume" => "ssh", "ssh_port" => 22}
-    environment = %{"kind" => "kubernetes", "deployment_id" => "test", "provider" => provider, "startup_timeout_ms" => 1_000, "shutdown_timeout_ms" => 1_000}
+
+    provider = %{
+      "kubeconfig" => kubeconfig,
+      "context" => "test",
+      "namespace" => "test",
+      "template" => "worker-slot",
+      "ssh_user" => "worker",
+      "ssh_auth_volume" => "ssh",
+      "ssh_port" => 22
+    }
+
+    environment = %{
+      "kind" => "kubernetes",
+      "deployment_id" => "test",
+      "provider" => provider,
+      "startup_timeout_ms" => 1_000,
+      "shutdown_timeout_ms" => 1_000
+    }
+
     profile = %{"worker" => %{"environment" => environment}, "workspace_base" => "/state/workspace/worker"}
     lane = %{"tracker" => %{"kind" => "memory"}}
 

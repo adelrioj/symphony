@@ -82,7 +82,12 @@ defmodule SymphonyElixir.ExecutionProfiles do
 
   defp update_profile(id, attrs) do
     with {:ok, profile} <- fetch_profile(id),
-         :ok <- Lanes.validate_profile_workspaces(profile_attrs(profile), Map.merge(profile_attrs(profile), attrs), linked_lanes(profile)) do
+         :ok <-
+           Lanes.validate_profile_workspaces(
+             profile_attrs(profile),
+             Map.merge(profile_attrs(profile), attrs),
+             linked_lanes(profile)
+           ) do
       case Repo.update(Profile.changeset(profile, attrs)) do
         {:ok, updated} -> {:ok, {:batch, updated, linked_lane_ids(updated)}}
         {:error, changeset} -> {:error, Lanes.errors_for(changeset)}

@@ -136,7 +136,9 @@ defmodule SymphonyElixir.Lanes do
 
   @spec repair_fixed_root(Lane.t()) :: {:ok, Lane.t()} | {:error, [error()]}
   def repair_fixed_root(%Lane{id: id}) do
-    with {:ok, %{enabled: false, error: nil, workspace_base: base, workspace_subdir: subdir, settings: %Schema{} = settings} = snapshot} <- LaneStore.lookup(id),
+    with {:ok,
+          %{enabled: false, error: nil, workspace_base: base, workspace_subdir: subdir, settings: %Schema{} = settings} =
+            snapshot} <- LaneStore.lookup(id),
          true <- is_binary(base) and Path.expand(base) == "/state/workspace/worker" and subdir != ".",
          %{kind: "kubernetes", provider: %{"template" => "worker-slot"}} = config <- EnvironmentConfig.runtime(settings),
          :ok <- empty_provider_inventory(config) do
@@ -310,7 +312,8 @@ defmodule SymphonyElixir.Lanes do
     do: [
       %{
         path: "workspace_subdir",
-        message: "repair requires a disabled fixed-root Kubernetes lane, empty provider inventory, and no unresolved operations"
+        message:
+          "repair requires a disabled fixed-root Kubernetes lane, empty provider inventory, and no unresolved operations"
       }
     ]
 
@@ -693,7 +696,10 @@ defmodule SymphonyElixir.Lanes do
   end
 
   defp fixed_root_workspace(
-         %{"workspace_base" => base, "worker" => %{"environment" => %{"kind" => "kubernetes", "provider" => %{"template" => "worker-slot"}}}},
+         %{
+           "workspace_base" => base,
+           "worker" => %{"environment" => %{"kind" => "kubernetes", "provider" => %{"template" => "worker-slot"}}}
+         },
          subdir
        )
        when is_binary(base) do

@@ -187,12 +187,49 @@ defmodule SymphonyElixir.LaneStoreTest do
   test "stored nested fixed-root lanes do not disable unrelated lanes on restore", %{tmp_dir: root} do
     kubeconfig = Path.join(root, "kubeconfig")
     File.write!(kubeconfig, "test")
-    provider = %{"kubeconfig" => kubeconfig, "context" => "test", "namespace" => "tra", "template" => "worker-slot", "ssh_user" => "worker", "ssh_auth_volume" => "ssh", "ssh_port" => 22}
-    environment = %{"kind" => "kubernetes", "deployment_id" => "test", "provider" => provider, "startup_timeout_ms" => 1_000, "shutdown_timeout_ms" => 1_000}
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Existing fixed-root", workspace_base: "/state/workspace/worker", worker: %{"environment" => environment}})
-    {:ok, old} = Lanes.create(%{slug: "old-tra", execution_profile_id: profile.id, workspace_subdir: ".", config: %{"tracker" => %{"kind" => "memory"}}})
+
+    provider = %{
+      "kubeconfig" => kubeconfig,
+      "context" => "test",
+      "namespace" => "tra",
+      "template" => "worker-slot",
+      "ssh_user" => "worker",
+      "ssh_auth_volume" => "ssh",
+      "ssh_port" => 22
+    }
+
+    environment = %{
+      "kind" => "kubernetes",
+      "deployment_id" => "test",
+      "provider" => provider,
+      "startup_timeout_ms" => 1_000,
+      "shutdown_timeout_ms" => 1_000
+    }
+
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Existing fixed-root",
+        workspace_base: "/state/workspace/worker",
+        worker: %{"environment" => environment}
+      })
+
+    {:ok, old} =
+      Lanes.create(%{
+        slug: "old-tra",
+        execution_profile_id: profile.id,
+        workspace_subdir: ".",
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, healthy_profile} = ExecutionProfiles.create(%{name: "Healthy local", workspace_base: root, worker: %{}})
-    {:ok, healthy} = Lanes.create(%{slug: "healthy", execution_profile_id: healthy_profile.id, config: %{"tracker" => %{"kind" => "memory"}}})
+
+    {:ok, healthy} =
+      Lanes.create(%{
+        slug: "healthy",
+        execution_profile_id: healthy_profile.id,
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
     {:ok, healthy} = Lanes.set_enabled(healthy, true)
     assert Lanes.get!(healthy.id).enabled
     Repo.update!(Ecto.Changeset.change(old, workspace_subdir: "tra-features"))
@@ -205,18 +242,50 @@ defmodule SymphonyElixir.LaneStoreTest do
     assert healthy_entry.error == nil
     assert healthy_entry.enabled
     assert Lanes.get!(healthy.id).enabled
-    assert {:ok, %Entry{settings: %Schema{workspace: %{root: "/state/workspace/worker/tra-features"}}, enabled: false}} = LaneStore.lookup(old.id)
+
+    assert {:ok, %Entry{settings: %Schema{workspace: %{root: "/state/workspace/worker/tra-features"}}, enabled: false}} =
+             LaneStore.lookup(old.id)
   end
 
   @tag :tmp_dir
   test "profile edits cannot turn a nested lane into a fixed-root worker", %{tmp_dir: root} do
     kubeconfig = Path.join(root, "kubeconfig")
     File.write!(kubeconfig, "test")
-    provider = %{"kubeconfig" => kubeconfig, "context" => "test", "namespace" => "test", "template" => "worker-slot", "ssh_user" => "worker", "ssh_auth_volume" => "ssh", "ssh_port" => 22}
-    environment = %{"kind" => "kubernetes", "deployment_id" => "test", "provider" => provider, "startup_timeout_ms" => 1_000, "shutdown_timeout_ms" => 1_000}
+
+    provider = %{
+      "kubeconfig" => kubeconfig,
+      "context" => "test",
+      "namespace" => "test",
+      "template" => "worker-slot",
+      "ssh_user" => "worker",
+      "ssh_auth_volume" => "ssh",
+      "ssh_port" => 22
+    }
+
+    environment = %{
+      "kind" => "kubernetes",
+      "deployment_id" => "test",
+      "provider" => provider,
+      "startup_timeout_ms" => 1_000,
+      "shutdown_timeout_ms" => 1_000
+    }
+
     {:ok, profile} = ExecutionProfiles.create(%{name: "Local nested", workspace_base: root, worker: %{}})
-    {:ok, lane} = Lanes.create(%{slug: "nested-on-edit", execution_profile_id: profile.id, workspace_subdir: "nested", config: %{"tracker" => %{"kind" => "memory"}}})
-    assert {:error, errors} = ExecutionProfiles.update(profile, %{workspace_base: "/state/workspace/worker", worker: %{"environment" => environment}})
+
+    {:ok, lane} =
+      Lanes.create(%{
+        slug: "nested-on-edit",
+        execution_profile_id: profile.id,
+        workspace_subdir: "nested",
+        config: %{"tracker" => %{"kind" => "memory"}}
+      })
+
+    assert {:error, errors} =
+             ExecutionProfiles.update(profile, %{
+               workspace_base: "/state/workspace/worker",
+               worker: %{"environment" => environment}
+             })
+
     assert Enum.any?(errors, &(&1.path == "lanes.#{lane.id}.workspace_subdir"))
     assert ExecutionProfiles.get(profile.id).workspace_base == root
     assert Lanes.get!(lane.id).workspace_subdir == "nested"

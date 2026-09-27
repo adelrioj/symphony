@@ -168,17 +168,53 @@ defmodule SymphonyElixirWeb.LanesApiTest do
   test "invalid fixed-root workspace updates preserve the active version", %{tmp_dir: root} do
     kubeconfig = Path.join(root, "kubeconfig")
     File.write!(kubeconfig, "test")
-    provider = %{"kubeconfig" => kubeconfig, "context" => "test", "namespace" => "test", "template" => "worker-slot", "ssh_user" => "worker", "ssh_auth_volume" => "ssh", "ssh_port" => 22}
-    environment = %{"kind" => "kubernetes", "deployment_id" => "test", "provider" => provider, "startup_timeout_ms" => 1_000, "shutdown_timeout_ms" => 1_000}
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Fixed-root API", workspace_base: "/state/workspace/worker/", worker: %{"environment" => environment}})
-    attrs = %{slug: "fixed-root-api", name: "Fixed", execution_profile_id: profile.id, workspace_subdir: ".", config: @config, prompt: "work"}
+
+    provider = %{
+      "kubeconfig" => kubeconfig,
+      "context" => "test",
+      "namespace" => "test",
+      "template" => "worker-slot",
+      "ssh_user" => "worker",
+      "ssh_auth_volume" => "ssh",
+      "ssh_port" => 22
+    }
+
+    environment = %{
+      "kind" => "kubernetes",
+      "deployment_id" => "test",
+      "provider" => provider,
+      "startup_timeout_ms" => 1_000,
+      "shutdown_timeout_ms" => 1_000
+    }
+
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Fixed-root API",
+        workspace_base: "/state/workspace/worker/",
+        worker: %{"environment" => environment}
+      })
+
+    attrs = %{
+      slug: "fixed-root-api",
+      name: "Fixed",
+      execution_profile_id: profile.id,
+      workspace_subdir: ".",
+      config: @config,
+      prompt: "work"
+    }
+
     invalid = Map.put(attrs, :workspace_subdir, "tra-features")
     create_errors = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(invalid)), 422)["errors"]
     assert Enum.any?(create_errors, &(&1["path"] == "workspace_subdir"))
     assert is_nil(Lanes.get_by_slug("fixed-root-api"))
     %{"current_version_id" => version} = json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs)), 201)
 
-    errors = json_response(put(api_conn(), "/api/v1/lanes/fixed-root-api", Jason.encode!(%{workspace_subdir: "tra-features"})), 422)["errors"]
+    errors =
+      json_response(
+        put(api_conn(), "/api/v1/lanes/fixed-root-api", Jason.encode!(%{workspace_subdir: "tra-features"})),
+        422
+      )["errors"]
+
     assert Enum.any?(errors, &(&1["path"] == "workspace_subdir"))
     assert Lanes.get_by_slug("fixed-root-api").current_version_id == version
   end
@@ -194,23 +230,64 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     System.put_env("PATH", root <> ":" <> original_path)
     on_exit(fn -> System.put_env("PATH", original_path) end)
 
-    provider = %{"kubeconfig" => kubeconfig, "context" => "test", "namespace" => "test", "template" => "worker-slot", "ssh_user" => "worker", "ssh_auth_volume" => "ssh", "ssh_port" => 22}
-    environment = %{"kind" => "kubernetes", "deployment_id" => "test", "provider" => provider, "startup_timeout_ms" => 1_000, "shutdown_timeout_ms" => 1_000}
-    {:ok, profile} = ExecutionProfiles.create(%{name: "Persisted fixed root", workspace_base: "/state/workspace/worker", worker: %{"environment" => environment}})
-    {:ok, lane} = Lanes.create(%{slug: "persisted-root", execution_profile_id: profile.id, workspace_subdir: ".", config: @config})
+    provider = %{
+      "kubeconfig" => kubeconfig,
+      "context" => "test",
+      "namespace" => "test",
+      "template" => "worker-slot",
+      "ssh_user" => "worker",
+      "ssh_auth_volume" => "ssh",
+      "ssh_port" => 22
+    }
+
+    environment = %{
+      "kind" => "kubernetes",
+      "deployment_id" => "test",
+      "provider" => provider,
+      "startup_timeout_ms" => 1_000,
+      "shutdown_timeout_ms" => 1_000
+    }
+
+    {:ok, profile} =
+      ExecutionProfiles.create(%{
+        name: "Persisted fixed root",
+        workspace_base: "/state/workspace/worker",
+        worker: %{"environment" => environment}
+      })
+
+    {:ok, lane} =
+      Lanes.create(%{slug: "persisted-root", execution_profile_id: profile.id, workspace_subdir: ".", config: @config})
+
     Repo.update!(Ecto.Changeset.change(lane, workspace_subdir: "tra-features"))
     Supervisor.terminate_child(SymphonyElixir.Supervisor, LaneStore)
     {:ok, _} = Supervisor.restart_child(SymphonyElixir.Supervisor, LaneStore)
 
-    assert Enum.any?(json_response(put(api_conn(), "/api/v1/lanes/persisted-root", Jason.encode!(%{workspace_subdir: "."})), 422)["errors"], &(&1["path"] == "worker.environment"))
+    assert Enum.any?(
+             json_response(
+               put(api_conn(), "/api/v1/lanes/persisted-root", Jason.encode!(%{workspace_subdir: "."})),
+               422
+             )["errors"],
+             &(&1["path"] == "worker.environment")
+           )
+
     before_version = Lanes.get!(lane.id).current_version_id
     File.write!(kubectl, "#!/bin/sh\nexit 1\n")
-    assert Enum.any?(json_response(post(api_conn(), "/api/v1/lanes/persisted-root/repair-fixed-root", ""), 422)["errors"], &(&1["path"] == "workspace_subdir"))
+
+    assert Enum.any?(
+             json_response(post(api_conn(), "/api/v1/lanes/persisted-root/repair-fixed-root", ""), 422)["errors"],
+             &(&1["path"] == "workspace_subdir")
+           )
+
     assert Lanes.get!(lane.id).workspace_subdir == "tra-features"
     assert Lanes.get!(lane.id).current_version_id == before_version
     started = Path.join(root, "discovery-started")
     resume = Path.join(root, "resume-discovery")
-    File.write!(kubectl, "#!/bin/sh\ntouch '#{started}'\nwhile [ ! -f '#{resume}' ]; do sleep 0.05; done\nprintf '%s\\n' '{\"metadata\":{\"resourceVersion\":\"1\"},\"items\":[]}'\n")
+
+    File.write!(
+      kubectl,
+      "#!/bin/sh\ntouch '#{started}'\nwhile [ ! -f '#{resume}' ]; do sleep 0.05; done\nprintf '%s\\n' '{\"metadata\":{\"resourceVersion\":\"1\"},\"items\":[]}'\n"
+    )
+
     pending = Task.async(fn -> post(api_conn(), "/api/v1/lanes/persisted-root/repair-fixed-root", "") end)
 
     assert Enum.any?(1..100, fn _ ->
@@ -235,12 +312,21 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     assert repaired["enabled"] == false
     assert repaired["current_version_id"] == before_version
     assert {:ok, %{settings: %{workspace: %{root: "/state/workspace/worker"}}}} = LaneStore.lookup(lane.id)
-    assert Enum.any?(json_response(post(api_conn(), "/api/v1/lanes/persisted-root/repair-fixed-root", ""), 422)["errors"], &(&1["path"] == "workspace_subdir"))
+
+    assert Enum.any?(
+             json_response(post(api_conn(), "/api/v1/lanes/persisted-root/repair-fixed-root", ""), 422)["errors"],
+             &(&1["path"] == "workspace_subdir")
+           )
   end
 
   test "fixed-root repair rejects unrelated lanes" do
     {:ok, lane} = Lanes.create(attrs("unrelated-root"))
-    assert Enum.any?(json_response(post(api_conn(), "/api/v1/lanes/unrelated-root/repair-fixed-root", ""), 422)["errors"], &(&1["path"] == "workspace_subdir"))
+
+    assert Enum.any?(
+             json_response(post(api_conn(), "/api/v1/lanes/unrelated-root/repair-fixed-root", ""), 422)["errors"],
+             &(&1["path"] == "workspace_subdir")
+           )
+
     assert Lanes.get!(lane.id).workspace_subdir == "."
   end
 

@@ -142,7 +142,8 @@ defmodule SymphonyElixir.LaneStore do
 
   @doc "Atomically repairs a disabled fixed-root lane against a caller-verified empty inventory snapshot."
   @spec repair_fixed_root(lane_id(), Entry.t(), ((Schema.t() -> :ok | {:error, term()}) -> term())) :: term()
-  def repair_fixed_root(lane_id, snapshot, fun), do: GenServer.call(__MODULE__, {:repair_fixed_root, lane_id, snapshot, fun}, :infinity)
+  def repair_fixed_root(lane_id, snapshot, fun),
+    do: GenServer.call(__MODULE__, {:repair_fixed_root, lane_id, snapshot, fun}, :infinity)
 
   @spec protect_environment(lane_id(), binary() | nil) :: {:ok, reference()} | {:error, term()}
   def protect_environment(lane_id, identity), do: GenServer.call(__MODULE__, {:protect_environment, lane_id, identity})
