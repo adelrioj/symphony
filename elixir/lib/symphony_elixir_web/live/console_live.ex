@@ -213,6 +213,7 @@ defmodule SymphonyElixirWeb.ConsoleLive do
   defp reason_text(:not_running), do: "its run already ended"
   defp reason_text(:not_retrying), do: "it is no longer waiting to retry"
   defp reason_text(:unavailable), do: "the lane is not running"
+  defp reason_text(:not_blocked), do: "it is no longer blocked"
   defp reason_text(:no_active_state), do: "the lane has no active state to move it to"
   defp reason_text(reason), do: "the tracker returned #{inspect(reason)}"
 end

@@ -2960,6 +2960,21 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_call({:operator_blocked?, issue_id}, _from, state), do: {:reply, Map.has_key?(state.blocked, issue_id), state}
+
+  def handle_call({:operator_release_blocked, issue_id}, _from, state) do
+    case Map.get(state.blocked, issue_id) do
+      nil ->
+        {:reply, :ok, state}
+
+      entry ->
+        Logger.info("Operator released blocked issue_id=#{issue_id} issue_identifier=#{Map.get(entry, :identifier)}")
+        state = release_issue_claim(state, issue_id)
+        notify_dashboard()
+        {:reply, :ok, state}
+    end
+  end
+
   @impl true
   def terminate(reason, state) do
     status = if reason in [:normal, :shutdown] or match?({:shutdown, _}, reason), do: "stopped", else: "failed"

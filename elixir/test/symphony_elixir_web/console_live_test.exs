@@ -18,6 +18,7 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
 
     @impl true
     def handle_call(:snapshot, _from, state), do: {:reply, state.snapshot, state}
+    def handle_call({:operator_blocked?, _issue_id}, _from, state), do: {:reply, state.blocked?, state}
     def handle_call(:request_refresh, _from, state), do: {:reply, %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: []}, state}
 
     def handle_call(message, _from, state) do
@@ -27,7 +28,7 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
   end
 
   setup context do
-    {:ok, fake} = FakeOrchestrator.start_link(%{snapshot: Map.get(context, :snapshot, snapshot()), parent: self(), reply: Map.get(context, :reply, :ok)})
+    {:ok, fake} = FakeOrchestrator.start_link(%{snapshot: Map.get(context, :snapshot, snapshot()), parent: self(), reply: Map.get(context, :reply, :ok), blocked?: Map.get(context, :blocked?, true)})
     previous = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, Keyword.merge(previous, server: false, secret_key_base: String.duplicate("s", 64), orchestrator: fake))
     on_exit(fn -> Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous) end)
@@ -186,6 +187,7 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
 
     view |> element("#console-detail button", "Approve") |> render_click()
     assert_receive {:memory_tracker_state_update, "blk-1", "Todo"}
+    assert_receive {:orchestrator_call, {:operator_release_blocked, "blk-1"}}
     assert has_element?(view, "#flash-info", "OPS-2 resumed.")
 
     view |> element("#console-detail button", "Reply to agent") |> render_click()
@@ -216,6 +218,15 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     view |> element("#console-detail button", "Stop run") |> render_click()
     view |> element("#stop-confirm button", "Stop run") |> render_click()
     assert has_element?(view, "#flash-error", "its run already ended")
+  end
+
+  @tag blocked?: false
+  test "approving a ticket that is no longer blocked says so", %{conn: conn} do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Ablk-1")
+    view |> element("#console-detail button", "Approve") |> render_click()
+    assert has_element?(view, "#flash-error", "OPS-2 was not changed: it is no longer blocked.")
+    refute_receive {:memory_tracker_state_update, _, _}, 50
   end
 
   test "resume failures name the cause", %{conn: conn} do

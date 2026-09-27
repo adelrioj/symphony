@@ -1,8 +1,9 @@
 defmodule SymphonyElixir.OperatorActions do
   @moduledoc """
-  Operator controls for one lane's tickets. Stop and retry act on the lane orchestrator. Resuming a
-  blocked ticket goes through the `Tracker` behaviour, so the normal blocked-issue reconcile releases it
-  and a new attempt starts. Callers must already be in the lane's `LaneContext`.
+  Operator controls for one lane's tickets. Stop and retry act on the lane orchestrator. Resuming applies
+  only to a blocked ticket (held by the orchestrator, or in `agent.blocked_state` in the tracker): it moves
+  the ticket through the `Tracker` behaviour, then releases the orchestrator's block so the next poll
+  starts a new attempt. Callers must already be in the lane's `LaneContext`.
   """
 
   alias SymphonyElixir.{Config, Orchestrator, Tracker}
@@ -16,12 +17,32 @@ defmodule SymphonyElixir.OperatorActions do
   @spec resume(GenServer.server(), String.t(), String.t() | nil) :: :ok | {:error, term()}
   def resume(orchestrator, issue_id, message) when is_binary(issue_id) do
     with {:ok, target} <- resume_state(),
+         :ok <- ensure_blocked(orchestrator, issue_id),
          :ok <- comment(issue_id, message),
          :ok <- Tracker.update_issue_state(issue_id, target) do
+      # The ticket has moved; an unavailable lane has no block left to release.
+      _ = call(orchestrator, {:operator_release_blocked, issue_id})
       _ = Orchestrator.request_refresh(orchestrator)
       :ok
     end
   end
+
+  defp ensure_blocked(orchestrator, issue_id) do
+    if call(orchestrator, {:operator_blocked?, issue_id}) == true, do: :ok, else: blocked_in_tracker(issue_id)
+  end
+
+  defp blocked_in_tracker(issue_id) do
+    blocked_state = Config.settings!().agent.blocked_state
+
+    with {:ok, issues} <- Tracker.fetch_issues_by_ids([issue_id]) do
+      if Enum.any?(issues, &same_state?(&1.state, blocked_state)), do: :ok, else: {:error, :not_blocked}
+    end
+  end
+
+  defp same_state?(a, b) when is_binary(a) and is_binary(b), do: normalize_state(a) == normalize_state(b)
+  defp same_state?(_a, _b), do: false
+
+  defp normalize_state(state), do: state |> String.trim() |> String.downcase()
 
   defp resume_state do
     settings = Config.settings!()
