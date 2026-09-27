@@ -215,11 +215,13 @@ defmodule SymphonyElixir.LaneStore do
   end
 
   def handle_call({:repair_fixed_root, id, snapshot, fun}, _from, state) do
-    with {:ok, released} <- release_empty_fixed_root(state, id, snapshot) do
-      result = Repo.transaction(fn -> prepare_mutation(id, fun, released) end)
-      publish_mutation(result, nil, if(match?({:ok, _}, result), do: released, else: state))
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+    case release_empty_fixed_root(state, id, snapshot) do
+      {:ok, released} ->
+        result = Repo.transaction(fn -> prepare_mutation(id, fun, released) end)
+        publish_mutation(result, nil, if(match?({:ok, _}, result), do: released, else: state))
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -897,8 +899,21 @@ defmodule SymphonyElixir.LaneStore do
   end
 
   defp release_empty_fixed_root(state, id, snapshot) do
-    with {:ok, %Entry{enabled: false, error: nil, workspace_base: base, workspace_subdir: subdir, settings: %Schema{} = settings, generation: generation}} <- lookup(id),
-         %Entry{generation: ^generation, settings: ^settings, workspace_base: ^base, workspace_subdir: ^subdir} <- snapshot,
+    with {:ok,
+          %Entry{
+            enabled: false,
+            error: nil,
+            workspace_base: base,
+            workspace_subdir: subdir,
+            settings: %Schema{} = settings,
+            generation: generation
+          }} <- lookup(id),
+         %Entry{
+           generation: ^generation,
+           settings: ^settings,
+           workspace_base: ^base,
+           workspace_subdir: ^subdir
+         } <- snapshot,
          true <- is_binary(base) and Path.expand(base) == "/state/workspace/worker" and subdir != ".",
          %{identity: identity, settings: %Schema{}} = guard <- Map.get(state.guards, id),
          true <- identity == effective_identity(settings) and not Map.get(guard, :released?, false),

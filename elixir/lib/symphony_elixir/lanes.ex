@@ -124,7 +124,11 @@ defmodule SymphonyElixir.Lanes do
          true <- is_binary(base) and Path.expand(base) == "/state/workspace/worker" and subdir != ".",
          %{kind: "kubernetes", provider: %{"template" => "worker-slot"}} = config <- EnvironmentConfig.runtime(settings),
          :ok <- empty_provider_inventory(config) do
-      LaneStore.repair_fixed_root(id, snapshot, &transact_mutation(fn check -> update_lane(id, %{"workspace_subdir" => "."}, check) end, &1))
+      LaneStore.repair_fixed_root(
+        id,
+        snapshot,
+        &transact_mutation(fn check -> update_lane(id, %{"workspace_subdir" => "."}, check) end, &1)
+      )
       |> mutation_result()
     else
       _ -> {:error, errors_for(:fixed_root_repair_unsafe)}
@@ -631,7 +635,10 @@ defmodule SymphonyElixir.Lanes do
   @spec validate_profile_workspaces(map(), map(), [Lane.t()]) :: :ok | {:error, [error()]}
   def validate_profile_workspaces(before, after_attrs, lanes) do
     Enum.reduce_while(lanes, :ok, fn lane, :ok ->
-      case {fixed_root_workspace(before, lane.workspace_subdir), fixed_root_workspace(after_attrs, lane.workspace_subdir)} do
+      previous = fixed_root_workspace(before, lane.workspace_subdir)
+      candidate = fixed_root_workspace(after_attrs, lane.workspace_subdir)
+
+      case {previous, candidate} do
         {:ok, {:error, errors}} ->
           {:halt, {:error, Enum.map(errors, &%{&1 | path: "lanes.#{lane.id}.#{&1.path}"})}}
 
