@@ -36,6 +36,7 @@ defmodule SymphonyElixir.Runs do
          issue_id: issue.id,
          issue_identifier: issue.identifier,
          issue_title: issue.title,
+         issue_url: issue.url,
          issue_state: issue.state,
          attempt_id: attempt_id,
          attempt: Map.get(attrs, :attempt),
@@ -105,20 +106,23 @@ defmodule SymphonyElixir.Runs do
   def prune_events(days) when is_integer(days) and days > 0,
     do: GenServer.call(Writer, {:prune_events, days}, :infinity)
 
+  @event_kinds [
+                 {"turn_started", ~w(session_started turn_started)},
+                 {"turn_finished", ~w(turn_completed turn_finished result completed)},
+                 {"blocked",
+                  ~w(blocked attempt_blocked turn_input_required input_required needs_input approval_required)},
+                 {"error", ~w(error turn_failed startup_failed session_failed turn_cancelled)},
+                 {"hook", ~w(hook)},
+                 {"tool", ~w(tool_use)},
+                 {"reasoning", ~w(reasoning)}
+               ]
+               |> Enum.flat_map(fn {kind, events} -> Enum.map(events, &{&1, kind}) end)
+               |> Map.new()
+
   @spec kind_for(term()) :: String.t()
   def kind_for(event) when is_atom(event), do: event |> Atom.to_string() |> kind_for()
-
-  def kind_for(event) when is_binary(event) do
-    cond do
-      event in ~w(session_started turn_started) -> "turn_started"
-      event in ~w(turn_completed turn_finished result completed) -> "turn_finished"
-      event in ~w(blocked attempt_blocked turn_input_required input_required needs_input approval_required) -> "blocked"
-      event in ~w(error turn_failed startup_failed session_failed turn_cancelled) -> "error"
-      event == "hook" or String.starts_with?(event, "hook_") -> "hook"
-      true -> "agent_message"
-    end
-  end
-
+  def kind_for("hook_" <> _name), do: "hook"
+  def kind_for(event) when is_binary(event), do: Map.get(@event_kinds, event, "agent_message")
   def kind_for(_event), do: "agent_message"
 
   defp dispatch_snapshot(attrs, lane_id) do

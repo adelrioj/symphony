@@ -12,12 +12,16 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   alias SymphonyElixir.Agent.Result
 
   @approval_tool "mcp__symphony__approval_prompt"
+  # The first of these string inputs names what a tool call is doing, e.g. "Bash: mix test".
+  @tool_detail_keys ~w(command file_path path pattern url query description)
 
   defstruct session_id: nil,
             tokens: %{input: 0, output: 0, total: 0},
             cached_tokens: 0,
             message_tokens: %{},
             activity: nil,
+            activity_kind: :notification,
+            activity_detail: nil,
             seconds_running: 0,
             summary: nil,
             blocked_action: nil,
@@ -30,6 +34,8 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
           cached_tokens: non_neg_integer(),
           message_tokens: %{optional(String.t()) => map()},
           activity: String.t() | nil,
+          activity_kind: :notification | :tool_use | :reasoning,
+          activity_detail: String.t() | nil,
           seconds_running: non_neg_integer(),
           summary: String.t() | nil,
           blocked_action: String.t() | nil,
@@ -43,6 +49,7 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
           session_id: String.t() | nil,
           usage_scope: :turn,
           payload: String.t(),
+          detail: String.t() | nil,
           usage: %{
             input_tokens: non_neg_integer(),
             output_tokens: non_neg_integer(),
@@ -85,11 +92,11 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
         updated_acc.blocked_action != acc.blocked_action ->
           worker_update(:blocked, updated_acc)
 
+        updated_acc.activity != acc.activity ->
+          worker_update(updated_acc.activity_kind, updated_acc)
+
         is_map(Map.get(message, "usage")) ->
           worker_update(:usage_updated, updated_acc)
-
-        updated_acc.activity != acc.activity ->
-          worker_update(:notification, updated_acc)
 
         true ->
           nil
@@ -198,13 +205,38 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
     Enum.reduce(content, acc, fn
       %{"type" => "tool_use", "name" => @approval_tool, "input" => input}, inner ->
         action = blocked_action_text(input)
-        %{inner | blocked_action: action, activity: "Awaiting approval"}
+
+        %{
+          inner
+          | blocked_action: action,
+            activity: "Awaiting approval",
+            activity_kind: :notification,
+            activity_detail: nil
+        }
 
       %{"type" => "text", "text" => text}, inner when is_binary(text) ->
-        %{inner | summary: append_text(inner.summary, text), activity: String.slice(text, 0, 500)}
+        %{
+          inner
+          | summary: append_text(inner.summary, text),
+            activity: String.slice(text, 0, 500),
+            activity_kind: :notification,
+            activity_detail: nil
+        }
 
-      %{"type" => "tool_use", "name" => name}, inner when is_binary(name) ->
-        %{inner | activity: "Using tool: " <> String.slice(name, 0, 200)}
+      %{"type" => "thinking", "thinking" => text}, inner when is_binary(text) and text != "" ->
+        %{inner | activity: String.slice(text, 0, 500), activity_kind: :reasoning, activity_detail: nil}
+
+      # Tool input rides in `detail`, which only operator-only run history keeps: commands and
+      # paths can carry secrets, so snapshots and the state API see just the tool name.
+      %{"type" => "tool_use", "name" => name} = block, inner when is_binary(name) ->
+        name = String.slice(name, 0, 200)
+
+        %{
+          inner
+          | activity: "Using tool: " <> name,
+            activity_kind: :tool_use,
+            activity_detail: tool_detail(name, Map.get(block, "input"))
+        }
 
       _content, inner ->
         inner
@@ -212,6 +244,15 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   end
 
   defp apply_content(acc, _content), do: acc
+
+  defp tool_detail(name, input) when is_map(input) do
+    case Enum.find(@tool_detail_keys, &(is_binary(input[&1]) and input[&1] != "")) do
+      nil -> nil
+      key -> name <> ": " <> String.slice(input[key], 0, 300)
+    end
+  end
+
+  defp tool_detail(_name, _input), do: nil
 
   defp cached_usage(usage, default) when is_map(usage), do: Map.get(usage, "cache_read_input_tokens", default)
   defp cached_usage(_usage, default), do: default
@@ -256,6 +297,7 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
       session_id: acc.session_id,
       usage_scope: :turn,
       payload: acc.activity || "Claude #{kind}",
+      detail: acc.activity_detail,
       usage: %{
         input_tokens: Map.get(acc.tokens, :input, 0),
         output_tokens: Map.get(acc.tokens, :output, 0),

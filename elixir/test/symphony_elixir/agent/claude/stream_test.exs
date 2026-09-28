@@ -90,6 +90,31 @@ defmodule SymphonyElixir.Agent.Claude.StreamTest do
     assert {:ok, %Result{status: :blocked, blocked_action: "approve me"}} = Stream.fold(events, 0)
   end
 
+  test "tool calls and reasoning emit their own updates; tool input travels only as detail" do
+    usage = %{"input_tokens" => 5, "output_tokens" => 1}
+
+    step = fn acc, block ->
+      Stream.step(%{"type" => "assistant", "message" => %{"id" => "m1", "usage" => usage, "content" => [block]}}, acc)
+    end
+
+    {acc, reasoning} = step.(Stream.new(), %{"type" => "thinking", "thinking" => "Check the judges first."})
+    assert %{event: :reasoning, payload: "Check the judges first."} = reasoning
+
+    {acc, tool} = step.(acc, %{"type" => "tool_use", "name" => "Bash", "input" => %{"command" => "ls evals"}})
+    assert %{event: :tool_use, payload: "Using tool: Bash", detail: "Bash: ls evals"} = tool
+
+    {acc, bare} = step.(acc, %{"type" => "tool_use", "name" => "TodoWrite", "input" => %{"todos" => []}})
+    assert %{event: :tool_use, payload: "Using tool: TodoWrite", detail: nil} = bare
+
+    {acc, text} = step.(acc, %{"type" => "text", "text" => "All nine judges share a rubric."})
+    assert %{event: :notification, payload: "All nine judges share a rubric.", detail: nil} = text
+
+    {acc, _update} = step.(acc, %{"type" => "tool_use", "name" => "Read", "input" => %{"file_path" => "a.ex"}})
+
+    assert {%Stream{summary: "All nine judges share a rubric."}, %{event: :usage_updated}} =
+             step.(acc, %{"type" => "ignored"})
+  end
+
   test "failure activity reports the outcome instead of retaining the last successful action" do
     {acc, _} =
       Stream.step(%{

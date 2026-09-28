@@ -206,7 +206,15 @@ defmodule SymphonyElixir.RunsTest do
 
   test "attempts keep the ticket title and list newest first per issue" do
     lane_id = LaneContext.current!()
-    issue = %Issue{id: "titled", identifier: "TT-1", title: "Keep my title", state: "Todo"}
+
+    issue = %Issue{
+      id: "titled",
+      identifier: "TT-1",
+      title: "Keep my title",
+      state: "Todo",
+      url: "https://linear.app/t/issue/TT-1"
+    }
+
     :ok = Runs.started(%{lane_id: lane_id, issue: issue, attempt_id: "titled-1", attempt: 1})
     :ok = Runs.finished("titled-1", "failed")
     :ok = Runs.started(%{lane_id: lane_id, issue: issue, attempt_id: "titled-2", attempt: 2})
@@ -219,7 +227,10 @@ defmodule SymphonyElixir.RunsTest do
         attempt: 1
       })
 
-    assert [%Run{attempt_id: "titled-2", issue_title: "Keep my title"}, %Run{attempt_id: "titled-1"}] =
+    assert [
+             %Run{attempt_id: "titled-2", issue_title: "Keep my title", issue_url: "https://linear.app/t/issue/TT-1"},
+             %Run{attempt_id: "titled-1"}
+           ] =
              Runs.for_issue(lane_id, "titled", 10)
 
     assert [%Run{attempt_id: "titled-2"}] = Runs.for_issue(lane_id, "titled", 1)
@@ -239,6 +250,8 @@ defmodule SymphonyElixir.RunsTest do
         "turn_started",
         "result",
         "hook",
+        :tool_use,
+        :reasoning,
         {:vendor, 7}
       ],
       fn event ->
@@ -257,6 +270,8 @@ defmodule SymphonyElixir.RunsTest do
              {"turn_started", "turn_started"},
              {"turn_finished", "result"},
              {"hook", "hook"},
+             {"tool", "tool_use"},
+             {"reasoning", "reasoning"},
              {"agent_message", "{:vendor, 7}"}
            ] == Enum.map(Runs.events(run.id), &{&1.kind, &1.payload["event"]})
   end

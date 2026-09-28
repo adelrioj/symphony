@@ -266,7 +266,8 @@ defmodule SymphonyElixir.Orchestrator do
           %{
             event: update.event,
             message: updated_running_entry.last_codex_message,
-            session_id: updated_running_entry.session_id
+            session_id: updated_running_entry.session_id,
+            detail: update[:detail]
           },
           token_delta,
           Map.get(updated_running_entry, :turn_count, 0)

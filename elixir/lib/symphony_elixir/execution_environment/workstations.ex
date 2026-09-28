@@ -974,17 +974,21 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
          not (unbound and workstation["state"] == "STATE_STOPPED") do
       assigned_credential_environment(config, record, workstation, old_assignment, opts)
     else
-      cond do
-        Credentials.tracked?(record) and not Credentials.enabled?(config) ->
-          {:error, :credential_outcome_unknown}
+      unassigned_credential_environment(config, record, workstation)
+    end
+  end
 
-        workstation["state"] == "STATE_STOPPED" and
-            Map.has_key?(Map.get(workstation, "env", %{}), "SYMPHONY_CODEX_RESEED") ->
-          {:ok, Map.delete(workstation["env"], "SYMPHONY_CODEX_RESEED")}
+  defp unassigned_credential_environment(config, record, workstation) do
+    cond do
+      Credentials.tracked?(record) and not Credentials.enabled?(config) ->
+        {:error, :credential_outcome_unknown}
 
-        true ->
-          {:ok, nil}
-      end
+      workstation["state"] == "STATE_STOPPED" and
+          Map.has_key?(Map.get(workstation, "env", %{}), "SYMPHONY_CODEX_RESEED") ->
+        {:ok, Map.delete(workstation["env"], "SYMPHONY_CODEX_RESEED")}
+
+      true ->
+        {:ok, nil}
     end
   end
 

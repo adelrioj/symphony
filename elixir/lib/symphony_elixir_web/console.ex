@@ -2,11 +2,12 @@ defmodule SymphonyElixirWeb.Console do
   @moduledoc """
   Pure projections for the operator console. Flattens lane snapshots, environment
   recovery needs, and durable run history into tickets, groups them by run status
-  or tracker state, and sizes each lane's agent strip from runtime tickets only.
+  or tracker state, and turns run events into a readable activity feed.
   """
 
   alias SymphonyElixir.LaneStore.Entry
-  alias SymphonyElixir.Runs.Run
+  alias SymphonyElixir.Runs.{Event, Run}
+  alias SymphonyElixir.StatusDashboard
 
   @type lane_view :: %{entry: Entry.t(), payload: map(), runs: [Run.t()]}
   @type ticket :: map()
@@ -85,25 +86,6 @@ defmodule SymphonyElixirWeb.Console do
     )
   end
 
-  @spec strip(Entry.t(), [ticket()]) ::
-          %{agents: [ticket()], idle: non_neg_integer(), max: non_neg_integer()}
-  def strip(%Entry{} = entry, tickets) do
-    agents =
-      Enum.filter(
-        tickets,
-        &(&1.lane == entry.slug and not &1.history and &1.source != :environment and
-            &1.status in ["running", "blocked"])
-      )
-
-    max =
-      if entry.enabled,
-        do: agent_setting(entry, :max_concurrent_agents, 0),
-        else: 0
-
-    running = Enum.count(agents, &(&1.status == "running"))
-    %{agents: agents, idle: max(max - running, 0), max: max}
-  end
-
   @spec agent_setting(Entry.t(), atom(), term()) :: term()
   def agent_setting(%Entry{settings: %{agent: agent}}, key, _default) do
     Map.get(agent, key)
@@ -137,11 +119,28 @@ defmodule SymphonyElixirWeb.Console do
   def recent_crash?(%Entry{runtime: %{last_crash: %{at: at}}}, now), do: DateTime.diff(now, at) < 3600
   def recent_crash?(_entry, _now), do: false
 
+  @doc "A run's events as readable steps: token rows dropped, and a repeat of the previous step's text dropped."
+  @spec activity([Event.t()]) :: [%{at: DateTime.t(), kind: String.t(), text: String.t()}]
+  def activity(events) do
+    events
+    |> Enum.reject(&(&1.kind == "usage"))
+    |> Enum.map(&%{at: &1.at, kind: &1.kind, text: describe_event(&1.payload)})
+    |> Enum.dedup_by(& &1.text)
+  end
+
   @spec describe_event(map()) :: String.t()
+  def describe_event(%{"detail" => detail}) when is_binary(detail) and detail != "", do: detail
+
   def describe_event(%{"message" => message})
       when is_binary(message) and message != "" do
     message
   end
+
+  # Agent events store the orchestrator's last update summary: Claude text, or a raw Codex payload.
+  def describe_event(%{"message" => %{"message" => text}}) when is_binary(text) and text != "", do: text
+
+  def describe_event(%{"message" => %{"message" => payload}}) when is_map(payload),
+    do: StatusDashboard.humanize_codex_message(%{message: payload})
 
   def describe_event(%{"total_tokens" => total} = payload) do
     "in #{payload["input_tokens"]} / out #{payload["output_tokens"]} / " <>
@@ -174,17 +173,7 @@ defmodule SymphonyElixirWeb.Console do
       Enum.flat_map(@live_statuses, fn status ->
         payload
         |> Map.get(String.to_existing_atom(status), [])
-        |> Enum.map(fn item ->
-          environment = Map.get(environments, item.issue_id)
-
-          if status == "queued" and is_map(environment) and environment_attention?(environment) do
-            environment_ticket(entry, environment, item)
-          else
-            entry
-            |> live_ticket(status, item)
-            |> Map.put(:environment, environment)
-          end
-        end)
+        |> Enum.map(&status_ticket(entry, status, &1, Map.get(environments, &1.issue_id)))
       end)
 
     live_ids = MapSet.new(live, & &1.issue_id)
@@ -206,6 +195,17 @@ defmodule SymphonyElixirWeb.Console do
       |> Enum.map(&run_ticket(entry, &1))
 
     live ++ attention ++ finished
+  end
+
+  # A queued issue whose workstation needs recovery is shown as that blocker, not as queued.
+  defp status_ticket(entry, status, item, environment) do
+    if status == "queued" and is_map(environment) and environment_attention?(environment) do
+      environment_ticket(entry, environment, item)
+    else
+      entry
+      |> live_ticket(status, item)
+      |> Map.put(:environment, environment)
+    end
   end
 
   defp environment_attention?(environment) do
@@ -268,7 +268,7 @@ defmodule SymphonyElixirWeb.Console do
       source: :history,
       environment: nil,
       labels: [],
-      url: nil,
+      url: external_url(run.issue_url),
       blocked_by: [],
       attempt: run.attempt,
       turn_count: run.turns,

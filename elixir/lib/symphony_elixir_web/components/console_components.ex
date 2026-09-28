@@ -27,23 +27,28 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
   @spec lane_nav(map()) :: Phoenix.LiveView.Rendered.t()
   def lane_nav(assigns) do
     ~H"""
+    <a class="console-brand" href="/">Symphony</a>
     <nav class="console-lanes" aria-label="Lanes">
       <.link patch={console_path(@nav, lane: nil)} class="console-lane" aria-current={to_string(is_nil(@nav.lane))}>
         All lanes <span class="console-count">{length(@tickets)}</span>
       </.link>
-      <.link
-        :for={entry <- @entries}
-        id={"lane-nav-#{entry.slug}"}
-        patch={console_path(@nav, lane: entry.slug)}
-        class="console-lane"
-        aria-current={to_string(@nav.lane == entry.slug)}
-      >
-        <span class={"console-dot console-dot--#{lane_health(entry, @tickets)}"}></span>
-        {entry.name}
-        <.backend name={Console.agent_setting(entry, :backend, "codex")} />
-        <span :if={entry.enabled} class="console-count">{count(@tickets, entry.slug, "running")}/{Console.agent_setting(entry, :max_concurrent_agents, 0)}</span>
-        <span :if={not entry.enabled} class="console-count">off</span>
-      </.link>
+      <%= for entry <- @entries do %>
+        <.link
+          id={"lane-nav-#{entry.slug}"}
+          patch={console_path(@nav, lane: entry.slug)}
+          class="console-lane"
+          aria-current={to_string(@nav.lane == entry.slug)}
+        >
+          <span class={"console-dot console-dot--#{lane_health(entry, @tickets)}"}></span>
+          {entry.name}
+          <.backend name={Console.agent_setting(entry, :backend, "codex")} />
+          <span :if={entry.enabled} class="console-count">{count(@tickets, entry.slug, "running")}/{Console.agent_setting(entry, :max_concurrent_agents, 0)}</span>
+          <span :if={not entry.enabled} class="console-count">off</span>
+        </.link>
+        <p :if={Console.recent_crash?(entry, @now)} id={"lane-crash-#{entry.slug}"} class="console-restarts">
+          restarted {entry.runtime.restarts}× · last crash {Calendar.strftime(entry.runtime.last_crash.at, "%H:%M")}
+        </p>
+      <% end %>
       <.link
         id="attention-toggle"
         patch={console_path(@nav, attention: not @nav.attention)}
@@ -52,44 +57,12 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
       >
         Needs attention <span class="console-count">{Enum.count(@tickets, &(not &1.history and &1.status == "blocked"))}</span>
       </.link>
-      <a class="console-lane console-lane--manage" href="/lanes">Manage lanes</a>
     </nav>
-    """
-  end
-
-  @spec strip(map()) :: Phoenix.LiveView.Rendered.t()
-  def strip(assigns) do
-    ~H"""
-    <section class="console-strip" aria-label="Live agents">
-      <div :for={{entry, strip} <- @strips} class="console-strip-lane" id={"strip-#{entry.slug}"}>
-        <p class="console-strip-head">
-          <span class={"console-dot console-dot--#{lane_health(entry, @tickets)}"}></span>
-          {entry.name}
-          <.backend name={Console.agent_setting(entry, :backend, "codex")} />
-          <span :if={Console.recent_crash?(entry, @now)} class="console-restarts">
-            restarted {entry.runtime.restarts}× · last crash {Calendar.strftime(entry.runtime.last_crash.at, "%H:%M")}
-          </span>
-        </p>
-        <div class="console-tiles">
-          <.link
-            :for={ticket <- strip.agents}
-            patch={console_path(@nav, selected: ticket.key)}
-            class={"console-tile console-tile--#{ticket.status}"}
-            data-ticket={ticket.key}
-          >
-            <span class="console-tile-head">
-              <span class="mono">{ticket.identifier}</span>
-              <span :if={ticket.status == "running"} class="mono muted">T{ticket.turn_count}/{Console.agent_setting(entry, :max_turns, 0)}</span>
-              <span :if={ticket.status == "blocked"} class="console-pill console-pill--blocked">blocked</span>
-            </span>
-            <span class="console-tile-title">{ticket.title || ticket.identifier}</span>
-            <span class="console-tile-msg">{ticket.error || ticket.last_message}</span>
-          </.link>
-          <span :if={strip.idle > 0} class="console-tile console-tile--idle">{strip.idle} idle</span>
-          <span :if={not entry.enabled} class="console-tile console-tile--idle">Disabled</span>
-        </div>
-      </div>
-    </section>
+    <nav class="console-configure" aria-label="Configure">
+      <p class="console-h">Configure</p>
+      <a class="console-lane" href="/lanes">Lanes</a>
+      <a class="console-lane" href="/execution-profiles">Execution profiles</a>
+    </nav>
     """
   end
 

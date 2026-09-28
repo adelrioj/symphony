@@ -129,8 +129,6 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
   } do
     {:ok, view, _html} = live(conn, "/?lane=ops")
     assert has_element?(view, "#console-list [data-group='blocked'] [data-ticket='ops:bon-143']", "BON-143")
-    refute has_element?(view, "#strip-ops [data-ticket='ops:bon-143']")
-    assert has_element?(view, "#strip-ops .console-tile--idle", "2 idle")
 
     view |> element("#attention-toggle") |> render_click()
     view |> element("#group-tracker") |> render_click()
@@ -241,16 +239,16 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     assert has_element?(view, "#queued-note", "Dispatches when a slot frees up.")
   end
 
-  test "a lane that crashed in the last hour warns in its strip", %{conn: conn, lane: lane} do
+  test "a lane that crashed in the last hour warns under its sidebar entry", %{conn: conn, lane: lane} do
     {:ok, entry} = LaneStore.lookup(lane.id)
     crashed = fn at -> %{entry | runtime: %{entry.runtime | restarts: 2, last_crash: %{reason: ":boom", at: at}}} end
     :ok = LaneStore.put_entry(crashed.(DateTime.utc_now()))
     {:ok, view, _html} = live(conn, "/?lane=ops")
-    assert has_element?(view, "#strip-ops .console-restarts", "restarted 2×")
+    assert has_element?(view, "#lane-crash-ops", "restarted 2×")
 
     :ok = LaneStore.put_entry(crashed.(DateTime.add(DateTime.utc_now(), -7200)))
     send(view.pid, :observability_updated)
-    refute has_element?(view, "#strip-ops .console-restarts")
+    refute has_element?(view, "#lane-crash-ops")
   end
 
   test "poll trackers asks the scoped lanes to poll now", %{conn: conn, fake: fake} do
@@ -263,17 +261,22 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     assert has_element?(view, "#flash-error", "nothing was polled")
   end
 
-  test "strip, grouped list and history render from lane snapshots", %{conn: conn, lane: lane} do
+  test "grouped list and history render from lane snapshots", %{conn: conn, lane: lane} do
     {:ok, view, _html} = live(conn, "/?lane=ops")
-    assert has_element?(view, "#strip-ops [data-ticket='ops:run-1']", "Cache deps in CI")
-    assert has_element?(view, "#strip-ops [data-ticket='ops:blk-1']", "blocked")
-    assert has_element?(view, "#strip-ops .console-tile--idle", "1 idle")
+    refute has_element?(view, ".console-strip")
     assert has_element?(view, "#console-list [data-group='running'] [data-ticket='ops:run-1']", "In Progress")
     assert has_element?(view, "#console-list [data-group='queued'] [data-ticket='ops:q-1']", "⊘ OPS-1")
     assert has_element?(view, "#console-detail", "Select a ticket")
     assert has_element?(view, "#lane-nav-ops", "1/2")
 
-    issue = %Issue{id: "old-1", identifier: "OPS-9", title: "Old work", state: "Done"}
+    issue = %Issue{
+      id: "old-1",
+      identifier: "OPS-9",
+      title: "Old work",
+      state: "Done",
+      url: "https://linear.app/o/OPS-9"
+    }
+
     :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "old-att", attempt: 1})
     :ok = Runs.event("old-att", %{event: :turn_completed, message: "wrapped up"}, %{}, 1)
     :ok = Runs.finished("old-att", "done")
@@ -284,6 +287,7 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     view |> element("#console-list [data-ticket='ops:old-1']") |> render_click()
     assert has_element?(view, "#console-detail .console-chip", "attempt 1 · done")
     assert has_element?(view, "#console-detail .console-events", "wrapped up")
+    assert has_element?(view, "#console-detail a[href='https://linear.app/o/OPS-9']", "Open in tracker")
   end
 
   test "tracker grouping, attention filter and selection live in the URL", %{conn: conn} do
@@ -304,10 +308,12 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     assert_patch(view, "/?lane=ops&attention=1&ticket=ops%3Ablk-1")
   end
 
-  test "the all-lanes view tags rows with their lane and links lane management", %{conn: conn} do
+  test "the all-lanes view tags rows with their lane and the sidebar links configuration", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/")
     assert has_element?(view, "#console-list [data-ticket='ops:run-1'] .console-lane-tag", "ops")
-    assert has_element?(view, "a[href='/lanes']", "Manage lanes")
+    assert has_element?(view, ".console-side a.console-brand[href='/']", "Symphony")
+    assert has_element?(view, ".console-configure a[href='/lanes']", "Lanes")
+    assert has_element?(view, ".console-configure a[href='/execution-profiles']", "Execution profiles")
     view |> element("#lane-nav-ops") |> render_click()
     assert_patch(view, "/?lane=ops")
   end
@@ -368,7 +374,6 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Aold-blk")
     assert has_element?(view, "#console-list [data-group='finished'] [data-ticket='ops:old-blk']")
     refute has_element?(view, "#console-list [data-group='blocked'] [data-ticket='ops:old-blk']")
-    refute has_element?(view, "#strip-ops [data-ticket='ops:old-blk']")
     assert has_element?(view, "#lane-nav-ops .console-dot--idle")
     assert has_element?(view, "#attention-toggle .console-count", "0")
     refute has_element?(view, "#console-detail button")
@@ -412,13 +417,21 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
   test "the detail panel shows attempts and the latest activity", %{conn: conn, lane: lane} do
     issue = %Issue{id: "run-1", identifier: "OPS-1", title: "Cache deps in CI", state: "In Progress"}
     :ok = Runs.started(%{lane_id: lane.id, issue: issue, attempt_id: "att-1", attempt: 1})
-    :ok = Runs.event("att-1", %{event: :notification, message: "Reading make-all.yml"}, %{}, 1)
+    :ok = Runs.event("att-1", %{event: :session_started, message: %{event: :session_started, message: nil}}, %{}, 0)
+
+    # The orchestrator stores its update summary; the agent's text is nested inside it.
+    summary = %{event: :usage_updated, message: "Reading make-all.yml", timestamp: DateTime.utc_now()}
+    :ok = Runs.event("att-1", %{event: :usage_updated, message: summary}, %{input_tokens: 5}, 1)
+    :ok = Runs.event("att-1", %{event: :usage_updated, message: summary}, %{input_tokens: 5}, 1)
     :ok = Runs.flush()
 
     {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Arun-1")
     assert has_element?(view, "#console-detail a[href='/runs/att-1']", "Full run log")
     assert has_element?(view, "#console-detail a[href='/runs/att-1']", "attempt 1 · running")
+    assert has_element?(view, "#console-detail .console-events .console-turn", "New turn")
     assert has_element?(view, "#console-detail .console-events", "Reading make-all.yml")
+    refute has_element?(view, "#console-detail .console-events", "usage_updated")
+    refute has_element?(view, "#console-detail .console-events", "in 5 / out 0")
     assert has_element?(view, "#console-detail", "3 / 20")
   end
 

@@ -23,6 +23,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       blocked? = issue.title == "blocked"
 
+      tool = %{"type" => "tool_use", "name" => "Bash", "input" => %{"command" => "mix test"}}
+
       content =
         if blocked?,
           do: [
@@ -36,6 +38,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       events = [
         %{"type" => "system", "subtype" => "init", "session_id" => "history-session"},
+        %{"type" => "assistant", "message" => %{"content" => [tool]}},
         %{"type" => "assistant", "message" => %{"content" => content}},
         %{
           "type" => "result",
@@ -107,6 +110,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       events = SymphonyElixir.Runs.events(run.id)
       assert Enum.count(events, &(&1.kind == "hook")) == 6
       assert Enum.any?(events, &(&1.kind == if(outcome == "blocked", do: "blocked", else: "turn_finished")))
+
+      # Tool input reaches operator-only run history, never the snapshot message.
+      if outcome == "done", do: assert(Enum.any?(events, &(&1.payload["detail"] == "Bash: mix test")))
     end
   end
 

@@ -114,7 +114,8 @@ defmodule SymphonyElixir.Runs.Writer do
       insert_event(run.id, at, Runs.kind_for(update.event), %{
         "event" => event_name(update.event),
         "message" => Map.get(update, :message),
-        "session_id" => Map.get(update, :session_id)
+        "session_id" => Map.get(update, :session_id),
+        "detail" => Map.get(update, :detail)
       })
 
     usage =

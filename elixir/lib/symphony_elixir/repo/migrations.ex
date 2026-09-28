@@ -250,3 +250,15 @@ defmodule SymphonyElixir.Repo.Migrations.AddRunIssueTitle do
     end
   end
 end
+
+defmodule SymphonyElixir.Repo.Migrations.AddRunIssueUrl do
+  @moduledoc false
+  use Ecto.Migration
+
+  @spec change() :: term()
+  def change do
+    alter table(:runs) do
+      add(:issue_url, :string)
+    end
+  end
+end
