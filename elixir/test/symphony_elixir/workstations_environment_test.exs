@@ -1558,6 +1558,9 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
 
     Agent.update(server, &put_in(&1, [:template, "container", "env"], markers))
     assert :ok = Workstations.preflight(enabled, opts(request))
+    Agent.update(server, &put_in(&1, [:template, "container", "env", "SYMPHONY_CODEX_RESEED"], "{}"))
+    assert {:error, {:invalid, :codex_profile}} = Workstations.preflight(enabled, opts(request))
+    Agent.update(server, &put_in(&1, [:template, "container", "env"], markers))
     Agent.update(server, &put_in(&1, [:template, "container", "env", "SYMPHONY_PROFILE"], "bugs"))
     assert {:error, {:invalid, :codex_profile}} = Workstations.preflight(enabled, opts(request))
   end
@@ -1634,6 +1637,206 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     assert {:error, {:unknown, :credential_outcome_unknown}, _} = Workstations.start(enabled, assigned, options)
     assert {:ok, deleted} = Workstations.destroy(enabled, committed, options)
     assert deleted.absent?
+  end
+
+  test "acknowledged reseed survives the next claim, UID binding and running reconciliation" do
+    {server, cloud, enabled, options, committed} = reseeded_credential_fixture()
+    proof = Credentials.disposition(committed)
+    assert proof["epoch"] == 1
+    assert proof["resolved_epoch"] == 2
+    assert proof["resource_acknowledged"]
+
+    assert {:ok, claimed} = Credentials.claim(enabled, %{committed | attempt_id: "replacement"}, :agent, options)
+    assert Credentials.assignment(claimed)["owner"]["workstation_uid"] == nil
+    assert Credentials.data(claimed)["reseed"] == proof
+    assert {:ok, durable_claim} = Workstations.put_intent(enabled, claimed, %{}, options)
+    assert {:ok, [discovered]} = Workstations.discover(enabled, options)
+    assert {:ok, recovered} = Credentials.reconcile(enabled, discovered, options)
+    assert Credentials.data(recovered)["reseed"] == proof
+    assert {:ok, bound} = Credentials.bind(enabled, recovered, :agent, options)
+    assert Credentials.data(bound)["reseed"] == proof
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    env = Agent.get(server, & &1.workstation["env"])
+    assert Jason.decode!(env["SYMPHONY_CODEX_RESEED"]) == proof
+    assert Jason.decode!(env["SYMPHONY_CODEX_ASSIGNMENT"]) == Credentials.assignment(bound)
+
+    assert Enum.sort(Map.keys(Jason.decode!(env["SYMPHONY_CODEX_ASSIGNMENT"]))) ==
+             ~w(claim_id credential_id epoch owner schema secret_version)
+
+    assert env["SYMPHONY_CODEX_MODE"] == "execute"
+    assert durable_claim.provider_ref.uid == bound.provider_ref.uid
+    assert {:ok, running} = Workstations.start(enabled, assigned, options)
+    assert {:ok, reconciled} = Credentials.reconcile(enabled, Credentials.put(running, %{"stage" => "ready"}), options)
+    assert {:ok, _} = Workstations.put_intent(enabled, reconciled, %{}, options)
+    assert Agent.get(server, & &1.workstation["env"]) == env
+    assert Agent.get(cloud, & &1.record["epoch"]) == 2
+  end
+
+  test "repeated central reseed publishes epoch three without assuming the retained worker reached epoch two" do
+    {server, cloud, enabled, options, committed} = reseeded_credential_fixture()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{committed | attempt_id: "failed-replacement"}, :agent, options)
+    assert {:ok, bound} = Credentials.bind(enabled, claimed, :agent, options)
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    assert {:ok, running} = Workstations.start(enabled, assigned, options)
+    assert {:ok, stopped} = Workstations.stop(enabled, running, options)
+    assert {:ok, committed} = reseed_stopped_credential(cloud, enabled, stopped, options)
+    proof = Credentials.disposition(committed)
+    assert proof["epoch"] == 2
+    assert proof["resolved_epoch"] == 3
+    assert proof["owner"]["attempt_id"] == "failed-replacement"
+    assert {:ok, claimed} = Credentials.claim(enabled, %{committed | attempt_id: "third-attempt"}, :agent, options)
+    assert {:ok, bound} = Credentials.bind(enabled, claimed, :agent, options)
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    assert Jason.decode!(Agent.get(server, & &1.workstation["env"]["SYMPHONY_CODEX_RESEED"])) == proof
+    assert Credentials.assignment(assigned)["epoch"] == 3
+    assert {:ok, _running} = Workstations.start(enabled, assigned, options)
+  end
+
+  for {label, path, value} <- [
+        {"unacknowledged", ["resource_acknowledged"], false},
+        {"malformed epoch", ["epoch"], "one"},
+        {"stale epoch", ["resolved_epoch"], 3},
+        {"stale head", ["secret_version"], "projects/123456/secrets/features-codex/versions/1"},
+        {"foreign credential", ["credential_id"], "foreign-credential"},
+        {"foreign deployment", ["owner", "deployment_id"], "foreign-deployment"},
+        {"foreign lane", ["owner", "lane"], "bugs"},
+        {"foreign resource", ["owner", "workstation_name"],
+         "projects/p/locations/l/workstationClusters/c/workstationConfigs/cfg/workstations/foreign"},
+        {"foreign UID", ["owner", "workstation_uid"], "foreign-uid"},
+        {"forged claim", ["claim_id"], "forged-claim"},
+        {"forged stop", ["stop_proof", "operation"], "projects/p/locations/l/operations/forged"},
+        {"foreign stop scope", ["stop_proof", "operation"], "projects/foreign/locations/l/operations/stop"},
+        {"forged stop attempt", ["stop_proof", "attempt_id"], "forged-attempt"},
+        {"extra field", ["unexpected"], true}
+      ] do
+    test "#{label} reseed metadata survives rejection through reconciliation and prepare without starting" do
+      {server, _cloud, enabled, options, committed} = reseeded_credential_fixture()
+      assert {:ok, claimed} = Credentials.claim(enabled, %{committed | attempt_id: "replacement"}, :agent, options)
+      assert {:ok, bound} = Credentials.bind(enabled, claimed, :agent, options)
+      assert {:ok, _assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+      proof = put_in(Credentials.disposition(committed), unquote(path), unquote(value))
+      change_annotation(server, &put_in(&1, ["metadata", "codex_credentials", "reseed"], proof))
+      assert {:ok, [durable]} = Workstations.discover(enabled, options)
+      before = Agent.get(server, & &1)
+
+      assert {:error, {:unknown, :credential_outcome_unknown}, refused} =
+               Credentials.reconcile(enabled, durable, options)
+
+      assert Credentials.data(refused)["reseed"] == proof
+
+      assert {:error, {:unknown, :credential_outcome_unknown}, refused_again} =
+               Credentials.claim(enabled, refused, :agent, options)
+
+      assert Credentials.data(refused_again)["reseed"] == proof
+      entry = %ExecutionEnvironment.Lifecycle.Entry{record: durable, attempt_id: "replacement", purpose: :agent}
+
+      assert {:error, {:unknown, :credential_outcome_unknown}, failed_prepare} =
+               Operations.run(Workstations, enabled, entry, :prepare, options)
+
+      assert Credentials.data(failed_prepare)["reseed"] == proof
+      assert {:error, :credential_outcome_unknown} = Credentials.reseed_proof(enabled, durable, options)
+
+      assert {:error, {:unknown, :credential_outcome_unknown}, _} =
+               Workstations.put_intent(enabled, durable, %{desired: :running}, options)
+
+      assert {:error, {:unknown, :credential_outcome_unknown}, _} = Workstations.start(enabled, durable, options)
+      assert Agent.get(server, & &1) == before
+    end
+  end
+
+  test "stale reseed env is removed only after an ordinary retained claim is physically stopped" do
+    {server, _cloud, enabled, options, committed} = reseeded_credential_fixture()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{committed | attempt_id: "replacement"}, :agent, options)
+    assert {:ok, bound} = Credentials.bind(enabled, claimed, :agent, options)
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    assert {:ok, running} = Workstations.start(enabled, assigned, options)
+    env = Agent.get(server, & &1.workstation["env"])
+    assert Map.has_key?(env, "SYMPHONY_CODEX_RESEED")
+    assert {:ok, _} = Workstations.put_intent(enabled, running, %{desired: :stopped}, options)
+    assert Agent.get(server, & &1.workstation["env"]) == env
+    assert {:ok, stopped} = Workstations.stop(enabled, running, options)
+
+    receipt =
+      Map.merge(Credentials.assignment(stopped), %{
+        "secret_version" => codex_references()["secret"] <> "/versions/2",
+        "sha256" => String.duplicate("c", 64),
+        "admission" => "sealed"
+      })
+
+    assert {:ok, checkpointed} = Credentials.checkpoint(enabled, stopped, receipt, options)
+    assert {:ok, released} = Credentials.release(enabled, checkpointed, options)
+    assert Credentials.data(released)["reseed"] == nil
+    assert {:ok, committed} = Operations.reconcile_credentials(Workstations, enabled, released, options)
+    assert {:ok, claimed} = Credentials.claim(enabled, %{committed | attempt_id: "ordinary"}, :agent, options)
+    assert Credentials.data(claimed)["reseed"] == nil
+    assert {:ok, bound} = Credentials.bind(enabled, claimed, :agent, options)
+    Agent.update(server, &put_in(&1, [:workstation, "env", "SYMPHONY_CODEX_RESEED"], env["SYMPHONY_CODEX_RESEED"]))
+    Agent.update(server, &put_in(&1, [:workstation, "state"], "STATE_RUNNING"))
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} =
+             Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+
+    assert Agent.get(server, & &1.workstation["env"]["SYMPHONY_CODEX_RESEED"]) == env["SYMPHONY_CODEX_RESEED"]
+    Agent.update(server, &put_in(&1, [:workstation, "state"], "STATE_STOPPED"))
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    refute Map.has_key?(Agent.get(server, & &1.workstation["env"]), "SYMPHONY_CODEX_RESEED")
+    assert {:ok, _running} = Workstations.start(enabled, assigned, options)
+  end
+
+  test "start refuses a reseed env changed after publication and a changed central handoff" do
+    {server, cloud, enabled, options, committed} = reseeded_credential_fixture()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{committed | attempt_id: "replacement"}, :agent, options)
+    assert {:ok, bound} = Credentials.bind(enabled, claimed, :agent, options)
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    env = Agent.get(server, & &1.workstation["env"])
+    Agent.update(server, &put_in(&1, [:workstation, "env", "SYMPHONY_CODEX_RESEED"], "{}"))
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} = Workstations.start(enabled, assigned, options)
+    Agent.update(server, &put_in(&1, [:workstation, "env"], env))
+    Agent.update(cloud, &put_in(&1, [:record, "last_handoff", "claim_id"], "different-handoff"))
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, refused} =
+             Credentials.reconcile(enabled, assigned, options)
+
+    assert Credentials.data(refused)["reseed"] == Credentials.disposition(committed)
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} = Workstations.start(enabled, assigned, options)
+    assert Agent.get(server, & &1.workstation["state"]) == "STATE_STOPPED"
+    assert Agent.get(server, & &1.workstation["env"]) == env
+  end
+
+  test "an ordinary higher epoch assignment cannot inherit provider env replacement evidence" do
+    {server, cloud, enabled, options} = codex_provider()
+
+    seed =
+      SymphonyElixir.CodexCredentials.Record.initial(
+        codex_references()["credential_id"],
+        2,
+        codex_references()["secret"] <> "/versions/2"
+      )
+
+    Agent.update(cloud, &%{&1 | record: seed, generation: &1.generation + 1})
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "ordinary"}, :agent, options)
+    assert {:ok, created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, bound} = Credentials.bind(enabled, created, :agent, options)
+    assert {:ok, reconciled} = Credentials.reconcile(enabled, bound, options)
+    assert Credentials.assignment(reconciled)["epoch"] == 2
+    assert Credentials.data(reconciled)["reseed"] == nil
+    Agent.update(server, &put_in(&1, [:workstation, "env"], %{"SYMPHONY_CODEX_RESEED" => "{}"}))
+    assert {:ok, assigned} = Workstations.put_intent(enabled, reconciled, %{desired: :running}, options)
+    refute Map.has_key?(Agent.get(server, & &1.workstation["env"]), "SYMPHONY_CODEX_RESEED")
+    assert {:ok, _running} = Workstations.start(enabled, assigned, options)
+    assert Agent.get(cloud, & &1.record["epoch"]) == 2
+  end
+
+  test "an unacknowledged disposition cannot authorize the next claim" do
+    {_server, cloud, enabled, options, committed} = reseeded_credential_fixture()
+    proof = Map.put(Credentials.disposition(committed), "resource_acknowledged", false)
+    unacknowledged = Credentials.put(committed, %{"disposition" => proof})
+    before = Agent.get(cloud, & &1)
+
+    assert {:error, {:unknown, :credential_outcome_unknown}, _} =
+             Credentials.claim(enabled, %{unacknowledged | attempt_id: "replacement"}, :agent, options)
+
+    assert Agent.get(cloud, & &1) == before
   end
 
   for verb <- [:start, :delete] do
@@ -1843,6 +2046,42 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     end
 
     Keyword.merge(options, request: request, request_fun: request_fun)
+  end
+
+  defp reseeded_credential_fixture do
+    {server, cloud, enabled, options} = codex_provider()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
+    assert {:ok, created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, bound} = Credentials.bind(enabled, created, :agent, options)
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    assert {:ok, running} = Workstations.start(enabled, assigned, options)
+    assert {:ok, stopped} = Workstations.stop(enabled, running, options)
+    assert {:ok, committed} = reseed_stopped_credential(cloud, enabled, stopped, options)
+    assert {:ok, [durable]} = Workstations.discover(enabled, options)
+    assert Credentials.disposition(durable) == Credentials.disposition(committed)
+    {server, cloud, enabled, options, durable}
+  end
+
+  defp reseed_stopped_credential(cloud, enabled, stopped, options) do
+    assigned = Credentials.assignment(stopped)
+    {:quiescent, %{uid: uid, operation: operation}} = stopped.proof
+    epoch = assigned["epoch"] + 1
+    head = codex_references()["secret"] <> "/versions/#{epoch}"
+
+    handoff = %{
+      "claim_id" => assigned["claim_id"],
+      "owner" => assigned["owner"],
+      "secret_version" => head,
+      "stop_proof" => %{"uid" => uid, "operation" => operation, "attempt_id" => assigned["owner"]["attempt_id"]},
+      "resource_acknowledged" => false
+    }
+
+    reseeded =
+      SymphonyElixir.CodexCredentials.Record.initial(codex_references()["credential_id"], epoch, head)
+      |> Map.merge(%{"last_handoff" => handoff, "transition_id" => "reseed-fixture-#{epoch}"})
+
+    Agent.update(cloud, &%{&1 | record: reseeded, generation: &1.generation + 1})
+    Operations.reconcile_credentials(Workstations, enabled, stopped, options)
   end
 
   defp codex_provider do

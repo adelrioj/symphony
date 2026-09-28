@@ -433,7 +433,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       "labels" => Map.merge(Map.get(workstation, "labels", %{}), expected["labels"])
     }
 
-    case credential_environment(config, record, workstation) do
+    case credential_environment(config, record, workstation, opts) do
       {:ok, environment} ->
         body = if environment, do: Map.put(body, "env", environment), else: body
         mask = if environment, do: "annotations,labels,env", else: "annotations,labels"
@@ -903,7 +903,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       valid =
         config.kind == "google_workstations" and env["SYMPHONY_PROFILE"] == "features" and
           env["SYMPHONY_CODEX_ENABLED"] == "1" and env["SYMPHONY_CODEX_SECRET"] == config.codex_credentials["secret"] and
-          not Map.has_key?(env, "SYMPHONY_CODEX_ASSIGNMENT") and not Map.has_key?(env, "SYMPHONY_CODEX_MODE")
+          not Enum.any?(~w(SYMPHONY_CODEX_ASSIGNMENT SYMPHONY_CODEX_MODE SYMPHONY_CODEX_RESEED), &Map.has_key?(env, &1))
 
       if valid, do: :ok, else: {:error, {:invalid, :codex_profile}}
     else
@@ -936,7 +936,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
            {:ok, template} <- get(config, config_name(config, record), opts),
            :ok <- credential_profile(config, template),
            {:ok, workstation} <- get(config, resource_name(config, record), opts),
-           {:ok, expected} <- credential_environment(config, record, workstation),
+           {:ok, expected} <- credential_environment(config, record, workstation, opts),
            true <- workstation["env"] == expected do
         :ok
       else
@@ -963,7 +963,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp credential_mutation_guard(_config, _record, _verb, _opts), do: :ok
 
-  defp credential_environment(config, record, workstation) do
+  defp credential_environment(config, record, workstation, opts) do
     unbound =
       Credentials.data(record)["stage"] == "claimed" and
         is_nil(get_in(Credentials.data(record), ["assignment", "owner", "workstation_uid"]))
@@ -972,11 +972,19 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
     if Credentials.enabled?(config) and record.desired == :running and
          not (unbound and workstation["state"] == "STATE_STOPPED") do
-      assigned_credential_environment(config, record, workstation, old_assignment)
+      assigned_credential_environment(config, record, workstation, old_assignment, opts)
     else
-      if Credentials.tracked?(record) and not Credentials.enabled?(config),
-        do: {:error, :credential_outcome_unknown},
-        else: {:ok, nil}
+      cond do
+        Credentials.tracked?(record) and not Credentials.enabled?(config) ->
+          {:error, :credential_outcome_unknown}
+
+        workstation["state"] == "STATE_STOPPED" and
+            Map.has_key?(Map.get(workstation, "env", %{}), "SYMPHONY_CODEX_RESEED") ->
+          {:ok, Map.delete(workstation["env"], "SYMPHONY_CODEX_RESEED")}
+
+        true ->
+          {:ok, nil}
+      end
     end
   end
 
@@ -987,7 +995,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
     end
   end
 
-  defp assigned_credential_environment(config, record, workstation, old_assignment) do
+  defp assigned_credential_environment(config, record, workstation, old_assignment, opts) do
     assigned = Credentials.assignment(record)
     mode = Credentials.data(record)["mode"]
     env = Map.get(workstation, "env", %{})
@@ -996,12 +1004,20 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       env["SYMPHONY_CODEX_MODE"] == "recover" and mode == "execute" and
         old_assignment["claim_id"] == assigned["claim_id"]
 
-    valid = valid_credential_environment?(config, assigned, mode, env)
-    expected = Map.merge(env, %{"SYMPHONY_CODEX_ASSIGNMENT" => Jason.encode!(assigned), "SYMPHONY_CODEX_MODE" => mode})
+    with {:ok, proof} <- Credentials.reseed_proof(config, record, opts) do
+      valid = valid_credential_environment?(config, assigned, mode, env)
 
-    if valid and not reopened_recovery and (expected == env or workstation["state"] == "STATE_STOPPED"),
-      do: {:ok, expected},
-      else: {:error, :credential_outcome_unknown}
+      expected =
+        env
+        |> Map.delete("SYMPHONY_CODEX_RESEED")
+        |> Map.merge(%{"SYMPHONY_CODEX_ASSIGNMENT" => Jason.encode!(assigned), "SYMPHONY_CODEX_MODE" => mode})
+
+      expected = if proof, do: Map.put(expected, "SYMPHONY_CODEX_RESEED", Jason.encode!(proof)), else: expected
+
+      if valid and not reopened_recovery and (expected == env or workstation["state"] == "STATE_STOPPED"),
+        do: {:ok, expected},
+        else: {:error, :credential_outcome_unknown}
+    end
   end
 
   defp valid_credential_environment?(config, assigned, mode, env) do
@@ -1147,7 +1163,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   defp credential_markers?(env) when is_map(env) do
     env["SYMPHONY_PROFILE"] == "features" or
       Enum.any?(
-        ~w(SYMPHONY_CODEX_ENABLED SYMPHONY_CODEX_SECRET SYMPHONY_CODEX_ASSIGNMENT SYMPHONY_CODEX_MODE),
+        ~w(SYMPHONY_CODEX_ENABLED SYMPHONY_CODEX_SECRET SYMPHONY_CODEX_ASSIGNMENT SYMPHONY_CODEX_MODE SYMPHONY_CODEX_RESEED),
         &Map.has_key?(env, &1)
       )
   end
