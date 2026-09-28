@@ -3,8 +3,8 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
   import Bitwise
   alias Exqlite.Sqlite3
   alias SymphonyElixir.CodexCredentials.{ControlStore, GoogleClient, Record}
-  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ExecutionEnvironment.{Config, Credentials, Lifecycle, Operations, Workstations}
+  alias SymphonyElixir.ExecutionProfiles.Configuration
   alias SymphonyElixir.{Maintenance, PathSafety, Workflow}
 
   @actions ~w(inspect checkpoint reseed-stop reseed-commit)
@@ -87,16 +87,26 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
          {:ok, db} <- Sqlite3.open(database, mode: :readonly) do
       try do
         with {:ok, [[0]]} <- query(db, "SELECT COUNT(*) FROM lanes WHERE enabled IS NOT 0"),
-             {:ok, [[front, prompt]]} <-
+             {:ok, [[front, prompt, base, worker, nil, subdir]]} <-
                query(
                  db,
-                 "SELECT v.front_matter, v.prompt FROM lanes l JOIN lane_versions v ON v.id = l.current_version_id AND v.lane_id = l.id WHERE l.slug = 'features' AND l.deleted_at IS NULL"
+                 """
+                 SELECT v.front_matter, v.prompt, p.workspace_base, p.worker, p.repair_error, l.workspace_subdir
+                 FROM lanes l
+                 JOIN lane_versions v ON v.id = l.current_version_id AND v.lane_id = l.id
+                 JOIN execution_profiles p ON p.id = l.execution_profile_id
+                 WHERE l.slug = 'features' AND l.deleted_at IS NULL
+                 """
                ),
-             {:ok, persisted} <- Workflow.parse_parts(front, prompt),
-             {:ok, content} <- File.read(workflow),
-             {:ok, supplied} <- Workflow.parse(content),
-             true <- persisted == supplied,
-             {:ok, settings} <- Schema.parse(persisted.config, resolve_secrets: false),
+             {:ok, lane} <- Workflow.parse_parts(front, prompt),
+             {:ok, worker} <- Jason.decode(worker),
+             profile = %{"workspace_base" => base, "worker" => worker},
+             {:ok, persisted} <- effective_workflow(profile, lane.config, subdir, lane.prompt),
+             {:ok, supplied} <- Workflow.load(workflow),
+             {supplied_profile, supplied_config} = Configuration.split(supplied.config),
+             {:ok, supplied} <- effective_workflow(supplied_profile, supplied_config, ".", supplied.prompt),
+             true <- persisted.workflow == supplied.workflow,
+             settings = persisted.settings,
              %{kind: "google_workstations", codex_credentials: refs} = config when is_map(refs) <-
                Config.runtime(settings),
              :ok <- Workstations.validate_config(config.provider) do
@@ -111,6 +121,17 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
       end
     else
       _ -> {:error, :installation_required}
+    end
+  end
+
+  defp effective_workflow(profile, config, subdir, prompt) do
+    worker = profile["worker"]
+
+    if is_map(worker) and Map.get(worker, "ssh_hosts", []) == [] and
+         get_in(worker, ["environment", "kind"]) == "google_workstations" do
+      Configuration.resolve(profile, config, subdir, prompt, nil, :structure)
+    else
+      {:error, :configuration_invalid}
     end
   end
 

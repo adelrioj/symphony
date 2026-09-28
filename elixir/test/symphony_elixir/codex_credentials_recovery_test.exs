@@ -5,6 +5,7 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ExecutionEnvironment.{Config, Credentials, Operations}
   alias SymphonyElixir.ExecutionEnvironment.Record, as: Resource
+  alias SymphonyElixir.ExecutionProfiles.Configuration
 
   defmodule Provider do
     def validate_config(_), do: :ok
@@ -75,25 +76,47 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
     }
 
     front =
-      Jason.encode!(%{
-        "tracker" => %{"kind" => "memory"},
-        "workspace" => %{"root" => "/state/workspaces"},
-        "worker" => %{"environment" => environment}
-      })
+      """
+      tracker:
+        kind: memory
+      workspace:
+        root: /state/workspaces
+      worker:
+        environment: #{Jason.encode!(environment)}
+      """
 
     workflow = Path.join(root, "WORKFLOW.md")
     File.write!(workflow, SymphonyElixir.Workflow.render(front, "Current Features prompt"))
+    {:ok, imported} = SymphonyElixir.Workflow.load(workflow)
+    {profile, lane_config} = Configuration.split(imported.config)
     database = Path.join(root, "symphony.sqlite3")
     {:ok, db} = Sqlite3.open(database)
 
     :ok =
       Sqlite3.execute(
         db,
-        "CREATE TABLE lanes (id INTEGER PRIMARY KEY, slug TEXT, enabled INTEGER, deleted_at TEXT, current_version_id INTEGER); CREATE TABLE lane_versions (id INTEGER PRIMARY KEY, lane_id INTEGER, front_matter TEXT, prompt TEXT); INSERT INTO lanes VALUES (1, 'features', 0, NULL, 1);"
+        """
+        CREATE TABLE execution_profiles (
+          id INTEGER PRIMARY KEY, workspace_base TEXT, worker TEXT, repair_error TEXT
+        );
+        CREATE TABLE lanes (
+          id INTEGER PRIMARY KEY, slug TEXT, enabled INTEGER, deleted_at TEXT,
+          current_version_id INTEGER, execution_profile_id INTEGER, workspace_subdir TEXT
+        );
+        CREATE TABLE lane_versions (
+          id INTEGER PRIMARY KEY, lane_id INTEGER, front_matter TEXT, prompt TEXT
+        );
+        INSERT INTO lanes VALUES (1, 'features', 0, NULL, 1, 1, '.');
+        """
       )
 
+    {:ok, statement} = Sqlite3.prepare(db, "INSERT INTO execution_profiles VALUES (1, ?, ?, NULL)")
+    :ok = Sqlite3.bind(statement, [profile["workspace_base"], Jason.encode!(profile["worker"])])
+    :done = Sqlite3.step(db, statement)
+    :ok = Sqlite3.release(db, statement)
+
     {:ok, statement} = Sqlite3.prepare(db, "INSERT INTO lane_versions VALUES (1, 1, ?, ?)")
-    :ok = Sqlite3.bind(statement, [front, "Current Features prompt"])
+    :ok = Sqlite3.bind(statement, [SymphonyElixir.Workflow.encode_config(lane_config), imported.prompt])
     :done = Sqlite3.step(db, statement)
     :ok = Sqlite3.release(db, statement)
     :ok = Sqlite3.close(db)
@@ -326,13 +349,54 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
   end
 
   test "enabled deleted lane still blocks maintenance", c do
-    sql(c.database, "INSERT INTO lanes VALUES (2, 'deleted', 1, '2026-01-01', NULL)")
+    sql(c.database, "INSERT INTO lanes VALUES (2, 'deleted', 1, '2026-01-01', NULL, 1, '.')")
     assert {:error, :lanes_enabled} = Recovery.reconcile(c.options, c.deps)
   end
 
   test "stale Features prompt cannot substitute for the persisted current version", c do
     File.write!(c.workflow, String.replace(File.read!(c.workflow), "Current Features prompt", "Stale prompt"))
     assert {:error, :workflow_mismatch} = Recovery.reconcile(c.options, c.deps)
+  end
+
+  test "profile workspace and lane subdirectory drift block recovery", c do
+    sql(c.database, "UPDATE execution_profiles SET workspace_base = '/state/other'")
+    assert {:error, :workflow_mismatch} = Recovery.reconcile(c.options, c.deps)
+    sql(c.database, "UPDATE execution_profiles SET workspace_base = '/state/workspaces'")
+    sql(c.database, "UPDATE lanes SET workspace_subdir = 'other'")
+    assert {:error, :workflow_mismatch} = Recovery.reconcile(c.options, c.deps)
+  end
+
+  test "profile resource and credential configuration drift block recovery", c do
+    for {path, value} <- [
+          {"$.environment.provider.config", "other"},
+          {"$.environment.provider.credential_configuration", "other"},
+          {"$.environment.codex_credentials.control_object", "other.json"}
+        ] do
+      {:ok, imported} = SymphonyElixir.Workflow.load(c.workflow)
+      {profile, _} = Configuration.split(imported.config)
+      {:ok, db} = Sqlite3.open(c.database)
+      {:ok, statement} = Sqlite3.prepare(db, "UPDATE execution_profiles SET worker = json_set(?, ?, ?)")
+      :ok = Sqlite3.bind(statement, [Jason.encode!(profile["worker"]), path, value])
+      :done = Sqlite3.step(db, statement)
+      :ok = Sqlite3.release(db, statement)
+      :ok = Sqlite3.close(db)
+      assert {:error, :workflow_mismatch} = Recovery.reconcile(c.options, c.deps)
+    end
+
+    assert Agent.get(c.cloud, & &1.writes) == []
+    assert Agent.get(c.remote, & &1.writes) == []
+  end
+
+  test "lane configuration drift blocks recovery", c do
+    sql(c.database, ~s(UPDATE lane_versions SET front_matter = '{"tracker":{"kind":"memory"},"agent":{"max_turns":7}}'))
+    assert {:error, :workflow_mismatch} = Recovery.reconcile(c.options, c.deps)
+  end
+
+  test "missing or unrepaired profiles cannot authorize recovery", c do
+    sql(c.database, "UPDATE execution_profiles SET repair_error = 'invalid imported profile'")
+    assert {:error, :configuration_invalid} = Recovery.reconcile(c.options, c.deps)
+    sql(c.database, "DELETE FROM execution_profiles")
+    assert {:error, :configuration_invalid} = Recovery.reconcile(c.options, c.deps)
   end
 
   test "inspect reports absent authority without creating it", c do
