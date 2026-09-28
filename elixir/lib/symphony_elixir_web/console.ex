@@ -173,17 +173,7 @@ defmodule SymphonyElixirWeb.Console do
       Enum.flat_map(@live_statuses, fn status ->
         payload
         |> Map.get(String.to_existing_atom(status), [])
-        |> Enum.map(fn item ->
-          environment = Map.get(environments, item.issue_id)
-
-          if status == "queued" and is_map(environment) and environment_attention?(environment) do
-            environment_ticket(entry, environment, item)
-          else
-            entry
-            |> live_ticket(status, item)
-            |> Map.put(:environment, environment)
-          end
-        end)
+        |> Enum.map(&status_ticket(entry, status, &1, Map.get(environments, &1.issue_id)))
       end)
 
     live_ids = MapSet.new(live, & &1.issue_id)
@@ -205,6 +195,17 @@ defmodule SymphonyElixirWeb.Console do
       |> Enum.map(&run_ticket(entry, &1))
 
     live ++ attention ++ finished
+  end
+
+  # A queued issue whose workstation needs recovery is shown as that blocker, not as queued.
+  defp status_ticket(entry, status, item, environment) do
+    if status == "queued" and is_map(environment) and environment_attention?(environment) do
+      environment_ticket(entry, environment, item)
+    else
+      entry
+      |> live_ticket(status, item)
+      |> Map.put(:environment, environment)
+    end
   end
 
   defp environment_attention?(environment) do
