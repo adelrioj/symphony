@@ -1243,7 +1243,7 @@ Tracker links use only tracker-provided `http`/`https` URLs.
 | Route | Surface |
 | --- | --- |
 | `/login` | Operator-token login |
-| `/` | Operator console: live agents per lane, tickets by run status or tracker state, run detail, Stop / Retry now / Approve / Reply |
+| `/` | Operator console: lane sidebar with agent capacity, tickets by run status or tracker state, run detail with tracker link and activity feed, Stop / Retry now / Approve / Reply |
 | `/lanes` | Lane list, health, enable/disable controls |
 | `/execution-profiles` | List, create, edit and delete execution profiles |
 | `/execution-profiles/:id` | Profile details, linked lanes and safe worker summary |
@@ -1319,6 +1319,9 @@ the dispatch-time lane version/executor, status, timing, turn count, and token t
 usage. The ordered history writer is asynchronous: scheduling never waits for database writes.
 Database errors are logged, not retried; uncommitted queued events may be lost on process failure.
 History is observability data, never the source for claims, retries, or restart scheduling.
+Claude tool-call events keep a short summary of the tool input (for example `Bash: mix test`) in
+run history only, which the signed-in console and run pages show. Snapshots and `/api/v1/state`
+carry just the tool name, because commands and paths can contain secrets.
 
 Disabling a lane stops its runtime/agents and finishes active attempts as stopped; abnormal runtime
 death finishes them as failed. Runtime crashes are isolated by lane; five abnormal deaths within

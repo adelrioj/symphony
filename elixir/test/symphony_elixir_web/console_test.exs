@@ -2,7 +2,7 @@ defmodule SymphonyElixirWeb.ConsoleTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.LaneStore.Entry
-  alias SymphonyElixir.Runs.Run
+  alias SymphonyElixir.Runs.{Event, Run}
   alias SymphonyElixirWeb.Console
 
   @settings %{
@@ -49,6 +49,7 @@ defmodule SymphonyElixirWeb.ConsoleTest do
 
     assert %{
              title: "Old A-5",
+             url: "https://linear.app/a/A-5",
              tokens: %{total_tokens: 6},
              started_at: "2026-09-27T09:00:00Z"
            } = List.last(tickets)
@@ -87,8 +88,6 @@ defmodule SymphonyElixirWeb.ConsoleTest do
 
     assert [%{label: "Other states", tickets: [^ticket]}] =
              Console.groups(tickets, :tracker, [entry("main")])
-
-    assert %{agents: [], idle: 3, max: 3} = Console.strip(entry("main"), tickets)
   end
 
   test "credential recovery is visible with no unresolved marker and an unknown phase" do
@@ -135,9 +134,6 @@ defmodule SymphonyElixirWeb.ConsoleTest do
                environment: ^environment
              }
            ] = Enum.filter(tickets, &(&1.issue_id == "i1"))
-
-    assert %{agents: [%{issue_id: "i1"}, %{issue_id: "i2"}], idle: 2} =
-             Console.strip(entry("main"), tickets)
   end
 
   test "a queued tracker issue cannot hide its workstation recovery blocker" do
@@ -306,21 +302,7 @@ defmodule SymphonyElixirWeb.ConsoleTest do
            ]
   end
 
-  test "strip shows live running and blocked agents and counts idle slots from running only" do
-    tickets =
-      Console.tickets([
-        %{entry: entry("main"), payload: payload(), runs: [run("i7", "A-7", "blocked")]}
-      ])
-
-    assert %{agents: [%{identifier: "A-1"}, %{identifier: "A-2"}], idle: 2, max: 3} =
-             Console.strip(entry("main"), tickets)
-
-    assert %{agents: [], idle: 0, max: 0} =
-             Console.strip(entry("off", enabled: false), tickets)
-
-    assert %{idle: 0, max: 0} =
-             Console.strip(entry("broken", settings: nil), [])
-
+  test "agent settings fall back to the default when a lane has none" do
     assert Console.agent_setting(entry("main"), :backend, "codex") == "codex"
 
     assert Console.agent_setting(
@@ -361,12 +343,59 @@ defmodule SymphonyElixirWeb.ConsoleTest do
     assert Console.describe_event(%{"event" => "turn_started"}) == "turn_started"
     assert Console.describe_event(%{"other" => 1}) == ~s({"other":1})
 
+    # The orchestrator stores its last update summary, so agent text sits one level down.
+    assert Console.describe_event(%{
+             "event" => "usage_updated",
+             "message" => %{"event" => "usage_updated", "message" => "Reading evals/judges"}
+           }) == "Reading evals/judges"
+
+    assert Console.describe_event(%{
+             "event" => "notification",
+             "message" => %{"event" => "notification", "message" => %{"method" => "turn/started"}}
+           }) =~ "turn started"
+
+    assert Console.describe_event(%{
+             "event" => "tool_use",
+             "message" => %{"event" => "tool_use", "message" => "Using tool: Bash"},
+             "detail" => "Bash: ls evals"
+           }) == "Bash: ls evals"
+
+    assert Console.describe_event(%{"event" => "turn_started", "message" => %{"event" => "turn_started"}}) ==
+             "turn_started"
+
     assert Console.external_url(" https://linear.app/a/A-1 ") ==
              "https://linear.app/a/A-1"
 
     assert Console.external_url("javascript:alert(1)") == nil
     assert Console.external_url("https://") == nil
     assert Console.external_url(nil) == nil
+  end
+
+  test "activity keeps readable agent steps and drops token and repeat noise" do
+    at = ~U[2026-09-27 14:33:00.000000Z]
+
+    event = fn kind, text ->
+      %Event{at: at, kind: kind, payload: %{"event" => kind, "message" => %{"event" => kind, "message" => text}}}
+    end
+
+    events = [
+      event.("turn_started", "Claude session_started"),
+      event.("reasoning", "Check the judges first."),
+      %Event{at: at, kind: "usage", payload: %{"input_tokens" => 5, "output_tokens" => 1, "total_tokens" => 6}},
+      event.("tool", "Bash: ls evals"),
+      event.("agent_message", "Bash: ls evals"),
+      event.("agent_message", "All nine judges share a rubric."),
+      event.("agent_message", "All nine judges share a rubric.")
+    ]
+
+    assert Enum.map(Console.activity(events), &{&1.kind, &1.text}) == [
+             {"turn_started", "Claude session_started"},
+             {"reasoning", "Check the judges first."},
+             {"tool", "Bash: ls evals"},
+             {"agent_message", "All nine judges share a rubric."}
+           ]
+
+    assert [%{at: ^at}] = Console.activity([event.("tool", "Read: a.ex")])
   end
 
   test "handles non-binary tracker_state in grouping" do
@@ -483,6 +512,7 @@ defmodule SymphonyElixirWeb.ConsoleTest do
       issue_id: issue_id,
       issue_identifier: identifier,
       issue_title: "Old " <> identifier,
+      issue_url: "https://linear.app/a/" <> identifier,
       issue_state: "Todo",
       status: status,
       attempt_id: "#{identifier}-#{status}",

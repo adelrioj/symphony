@@ -1,5 +1,5 @@
 defmodule SymphonyElixirWeb.ConsoleLive do
-  @moduledoc "Operator console: each lane's live agents above one ticket list, with a run panel."
+  @moduledoc "Operator console: a lane sidebar, one ticket list, and a run panel."
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
@@ -71,7 +71,7 @@ defmodule SymphonyElixirWeb.ConsoleLive do
     ~H"""
     <section class="console" id="console">
       <aside class="console-side">
-        <.lane_nav nav={@nav} entries={@entries} tickets={@tickets} />
+        <.lane_nav nav={@nav} entries={@entries} tickets={@tickets} now={@now} />
       </aside>
       <section class="console-main">
         <header class="console-top">
@@ -82,7 +82,6 @@ defmodule SymphonyElixirWeb.ConsoleLive do
           </div>
           <button id="poll-trackers" type="button" class="subtle-button" phx-click="poll">↻ Poll trackers</button>
         </header>
-        <.strip nav={@nav} strips={@strips} tickets={@tickets} now={@now} />
         <.ticket_list nav={@nav} groups={@groups} now={@now} />
       </section>
       <aside class="console-detail" id="console-detail" aria-label="Ticket detail">
@@ -151,11 +150,11 @@ defmodule SymphonyElixirWeb.ConsoleLive do
           <section :if={@detail.events != []}>
             <h3 class="console-h">Activity</h3>
             <ol class="console-events">
-              <li :for={event <- @detail.events}>
+              <li :for={event <- @detail.events} class={if event.kind == "turn_started", do: "console-turn"}>
                 <time class="mono muted" datetime={DateTime.to_iso8601(event.at)}>{Calendar.strftime(event.at, "%H:%M:%S")}</time>
-                <span class={"console-k console-k--#{event.kind}"}></span>
-                <strong>{event.kind}</strong>
-                <span>{Console.describe_event(event.payload)}</span>
+                <span :if={event.kind == "turn_started"}>New turn</span>
+                <span :if={event.kind != "turn_started"} class={"console-k console-k--#{event.kind}"} title={event.kind}></span>
+                <span :if={event.kind != "turn_started"}>{event.text}</span>
               </li>
             </ol>
           </section>
@@ -245,7 +244,6 @@ defmodule SymphonyElixirWeb.ConsoleLive do
       now: DateTime.utc_now(),
       entries: entries,
       tickets: tickets,
-      strips: Enum.map(scoped, &{&1, Console.strip(&1, tickets)}),
       groups: Console.groups(visible, nav.group, scoped),
       ticket: ticket,
       detail: detail(ticket, entries)
@@ -260,8 +258,12 @@ defmodule SymphonyElixirWeb.ConsoleLive do
 
     events =
       case attempts do
-        [latest | _] -> Runs.recent_events(latest.id, @event_limit)
-        [] -> []
+        # Token rows and repeats are dropped from the feed, so read past them to fill it.
+        [latest | _] ->
+          latest.id |> Runs.recent_events(@event_limit * 3) |> Console.activity() |> Enum.take(-@event_limit)
+
+        [] ->
+          []
       end
 
     %{entry: entry, attempts: attempts, events: events}

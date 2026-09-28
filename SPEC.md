@@ -1797,8 +1797,9 @@ Installation settings and authentication:
 
 #### 13.7.1 Human-Readable Dashboard (`/`)
 
-- Host the operator console at `/`: live agents per lane, one ticket list grouped by run status or
-  tracker state, and a run detail panel. Host the lane list at `/lanes`, execution profiles at
+- Host the operator console at `/`: a lane sidebar with per-lane agent capacity, one ticket list
+  grouped by run status or tracker state, and a run detail panel with the tracker link and a
+  readable activity feed. Host the lane list at `/lanes`, execution profiles at
   `/execution-profiles` with creation at `/execution-profiles/new`, per-lane creation at
   `/lanes/new`, per-lane runtime at `/lanes/:slug`, editing at `/lanes/:slug/edit`, versions at
   `/lanes/:slug/versions`, attempt details at `/runs/:attempt_id`, and login at `/login`.

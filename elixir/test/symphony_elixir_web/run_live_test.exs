@@ -106,7 +106,7 @@ defmodule SymphonyElixirWeb.RunLiveTest do
     :ok = Runs.event("att-live", %{event: :turn_completed, message: ""}, %{}, 1)
     :ok = Runs.finished("att-live", "done")
     run = Runs.get_by_attempt("att-live")
-    payload = %{"detail" => "<script>alert('retained')</script>"}
+    payload = %{"note" => "<script>alert('retained')</script>"}
     Repo.insert!(%Event{run_id: run.id, at: DateTime.utc_now(), kind: "agent_message", payload: payload})
 
     {:ok, view, _html} = live(conn, "/runs/att-live")
