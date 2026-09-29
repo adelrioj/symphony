@@ -170,12 +170,6 @@ defmodule SymphonyElixir.Agent.PiTest do
     assert :ok = Pi.stop_session(session)
   end
 
-  # Task 6 replaces this with real remote execution and deletes this test.
-  test "remote contexts are unavailable until Task 6" do
-    session = %{workspace: "/w", execution_context: ExecutionContext.ssh("/w", "host")}
-    assert Pi.run_turn(session, "p", %{}, []) == {:error, :pi_remote_unavailable}
-  end
-
   defp value(argv, flag), do: Enum.at(argv, Enum.find_index(argv, &(&1 == flag)) + 1)
 
   defp write_fake_pi!(path, events) do

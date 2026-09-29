@@ -14,13 +14,14 @@ defmodule SymphonyElixir.Agent.Pi do
   alias SymphonyElixir.Agent.CliHarness
   alias SymphonyElixir.Agent.Pi.Stream
   alias SymphonyElixir.Agent.Result
-  alias SymphonyElixir.{Config, ExecutionContext, Tracker, Workflow}
+  alias SymphonyElixir.{Config, ExecutionContext, SSH, Tracker, Workflow}
 
   @bridge_path Path.expand("../../../priv/pi/symphony-mcp-bridge.ts", __DIR__)
   @external_resource @bridge_path
   @bridge_source File.read!(@bridge_path)
 
   @default_tools ~w(read bash edit write grep find ls)
+  @port_line_bytes 1_048_576
 
   @type session :: %{
           required(:workspace) => Path.t(),
@@ -112,7 +113,7 @@ defmodule SymphonyElixir.Agent.Pi do
   def run_turn(%{workspace: workspace, execution_context: context} = session, prompt, _issue, opts)
       when is_binary(prompt) do
     if ExecutionContext.remote?(context) do
-      {:error, :pi_remote_unavailable}
+      drive_ssh(session, workspace, prompt, Keyword.get(opts, :on_message))
     else
       run_local(session, workspace, prompt, Keyword.get(opts, :on_message))
     end
@@ -164,6 +165,101 @@ defmodule SymphonyElixir.Agent.Pi do
         _ = File.rm(prompt_path)
       end
     end
+  end
+
+  @doc false
+  @spec remote_command(String.t(), String.t()) :: String.t()
+  def remote_command(workspace, remote_dir) when is_binary(workspace) and is_binary(remote_dir) do
+    binding = Tracker.bind_agent_tools()
+
+    build_remote_command(
+      workspace,
+      remote_dir,
+      Config.settings!().pi,
+      binding.tool_specs,
+      binding.secret_environment_names
+    )
+  end
+
+  defp drive_ssh(
+         %{
+           execution_context: %ExecutionContext{target: host},
+           remote_dir: remote_dir,
+           workflow_snapshot_path: workflow_snapshot_path,
+           session_dir: session_dir,
+           pi_settings: pi,
+           tool_specs: tool_specs,
+           secret_environment_names: secret_environment_names
+         },
+         workspace,
+         prompt,
+         on_message
+       ) do
+    command = build_remote_command(workspace, remote_dir, pi, tool_specs, secret_environment_names)
+    local_bridge_config_path = Path.join(session_dir, "bridge.json")
+
+    with {:ok, workflow_snapshot} <- File.read(workflow_snapshot_path),
+         {:ok, encoded_local_bridge} <- File.read(local_bridge_config_path),
+         {:ok, local_bridge} <- Jason.decode(encoded_local_bridge),
+         {:ok, encoded_bridge} <-
+           encode_bridge_config(
+             bridge_config(
+               pi.linear_mcp_command || "symphony",
+               pi.linear_mcp_args ++ ["--linear-mcp", "--workflow", Path.join(remote_dir, "WORKFLOW.md")],
+               Map.get(local_bridge, "env", %{}),
+               Map.fetch!(local_bridge, "timeoutMs")
+             )
+           ),
+         payload =
+           CliHarness.ssh_payload([workflow_snapshot, @bridge_source, encoded_bridge, settings_json(), prompt]),
+         {:ok, port} <- SSH.start_port(host, command, line: @port_line_bytes),
+         :ok <- SSH.write_stdin(port, payload) do
+      CliHarness.collect_port_stream(port, on_message, Stream, "pi")
+    end
+  rescue
+    error -> {:error, {:pi_ssh_port, error}}
+  end
+
+  defp build_remote_command(workspace, remote_dir, pi, tool_specs, secret_environment_names) do
+    path = &CliHarness.shell_escape(Path.join(remote_dir, &1))
+
+    [
+      "cd #{CliHarness.shell_escape(workspace)}",
+      "umask 077",
+      # Installed before any secret file is written so a killed runner cannot leave tracker secrets behind.
+      "trap #{CliHarness.shell_escape(secret_cleanup_command(remote_dir))} EXIT HUP INT TERM",
+      "mkdir -p #{path.("agent")} #{path.("sessions")}",
+      "chmod 700 #{CliHarness.shell_escape(remote_dir)}",
+      CliHarness.read_length_prefixed_file("workflow", path.("WORKFLOW.md")),
+      CliHarness.read_length_prefixed_file("bridge", path.("bridge.ts")),
+      CliHarness.read_length_prefixed_file("bridge_config", path.("bridge.json")),
+      CliHarness.read_length_prefixed_file("settings", path.("agent/settings.json")),
+      "IFS= read -r symphony_prompt_bytes",
+      "case \"$symphony_prompt_bytes\" in ''|*[!0-9]*) exit 64;; esac",
+      CliHarness.tracker_secret_unset_command(secret_environment_names),
+      "symphony_continue=",
+      "if [ -n \"$(ls -A #{path.("sessions")} 2>/dev/null)\" ]; then symphony_continue=--continue; fi",
+      remote_pi_invocation(remote_dir, pi, tool_specs)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" && ")
+  end
+
+  # Files rewritten every turn that hold tracker secrets; `bridge.ts`, `agent/settings.json` and
+  # `sessions/` are not secret and stay for `--continue`.
+  defp secret_cleanup_command(remote_dir) do
+    files = Enum.map_join(["bridge.json", "WORKFLOW.md"], " ", &CliHarness.shell_escape(Path.join(remote_dir, &1)))
+    "rm -f " <> files
+  end
+
+  defp remote_pi_invocation(remote_dir, pi, tool_specs) do
+    paths = %{sessions_dir: Path.join(remote_dir, "sessions"), bridge_path: Path.join(remote_dir, "bridge.ts")}
+    args = paths |> argv(pi, tool_specs, false) |> Enum.map(&CliHarness.shell_escape/1)
+
+    "dd bs=1 count=\"$symphony_prompt_bytes\" 2>/dev/null | " <>
+      "PI_CODING_AGENT_DIR=#{CliHarness.shell_escape(Path.join(remote_dir, "agent"))} " <>
+      "SYMPHONY_BRIDGE_CONFIG=#{CliHarness.shell_escape(Path.join(remote_dir, "bridge.json"))} " <>
+      Enum.join([CliHarness.shell_escape(pi.command) | args] ++ ["$symphony_continue"], " ")
   end
 
   @doc false
