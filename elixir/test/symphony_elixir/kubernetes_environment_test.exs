@@ -953,6 +953,22 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"] == nil
   end
 
+  test "direct destroy recovers the closed journal before classifying an absent unreleased Pod" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    gate_recovery_fixture(record)
+
+    assert {:ok, deleted} = Kubernetes.destroy(config, created, opts)
+    assert deleted.absent?
+
+    assert get_in(guard_data(record), ["evidence", "physical", "pod-uid", "kind"]) ==
+             "admission_never_executable"
+
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"] == nil
+  end
+
   test "a changed admission policy cannot retroactively certify a vanished Pod" do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)

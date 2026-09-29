@@ -15,6 +15,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.GateRecovery do
   # Pod absence. The admission policy and its binding must have existed unchanged before the
   # Sandbox, and the namespace selector/provider identity must have been owned unchanged since
   # before it was created. Otherwise the historical gate cannot be established.
+  @spec proof(map(), map(), map(), map(), keyword()) :: {:ok, map() | nil}
   def proof(config, record, sandbox, operation, opts) do
     namespace = get_in(sandbox, ["metadata", "namespace"])
 

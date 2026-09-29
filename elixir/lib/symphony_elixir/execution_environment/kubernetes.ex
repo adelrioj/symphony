@@ -570,7 +570,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   # backed by the admission gate's unchanged history, may account for a journaled Pod
   # that was never authorized to run. Authorized Pods still require physical evidence.
   defp recover_unreleased(config, record, sandbox, pods, opts) do
-    if record.desired in [:stopped, :absent] and suspension_acknowledged?(record, sandbox) do
+    if record.desired in [:stopped, :absent] and
+         (suspension_acknowledged?(record, sandbox) or
+            (record.desired == :absent and drained_journal?(sandbox))) do
       with {:ok, operations} <- pod_operations(sandbox),
            true <- prior_pod_operations_preserved?(record, operations) do
         Enum.reduce_while(operations, {:ok, record}, fn operation, {:ok, current} ->
@@ -596,6 +598,14 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     else
       {:ok, record}
     end
+  end
+
+  defp drained_journal?(sandbox) do
+    close_id = get_in(sandbox, ["spec", "creationControl", "closeRequestId"])
+    journal = get_in(sandbox, ["status", "creationJournal"])
+
+    is_binary(close_id) and is_map(journal) and journal["phase"] == "Drained" and
+      valid_journal?(journal, uid(sandbox), close_id, get_in(sandbox, ["metadata", "namespace"]))
   end
 
   @spec put_intent(map(), Record.t(), map(), keyword()) :: SymphonyElixir.ExecutionEnvironment.result()
@@ -826,6 +836,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp destroy_closed(config, record, sandbox, journal, guard, q, opts) do
     with {:ok, objects} <- inventory(config, opts),
          {:ok, captured} <- capture_storage(record, sandbox, objects, q),
+         {:ok, captured} <- recover_unreleased(config, captured, sandbox, objects["pods"], opts),
          {:ok, classified} <- classify_journal(captured, sandbox, journal, guard, objects, q),
          {:ok, saved} <- persist(config, classified, sandbox, [], opts),
          {:ok, stopped} <- stop(config, saved, opts) do
