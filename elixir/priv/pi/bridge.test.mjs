@@ -59,10 +59,34 @@ test("a dead child fails later calls fast", async () => {
   await assert.rejects(() => pi.tools[0].execute("i", { query: "x" }), /exited|closed/);
 });
 
-test("child env comes from cfg.env on top of process env", async () => {
-  const c = new McpClient({ ...server(), env: { FAKE_MODE: "", SECRET_PROBE: "s3" } }, 2000);
-  await c.start();
-  const tools = await c.listTools();
-  assert.ok(tools.some((t) => t.name === "linear_graphql"));
-  c.close();
+const callTool = async (cfg, name, args) => {
+  const c = new McpClient(cfg, 2000);
+  try {
+    await c.start();
+    return await c.callTool(name, args);
+  } finally {
+    c.close();
+  }
+};
+
+test("cfg.env and parent process env both reach the child", async () => {
+  process.env.PARENT_PROBE = "p1";
+  const cfg = { ...server("env"), env: { FAKE_MODE: "env", SECRET_PROBE: "s3" } };
+  assert.equal((await callTool(cfg, "linear_graphql", { name: "SECRET_PROBE" })).content[0].text, "s3");
+  assert.equal((await callTool(cfg, "linear_graphql", { name: "PARENT_PROBE" })).content[0].text, "p1");
+});
+
+test("a response split across stdout chunks is reassembled", async () => {
+  const out = await callTool(server("split"), "linear_graphql", { query: "x" });
+  assert.equal(out.content[0].text, "whole");
+});
+
+test("a response with an unknown id is ignored", async () => {
+  const out = await callTool(server("unknown-id"), "linear_graphql", { query: "x" });
+  assert.match(out.content[0].text, /^echo:/);
+});
+
+test("a final response written right before exit still resolves", async () => {
+  const out = await callTool(server("exit-after-reply"), "linear_graphql", { query: "x" });
+  assert.ok(out.content[0].text.startsWith("last"));
 });

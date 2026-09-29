@@ -25,7 +25,8 @@ export class McpClient {
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.onData(chunk));
     this.child.on("error", (e) => this.fail(new Error(`MCP server failed to start: ${e.message}`)));
-    this.child.on("exit", (code) => this.fail(new Error(`MCP server exited (code ${code})`)));
+    // "close" fires after stdio drains, so a final response written just before exit is not lost.
+    this.child.on("close", (code) => this.fail(new Error(`MCP server exited (code ${code})`)));
     this.child.stdin.on("error", () => {});
   }
 
@@ -127,4 +128,5 @@ export default async function (pi: any): Promise<void> {
   await client.start();
   await registerBridgeTools(pi, client);
   pi.on("session_shutdown", () => client.close());
+  process.once("exit", () => client.close());
 }
