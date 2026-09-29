@@ -352,6 +352,7 @@ defmodule SymphonyElixir.TestSupport do
           claude_allowed_tools: nil,
           claude_extra_mcp_servers: %{},
           omp_command: "omp",
+          pi_command: "pi",
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -401,6 +402,7 @@ defmodule SymphonyElixir.TestSupport do
     claude_allowed_tools = Keyword.get(config, :claude_allowed_tools)
     claude_extra_mcp_servers = Keyword.get(config, :claude_extra_mcp_servers)
     omp_command = Keyword.get(config, :omp_command)
+    pi_command = Keyword.get(config, :pi_command)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -459,6 +461,8 @@ defmodule SymphonyElixir.TestSupport do
         "  extra_mcp_servers: #{yaml_value(claude_extra_mcp_servers)}",
         "omp:",
         "  command: #{yaml_value(omp_command)}",
+        "pi:",
+        "  command: #{yaml_value(pi_command)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         "---",
