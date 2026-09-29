@@ -17,7 +17,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.HostRecovery do
     pod_uid = operation["objectUID"]
     name = @receipt_prefix <> pod_uid
 
-    with {:ok, receipt} <- Client.lookup(config, "/api/v1/namespaces/#{@receipt_namespace}/configmaps", name, opts),
+    with {:ok, receipt} <- fetch_receipt(config, name, opts),
          {:ok, assertion} <- decode_receipt(receipt, record, sandbox, operation),
          {:ok, guard} <- Guard.fetch(config, record, opts),
          {:ok, node} <- Client.lookup(config, "/api/v1/nodes", assertion["hostname"], opts),
@@ -40,6 +40,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes.HostRecovery do
          "captured_at" => assertion["captured_at"]
        }}
     else
+      _ -> {:ok, nil}
+    end
+  end
+
+  # Client.lookup lists the whole collection; the provider has only get on
+  # management-namespace ConfigMaps. Read this exact operator-issued name.
+  defp fetch_receipt(config, name, opts) do
+    path = "/api/v1/namespaces/#{@receipt_namespace}/configmaps/#{name}"
+
+    case Client.request(config, :get, path, nil, opts) do
+      {:ok, %{status: 200, body: %{} = receipt}} -> {:ok, receipt}
       _ -> {:ok, nil}
     end
   end
