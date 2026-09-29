@@ -1,11 +1,11 @@
-defmodule SymphonyElixir.Agent.Omp.Stream do
-  @moduledoc "omp event folder: the shared pi-family folder with omp error tags."
+defmodule SymphonyElixir.Agent.Pi.Stream do
+  @moduledoc "pi event folder: the shared pi-family folder with pi error tags."
   @behaviour SymphonyElixir.Agent.CliHarness.StreamFolder
   alias SymphonyElixir.Agent.PiFamily.Stream, as: Family
 
   @impl true
   @spec new() :: Family.t()
-  def new, do: Family.new(:omp_error, :omp_stream)
+  def new, do: Family.new(:pi_error, :pi_stream)
 
   @impl true
   @spec step(map(), Family.t()) :: {Family.t(), map() | nil}

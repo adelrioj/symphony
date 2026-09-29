@@ -9,7 +9,7 @@ This repo is two things:
 - **`SPEC.md`** (repo root) — the language-agnostic specification of Symphony. It is the source of truth.
 - **`elixir/`** — the reference implementation (Elixir/OTP). It may be a *superset* of the spec but must never *conflict* with it. When an implementation change meaningfully alters intended behavior, update `SPEC.md` in the same change.
 
-Symphony orchestrates autonomous coding work in DB-backed lanes: each lane polls its configured tracker scope, creates isolated per-issue workspaces, and runs a coding-agent backend. One installation serves one client with multiple independently supervised lanes. Both boundaries are pluggable behaviours — `Tracker` (6 adapters) and `Agent` (`codex`, `claude`, `omp`).
+Symphony orchestrates autonomous coding work in DB-backed lanes: each lane polls its configured tracker scope, creates isolated per-issue workspaces, and runs a coding-agent backend. One installation serves one client with multiple independently supervised lanes. Both boundaries are pluggable behaviours — `Tracker` (6 adapters) and `Agent` (`codex`, `claude`, `omp`, `pi`).
 
 **Nearly all development happens in `elixir/`.** Read `elixir/AGENTS.md` first — it carries the authoritative implementation rules (the most important ones are summarized below).
 

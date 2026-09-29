@@ -24,5 +24,6 @@ defmodule SymphonyElixir.Agent do
   def module_for("codex"), do: {:ok, SymphonyElixir.Agent.Codex}
   def module_for("claude"), do: {:ok, SymphonyElixir.Agent.Claude}
   def module_for("omp"), do: {:ok, SymphonyElixir.Agent.Omp}
+  def module_for("pi"), do: {:ok, SymphonyElixir.Agent.Pi}
   def module_for(other), do: {:error, {:invalid_agent_backend, other}}
 end

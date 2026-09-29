@@ -170,6 +170,13 @@ claude:
 #   model: openrouter/anthropic/claude-sonnet-4
 #   thinking: low
 #   allowed_tools: [read, grep, find, edit, write, bash]
+# Optional pi backend (agent.backend: pi). Credentials come from the process environment only
+# (e.g. OPENROUTER_API_KEY); ~/.pi/agent/models.json and auth.json are not visible to lanes.
+# pi:
+#   command: pi
+#   model: openrouter/anthropic/claude-sonnet-4
+#   thinking: low
+#   allowed_tools: [read, bash, edit, write, grep, find, ls]  # built-ins only; symphony_* bridge tools are added
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

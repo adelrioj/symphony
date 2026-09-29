@@ -8,9 +8,52 @@ defmodule SymphonyElixir.Agent.CliHarness do
   require Logger
 
   alias SymphonyElixir.Agent.Result
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, ExecutionContext, SSH, Workspace}
 
   @port_line_bytes 1_048_576
+  @remote_cleanup_timeout_ms 2_000
+
+  @spec require_context(term()) :: :ok | {:error, atom()}
+  def require_context(context) do
+    case {Map.get(Config.settings!().worker, :environment), context} do
+      {%{}, %ExecutionContext{mode: :managed}} -> :ok
+      {%{}, _} -> {:error, :managed_context_required}
+      {nil, %ExecutionContext{}} -> :ok
+      {nil, _} -> {:error, :execution_context_required}
+    end
+  end
+
+  @spec workspace_cwd(Path.t(), ExecutionContext.t()) :: {:ok, Path.t()} | {:error, term()}
+  def workspace_cwd(workspace, %ExecutionContext{mode: :managed} = context) do
+    with :ok <- Workspace.validate_workspace_path(workspace, context), do: {:ok, workspace}
+  end
+
+  def workspace_cwd(workspace, context) do
+    if ExecutionContext.remote?(context), do: {:ok, workspace}, else: {:ok, Path.expand(workspace)}
+  end
+
+  @spec mkdir_private(Path.t()) :: :ok | {:error, term()}
+  def mkdir_private(path) do
+    with :ok <- File.mkdir_p(path), do: File.chmod(path, 0o700)
+  end
+
+  # Best effort and bounded: a hung ssh must not block session teardown.
+  @spec remove_remote_dir(term(), String.t()) :: :ok
+  def remove_remote_dir(host, remote_dir) do
+    task = Task.async(fn -> SSH.run(host, "rm -rf " <> shell_escape(remote_dir)) end)
+    _ = Task.yield(task, @remote_cleanup_timeout_ms) || Task.shutdown(task, :brutal_kill)
+    :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  @spec ssh_payload([binary()]) :: iodata()
+  def ssh_payload(parts), do: Enum.map(parts, &[Integer.to_string(byte_size(&1)), "\n", &1])
+
+  @spec new_remote_dir(String.t(), ExecutionContext.t()) :: String.t() | nil
+  def new_remote_dir(prefix, context) do
+    if ExecutionContext.remote?(context), do: "/tmp/" <> prefix <> "-" <> temp_token()
+  end
 
   @spec create_session_dir(String.t(), Path.t()) :: {:ok, Path.t(), pid()} | {:error, term()}
   def create_session_dir(dir_name, workspace) do

@@ -119,6 +119,7 @@ defmodule SymphonyElixir.Config do
   @spec backend_command(map(), module()) :: String.t()
   def backend_command(settings, SymphonyElixir.Agent.Claude), do: settings.claude.command
   def backend_command(settings, SymphonyElixir.Agent.Omp), do: settings.omp.command
+  def backend_command(settings, SymphonyElixir.Agent.Pi), do: settings.pi.command
   def backend_command(settings, _codex), do: settings.codex.command
 
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
@@ -209,18 +210,14 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_backend_commands(settings) do
-    cond do
-      selected_backend?(settings, "codex") and blank_string?(settings.codex.command) ->
-        {:error, {:invalid_workflow_config, "codex.command can't be blank"}}
+    blank =
+      Enum.find(~w(codex claude omp pi), fn name ->
+        selected_backend?(settings, name) and blank_string?(Map.fetch!(settings, String.to_existing_atom(name)).command)
+      end)
 
-      selected_backend?(settings, "claude") and blank_string?(settings.claude.command) ->
-        {:error, {:invalid_workflow_config, "claude.command can't be blank"}}
-
-      selected_backend?(settings, "omp") and blank_string?(settings.omp.command) ->
-        {:error, {:invalid_workflow_config, "omp.command can't be blank"}}
-
-      true ->
-        :ok
+    case blank do
+      nil -> :ok
+      name -> {:error, {:invalid_workflow_config, "#{name}.command can't be blank"}}
     end
   end
 
