@@ -39,8 +39,8 @@ defmodule SymphonyElixir.Agent.OmpTest do
   test "argv omits --continue on turn 1 and includes it afterwards; flags are hermetic; tools never list mcp names" do
     omp = %{args: ["--foo"], model: "openrouter/x/y", thinking: "high", allowed_tools: nil}
     paths = %{sessions_dir: "/s/sessions", overlay_path: "/s/overlay.yml"}
-    first = Omp.argv(paths, omp, [%{"name" => "linear_graphql"}], false)
-    later = Omp.argv(paths, omp, [%{"name" => "linear_graphql"}], true)
+    first = Omp.argv(paths, omp, false)
+    later = Omp.argv(paths, omp, true)
 
     assert hd(first) == "--foo"
     for flag <- ~w(-p --no-extensions --no-skills --no-rules --no-title), do: assert(flag in first)
@@ -54,7 +54,7 @@ defmodule SymphonyElixir.Agent.OmpTest do
     tools = first |> argv_value("--tools") |> String.split(",")
     assert tools == ~w(read grep find edit write bash)
 
-    custom = Omp.argv(paths, %{omp | allowed_tools: ["read"]}, [%{"name" => "linear_graphql"}], false)
+    custom = Omp.argv(paths, %{omp | allowed_tools: ["read"]}, false)
     assert custom |> argv_value("--tools") |> String.split(",") == ["read"]
   end
 
@@ -159,16 +159,6 @@ defmodule SymphonyElixir.Agent.OmpTest do
     assert Omp.run_turn(session, "prompt", %{}, []) ==
              {:error, {:executable_not_found, "definitely_missing_omp_for_symphony"}}
 
-    assert :ok = Omp.stop_session(session)
-  end
-
-  test "remote execution is unavailable until the remote driver lands" do
-    {:ok, session} =
-      Omp.start_session(File.cwd!(),
-        execution_context: ExecutionContext.ssh(Config.settings!().workspace.root, "remote")
-      )
-
-    assert Omp.run_turn(session, "prompt", %{}, []) == {:error, :omp_remote_unavailable}
     assert :ok = Omp.stop_session(session)
   end
 

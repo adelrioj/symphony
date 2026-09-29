@@ -13,11 +13,12 @@ defmodule SymphonyElixir.Agent.Omp do
   alias SymphonyElixir.Agent.CliHarness
   alias SymphonyElixir.Agent.Omp.Stream
   alias SymphonyElixir.Agent.Result
-  alias SymphonyElixir.{Config, ExecutionContext, Tracker, Workflow, Workspace}
+  alias SymphonyElixir.{Config, ExecutionContext, SSH, Tracker, Workflow, Workspace}
 
   @providers_to_disable ~w(omp-plugins claude agent-plugins codex agents claude-plugins gemini opencode
                            cursor windsurf cline github vscode agents-md mcp-json ssh-json)
   @default_tools ~w(read grep find edit write bash)
+  @port_line_bytes 1_048_576
 
   @type session :: %{
           required(:workspace) => Path.t(),
@@ -25,8 +26,8 @@ defmodule SymphonyElixir.Agent.Omp do
           required(:session_dir) => Path.t(),
           required(:workflow_snapshot_path) => Path.t(),
           required(:secret_environment_names) => [String.t()],
-          required(:tool_specs) => [map()],
           required(:omp_settings) => map(),
+          required(:remote_dir) => String.t() | nil,
           required(:cleanup_monitor) => pid()
         }
 
@@ -57,8 +58,8 @@ defmodule SymphonyElixir.Agent.Omp do
              cleanup_monitor: cleanup_monitor,
              workflow_snapshot_path: workflow_snapshot_path,
              secret_environment_names: secret_environment_names,
-             tool_specs: dynamic_tool_binding.tool_specs,
-             omp_settings: settings.omp
+             omp_settings: settings.omp,
+             remote_dir: remote_dir(context)
            }}
 
         {:error, _reason} = error ->
@@ -66,6 +67,10 @@ defmodule SymphonyElixir.Agent.Omp do
           error
       end
     end
+  end
+
+  defp remote_dir(context) do
+    if ExecutionContext.remote?(context), do: "/tmp/symphony-omp-" <> CliHarness.temp_token()
   end
 
   # Same rules as `Agent.Claude`; kept private here because the duplicate is only two small clauses.
@@ -120,8 +125,7 @@ defmodule SymphonyElixir.Agent.Omp do
   def run_turn(%{workspace: workspace, execution_context: context} = session, prompt, _issue, opts)
       when is_binary(prompt) do
     if ExecutionContext.remote?(context) do
-      # Temporary: replaced by the SSH/managed driver in the remote-execution task.
-      {:error, :omp_remote_unavailable}
+      drive_ssh(session, workspace, prompt, Keyword.get(opts, :on_message))
     else
       run_local(session, workspace, prompt, Keyword.get(opts, :on_message))
     end
@@ -130,6 +134,11 @@ defmodule SymphonyElixir.Agent.Omp do
   @impl true
   @spec stop_session(SymphonyElixir.Agent.session()) :: :ok
   def stop_session(%{session_dir: session_dir} = session) when is_binary(session_dir) do
+    with %{remote_dir: remote_dir, execution_context: %ExecutionContext{target: host}} when is_binary(remote_dir) <-
+           session do
+      _ = SSH.run(host, "rm -rf " <> CliHarness.shell_escape(remote_dir))
+    end
+
     CliHarness.remove_session_dir(session_dir, session[:cleanup_monitor])
   end
 
@@ -148,7 +157,7 @@ defmodule SymphonyElixir.Agent.Omp do
       try do
         CliHarness.drive_port(
           executable,
-          argv(paths, session.omp_settings, session.tool_specs, continue?),
+          argv(paths, session.omp_settings, continue?),
           workspace,
           on_message,
           prompt_path,
@@ -189,15 +198,15 @@ defmodule SymphonyElixir.Agent.Omp do
 
   # omp 18.4.3 validates `--tools` against built-in tools only and exits 2 on `mcp__*` names, while
   # MCP tools from the private `mcp.json` are mounted regardless of the allowlist. So the tracker
-  # tools are reachable without being listed and `tool_specs` does not affect the allowlist.
+  # tools are reachable without being listed.
   @doc false
-  @spec tool_allowlist(map(), [map()]) :: [String.t()]
-  def tool_allowlist(%{allowed_tools: tools}, _tool_specs) when is_list(tools), do: tools
-  def tool_allowlist(_omp, _tool_specs), do: @default_tools
+  @spec tool_allowlist(map()) :: [String.t()]
+  def tool_allowlist(%{allowed_tools: tools}) when is_list(tools), do: tools
+  def tool_allowlist(_omp), do: @default_tools
 
   @doc false
-  @spec argv(map(), map(), [map()], boolean()) :: [String.t()]
-  def argv(%{sessions_dir: sessions, overlay_path: overlay}, omp, tool_specs, continue?) do
+  @spec argv(map(), map(), boolean()) :: [String.t()]
+  def argv(%{sessions_dir: sessions, overlay_path: overlay}, omp, continue?) do
     omp.args ++
       [
         "-p",
@@ -214,11 +223,96 @@ defmodule SymphonyElixir.Agent.Omp do
         "--session-dir",
         sessions,
         "--tools",
-        Enum.join(tool_allowlist(omp, tool_specs), ",")
+        Enum.join(tool_allowlist(omp), ",")
       ] ++
       if(continue?, do: ["--continue"], else: []) ++
       opt("--model", omp.model) ++ opt("--thinking", omp.thinking)
   end
+
+  @doc false
+  @spec remote_command(String.t(), String.t()) :: String.t()
+  def remote_command(workspace, remote_dir) when is_binary(workspace) and is_binary(remote_dir) do
+    build_remote_command(
+      workspace,
+      remote_dir,
+      Config.settings!().omp,
+      Tracker.bind_agent_tools().secret_environment_names
+    )
+  end
+
+  defp drive_ssh(
+         %{
+           execution_context: %ExecutionContext{target: host},
+           remote_dir: remote_dir,
+           workflow_snapshot_path: workflow_snapshot_path,
+           session_dir: session_dir,
+           omp_settings: omp,
+           secret_environment_names: secret_environment_names
+         },
+         workspace,
+         prompt,
+         on_message
+       ) do
+    command = build_remote_command(workspace, remote_dir, omp, secret_environment_names)
+    local_mcp_path = Path.join([session_dir, "agent", "mcp.json"])
+
+    with {:ok, workflow_snapshot} <- File.read(workflow_snapshot_path),
+         {:ok, encoded_local_mcp} <- File.read(local_mcp_path),
+         {:ok, local_mcp} <- Jason.decode(encoded_local_mcp),
+         tracker_env = get_in(local_mcp, ["mcpServers", "symphony", "env"]) || %{},
+         {:ok, encoded_mcp} <-
+           encode_mcp_config(
+             mcp_config(Path.join(remote_dir, "WORKFLOW.md"), remote_mcp_command(omp), omp, tracker_env),
+             local_mcp_path
+           ),
+         payload = ssh_payload(workflow_snapshot, encoded_mcp, overlay_yaml(), prompt),
+         {:ok, port} <- SSH.start_port(host, command, line: @port_line_bytes),
+         :ok <- SSH.write_stdin(port, payload) do
+      CliHarness.collect_port_stream(port, on_message, Stream, "omp")
+    end
+  rescue
+    error -> {:error, {:omp_ssh_port, error}}
+  end
+
+  defp ssh_payload(workflow, encoded_mcp, overlay, prompt) do
+    Enum.map(
+      [workflow, encoded_mcp, overlay, prompt],
+      &[Integer.to_string(byte_size(&1)), "\n", &1]
+    )
+  end
+
+  defp build_remote_command(workspace, remote_dir, omp, secret_environment_names) do
+    path = &CliHarness.shell_escape(Path.join(remote_dir, &1))
+
+    [
+      "cd #{CliHarness.shell_escape(workspace)}",
+      "umask 077",
+      "mkdir -p #{path.("agent")} #{path.("sessions")}",
+      "chmod 700 #{CliHarness.shell_escape(remote_dir)}",
+      CliHarness.read_length_prefixed_file("workflow", path.("WORKFLOW.md")),
+      CliHarness.read_length_prefixed_file("mcp_config", path.("agent/mcp.json")),
+      CliHarness.read_length_prefixed_file("overlay", path.("overlay.yml")),
+      "IFS= read -r symphony_prompt_bytes",
+      "case \"$symphony_prompt_bytes\" in ''|*[!0-9]*) exit 64;; esac",
+      CliHarness.tracker_secret_unset_command(secret_environment_names),
+      "symphony_continue=",
+      "if [ -n \"$(ls -A #{path.("sessions")} 2>/dev/null)\" ]; then symphony_continue=--continue; fi",
+      remote_omp_invocation(remote_dir, omp)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" && ")
+  end
+
+  defp remote_omp_invocation(remote_dir, omp) do
+    paths = %{sessions_dir: Path.join(remote_dir, "sessions"), overlay_path: Path.join(remote_dir, "overlay.yml")}
+    args = paths |> argv(omp, false) |> Enum.map(&CliHarness.shell_escape/1)
+
+    "dd bs=1 count=\"$symphony_prompt_bytes\" 2>/dev/null | " <>
+      "PI_CODING_AGENT_DIR=#{CliHarness.shell_escape(Path.join(remote_dir, "agent"))} " <>
+      Enum.join([CliHarness.shell_escape(omp.command) | args] ++ ["$symphony_continue"], " ")
+  end
+
+  defp remote_mcp_command(omp), do: omp.linear_mcp_command || "symphony"
 
   defp opt(_flag, nil), do: []
   defp opt(flag, value), do: [flag, value]
