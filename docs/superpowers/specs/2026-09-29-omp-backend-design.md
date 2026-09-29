@@ -40,16 +40,15 @@ Touchpoints:
 |---|---|---|
 | `command` | `omp` | Executable |
 | `model` | unset | omp `provider/id`, e.g. `openrouter/...` |
-| `profile` | unset | Pre-authorized omp profile supplying credentials |
 | `thinking` | unset | `--thinking` level |
-| `args` | `[]` | Passthrough argv |
+| `args` | `[]` | Passthrough argv, placed before Symphony's flags |
 | `allowed_tools` | read, grep, find, edit, write, bash | `--tools` allowlist; tracker MCP tools always added |
 | `linear_mcp_command` / `linear_mcp_args` | as Claude | Tracker MCP server launch |
 | `extra_mcp_servers` | `{}` | Merged left; `symphony` wins collisions |
 
 ## Turn flow
 
-Per turn, a fresh process: `omp -p --mode json --session-dir <private> --approval-mode yolo --tools <allowlist> [--continue] [--model --profile --thinking]`, cwd = workspace, prompt from a private file.
+Per turn, a fresh process: `omp -p --mode json --session-dir <private>/sessions --approval-mode yolo --tools <allowlist> --no-extensions --no-skills --no-rules --no-title --config <private>/overlay.yml [--continue] [--model --thinking]`, cwd = workspace, env `PI_CODING_AGENT_DIR=<private>/agent`, prompt on stdin from a private file.
 
 - Turn 1 sends the full prompt. Turns 2..N pass `--continue` with the short continuation prompt.
 - `Omp.Stream` folds events: `session`, `agent_start`, `turn_start`, `message_update`, `turn_end`, `agent_end`. Tokens are summed from assistant `usage`.
@@ -59,18 +58,30 @@ Per turn, a fresh process: `omp -p --mode json --session-dir <private> --approva
 
 ## Tool delivery and isolation
 
-The tracker MCP server reaches omp through a config written to the private session dir.
+The tracker MCP server reaches omp through `<private>/agent/mcp.json`, and `PI_CODING_AGENT_DIR` points omp at that private agent dir.
 
-Problem: omp has no `--strict-mcp-config`. It auto-discovers MCP servers from `~/.omp`, `~/.claude`, `~/.codex`, Cursor, project `.mcp.json`, and more. A probe attempted to connect an ambient Notion server. Workspace `.mcp.json` could also inject servers.
+Verified by probe (omp 18.4.3): omp has no `--strict-mcp-config` and auto-discovers MCP servers from `~/.omp/agent/mcp.json`, `~/.claude.json`, plugins, Cursor, project `.mcp.json`, and more. A `--config` overlay with `disabledProviders` alone did not remove user-level native servers (the agent still called `mcp__chrome_devtools_*`). What did give a hermetic tool list:
 
-Plan, per session: an omp config overlay (`--config`) setting `mcp.enableProjectConfig: false` and `disabledProviders` for foreign-tool discovery, plus `--no-extensions --no-skills --no-rules`. `omp.profile` names the pre-authorized profile that supplies credentials.
+- private `PI_CODING_AGENT_DIR` holding only Symphony's `mcp.json`;
+- overlay `mcp.enableProjectConfig: false`;
+- overlay `disabledProviders` listing every discovery provider except `native`: `omp-plugins, claude, agent-plugins, codex, agents, claude-plugins, gemini, opencode, cursor, windsurf, cline, github, vscode, agents-md, mcp-json, ssh-json`;
+- `--no-extensions --no-skills --no-rules`.
 
-**Open verification (blocks implementation of this section):** confirm that `disabledProviders` and the overlay actually suppress MCP discovery from foreign tools and root `.mcp.json`. If not, fall back to an isolated profile with credentials copied in, or fail the lane preflight. The spec must not ship with ambient MCP leakage.
+With this, only the `symphony` server was attempted and the model reported no `mcp__` tools otherwise.
+
+## Credentials
+
+A private agent dir has no `agent.db`, so omp's stored logins are not visible. Symlinking `agent.db` is unsafe: SQLite would create a separate `-wal` in the private dir beside the shared database file. So credentials come from the process environment, which the Port and SSH login shell already inherit:
+
+- provider API keys (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...);
+- subscription/OAuth logins through omp's auth broker (`omp auth-broker serve`) with `OMP_AUTH_BROKER_URL` and `OMP_AUTH_BROKER_TOKEN`.
+
+Limitation, documented: OAuth logins that exist only in a local `agent.db` are unavailable to Symphony lanes until moved to a broker.
 
 ## Execution contexts
 
 - Local: Port, cwd = workspace.
-- SSH and managed: harness builds the remote command as Claude does, uploads the config and workflow snapshot to a remote temp path, unsets tracker secrets after use, then runs `omp`. omp must be installed and authenticated on each remote host or guest. Managed requires a `:managed` `ExecutionContext`.
+- SSH and managed: the remote command creates a persistent remote session dir (`/tmp/symphony-omp-<token>`, mode 0700, holding `sessions/`), rewrites `agent/mcp.json`, `overlay.yml`, and the workflow snapshot each turn from length-prefixed stdin, unsets tracker secrets after use, chooses `--continue` when `sessions/` is non-empty, then runs `omp`. `stop_session` removes the remote dir best-effort. omp must be installed on each remote host or guest, with credentials in that environment. Managed requires a `:managed` `ExecutionContext`.
 
 ## Testing
 
