@@ -308,6 +308,32 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Pi do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:command, :string, default: "pi")
+      field(:model, :string)
+      field(:thinking, :string)
+      field(:args, {:array, :string}, default: [])
+      field(:allowed_tools, {:array, :string})
+      field(:linear_mcp_command, :string)
+      field(:linear_mcp_args, {:array, :string}, default: [])
+    end
+
+    @cast_fields [:command, :model, :thinking, :args, :allowed_tools, :linear_mcp_command, :linear_mcp_args]
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, @cast_fields, empty_values: [])
+      |> validate_inclusion(:thinking, ~w(off minimal low medium high xhigh), message: "is not a pi thinking level")
+    end
+  end
+
   defmodule Hooks do
     @moduledoc false
     use Ecto.Schema
@@ -379,6 +405,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
     embeds_one(:omp, Omp, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:pi, Pi, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -392,7 +419,7 @@ defmodule SymphonyElixir.Config.Schema do
     {:ok, settings} = parse(%{"tracker" => %{"kind" => "memory"}})
 
     settings
-    |> Map.take([:tracker, :polling, :agent, :codex, :claude, :omp, :hooks, :observability])
+    |> Map.take([:tracker, :polling, :agent, :codex, :claude, :omp, :pi, :hooks, :observability])
     |> stringify_structs()
     |> drop_nil_values()
     |> update_in(["tracker"], &Map.delete(&1, "secret_environment_names"))
@@ -536,6 +563,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:claude, with: &Claude.changeset/2)
     |> cast_embed(:omp, with: &Omp.changeset/2)
+    |> cast_embed(:pi, with: &Pi.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)

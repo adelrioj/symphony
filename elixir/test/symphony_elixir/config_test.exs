@@ -206,6 +206,53 @@ defmodule SymphonyElixir.ConfigTest do
       assert Config.backend_command(settings, SymphonyElixir.Agent.Claude) == "my-claude"
       assert Config.backend_command(settings, SymphonyElixir.Agent.Codex) == "my-codex"
     end
+
+    test "rejects blank pi.command when global backend selects pi" do
+      assert {:error, [%{path: "pi.command"}]} =
+               write_workflow!("""
+               ---
+               tracker: {kind: memory}
+               agent: {backend: pi}
+               pi: {command: "  "}
+               ---
+               body
+               """)
+    end
+
+    test "pi.thinking accepts xhigh but rejects omp-only levels" do
+      for level <- ["max", "auto"] do
+        assert {:error, [%{path: "pi.thinking"}]} =
+                 write_workflow!("""
+                 ---
+                 tracker: {kind: memory}
+                 pi: {thinking: #{level}}
+                 ---
+                 body
+                 """)
+      end
+
+      write_workflow!("""
+      ---
+      tracker: {kind: memory}
+      pi: {thinking: xhigh}
+      ---
+      body
+      """)
+
+      assert Config.settings!().pi.thinking == "xhigh"
+    end
+
+    test "backend_command/2 resolves pi" do
+      write_workflow!("""
+      ---
+      tracker: {kind: memory}
+      pi: {command: my-pi}
+      ---
+      body
+      """)
+
+      assert Config.backend_command(Config.settings!(), SymphonyElixir.Agent.Pi) == "my-pi"
+    end
   end
 
   test "schema errors identify invalid fields in changesets and early worker validation" do
