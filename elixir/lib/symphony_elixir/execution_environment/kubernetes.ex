@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @behaviour SymphonyElixir.ExecutionEnvironment
 
   alias SymphonyElixir.ExecutionEnvironment.{Command, Config, Connection, Operations, Record}
-  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Declaration, GateRecovery, Guard}
+  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Declaration, Guard, HostRecovery}
   alias SymphonyElixir.SSH.Target
 
   @api "agents.x-k8s.io/v1beta1"
@@ -570,34 +570,43 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   # backed by the admission gate's unchanged history, may account for a journaled Pod
   # that was never authorized to run. Authorized Pods still require physical evidence.
   defp recover_unreleased(config, record, sandbox, pods, opts) do
-    if record.desired in [:stopped, :absent] and
-         (suspension_acknowledged?(record, sandbox) or
-            (record.desired == :absent and drained_journal?(sandbox))) do
-      with {:ok, operations} <- pod_operations(sandbox),
-           true <- prior_pod_operations_preserved?(record, operations) do
-        Enum.reduce_while(operations, {:ok, record}, fn operation, {:ok, current} ->
-          pod_uid = operation["objectUID"]
+    with true <- recoverable_parent?(record, sandbox),
+         {:ok, operations} <- pod_operations(sandbox),
+         true <- prior_pod_operations_preserved?(record, operations) do
+      Enum.reduce_while(operations, {:ok, record}, fn operation, {:ok, current} ->
+        recover_operation(config, current, sandbox, operation, pods, opts)
+      end)
+    else
+      _ -> {:ok, record}
+    end
+  end
 
-          if operation["state"] == "Committed" and
-               pod_uid not in (current.metadata["authorized_pod_uids"] || []) and
-               get_in(current.metadata, ["authorized_pods", pod_uid]) == nil and
-               get_in(current.metadata, ["pod_safety", pod_uid]) == nil and
-               not Enum.any?(pods, &(controller_attribution?(&1, operation) and uid(&1) == pod_uid)) do
-            case GateRecovery.proof(config, current, sandbox, operation, opts) do
-              {:ok, %{} = proof} -> {:cont, {:ok, put_pod_safety(current, pod_uid, proof)}}
-              {:ok, nil} -> {:cont, {:ok, current}}
-              error -> {:halt, error}
-            end
-          else
-            {:cont, {:ok, current}}
-          end
-        end)
-      else
-        _ -> {:ok, record}
+  defp recoverable_parent?(record, sandbox) do
+    record.desired in [:stopped, :absent] and
+      (suspension_acknowledged?(record, sandbox) or
+         (record.desired == :absent and drained_journal?(sandbox)))
+  end
+
+  defp recover_operation(config, record, sandbox, operation, pods, opts) do
+    if unreleased_missing_operation?(record, operation, pods) do
+      case HostRecovery.proof(config, record, sandbox, operation, opts) do
+        {:ok, %{} = proof} -> {:cont, {:ok, put_pod_safety(record, operation["objectUID"], proof)}}
+        {:ok, nil} -> {:cont, {:ok, record}}
+        error -> {:halt, error}
       end
     else
-      {:ok, record}
+      {:cont, {:ok, record}}
     end
+  end
+
+  defp unreleased_missing_operation?(record, operation, pods) do
+    pod_uid = operation["objectUID"]
+
+    operation["state"] == "Committed" and
+      pod_uid not in (record.metadata["authorized_pod_uids"] || []) and
+      get_in(record.metadata, ["authorized_pods", pod_uid]) == nil and
+      get_in(record.metadata, ["pod_safety", pod_uid]) == nil and
+      not Enum.any?(pods, &(controller_attribution?(&1, operation) and uid(&1) == pod_uid))
   end
 
   defp drained_journal?(sandbox) do
@@ -1173,14 +1182,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp terminal_kind(%{"kind" => "host_destroyed"}), do: "host_destroyed"
   defp terminal_kind(_), do: "terminated"
 
-  defp valid_safety?(%{"kind" => "admission_never_executable"} = proof, pod_uid, record) do
+  defp valid_safety?(%{"kind" => "host_shutdown"} = proof, pod_uid, record) do
     operation = get_in(record.metadata, ["controller_pod_operations", proof["operation_id"]])
 
-    proof["uid"] == pod_uid and proof["parent_uid"] == record.provider_ref and
-      proof["qualification_uid"] == record.metadata["qualification_uid"] and
-      is_binary(proof["policy_uid"]) and is_binary(proof["binding_uid"]) and is_binary(proof["namespace_uid"]) and
-      pod_uid not in (record.metadata["authorized_pod_uids"] || []) and
-      operation != nil and operation["state"] == "Committed" and operation["objectUID"] == pod_uid
+    operation != nil and operation["state"] == "Committed" and operation["objectUID"] == pod_uid and
+      host_shutdown_matches?(proof, pod_uid, record)
   end
 
   defp valid_safety?(proof, pod_uid, record) when is_map(proof) do
@@ -1190,6 +1196,22 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp valid_safety?(_, _, _), do: false
+
+  defp host_shutdown_matches?(proof, pod_uid, record) do
+    proof["uid"] == pod_uid and proof["parent_uid"] == record.provider_ref and
+      proof["qualification_uid"] == record.metadata["qualification_uid"] and
+      pod_uid not in (record.metadata["authorized_pod_uids"] || []) and
+      Enum.all?(~w(node_uid boot_id pv_uid volume_handle receipt_uid captured_at), fn key ->
+        is_binary(proof[key]) and proof[key] != ""
+      end) and
+      shutdown_volume_matches?(proof, record)
+  end
+
+  defp shutdown_volume_matches?(proof, record) do
+    Enum.any?(record.metadata["volumes"] || %{}, fn {_, volume} ->
+      volume["pv_uid"] == proof["pv_uid"] and volume["volume_handle"] == proof["volume_handle"]
+    end)
+  end
 
   defp complete_evidence?(guard, record) do
     evidence = guard.data["evidence"]
