@@ -5,6 +5,23 @@ defmodule SymphonyElixir.Agent.CliHarnessTest do
 
   @claude_opts [stream: Claude.Stream, error_tag: :claude_port, label: "Claude"]
 
+  test "ssh_payload/1 length-prefixes every part" do
+    assert IO.iodata_to_binary(CliHarness.ssh_payload(["ab", "", "xyz"])) == "2\nab0\n3\nxyz"
+  end
+
+  test "mkdir_private/1 creates a 0700 directory" do
+    dir = Path.join(System.tmp_dir!(), "harness-#{System.unique_integer([:positive])}/a/b")
+    assert :ok = CliHarness.mkdir_private(dir)
+    assert File.stat!(dir).mode |> Bitwise.band(0o777) == 0o700
+    File.rm_rf!(Path.dirname(Path.dirname(dir)))
+  end
+
+  test "new_remote_dir/2 is nil for local contexts and prefixed for remote ones" do
+    assert CliHarness.new_remote_dir("symphony-x", SymphonyElixir.ExecutionContext.local("/tmp")) == nil
+    remote = SymphonyElixir.ExecutionContext.ssh("/tmp", "host")
+    assert "/tmp/symphony-x-" <> _ = CliHarness.new_remote_dir("symphony-x", remote)
+  end
+
   test "create_session_dir/2 returns directory errors" do
     assert {:error, {:mcp_config_dir, %FunctionClauseError{}}} =
              CliHarness.create_session_dir("symphony-claude-mcp", :bad_workspace)
