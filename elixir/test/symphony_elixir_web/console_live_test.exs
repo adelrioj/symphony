@@ -122,6 +122,40 @@ defmodule SymphonyElixirWeb.ConsoleLiveTest do
     assert has_element?(view, "#queued-note", "No run yet. Waiting on OPS-1.")
   end
 
+  test "clicking empty list space clears the selection", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Arun-1")
+    assert has_element?(view, "#console-detail h2")
+
+    view |> element("#console-list-fill") |> render_click()
+    assert_patch(view, "/?lane=ops")
+    refute has_element?(view, "#console-detail h2")
+    assert has_element?(view, "#console-detail", "Select a ticket")
+  end
+
+  test "the tab hides and shows the detail pane; selecting a ticket reopens it", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?lane=ops&ticket=ops%3Arun-1")
+    refute has_element?(view, "#console.console--closed")
+
+    view |> element("#detail-toggle") |> render_click()
+    assert has_element?(view, "#console.console--closed")
+    assert has_element?(view, "#detail-toggle[aria-expanded='false']", "<")
+
+    view |> element("#console-list [data-ticket='ops:rty-1']") |> render_click()
+    refute has_element?(view, "#console.console--closed")
+  end
+
+  test "group headers collapse and expand their tickets", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/?lane=ops")
+    assert has_element?(view, "#console-list [data-group='running'] [data-ticket='ops:run-1']")
+
+    view |> element("[data-group='running'] .console-group-toggle") |> render_click()
+    refute has_element?(view, "#console-list [data-group='running'] [data-ticket='ops:run-1']")
+    assert has_element?(view, "[data-group='running'] .console-count")
+
+    view |> element("[data-group='running'] .console-group-toggle") |> render_click()
+    assert has_element?(view, "#console-list [data-group='running'] [data-ticket='ops:run-1']")
+  end
+
   @tag snapshot: @recovery_snapshot
   test "workstation recovery stays visible through filters and clears after a healthy refresh", %{
     conn: conn,

@@ -771,7 +771,7 @@ pre,
 /* The console is full-bleed; its own sidebar replaces the shared nav. */
 .app-shell:has(.console) { max-width: none; padding: 0; }
 .app-shell:has(.console) > .app-nav { display: none; }
-.console { --mono: "SFMono-Regular", "SF Mono", Consolas, monospace; display: grid; grid-template-columns: 240px minmax(0, 1fr) 460px; min-height: 100vh; background: var(--card); font-size: 13.5px; line-height: 1.45; }
+.console { --mono: "SFMono-Regular", "SF Mono", Consolas, monospace; display: grid; grid-template-columns: 240px minmax(0, 1fr) 18px auto; height: 100vh; overflow: hidden; background: var(--card); font-size: 13.5px; line-height: 1.45; }
 .console .mono { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
 .console button, .console .subtle-button { border: 1px solid var(--line-strong); border-radius: 7px; padding: 4px 10px; font-size: 12.5px; font-weight: 500; letter-spacing: 0; background: var(--card); color: var(--ink); box-shadow: none; transform: none; display: inline-flex; gap: 6px; align-items: center; }
 .console button:hover, .console .subtle-button:hover { background: var(--page-deep); border-color: var(--line-strong); color: var(--ink); transform: none; box-shadow: none; }
@@ -795,7 +795,7 @@ pre,
 .console-dot--on { background: var(--accent); }
 .console-dot--warn { background: var(--danger); }
 .console-dot--off { background: transparent; border: 1.5px solid var(--faint); }
-.console-main { display: flex; flex-direction: column; min-width: 0; }
+.console-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .console-top { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 #poll-trackers { margin-left: auto; }
 .console-restarts { margin: 0; padding: 0 8px 4px 23px; font-size: 11px; color: var(--danger); }
@@ -803,9 +803,15 @@ pre,
 .console-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 7px; overflow: hidden; }
 .console-seg a { padding: 4px 10px; font-size: 12.5px; color: var(--muted); text-decoration: none; }
 .console-seg a[aria-current="true"] { background: var(--card-muted); color: var(--ink); font-weight: 600; }
-.console-list { overflow: auto; flex: 1; }
+.console-list { display: flex; flex-direction: column; overflow: auto; flex: 1; min-height: 0; }
+.console-list > .console-group { flex: none; }
+.console-list-fill { flex: 1 0 48px; }
 .console-group { margin: 0; }
-.console-group-head { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 16px; font-size: 13.5px; font-weight: 600; background: var(--card-muted); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 1; }
+.console-group-head { margin: 0; font-size: 13.5px; font-weight: 600; background: var(--card-muted); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 1; }
+.console .console-group-toggle { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 16px; border: 0; border-radius: 0; background: none; font-size: inherit; font-weight: inherit; text-align: left; }
+.console .console-group-toggle:hover { background: var(--page-deep); }
+.console-caret { display: inline-block; width: 12px; color: var(--muted); transition: transform 0.12s; }
+.console-caret--closed { transform: rotate(-90deg); }
 .console-group-head .console-count { margin-left: 0; font-size: 12px; }
 .console-cat { font-weight: 400; font-size: 10.5px; border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 5px; color: var(--muted); text-transform: lowercase; }
 .console-empty { margin: 0; padding: 14px 16px; color: var(--faint); text-align: center; }
@@ -836,10 +842,16 @@ pre,
 .console-pill--retrying { background: var(--retry-soft); color: var(--retry); }
 .console-pill--blocked, .console-pill--failed, .console-pill--turns_exhausted { background: var(--danger-soft); color: var(--danger); }
 .console-pill--done { background: var(--accent-soft); color: var(--accent); }
-.console-detail { border-left: 1px solid var(--line); overflow: auto; min-width: 0; }
+.console-detail { position: relative; display: flex; flex-direction: column; width: var(--detail-w, 40vw); min-width: 320px; max-width: 70vw; min-height: 0; overflow: hidden; border-left: 1px solid var(--line); }
+.console--closed .console-detail { display: none; }
+.console--closed { grid-template-columns: 240px minmax(0, 1fr) 18px; }
+.console-resize { position: absolute; left: -4px; top: 0; bottom: 0; width: 7px; cursor: col-resize; z-index: 5; touch-action: none; }
+.console-resize:hover, .console-resize.dragging { background: var(--accent); opacity: 0.4; }
+.console-tab { width: 18px; padding: 0; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: var(--page); color: var(--muted); font-weight: 700; font-size: 13px; cursor: pointer; }
+.console .console-tab:hover { background: var(--accent-soft); color: var(--accent); border-color: var(--line); }
 .console-detail > .empty-state { padding: 40px 16px; text-align: center; color: var(--faint); }
-.console-detail-body { display: grid; gap: 18px; padding: 14px 16px; align-content: start; }
-.console-detail-head { display: flex; align-items: center; gap: 8px; margin: -14px -16px 0; padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.console-detail-body { flex: 1; min-height: 0; overflow: auto; display: grid; gap: 18px; padding: 14px 16px; align-content: start; }
+.console-detail-head { flex: none; display: flex; align-items: center; gap: 8px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 13px; background: var(--card); }
 .console-detail-head .subtle-button { margin-left: auto; }
 .console-detail-title { margin: 0; font-size: 17px; font-weight: 650; text-wrap: balance; }
 .console-kv { display: grid; grid-template-columns: 118px minmax(0, 1fr); gap: 7px 10px; margin: 0; font-size: 12.5px; }
@@ -863,12 +875,12 @@ pre,
 .console-k--agent_message, .console-k--notification { background: var(--ink); }
 .console-k--reasoning { background: var(--run); }
 .console-events li:has(.console-k--reasoning) span:last-child { color: var(--muted); font-style: italic; }
-.console-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 -16px -14px; padding: 10px 16px; border-top: 1px solid var(--line); }
+.console-actions { flex: none; display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--card); box-shadow: 0 -4px 8px -6px rgba(0, 0, 0, 0.15); }
 .console-confirm, .console-reply { display: grid; gap: 8px; width: 100%; font-size: 12.5px; }
 .console-confirm p, .console-reply p { margin: 0; }
 .console-confirm p:last-child, .console-reply p:last-child { display: flex; gap: 8px; justify-content: flex-end; }
 .console-confirm { border: 1px solid var(--danger); background: var(--danger-soft); border-radius: 8px; padding: 10px; }
 .console-reply label { color: var(--muted); font-size: 12px; }
 .console-reply textarea { width: 100%; min-height: 70px; border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px; background: var(--card); color: var(--ink); font: inherit; resize: vertical; }
-@media (max-width: 1250px) { .console { grid-template-columns: 220px minmax(0, 1fr); min-height: 0; } .console-detail { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); } }
+@media (max-width: 1250px) { .console { grid-template-columns: 220px minmax(0, 1fr); height: auto; min-height: 0; overflow: visible; } .console-tab, .console-resize { display: none; } .console-detail, .console--closed .console-detail { display: flex; grid-column: 1 / -1; width: auto; max-width: none; min-width: 0; border-left: 0; border-top: 1px solid var(--line); overflow: visible; } .console-detail-body { overflow: visible; } .console-list { overflow: visible; } }
 @media (max-width: 760px) { .console { grid-template-columns: 1fr; } .console-side { border-right: 0; border-bottom: 1px solid var(--line); padding: 10px; } .console-lanes { grid-auto-flow: column; overflow-x: auto; } .console-lane { white-space: nowrap; } .console-row { grid-template-columns: 56px 16px minmax(0, 1fr); } .console-meta { grid-column: 2 / -1; justify-content: flex-start; flex-wrap: wrap; } .console-lane-tag { display: none; } .console-kv { grid-template-columns: 100px minmax(0, 1fr); } }

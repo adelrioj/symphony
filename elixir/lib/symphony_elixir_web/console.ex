@@ -119,14 +119,23 @@ defmodule SymphonyElixirWeb.Console do
   def recent_crash?(%Entry{runtime: %{last_crash: %{at: at}}}, now), do: DateTime.diff(now, at) < 3600
   def recent_crash?(_entry, _now), do: false
 
-  @doc "A run's events as readable steps: token rows dropped, and a repeat of the previous step's text dropped."
+  @doc """
+  A run's events as readable steps: token rows dropped, a repeat of the previous step's text dropped,
+  and bare "Using tool: X" notices dropped (tool calls that carry detail, like "Bash: ls", stay).
+  """
   @spec activity([Event.t()]) :: [%{at: DateTime.t(), kind: String.t(), text: String.t()}]
   def activity(events) do
     events
     |> Enum.reject(&(&1.kind == "usage"))
     |> Enum.map(&%{at: &1.at, kind: &1.kind, text: describe_event(&1.payload)})
+    |> Enum.reject(&tool_notice?(&1.text))
     |> Enum.dedup_by(& &1.text)
   end
+
+  defp tool_notice?(text), do: String.starts_with?(text, "Using tool: ")
+
+  defp drop_tool_notice(text) when is_binary(text), do: if(tool_notice?(text), do: nil, else: text)
+  defp drop_tool_notice(text), do: text
 
   @spec describe_event(map()) :: String.t()
   def describe_event(%{"detail" => detail}) when is_binary(detail) and detail != "", do: detail
@@ -243,7 +252,7 @@ defmodule SymphonyElixirWeb.Console do
       blocked_by: Map.get(item, :blocked_by, []),
       attempt: Map.get(item, :attempt),
       turn_count: Map.get(item, :turn_count),
-      last_message: Map.get(item, :last_message),
+      last_message: item |> Map.get(:last_message) |> drop_tool_notice(),
       error: Map.get(item, :error),
       due_at: Map.get(item, :due_at),
       started_at: Map.get(item, :started_at),

@@ -1253,6 +1253,11 @@ Tracker links use only tracker-provided `http`/`https` URLs.
 | `/lanes/:slug/versions` | Immutable version history and activation |
 | `/runs/:attempt_id` | Durable attempt details, token totals and event timeline |
 
+In the console, each ticket group (Running, Needs attention, …) collapses from its header. The run
+detail pane scrolls on its own, hides or shows from the slim tab on its left edge, and resizes by
+dragging that edge (default 40% of the page; the width is remembered in the browser). Clicking empty
+space in the list clears the selection. The activity feed omits bare "Using tool: X" notices.
+
 Approve and Reply apply only to a ticket that is still blocked (held blocked by the lane, or in
 `agent.blocked_state` in the tracker). They move it back to the lane's first non-blocked active state
 through the tracker (Reply posts a comment first) and release the lane's block; the next attempt sees
