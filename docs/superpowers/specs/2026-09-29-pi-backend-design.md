@@ -76,7 +76,7 @@ Shared code: `Agent.Omp` and `Agent.Pi` overlap heavily (session layout, remote 
 
 ## Order of work
 
-1. Probe isolation and `--tools` extension-glob behavior (resolves both open verifications); record results in this spec.
+1. (Done) Probes for isolation, `--tools` and `-e` TypeScript loading; results recorded above.
 2. Rename shared stream folder; extract shared harness pieces (omp tests are the net).
 3. Bridge extension and its tests.
 4. `pi.*` config, registry, `Agent.Pi` local, then SSH/managed.
