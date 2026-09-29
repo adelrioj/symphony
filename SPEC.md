@@ -154,7 +154,7 @@ Symphony is easiest to port when kept in these layers:
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
 - Coding-agent executable(s) for the configured backend(s), such as Codex app-server mode for
   `agent.backend: codex`, the Claude Code CLI for `agent.backend: claude`, and the omp CLI for
-  `agent.backend: omp`.
+  `agent.backend: omp`, and the pi CLI for `agent.backend: pi`.
 - Host environment authentication for the issue tracker and configured coding agent. Host-side
   tracker secret environment variables SHOULD NOT be inherited by the coding-agent child process.
 
@@ -407,6 +407,7 @@ Top-level keys:
 - `codex`
 - `claude`
 - `omp`
+- `pi`
 - `observability`
 - `server`
 
@@ -527,7 +528,7 @@ Fields:
   - Invalid entries (non-positive or non-numeric) are ignored.
 - `backend` (string)
   - Default: `codex`.
-  - Supported values for this spec version: `codex`, `claude`, `omp`.
+  - Supported values for this spec version: `codex`, `claude`, `omp`, `pi`.
   - Unknown values SHOULD be detected at dispatch/backend selection time so a typo only skips the
     affected issue instead of invalidating the whole workflow file.
 - `backend_by_state` (map `state_name -> backend_name`)
@@ -641,6 +642,31 @@ in a private session directory; the first turn sends the full prompt and later t
 disables foreign MCP/plugin discovery, so provider credentials MUST come from the process
 environment (provider API keys or omp's auth broker); logins stored only in a local `agent.db` are
 not visible.
+
+#### 5.3.9 `pi` (object)
+
+This object configures the pi backend only (`pi --mode json`).
+
+- `command` (string executable path/name)
+  - Default: `pi`. Launched directly, not through a shell; remote workers need an equivalent
+    installed and credentialed executable.
+- `model` (string, OPTIONAL): pi `provider/id`, for example `openrouter/anthropic/claude-sonnet-4`.
+- `thinking` (string, OPTIONAL): one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`.
+- `args` (list of strings): extra fixed CLI arguments placed before Symphony's flags. Default `[]`.
+- `allowed_tools` (list of strings, OPTIONAL)
+  - Lists pi's built-in tools only (default `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`).
+  - Tracker tools are delivered by a Symphony bridge extension as `symphony_<tool>` and are appended
+    to the explicit `--tools` list automatically; they MUST NOT be listed here.
+- `linear_mcp_command` / `linear_mcp_args`: as for `claude`.
+
+pi has no approval channel and is not sandboxed: turns run with the daemon user's privileges and
+the workspace is the working directory, not a confinement boundary. Tracker credentials are written
+to a same-user mode-0600 `bridge.json` the agent can read. Each issue keeps one pi session in a
+private session directory; the first turn sends the full prompt and later turns pass `--continue`
+with the continuation prompt (per-turn resume). Symphony runs pi with a private agent directory and
+the listed flags/settings that disable project extensions, skills, prompt templates, themes and
+context files, so provider credentials MUST come from the process environment; custom providers
+in `models.json` and logins stored only in `auth.json` are not visible.
 
 ### 5.4 Prompt Template Contract
 
@@ -861,6 +887,13 @@ not require recognizing or validating extension fields unless that extension is 
 - `omp.linear_mcp_command`: executable path/name or null
 - `omp.linear_mcp_args`: list of strings, default `[]`
 - `omp.extra_mcp_servers`: map of MCP server name to server object, default `{}`
+- `pi.command`: executable path/name, default `pi`
+- `pi.model`: string or null
+- `pi.thinking`: string or null
+- `pi.args`: list of strings, default `[]`
+- `pi.allowed_tools`: list of built-in tool names or null
+- `pi.linear_mcp_command`: executable path/name or null
+- `pi.linear_mcp_args`: list of strings, default `[]`
 
 ### 6.5 Lane Configuration Store
 
@@ -1229,7 +1262,8 @@ backends. The Codex app-server protocol for the targeted Codex version is the so
 Codex protocol schemas, message payloads, transport framing, and method names. The Claude Code CLI
 stream-json contract is the corresponding source of truth for the Claude backend, and the omp
 `--mode json` event stream for the omp backend. The omp backend resumes one session per issue
-across turns (`--continue`) and has no approval channel.
+across turns (`--continue`) and has no approval channel; the pi backend (`pi --mode json` event
+stream) does the same with tracker tools delivered through a bridge extension.
 
 Protocol source of truth:
 

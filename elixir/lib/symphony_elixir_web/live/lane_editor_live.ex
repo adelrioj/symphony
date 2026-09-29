@@ -72,6 +72,13 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {"omp_linear_mcp_command", ["omp", "linear_mcp_command"], :text},
     {"omp_linear_mcp_args", ["omp", "linear_mcp_args"], :list},
     {"omp_extra_mcp_servers_json", ["omp", "extra_mcp_servers"], :json},
+    {"pi_command", ["pi", "command"], :text},
+    {"pi_model", ["pi", "model"], :text},
+    {"pi_thinking", ["pi", "thinking"], :text},
+    {"pi_args", ["pi", "args"], :list},
+    {"pi_allowed_tools", ["pi", "allowed_tools"], :list},
+    {"pi_linear_mcp_command", ["pi", "linear_mcp_command"], :text},
+    {"pi_linear_mcp_args", ["pi", "linear_mcp_args"], :list},
     {"hooks_after_create", ["hooks", "after_create"], :text},
     {"hooks_before_run", ["hooks", "before_run"], :text},
     {"hooks_after_run", ["hooks", "after_run"], :text},
@@ -279,7 +286,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
         <fieldset class="form-section" id="workflow">
           <legend>Workflow</legend>
           <label for="lane-prompt">Prompt</label><textarea id="lane-prompt" name="lane[prompt]" rows="8" phx-debounce="300">{@params["prompt"]}</textarea>
-          <label for="agent-backend">Agent backend</label><select id="agent-backend" name="lane[agent_backend]"><option value="codex" selected={@params["agent_backend"] == "codex"}>Codex</option><option value="claude" selected={@params["agent_backend"] == "claude"}>Claude</option><option value="omp" selected={@params["agent_backend"] == "omp"}>omp</option></select>
+          <label for="agent-backend">Agent backend</label><select id="agent-backend" name="lane[agent_backend]"><option value="codex" selected={@params["agent_backend"] == "codex"}>Codex</option><option value="claude" selected={@params["agent_backend"] == "claude"}>Claude</option><option value="omp" selected={@params["agent_backend"] == "omp"}>omp</option><option value="pi" selected={@params["agent_backend"] == "pi"}>pi</option></select>
           <label for="agent-backend-by-state">Backend overrides by state (JSON)</label><textarea id="agent-backend-by-state" name="lane[agent_backend_by_state_json]" rows="3" class="mono">{@params["agent_backend_by_state_json"]}</textarea>
           <label for="agent-blocked-state">Blocked state</label><input id="agent-blocked-state" type="text" name="lane[agent_blocked_state]" value={@params["agent_blocked_state"]} />
           <label for="agent-in-progress-state">In-progress state</label><input id="agent-in-progress-state" type="text" name="lane[agent_in_progress_state]" value={@params["agent_in_progress_state"]} />
@@ -317,6 +324,17 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
             <label for="omp-allowed-tools">Allowed built-in tools (one per line)</label><textarea id="omp-allowed-tools" name="lane[omp_allowed_tools]" rows="3">{@params["omp_allowed_tools"]}</textarea>
             <label for="omp-extra-mcp">Additional MCP servers (JSON)</label><textarea id="omp-extra-mcp" name="lane[omp_extra_mcp_servers_json]" rows="5" class="mono">{@params["omp_extra_mcp_servers_json"]}</textarea>
             <.lane_prefix_errors errors={@errors} prefix="omp." />
+          </div>
+          <div :if={@params["agent_backend"] == "pi"} class="config-subsection">
+            <h3>pi settings</h3>
+            <label for="pi-command">Command</label><input id="pi-command" type="text" name="lane[pi_command]" value={@params["pi_command"]} />
+            <label for="pi-model">Model</label><input id="pi-model" type="text" name="lane[pi_model]" value={@params["pi_model"]} />
+            <label for="pi-thinking">Thinking level</label><input id="pi-thinking" type="text" name="lane[pi_thinking]" value={@params["pi_thinking"]} />
+            <label for="pi-args">Arguments (one per line)</label><textarea id="pi-args" name="lane[pi_args]" rows="3">{@params["pi_args"]}</textarea>
+            <label for="pi-linear-mcp-command">Linear MCP command</label><input id="pi-linear-mcp-command" type="text" name="lane[pi_linear_mcp_command]" value={@params["pi_linear_mcp_command"]} />
+            <label for="pi-linear-mcp-args">Linear MCP arguments (one per line)</label><textarea id="pi-linear-mcp-args" name="lane[pi_linear_mcp_args]" rows="3">{@params["pi_linear_mcp_args"]}</textarea>
+            <label for="pi-allowed-tools">Allowed built-in tools (one per line)</label><textarea id="pi-allowed-tools" name="lane[pi_allowed_tools]" rows="3">{@params["pi_allowed_tools"]}</textarea>
+            <.lane_prefix_errors errors={@errors} prefix="pi." />
           </div>
           <label for="hooks-after-create">After-create setup hook</label><textarea id="hooks-after-create" name="lane[hooks_after_create]" rows="2">{@params["hooks_after_create"]}</textarea>
           <label for="hooks-before-run">Before-run hook</label><textarea id="hooks-before-run" name="lane[hooks_before_run]" rows="2">{@params["hooks_before_run"]}</textarea>

@@ -24,8 +24,8 @@ One installation serves one client with multiple DB-backed lanes. Each enabled l
 
 The default backend is Codex in
 [App Server mode](https://developers.openai.com/codex/app-server/). Symphony also has an optional
-Claude backend that runs `claude -p --output-format stream-json` and an optional omp backend that
-runs `omp -p --mode json`.
+Claude backend that runs `claude -p --output-format stream-json`, an optional omp backend that
+runs `omp -p --mode json`, and an optional pi backend that runs `pi --mode json`.
 
 During Codex app-server sessions, the selected tracker adapter may advertise provider-native tools.
 Linear serves `linear_graphql` and `linear_fetch_attachment`, GitHub Issues serves `github_api`, Jira Cloud serves `jira_rest`,
@@ -167,6 +167,8 @@ Notes:
   `claude` CLI and its auth if you route states to it via `agent.backend_by_state`.
 - **The `omp` backend** is not installed in the image either. Add the `omp` CLI and its
   credentials (environment API keys or an auth broker) if you route states to it.
+- **The `pi` backend** is not installed in the image either. Add the `pi` CLI and provider API keys
+  in the environment if you route states to it.
 
 ## Burrito releases
 
@@ -997,7 +999,7 @@ introduced as UTC Unix milliseconds. Unknown issue identifiers still return not-
 
 ### Agent backends
 
-`agent.backend` selects the default backend. Supported values are `codex`, `claude`, and `omp`; the default
+`agent.backend` selects the default backend. Supported values are `codex`, `claude`, `omp`, and `pi`; the default
 is `codex`. `agent.backend_by_state` overrides the backend for a tracker state after trimming and
 lowercasing the state key. `agent.blocked_state` is where Symphony parks a blocked backend result
 after posting the blocked comment when the selected adapter supports tracker writes.
@@ -1119,6 +1121,49 @@ directory persists until the session stops.
 On SSH and managed workers, omp must be installed and credentialed on the host (environment
 variables available to the login shell); worker-side tracker variables are not required. omp uses
 the shared `codex.turn_timeout_ms` and `codex.stall_timeout_ms` settings.
+
+### pi backend
+
+The pi backend (`agent.backend: pi`) runs `pi --mode json` once per turn in the issue workspace.
+Turn 1 sends the full prompt; later turns pass `--continue` against the same private per-issue
+session directory with the continuation prompt. There is no approval channel.
+
+```yaml
+agent:
+  backend: pi
+pi:
+  command: pi
+  model: openrouter/anthropic/claude-sonnet-4
+  thinking: low
+```
+
+Credentials come from the process environment only, for example `OPENROUTER_API_KEY` or
+`ANTHROPIC_API_KEY` with `pi.model: openrouter/anthropic/claude-sonnet-4`. The private agent
+directory has no `models.json` or `auth.json`, so custom providers defined only in
+`~/.pi/agent/models.json` and logins stored only in `~/.pi/agent/auth.json` are not visible to
+lanes; built-in providers work from environment keys.
+
+Isolation: a private `PI_CODING_AGENT_DIR` holds only a `settings.json` with
+`defaultProjectTrust: never` and no packages, and turns pass `--offline --no-extensions --no-skills
+--no-prompt-templates --no-themes --no-context-files --no-approve`. With the listed flags and
+settings, workspace `.pi/` extensions and settings and context files such as `AGENTS.md` are not
+loaded.
+
+Tracker tools reach pi through a bridge extension that Symphony delivers itself (pi needs no
+extra install and Symphony needs no `node` for it). It speaks MCP to `symphony --linear-mcp` and
+registers tools named `symphony_<tool>`. `pi.allowed_tools` lists built-in tools only (default
+`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`); pi's `--tools` takes explicit names, so the
+`symphony_*` bridge tools are appended automatically.
+
+pi is not sandboxed. It runs with the daemon user's privileges: the built-in `bash`, `edit` and
+`write` tools are available, and the workspace is only the working directory, not a confinement
+boundary. Tracker credentials sit in a same-user mode-0600 `bridge.json` in the private session
+files, which the agent can read. On SSH and managed workers those files are removed after every
+turn (and on interruption); only the session directory persists until the session stops.
+
+On SSH and managed workers, pi must be installed and credentialed on the host (environment
+variables available to the login shell). pi uses the shared `codex.turn_timeout_ms` and
+`codex.stall_timeout_ms` settings.
 
 ### Linear adapter profile
 

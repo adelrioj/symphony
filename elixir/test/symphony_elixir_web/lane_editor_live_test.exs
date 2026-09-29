@@ -1073,6 +1073,37 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert saved["omp"]["thinking"] == "low"
   end
 
+  test "pi backend shows its own settings block and persists pi.model, args and allowed_tools", %{conn: conn} do
+    profile = new_profile!()
+    config = %{"tracker" => %{"kind" => "memory"}, "agent" => %{"backend" => "omp"}}
+    {:ok, lane} = Lanes.create(%{slug: "pi-editor", execution_profile_id: profile.id, config: config})
+    {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
+    assert has_element?(view, "#omp-command")
+    refute has_element?(view, "#pi-command")
+
+    view |> form("#lane-form", lane: %{agent_backend: "pi"}) |> render_change()
+    assert has_element?(view, "#pi-command")
+    refute has_element?(view, "#omp-command")
+    refute has_element?(view, "#claude-command")
+
+    view
+    |> form("#lane-form",
+      lane: %{
+        pi_model: "openrouter/anthropic/claude-sonnet-4",
+        pi_args: "--verbose\n--no-x",
+        pi_allowed_tools: "read\nbash"
+      }
+    )
+    |> render_submit()
+
+    assert_redirect(view, "/lanes/#{lane.slug}")
+    saved = saved_config(lane)
+    assert saved["agent"]["backend"] == "pi"
+    assert saved["pi"]["model"] == "openrouter/anthropic/claude-sonnet-4"
+    assert saved["pi"]["args"] == ["--verbose", "--no-x"]
+    assert saved["pi"]["allowed_tools"] == ["read", "bash"]
+  end
+
   test "a nullable provider can be populated through named adapter controls", %{conn: conn} do
     profile = new_profile!()
 
