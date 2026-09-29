@@ -592,7 +592,6 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
       case HostRecovery.proof(config, record, sandbox, operation, opts) do
         {:ok, %{} = proof} -> {:cont, {:ok, put_pod_safety(record, operation["objectUID"], proof)}}
         {:ok, nil} -> {:cont, {:ok, record}}
-        error -> {:halt, error}
       end
     else
       {:cont, {:ok, record}}
