@@ -38,11 +38,11 @@ The extension is materialized by `Agent.Pi` into the private session dir at `sta
 
 ### Isolation
 
-Private agent dir `<private>/agent` via `PI_CODING_AGENT_DIR`. Flags: `--no-extensions` (auto-discovery off; explicit `-e` still works), `--no-skills`, `--no-prompt-templates`, `--no-themes`, `--no-context-files`, `--no-approve` (ignore project-local trust-gated files and workspace `.pi/`), `--offline`, `--no-session` is NOT used. Global settings: a `<private>/agent/settings.json` written by Symphony with `defaultProjectTrust: "never"` and no packages. Verification required before implementation (same discipline as omp): a probe shows a workspace `.pi/extensions`, `.pi/settings.json`, `AGENTS.md`/`CLAUDE.md`, and the user's `~/.pi/agent/extensions` all contribute nothing.
+Private agent dir `<private>/agent` via `PI_CODING_AGENT_DIR`. Flags: `--no-extensions` (auto-discovery off; explicit `-e` still works), `--no-skills`, `--no-prompt-templates`, `--no-themes`, `--no-context-files`, `--no-approve`, `--offline`; `--no-session` is NOT used. Symphony writes `<private>/agent/settings.json` with `defaultProjectTrust: "never"` and no packages. Verified, see Verification results.
 
 ### Tools
 
-`--tools read,bash,edit,write,grep,find,ls,symphony_*` allowlist semantics apply to built-in, extension and custom tools alike (`--tools` help text). Default built-ins: `read, bash, edit, write, grep, find, ls`; the bridge's registered names are appended (they are known only after the bridge lists them, so `Agent.Pi` passes `--exclude-tools` for nothing and relies on the extension loading only Symphony's server; open verification: whether `--tools` accepts a glob for extension tools, else the allowlist omits bridge tools and `--no-builtin-tools` semantics are used with `--exclude-tools` for the built-ins to drop).
+The allowlist is `--tools <built-ins>,<bridge names>`, explicit names only (globs are not supported, verified). Built-ins default to `read, bash, edit, write, grep, find, ls`, overridable by `pi.allowed_tools`. Bridge names are `symphony_<tool name>` for each spec from `Tracker.bind_agent_tools().tool_specs`, computed by Symphony before launch, exactly as Claude's allowlist is. A tool the tracker lists at runtime but not in the specs is not callable.
 
 ### Config (`pi.*`)
 
@@ -82,8 +82,8 @@ Shared code: `Agent.Omp` and `Agent.Pi` overlap heavily (session layout, remote 
 4. `pi.*` config, registry, `Agent.Pi` local, then SSH/managed.
 5. Lane editor, docs, `SPEC.md`, gate.
 
-## Open verifications (block implementation of the affected section)
+## Verification results (pi 0.79.1, probed against a fake OpenAI-compatible server)
 
-1. Isolation recipe: confirm the flags and private `settings.json` fully suppress project `.pi/`, context files, and user extensions.
-2. `--tools` behavior for extension-registered tools (glob or explicit names); fallback recorded above.
-3. `pi -e <ts file>` loads TypeScript without a build step in the installed pi version, and works with `--no-extensions`.
+1. Isolation: with a private `PI_CODING_AGENT_DIR`, `settings.json` `{"defaultProjectTrust":"never","packages":[]}` and flags `--no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve --offline`, the request carried only built-in tools and none of the planted workspace `.pi/extensions/leak.ts`, `.pi/settings.json`, `AGENTS.md` or `CLAUDE.md`. Controls: without `--no-extensions`/`--no-approve` the project tool loaded; without `--no-context-files` the planted context markers reached the model.
+2. `--tools` takes explicit names only: `read,bash,symphony_probe` worked, the glob `read,symphony_*` dropped everything but `read`. Pi's default tools are `read, bash, edit, write` (no `grep/find/ls`).
+3. `pi -e file.ts` loads TypeScript with no build step and works together with `--no-extensions`.
