@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import readline from "node:readline";
 
 const mode = process.env.FAKE_MODE ?? "";
@@ -9,6 +10,8 @@ const tools = [
   },
   { name: "approval_prompt", description: "p", inputSchema: { type: "object", properties: {} } },
 ];
+
+if (process.env.PID_FILE) writeFileSync(process.env.PID_FILE, String(process.pid));
 
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
 
@@ -22,6 +25,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (msg.method === "initialize") {
     reply(msg.id, { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fake", version: "0" } });
   } else if (msg.method === "tools/list") {
+    if (mode === "list-error") {
+      return process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { message: "list failed" } }) + "\n");
+    }
     reply(msg.id, { tools });
     if (mode === "die") process.stdout.write("", () => process.exit(0));
   } else if (msg.method === "tools/call") {

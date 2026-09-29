@@ -54,7 +54,7 @@ The allowlist is `--tools <built-ins>,<bridge names>`, explicit names only (glob
 | `args` | `[]` | Passthrough argv |
 | `allowed_tools` | built-ins above | Built-in tool allowlist |
 | `linear_mcp_command` / `linear_mcp_args` | as omp | Tracker MCP server launch |
-| `extra_mcp_servers` | not supported | pi bridge serves the tracker server only; omitted from the schema, not silently ignored |
+| `extra_mcp_servers` | not supported; if set it is ignored | pi bridge serves the tracker server only; no validation is added |
 
 ### Credentials
 

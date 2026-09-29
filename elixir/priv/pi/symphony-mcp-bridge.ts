@@ -125,8 +125,13 @@ export default async function (pi: any): Promise<void> {
   if (!configPath) throw new Error("SYMPHONY_BRIDGE_CONFIG is not set");
   const cfg: BridgeConfig = JSON.parse(readFileSync(configPath, "utf8"));
   const client = new McpClient({ ...cfg, cwd: process.cwd() }, cfg.timeoutMs);
-  await client.start();
-  await registerBridgeTools(pi, client);
-  pi.on("session_shutdown", () => client.close());
   process.once("exit", () => client.close());
+  try {
+    await client.start();
+    await registerBridgeTools(pi, client);
+  } catch (error) {
+    client.close();
+    throw error;
+  }
+  pi.on("session_shutdown", () => client.close());
 }

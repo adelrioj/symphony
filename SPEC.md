@@ -153,7 +153,7 @@ Symphony is easiest to port when kept in these layers:
 - A database for lane configuration/history, plus local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
 - Coding-agent executable(s) for the configured backend(s), such as Codex app-server mode for
-  `agent.backend: codex`, the Claude Code CLI for `agent.backend: claude`, and the omp CLI for
+  `agent.backend: codex`, the Claude Code CLI for `agent.backend: claude`, the omp CLI for
   `agent.backend: omp`, and the pi CLI for `agent.backend: pi`.
 - Host environment authentication for the issue tracker and configured coding agent. Host-side
   tracker secret environment variables SHOULD NOT be inherited by the coding-agent child process.
@@ -663,10 +663,12 @@ pi has no approval channel and is not sandboxed: turns run with the daemon user'
 the workspace is the working directory, not a confinement boundary. Tracker credentials are written
 to a same-user mode-0600 `bridge.json` the agent can read. Each issue keeps one pi session in a
 private session directory; the first turn sends the full prompt and later turns pass `--continue`
-with the continuation prompt (per-turn resume). Symphony runs pi with a private agent directory and
-the listed flags/settings that disable project extensions, skills, prompt templates, themes and
-context files, so provider credentials MUST come from the process environment; custom providers
-in `models.json` and logins stored only in `auth.json` are not visible.
+with the continuation prompt (per-turn resume). Symphony MUST run pi with a
+private agent directory and MUST disable project trust, packages, extensions, skills, prompt
+templates, themes, context files and startup network access, so workspace-local or user-level
+configuration contributes nothing. Provider credentials therefore MUST come from the process
+environment; custom providers in `models.json` and logins stored only in `auth.json` are not
+visible.
 
 ### 5.4 Prompt Template Contract
 

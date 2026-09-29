@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { McpClient, registerBridgeTools } from "./symphony-mcp-bridge.ts";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import bridge, { McpClient, registerBridgeTools } from "./symphony-mcp-bridge.ts";
 
 const server = (mode) => ({
   command: process.execPath,
@@ -89,4 +92,20 @@ test("a response with an unknown id is ignored", async () => {
 test("a final response written right before exit still resolves", async () => {
   const out = await callTool(server("exit-after-reply"), "linear_graphql", { query: "x" });
   assert.ok(out.content[0].text.startsWith("last"));
+});
+
+test("default export kills the MCP child when startup fails", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bridge-"));
+  const pidFile = join(dir, "pid");
+  const cfgFile = join(dir, "cfg.json");
+  const { command, args } = server();
+  writeFileSync(cfgFile, JSON.stringify({ command, args, env: { FAKE_MODE: "list-error", PID_FILE: pidFile }, timeoutMs: 2000 }));
+  process.env.SYMPHONY_BRIDGE_CONFIG = cfgFile;
+  await assert.rejects(() => bridge({ registerTool() {}, on() {} }), /list failed/);
+  const pid = Number(readFileSync(pidFile, "utf8"));
+  let alive = true;
+  for (let i = 0; i < 50 && alive; i++) {
+    try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 50)); } catch { alive = false; }
+  }
+  assert.equal(alive, false, "MCP child still running");
 });

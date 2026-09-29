@@ -624,9 +624,10 @@ remains unresolved; it cannot be reported as successful cancellation or free exe
 
 #### Linux image and operator tooling
 
-Each repository supplies its development image, Bash, Git, **GNU** `realpath`, `findmnt`, both agent
-executables if routing to both backends, Docker/Compose, Testcontainers prerequisites, and browser
-dependencies. Remote Claude also needs its configured Symphony MCP executable. Preserve the repo's
+Each repository supplies its development image, Bash, Git, **GNU** `realpath`, `findmnt`, the agent
+executables for every backend routed to, Docker/Compose, Testcontainers prerequisites, and browser
+dependencies. Remote Claude, omp and pi also need a Symphony MCP executable
+(`<backend>.linear_mcp_command` or `symphony` on PATH). Preserve the repo's
 unchanged setup/test commands. Readiness checks the selected backend, authenticated SSH, a mounted
 writable workspace, actual GNU `realpath -m --` behavior (including nonexistent path components),
 and a usable local Unix Docker endpoint whose data directory is on a non-root mount. The SSH user
@@ -1162,7 +1163,9 @@ files, which the agent can read. On SSH and managed workers those files are remo
 turn (and on interruption); only the session directory persists until the session stops.
 
 On SSH and managed workers, pi must be installed and credentialed on the host (environment
-variables available to the login shell). pi uses the shared `codex.turn_timeout_ms` and
+variables available to the login shell). Workers also need `pi.linear_mcp_command` or `symphony`
+on PATH; otherwise the bridge extension fails to load and the turn fails. `pi.extra_mcp_servers`
+is not supported; if set it is ignored. pi uses the shared `codex.turn_timeout_ms` and
 `codex.stall_timeout_ms` settings.
 
 ### Linear adapter profile
