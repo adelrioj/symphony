@@ -9,6 +9,8 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
 
   require Logger
 
+  @behaviour SymphonyElixir.Agent.CliHarness.StreamFolder
+
   alias SymphonyElixir.Agent.Result
 
   @approval_tool "mcp__symphony__approval_prompt"
@@ -60,6 +62,7 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
         }
 
   @spec new() :: t()
+  @impl true
   def new, do: %__MODULE__{}
 
   @spec fold([map()], integer() | nil) :: {:ok, Result.t()} | {:error, term()}
@@ -76,6 +79,7 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   def step(event), do: step(event, new())
 
   @spec step(map(), t()) :: {t(), worker_update() | nil}
+  @impl true
   def step(%{"type" => "system", "subtype" => "init"} = event, acc) do
     updated_acc = %{acc | session_id: Map.get(event, "session_id", acc.session_id)}
     {updated_acc, worker_update(:session_started, updated_acc)}
@@ -129,6 +133,7 @@ defmodule SymphonyElixir.Agent.Claude.Stream do
   def step(_event, acc), do: {acc, nil}
 
   @spec finalize(t(), integer() | nil) :: {:ok, Result.t()} | {:error, term()}
+  @impl true
   def finalize(%__MODULE__{blocked_action: action} = acc, _exit_status) when is_binary(action) do
     # Blocked wins over a later error/nonzero exit (a denied permission ends the
     # run), but log any discarded error subtype so the precedence is auditable.
