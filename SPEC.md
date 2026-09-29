@@ -153,7 +153,8 @@ Symphony is easiest to port when kept in these layers:
 - A database for lane configuration/history, plus local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
 - Coding-agent executable(s) for the configured backend(s), such as Codex app-server mode for
-  `agent.backend: codex` and the Claude Code CLI for `agent.backend: claude`.
+  `agent.backend: codex`, the Claude Code CLI for `agent.backend: claude`, and the omp CLI for
+  `agent.backend: omp`.
 - Host environment authentication for the issue tracker and configured coding agent. Host-side
   tracker secret environment variables SHOULD NOT be inherited by the coding-agent child process.
 
@@ -405,6 +406,7 @@ Top-level keys:
 - `agent`
 - `codex`
 - `claude`
+- `omp`
 - `observability`
 - `server`
 
@@ -525,7 +527,7 @@ Fields:
   - Invalid entries (non-positive or non-numeric) are ignored.
 - `backend` (string)
   - Default: `codex`.
-  - Supported values for this spec version: `codex`, `claude`.
+  - Supported values for this spec version: `codex`, `claude`, `omp`.
   - Unknown values SHOULD be detected at dispatch/backend selection time so a typo only skips the
     affected issue instead of invalidating the whole workflow file.
 - `backend_by_state` (map `state_name -> backend_name`)
@@ -609,6 +611,33 @@ This object configures the Claude backend only. The Codex path remains behavior-
     `--allowedTools` and is therefore an access control, not a record.
   - `WORKFLOW.md` is the agent's prompt. A credential MUST NOT be written here; supply it to the
     server through a wrapper script or the environment instead.
+
+#### 5.3.8 `omp` (object)
+
+This object configures the omp backend only (`omp -p --mode json`).
+
+- `command` (string executable path/name)
+  - Default: `omp`. Launched directly, not through a shell; remote workers need an equivalent
+    installed and credentialed executable.
+- `model` (string, OPTIONAL): omp `provider/id`, for example `openrouter/anthropic/claude-sonnet-4`.
+- `thinking` (string, OPTIONAL): one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
+  `auto`.
+- `args` (list of strings): extra fixed CLI arguments placed before Symphony's flags. Default `[]`.
+- `allowed_tools` (list of strings, OPTIONAL)
+  - Restricts omp's built-in tools only (default `read`, `grep`, `find`, `edit`, `write`, `bash`).
+  - Tracker MCP tools are mounted by omp itself from Symphony's private MCP config and are always
+    available; they MUST NOT be listed here.
+- `linear_mcp_command` / `linear_mcp_args`: as for `claude`.
+- `extra_mcp_servers` (map): merged into the private MCP config; the `symphony` server wins a
+  name collision.
+
+omp has no approval channel: turns run with `--approval-mode yolo` and the built-in tool
+allowlist, so workspace confinement is Symphony's responsibility. Each issue keeps one omp session
+in a private session directory; the first turn sends the full prompt and later turns pass
+`--continue` with the continuation prompt. Symphony runs omp with a private agent directory and
+disables foreign MCP/plugin discovery, so provider credentials MUST come from the process
+environment (provider API keys or omp's auth broker); logins stored only in a local `agent.db` are
+not visible.
 
 ### 5.4 Prompt Template Contract
 
@@ -821,6 +850,14 @@ not require recognizing or validating extension fields unless that extension is 
 - `claude.linear_mcp_args`: list of strings, default `[]`
 - `claude.allowed_tools`: list of strings or null
 - `claude.extra_mcp_servers`: map of MCP server name to server object, default `{}`
+- `omp.command`: executable path/name, default `omp`
+- `omp.model`: string or null
+- `omp.thinking`: string or null
+- `omp.args`: list of strings, default `[]`
+- `omp.allowed_tools`: list of built-in tool names or null
+- `omp.linear_mcp_command`: executable path/name or null
+- `omp.linear_mcp_args`: list of strings, default `[]`
+- `omp.extra_mcp_servers`: map of MCP server name to server object, default `{}`
 
 ### 6.5 Lane Configuration Store
 
@@ -1187,7 +1224,9 @@ Invariant 3: Workspace key is sanitized.
 This section defines Symphony's language-neutral responsibilities when integrating coding-agent
 backends. The Codex app-server protocol for the targeted Codex version is the source of truth for
 Codex protocol schemas, message payloads, transport framing, and method names. The Claude Code CLI
-stream-json contract is the corresponding source of truth for the Claude backend.
+stream-json contract is the corresponding source of truth for the Claude backend, and the omp
+`--mode json` event stream for the omp backend. The omp backend resumes one session per issue
+across turns (`--continue`) and has no approval channel.
 
 Protocol source of truth:
 

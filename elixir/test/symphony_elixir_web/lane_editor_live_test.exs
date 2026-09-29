@@ -1050,6 +1050,29 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert settings.codex.command == "new-codex app-server"
   end
 
+  test "omp backend shows its own settings block and persists omp.model", %{conn: conn} do
+    profile = new_profile!()
+    config = %{"tracker" => %{"kind" => "memory"}, "agent" => %{"backend" => "claude"}}
+    {:ok, lane} = Lanes.create(%{slug: "omp-editor", execution_profile_id: profile.id, config: config})
+    {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
+    assert has_element?(view, "#claude-command")
+    refute has_element?(view, "#omp-command")
+
+    view |> form("#lane-form", lane: %{agent_backend: "omp"}) |> render_change()
+    assert has_element?(view, "#omp-command")
+    refute has_element?(view, "#claude-command")
+
+    view
+    |> form("#lane-form", lane: %{omp_model: "openrouter/anthropic/claude-sonnet-4", omp_thinking: "low"})
+    |> render_submit()
+
+    assert_redirect(view, "/lanes/#{lane.slug}")
+    saved = saved_config(lane)
+    assert saved["agent"]["backend"] == "omp"
+    assert saved["omp"]["model"] == "openrouter/anthropic/claude-sonnet-4"
+    assert saved["omp"]["thinking"] == "low"
+  end
+
   test "a nullable provider can be populated through named adapter controls", %{conn: conn} do
     profile = new_profile!()
 

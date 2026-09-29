@@ -42,7 +42,7 @@ Touchpoints:
 | `model` | unset | omp `provider/id`, e.g. `openrouter/...` |
 | `thinking` | unset | `--thinking` level |
 | `args` | `[]` | Passthrough argv, placed before Symphony's flags |
-| `allowed_tools` | read, grep, find, edit, write, bash | `--tools` allowlist; tracker MCP tools always added |
+| `allowed_tools` | read, grep, find, edit, write, bash | `--tools` allowlist of built-in tools only; omp rejects `mcp__symphony__*` here and mounts the tracker MCP tools itself (as `mcp__symphony_*`), so they are always available |
 | `linear_mcp_command` / `linear_mcp_args` | as Claude | Tracker MCP server launch |
 | `extra_mcp_servers` | `{}` | Merged left; `symphony` wins collisions |
 

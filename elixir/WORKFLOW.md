@@ -163,6 +163,13 @@ claude:
   command: claude
   args: []
   linear_mcp_args: []
+# Optional omp backend (route states with agent.backend_by_state or set agent.backend: omp).
+# Credentials come from the process environment (e.g. OPENROUTER_API_KEY).
+# omp:
+#   command: omp
+#   model: openrouter/anthropic/claude-sonnet-4
+#   thinking: low
+#   allowed_tools: [read, grep, find, edit, write, bash]
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

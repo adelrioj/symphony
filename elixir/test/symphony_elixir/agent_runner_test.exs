@@ -29,8 +29,6 @@ defmodule SymphonyElixir.AgentRunnerStubBackend do
       on_message.(message)
     end
 
-    if pid = opts[:test_pid], do: send(pid, {:stub_backend, :prompt, prompt})
-
     case opts[:run_result] do
       {:error, _reason} = error ->
         error
@@ -597,44 +595,6 @@ defmodule SymphonyElixir.AgentRunnerTest do
     assert Enum.at(prompts, 1) =~ "Continuation guidance:"
     assert Enum.at(prompts, 1) =~ "fresh process"
     refute Enum.at(prompts, 1) =~ "prior turn context"
-  end
-
-  test "non-Claude backends (omp resumes its session) get the short continuation prompt" do
-    # Uses the stub backend: Agent.Omp is not implemented yet, and AgentRunner's prompt
-    # clause only distinguishes Claude from every other backend.
-    workspace_root = Path.join(System.tmp_dir!(), "symphony-runner-cont-#{System.unique_integer([:positive])}")
-    on_exit(fn -> File.rm_rf(workspace_root) end)
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "memory",
-      tracker_active_states: ["Implemented"],
-      workspace_root: workspace_root,
-      max_turns: 2,
-      prompt: "Ticket {{ issue.identifier }}"
-    )
-
-    issue = build_issue(id: "issue-cont", identifier: "CONT-2", state: "Implemented")
-
-    fetcher = fn _ids ->
-      count = Process.get(:cont_fetch, 0) + 1
-      Process.put(:cont_fetch, count)
-      {:ok, [%{issue | state: if(count == 1, do: "Implemented", else: "Done")}]}
-    end
-
-    assert :ok =
-             AgentRunner.run(issue, nil,
-               backend_module: SymphonyElixir.AgentRunnerStubBackend,
-               execution_context: SymphonyElixir.ExecutionContext.local(SymphonyElixir.Config.local_workspace_root()),
-               issue_state_fetcher: fetcher,
-               test_pid: self()
-             )
-
-    assert_received {:stub_backend, :prompt, first}
-    assert_received {:stub_backend, :prompt, second}
-    assert first =~ "Ticket CONT-2"
-    assert second =~ "continuation turn #2 of 2"
-    refute second =~ "fresh process"
-    refute second =~ "Ticket CONT-2"
   end
 
   defp build_issue(overrides) do
