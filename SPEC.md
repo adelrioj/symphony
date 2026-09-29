@@ -631,8 +631,11 @@ This object configures the omp backend only (`omp -p --mode json`).
 - `extra_mcp_servers` (map): merged into the private MCP config; the `symphony` server wins a
   name collision.
 
-omp has no approval channel: turns run with `--approval-mode yolo` and the built-in tool
-allowlist, so workspace confinement is Symphony's responsibility. Each issue keeps one omp session
+omp has no approval channel and is not sandboxed: turns run with `--approval-mode yolo` and the
+built-in tool allowlist (including `bash`, `edit` and `write`) with the daemon user's privileges.
+The workspace is the working directory, not a confinement boundary. Tracker credentials are written
+to a same-user mode-0600 `mcp.json` inside the private agent directory, which the agent can read.
+Each issue keeps one omp session
 in a private session directory; the first turn sends the full prompt and later turns pass
 `--continue` with the continuation prompt. Symphony runs omp with a private agent directory and
 disables foreign MCP/plugin discovery, so provider credentials MUST come from the process

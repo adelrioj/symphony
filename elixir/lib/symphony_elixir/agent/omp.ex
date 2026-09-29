@@ -19,6 +19,7 @@ defmodule SymphonyElixir.Agent.Omp do
                            cursor windsurf cline github vscode agents-md mcp-json ssh-json)
   @default_tools ~w(read grep find edit write bash)
   @port_line_bytes 1_048_576
+  @remote_cleanup_timeout_ms 2_000
 
   @type session :: %{
           required(:workspace) => Path.t(),
@@ -134,12 +135,23 @@ defmodule SymphonyElixir.Agent.Omp do
   @impl true
   @spec stop_session(SymphonyElixir.Agent.session()) :: :ok
   def stop_session(%{session_dir: session_dir} = session) when is_binary(session_dir) do
+    :ok = CliHarness.remove_session_dir(session_dir, session[:cleanup_monitor])
+
     with %{remote_dir: remote_dir, execution_context: %ExecutionContext{target: host}} when is_binary(remote_dir) <-
            session do
-      _ = SSH.run(host, "rm -rf " <> CliHarness.shell_escape(remote_dir))
+      remove_remote_dir(host, remote_dir)
     end
 
-    CliHarness.remove_session_dir(session_dir, session[:cleanup_monitor])
+    :ok
+  end
+
+  # Best effort and bounded: a hung ssh must not block session teardown.
+  defp remove_remote_dir(host, remote_dir) do
+    task = Task.async(fn -> SSH.run(host, "rm -rf " <> CliHarness.shell_escape(remote_dir)) end)
+    _ = Task.yield(task, @remote_cleanup_timeout_ms) || Task.shutdown(task, :brutal_kill)
+    :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   defp run_local(session, workspace, prompt, on_message) do
@@ -287,6 +299,7 @@ defmodule SymphonyElixir.Agent.Omp do
     [
       "cd #{CliHarness.shell_escape(workspace)}",
       "umask 077",
+      "trap #{CliHarness.shell_escape(secret_cleanup_command(remote_dir))} EXIT HUP INT TERM",
       "mkdir -p #{path.("agent")} #{path.("sessions")}",
       "chmod 700 #{CliHarness.shell_escape(remote_dir)}",
       CliHarness.read_length_prefixed_file("workflow", path.("WORKFLOW.md")),
@@ -301,6 +314,18 @@ defmodule SymphonyElixir.Agent.Omp do
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join(" && ")
+  end
+
+  # Files rewritten every turn that hold tracker secrets; `sessions/` stays for `--continue`.
+  defp secret_cleanup_command(remote_dir) do
+    files =
+      Enum.map_join(
+        ["agent/mcp.json", "WORKFLOW.md", "overlay.yml"],
+        " ",
+        &CliHarness.shell_escape(Path.join(remote_dir, &1))
+      )
+
+    "rm -f " <> files
   end
 
   defp remote_omp_invocation(remote_dir, omp) do

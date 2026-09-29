@@ -103,7 +103,14 @@ defmodule SymphonyElixir.Agent.OmpSSHTest do
       env_names = capture |> Path.join("env") |> File.read!() |> String.split("\n", trim: true)
       refute Enum.any?(env_names, &String.starts_with?(&1, secret_name <> "="))
 
-      mcp = remote_dir |> Path.join("agent/mcp.json") |> File.read!() |> Jason.decode!()
+      # The secret-bearing files are gone after the turn; sessions/ stays so --continue works.
+      for file <- ["agent/mcp.json", "WORKFLOW.md", "overlay.yml"] do
+        refute File.exists?(Path.join(remote_dir, file))
+      end
+
+      assert File.dir?(Path.join(remote_dir, "sessions"))
+
+      mcp = capture |> Path.join("mcp.json") |> File.read!() |> Jason.decode!()
       assert mcp["mcpServers"]["symphony"]["env"][secret_name] == secret_value
       remote_args = mcp["mcpServers"]["symphony"]["args"]
 
@@ -116,6 +123,29 @@ defmodule SymphonyElixir.Agent.OmpSSHTest do
       refute File.exists?(remote_dir)
       refute File.exists?(session.session_dir)
     end
+  end
+
+  test "stop_session removes the local dir and returns :ok even when the ssh cleanup hangs" do
+    tmp = Path.join(System.tmp_dir!(), "symphony-omp-hang-test-#{System.unique_integer([:positive])}")
+    workspace = Path.join(tmp, "workspace")
+    fake_ssh = Path.join([tmp, "bin", "ssh"])
+    File.mkdir_p!(workspace)
+    File.mkdir_p!(Path.dirname(fake_ssh))
+    File.write!(fake_ssh, "#!/bin/sh\nexec sleep 5\n")
+    File.chmod!(fake_ssh, 0o755)
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), omp_command: "omp")
+    target = %Target{executable: fake_ssh, prefix: [], label: "fixture"}
+
+    {:ok, session} =
+      Omp.start_session(workspace, execution_context: ExecutionContext.ssh(Config.settings!().workspace.root, target))
+
+    assert File.dir?(session.session_dir)
+    started = System.monotonic_time(:millisecond)
+    assert :ok = Omp.stop_session(session)
+    assert System.monotonic_time(:millisecond) - started < 4_000
+    refute File.exists?(session.session_dir)
   end
 
   test "managed contexts are required when worker.environment is configured" do
@@ -206,6 +236,7 @@ defmodule SymphonyElixir.Agent.OmpSSHTest do
     File.write!(path, """
     #!/bin/sh
     printf '%s\\n' "$PI_CODING_AGENT_DIR" >> "$OMP_CAPTURE_DIR/agent_dir"
+    cp "$PI_CODING_AGENT_DIR/mcp.json" "$OMP_CAPTURE_DIR/mcp.json"
     env | cut -d= -f1-2 >> "$OMP_CAPTURE_DIR/env"
     printf 'TURN\\n' >> "$OMP_CAPTURE_DIR/argv"
     prev=""

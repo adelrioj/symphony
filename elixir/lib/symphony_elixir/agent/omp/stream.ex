@@ -20,7 +20,6 @@ defmodule SymphonyElixir.Agent.Omp.Stream do
             activity_detail: nil,
             summary: nil,
             stop_reason: nil,
-            error_message: nil,
             saw_agent_end: false
 
   @type t :: %__MODULE__{}
@@ -48,7 +47,7 @@ defmodule SymphonyElixir.Agent.Omp.Stream do
       acc
       |> apply_usage(message["usage"])
       |> apply_text(message["content"])
-      |> Map.merge(%{stop_reason: message["stopReason"], error_message: message["errorMessage"]})
+      |> Map.put(:stop_reason, message["stopReason"])
 
     {acc, worker_update(acc.activity_kind, acc)}
   end

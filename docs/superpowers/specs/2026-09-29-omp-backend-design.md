@@ -64,7 +64,7 @@ Verified by probe (omp 18.4.3): omp has no `--strict-mcp-config` and auto-discov
 
 - private `PI_CODING_AGENT_DIR` holding only Symphony's `mcp.json`;
 - overlay `mcp.enableProjectConfig: false`;
-- overlay `disabledProviders` listing every discovery provider except `native`: `omp-plugins, claude, agent-plugins, codex, agents, claude-plugins, gemini, opencode, cursor, windsurf, cline, github, vscode, agents-md, mcp-json, ssh-json`;
+- overlay `disabledProviders` listing the foreign discovery providers (all but `native`): `omp-plugins, claude, agent-plugins, codex, agents, claude-plugins, gemini, opencode, cursor, windsurf, cline, github, vscode, agents-md, mcp-json, ssh-json`;
 - `--no-extensions --no-skills --no-rules`.
 
 With this, only the `symphony` server was attempted and the model reported no `mcp__` tools otherwise.

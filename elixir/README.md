@@ -1105,9 +1105,16 @@ Symphony uses a private agent directory, and symlinking `agent.db` into it is un
 create a separate `-wal` file beside the shared database). Move such logins to a broker.
 
 Isolation is hermetic: a private `PI_CODING_AGENT_DIR` holds only Symphony's `mcp.json`, a config
-overlay disables project MCP config and every discovery provider except `native`, and turns pass
+overlay disables project MCP config and the listed foreign discovery providers, and turns pass
 `--no-extensions --no-skills --no-rules`. Only the tracker server and `omp.extra_mcp_servers` are
 reachable.
+
+omp is not sandboxed. It runs with the daemon user's privileges: the built-in `bash`, `edit` and
+`write` tools run under `--approval-mode yolo`, and the workspace is only the working directory, not
+a confinement boundary. Tracker credentials sit in a same-user mode-0600 `mcp.json` inside the
+private agent directory, which the agent can read. On SSH and managed workers the workflow,
+`mcp.json` and overlay are removed after every turn (and on interruption); only the session
+directory persists until the session stops.
 
 On SSH and managed workers, omp must be installed and credentialed on the host (environment
 variables available to the login shell); worker-side tracker variables are not required. omp uses
