@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   @behaviour SymphonyElixir.ExecutionEnvironment
 
   alias SymphonyElixir.ExecutionEnvironment.{Command, Config, Connection, Operations, Record}
-  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Declaration, Guard}
+  alias SymphonyElixir.ExecutionEnvironment.Kubernetes.{Client, Declaration, Guard, HostRecovery}
   alias SymphonyElixir.SSH.Target
 
   @api "agents.x-k8s.io/v1beta1"
@@ -554,6 +554,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
     with_pod_obligations(record, sandbox, objects["pods"], q, fn record ->
       with :ok <- owned_pods(objects["pods"], record, sandbox),
            {:ok, record} <- capture_storage(record, sandbox, objects, q),
+           {:ok, record} <- recover_unreleased(config, record, sandbox, objects["pods"], opts),
            {:ok, record} <- inspect_termination(config, record, q, opts),
            {:ok, record} <- save_observation(config, record, opts),
            {:ok, sandbox} <- fetch_parent(config, record, opts),
@@ -563,6 +564,56 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
         {:ok, normalize(record, sandbox, pods, evidence)}
       end
     end)
+  end
+
+  # A vanished Pod is not termination evidence. Only an explicitly authorized recovery,
+  # backed by the admission gate's unchanged history, may account for a journaled Pod
+  # that was never authorized to run. Authorized Pods still require physical evidence.
+  defp recover_unreleased(config, record, sandbox, pods, opts) do
+    with true <- recoverable_parent?(record, sandbox),
+         {:ok, operations} <- pod_operations(sandbox),
+         true <- prior_pod_operations_preserved?(record, operations) do
+      Enum.reduce_while(operations, {:ok, record}, fn operation, {:ok, current} ->
+        recover_operation(config, current, sandbox, operation, pods, opts)
+      end)
+    else
+      _ -> {:ok, record}
+    end
+  end
+
+  defp recoverable_parent?(record, sandbox) do
+    record.desired in [:stopped, :absent] and
+      (suspension_acknowledged?(record, sandbox) or
+         (record.desired == :absent and drained_journal?(sandbox)))
+  end
+
+  defp recover_operation(config, record, sandbox, operation, pods, opts) do
+    if unreleased_missing_operation?(record, operation, pods) do
+      case HostRecovery.proof(config, record, sandbox, operation, opts) do
+        {:ok, %{} = proof} -> {:cont, {:ok, put_pod_safety(record, operation["objectUID"], proof)}}
+        {:ok, nil} -> {:cont, {:ok, record}}
+      end
+    else
+      {:cont, {:ok, record}}
+    end
+  end
+
+  defp unreleased_missing_operation?(record, operation, pods) do
+    pod_uid = operation["objectUID"]
+
+    operation["state"] == "Committed" and
+      pod_uid not in (record.metadata["authorized_pod_uids"] || []) and
+      get_in(record.metadata, ["authorized_pods", pod_uid]) == nil and
+      get_in(record.metadata, ["pod_safety", pod_uid]) == nil and
+      not Enum.any?(pods, &(controller_attribution?(&1, operation) and uid(&1) == pod_uid))
+  end
+
+  defp drained_journal?(sandbox) do
+    close_id = get_in(sandbox, ["spec", "creationControl", "closeRequestId"])
+    journal = get_in(sandbox, ["status", "creationJournal"])
+
+    is_binary(close_id) and is_map(journal) and journal["phase"] == "Drained" and
+      valid_journal?(journal, uid(sandbox), close_id, get_in(sandbox, ["metadata", "namespace"]))
   end
 
   @spec put_intent(map(), Record.t(), map(), keyword()) :: SymphonyElixir.ExecutionEnvironment.result()
@@ -793,6 +844,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp destroy_closed(config, record, sandbox, journal, guard, q, opts) do
     with {:ok, objects} <- inventory(config, opts),
          {:ok, captured} <- capture_storage(record, sandbox, objects, q),
+         {:ok, captured} <- recover_unreleased(config, captured, sandbox, objects["pods"], opts),
          {:ok, classified} <- classify_journal(captured, sandbox, journal, guard, objects, q),
          {:ok, saved} <- persist(config, classified, sandbox, [], opts),
          {:ok, stopped} <- stop(config, saved, opts) do
@@ -1129,6 +1181,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   defp terminal_kind(%{"kind" => "host_destroyed"}), do: "host_destroyed"
   defp terminal_kind(_), do: "terminated"
 
+  defp valid_safety?(%{"kind" => "host_shutdown"} = proof, pod_uid, record) do
+    operation = get_in(record.metadata, ["controller_pod_operations", proof["operation_id"]])
+
+    operation != nil and operation["state"] == "Committed" and operation["objectUID"] == pod_uid and
+      host_shutdown_matches?(proof, pod_uid, record)
+  end
+
   defp valid_safety?(proof, pod_uid, record) when is_map(proof) do
     proof["kind"] in ["never_executable", "terminated", "host_destroyed"] and proof["uid"] == pod_uid and
       is_binary(proof["resourceVersion"]) and proof["resourceVersion"] != "" and
@@ -1136,6 +1195,22 @@ defmodule SymphonyElixir.ExecutionEnvironment.Kubernetes do
   end
 
   defp valid_safety?(_, _, _), do: false
+
+  defp host_shutdown_matches?(proof, pod_uid, record) do
+    proof["uid"] == pod_uid and proof["parent_uid"] == record.provider_ref and
+      proof["qualification_uid"] == record.metadata["qualification_uid"] and
+      pod_uid not in (record.metadata["authorized_pod_uids"] || []) and
+      Enum.all?(~w(node_uid boot_id pv_uid volume_handle receipt_uid captured_at), fn key ->
+        is_binary(proof[key]) and proof[key] != ""
+      end) and
+      shutdown_volume_matches?(proof, record)
+  end
+
+  defp shutdown_volume_matches?(proof, record) do
+    Enum.any?(record.metadata["volumes"] || %{}, fn {_, volume} ->
+      volume["pv_uid"] == proof["pv_uid"] and volume["volume_handle"] == proof["volume_handle"]
+    end)
+  end
 
   defp complete_evidence?(guard, record) do
     evidence = guard.data["evidence"]

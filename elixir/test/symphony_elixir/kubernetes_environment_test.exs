@@ -935,6 +935,150 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert Lifecycle.occupied?(%{Lifecycle.new(stopped, "stop", :cleanup) | phase: :stopped})
   end
 
+  test "a host-root shutdown receipt accounts for an absent committed Pod before cleanup" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    host_recovery_fixture(record)
+
+    {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:quiescent, _} = stopped.proof
+
+    assert get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid", "kind"]) ==
+             "host_shutdown"
+
+    assert {:ok, deleted} = Kubernetes.destroy(config, stopped, opts)
+    assert deleted.absent?
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"] == nil
+  end
+
+  test "direct destroy records host shutdown before classifying a closed journal" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    host_recovery_fixture(record)
+
+    assert {:ok, deleted} = Kubernetes.destroy(config, created, opts)
+    assert deleted.absent?
+
+    assert get_in(guard_data(record), ["evidence", "physical", "pod-uid", "kind"]) ==
+             "host_shutdown"
+
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"] == nil
+  end
+
+  test "a changed host boot cannot certify an absent Pod" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    host_recovery_fixture(record)
+    node = api_state()["nodes"]["worker-1"]
+    put_object("nodes", put_in(node, ["status", "nodeInfo", "bootID"], "another-boot"))
+
+    assert {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:compute_unknown, _} = stopped.proof
+    refute get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid"])
+  end
+
+  test "a receipt for another Pod cannot discharge this journal operation" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    host_recovery_fixture(record)
+    receipt = api_state()["configmaps"]["symphony-host-recovery-pod-uid"]
+    assertion = receipt["data"]["recovery.json"] |> Jason.decode!() |> Map.put("pod_uid", "other-pod")
+    put_object("configmaps", put_in(receipt, ["data", "recovery.json"], Jason.encode!(assertion)))
+
+    assert {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:compute_unknown, _} = stopped.proof
+    refute get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid"])
+  end
+
+  test "a PV bound to another host cannot support the host shutdown receipt" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    host_recovery_fixture(record)
+    pv = api_state()["persistentvolumes"]["pv-ticket"]
+
+    put_object(
+      "persistentvolumes",
+      put_in(
+        pv,
+        [
+          "spec",
+          "nodeAffinity",
+          "required",
+          "nodeSelectorTerms",
+          Access.at(0),
+          "matchExpressions",
+          Access.at(0),
+          "values"
+        ],
+        ["other-host"]
+      )
+    )
+
+    assert {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:compute_unknown, _} = stopped.proof
+    refute get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid"])
+  end
+
+  test "a host scan without a durable read-only fence cannot authorize cleanup" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    host_recovery_fixture(record)
+    receipt = api_state()["configmaps"]["symphony-host-recovery-pod-uid"]
+    assertion = receipt["data"]["recovery.json"] |> Jason.decode!() |> Map.delete("fence")
+    put_object("configmaps", put_in(receipt, ["data", "recovery.json"], Jason.encode!(assertion)))
+
+    assert {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:compute_unknown, _} = stopped.proof
+    refute get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid"])
+  end
+
+  test "a stale host inspection cannot authorize cleanup" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    host_recovery_fixture(record)
+    receipt = api_state()["configmaps"]["symphony-host-recovery-pod-uid"]
+    assertion = receipt["data"]["recovery.json"] |> Jason.decode!()
+    stale = DateTime.utc_now() |> DateTime.add(-3600) |> DateTime.to_iso8601()
+
+    put_object(
+      "configmaps",
+      put_in(receipt, ["data", "recovery.json"], Jason.encode!(Map.put(assertion, "captured_at", stale)))
+    )
+
+    assert {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:compute_unknown, _} = stopped.proof
+    refute get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid"])
+  end
+
+  test "a missing authorized Pod cannot use a host shutdown recovery receipt" do
+    {config, record, opts} = api_fixture(pinned_host: true)
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, started} = Kubernetes.start(config, intended, opts)
+    remove_object("pods", record.key)
+    host_recovery_fixture(record)
+
+    assert {:ok, stopped} = Kubernetes.stop(config, started, opts)
+    refute match?({:quiescent, _}, stopped.proof)
+
+    refute get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid", "kind"]) ==
+             "host_shutdown"
+  end
+
   test "a late committed missing Pod invalidates prior quiescence on an ordinary deletion failure" do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)
@@ -3673,6 +3817,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
           }
         }
       },
+      "validatingadmissionpolicies" => %{},
+      "validatingadmissionpolicybindings" => %{},
+      "namespaces" => %{},
       "nodes" => if(options[:pinned_host], do: %{"worker-1" => node_object()}, else: %{}),
       "hostlossdeclarations" => %{},
       "sandboxes" => %{},
@@ -3698,6 +3845,67 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     Process.delete(:delayed_release)
     supervisor = start_supervised!(Supervisor.child_spec({Task.Supervisor, []}, id: make_ref()))
     {config, record, [command_fun: &api_command/3, timeout_ms: 60_000, task_supervisor: supervisor, authority: self()]}
+  end
+
+  defp host_recovery_fixture(record) do
+    parent = api_state()["sandboxes"][record.key]
+    put_object("sandboxes", put_in(parent, ["metadata", "creationTimestamp"], "2026-09-28T00:00:00Z"))
+    operation = Enum.find(get_in(parent, ["status", "creationJournal", "operations"]), &(&1["resource"] == "pods"))
+    pv = api_state()["persistentvolumes"]["pv-ticket"]
+
+    affinity = %{
+      "required" => %{
+        "nodeSelectorTerms" => [
+          %{
+            "matchExpressions" => [
+              %{"key" => "topology.topolvm.io/node", "operator" => "In", "values" => ["worker-1"]}
+            ]
+          }
+        ]
+      }
+    }
+
+    put_object("persistentvolumes", put_in(pv, ["spec", "nodeAffinity"], affinity))
+
+    captured = DateTime.utc_now() |> DateTime.add(-30) |> DateTime.to_iso8601()
+
+    assertion = %{
+      "schema" => "devbox-host-shutdown/v1",
+      "parentUID" => "sandbox-uid",
+      "operationID" => operation["id"],
+      "pvName" => "pv-ticket",
+      "pvUID" => "pv-uid",
+      "nodeUID" => "node-uid",
+      "hostname" => "worker-1",
+      "boot_id" => "boot",
+      "pod_uid" => operation["objectUID"],
+      "volume_handle" => "disk-ticket",
+      "captured_at" => captured,
+      "command" => [
+        "devbox-host-shutdown-receipt",
+        "--host",
+        "worker-1",
+        "--pod-uid",
+        operation["objectUID"],
+        "--volume-handle",
+        "disk-ticket",
+        "--fence-read-only"
+      ],
+      "fence" => %{"lvm_permissions" => "read-only", "block_device_read_only" => true},
+      "pod_processes" => [],
+      "volume_mounts" => [],
+      "volume_users" => []
+    }
+
+    metadata =
+      meta("symphony-host-recovery-" <> operation["objectUID"], "receipt-uid")
+      |> Map.merge(%{"namespace" => "symphony", "creationTimestamp" => DateTime.utc_now() |> DateTime.to_iso8601()})
+
+    put_object("configmaps", %{
+      "metadata" => metadata,
+      "immutable" => true,
+      "data" => %{"recovery.json" => Jason.encode!(assertion)}
+    })
   end
 
   defp api_command(executable, args, _opts) do
