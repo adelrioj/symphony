@@ -942,6 +942,17 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     remove_object("pods", record.key)
     host_recovery_fixture(record)
 
+    # The provider can get this exact receipt but cannot list management ConfigMaps.
+    opts =
+      Keyword.put(opts, :command_fun, fn executable, args, options ->
+        if Path.basename(executable) == "kubectl" and "get" in args and
+             URI.parse(arg(args, "--raw")).path == "/api/v1/namespaces/symphony/configmaps" do
+          json(%{"kind" => "Status", "code" => 403})
+        else
+          api_command(executable, args, options)
+        end
+      end)
+
     {:ok, stopped} = Kubernetes.stop(config, created, opts)
     assert {:quiescent, _} = stopped.proof
 
@@ -3976,7 +3987,7 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
         end
 
       "get" in args ->
-        inventory_response(resource)
+        inventory_response(parts)
 
       "delete" in args ->
         resource = Enum.at(parts, -2)
@@ -4009,7 +4020,16 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     end
   end
 
-  defp inventory_response(resource) do
+  defp inventory_response(["api", "v1", "namespaces", "symphony", "configmaps", name]) do
+    case api_state()["configmaps"][name] do
+      nil -> json(%{"kind" => "Status", "code" => 404})
+      receipt -> json(receipt)
+    end
+  end
+
+  defp inventory_response(parts) do
+    resource = List.last(parts)
+
     if resource == "persistentvolumes" and option(:deny_post_create_inventory) and Process.get(:denied_create_seen) do
       json(%{"kind" => "Status", "code" => 403})
     else
