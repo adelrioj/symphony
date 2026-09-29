@@ -151,6 +151,61 @@ defmodule SymphonyElixir.ConfigTest do
 
       assert :ok = SymphonyElixir.Config.validate!()
     end
+
+    test "rejects blank omp.command when global backend selects omp" do
+      assert {:error, [%{path: "omp.command"}]} =
+               write_workflow!("""
+               ---
+               tracker: {kind: memory}
+               agent: {backend: omp}
+               omp: {command: "  "}
+               ---
+               body
+               """)
+
+      assert :ok = Config.validate!()
+    end
+
+    test "omp defaults" do
+      write_workflow!("""
+      ---
+      tracker: {kind: memory}
+      agent: {backend: omp}
+      ---
+      body
+      """)
+
+      assert %{command: "omp", args: [], model: nil, thinking: nil, allowed_tools: nil, extra_mcp_servers: %{}} =
+               Config.settings!().omp
+    end
+
+    test "rejects unknown omp.thinking level" do
+      assert {:error, [%{path: "omp.thinking"}]} =
+               write_workflow!("""
+               ---
+               tracker: {kind: memory}
+               omp: {thinking: bogus}
+               ---
+               body
+               """)
+    end
+
+    test "backend_command/2 picks the command of the given backend module" do
+      write_workflow!("""
+      ---
+      tracker: {kind: memory}
+      omp: {command: my-omp}
+      claude: {command: my-claude}
+      codex: {command: my-codex}
+      ---
+      body
+      """)
+
+      settings = Config.settings!()
+      assert Config.backend_command(settings, SymphonyElixir.Agent.Omp) == "my-omp"
+      assert Config.backend_command(settings, SymphonyElixir.Agent.Claude) == "my-claude"
+      assert Config.backend_command(settings, SymphonyElixir.Agent.Codex) == "my-codex"
+    end
   end
 
   test "schema errors identify invalid fields in changesets and early worker validation" do

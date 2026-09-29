@@ -2204,7 +2204,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp selected_executable(backend) do
     settings = Config.settings!()
-    command = if backend == SymphonyElixir.Agent.Claude, do: settings.claude.command, else: settings.codex.command
+    command = Config.backend_command(settings, backend)
     command |> OptionParser.split() |> List.first()
   rescue
     _ -> nil

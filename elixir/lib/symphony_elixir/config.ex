@@ -116,6 +116,11 @@ defmodule SymphonyElixir.Config do
 
   def agent_backend_for_state(_state_name), do: validate_agent_backend(settings!().agent.backend, "")
 
+  @spec backend_command(map(), module()) :: String.t()
+  def backend_command(settings, SymphonyElixir.Agent.Claude), do: settings.claude.command
+  def backend_command(settings, SymphonyElixir.Agent.Omp), do: settings.omp.command
+  def backend_command(settings, _codex), do: settings.codex.command
+
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
     case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do
@@ -210,6 +215,9 @@ defmodule SymphonyElixir.Config do
 
       selected_backend?(settings, "claude") and blank_string?(settings.claude.command) ->
         {:error, {:invalid_workflow_config, "claude.command can't be blank"}}
+
+      selected_backend?(settings, "omp") and blank_string?(settings.omp.command) ->
+        {:error, {:invalid_workflow_config, "omp.command can't be blank"}}
 
       true ->
         :ok
