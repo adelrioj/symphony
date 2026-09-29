@@ -74,6 +74,6 @@ defmodule SymphonyElixir.Agent.Omp.StreamTest do
   end
 
   test "unknown events are ignored" do
-    assert {%Stream{}, nil} = Stream.step(%{"type" => "message_update"}, Stream.new())
+    assert {%SymphonyElixir.Agent.PiFamily.Stream{}, nil} = Stream.step(%{"type" => "message_update"}, Stream.new())
   end
 end
