@@ -935,6 +935,82 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     assert Lifecycle.occupied?(%{Lifecycle.new(stopped, "stop", :cleanup) | phase: :stopped})
   end
 
+  test "an operator-authorized absent, unreleased Pod is accounted only under unchanged gate admission" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    gate_recovery_fixture(record)
+
+    {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:quiescent, _} = stopped.proof
+
+    assert get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid", "kind"]) ==
+             "admission_never_executable"
+
+    assert {:ok, deleted} = Kubernetes.destroy(config, stopped, opts)
+    assert deleted.absent?
+    assert api_state()["persistentvolumeclaims"]["workspace-se-ticket"] == nil
+  end
+
+  test "a changed admission policy cannot retroactively certify a vanished Pod" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    gate_recovery_fixture(record)
+    policy = api_state()["validatingadmissionpolicies"]["symphony-create-drain-pod-safety"]
+    put_object("validatingadmissionpolicies", put_in(policy, ["metadata", "generation"], 2))
+
+    assert {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:compute_unknown, _} = stopped.proof
+    refute get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid"])
+  end
+
+  test "a receipt for another committed Pod cannot discharge this operation" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    gate_recovery_fixture(record)
+    receipt = api_state()["configmaps"]["symphony-gate-recovery"]
+    authorization = receipt["data"]["recovery.json"] |> Jason.decode!() |> Map.put("podUID", "other-pod")
+    put_object("configmaps", put_in(receipt, ["data", "recovery.json"], Jason.encode!(authorization)))
+
+    assert {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:compute_unknown, _} = stopped.proof
+    refute get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid"])
+  end
+
+  test "a namespace selector changed after the Sandbox was created cannot certify an absent Pod" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    create_pod(api_state()["sandboxes"][record.key])
+    remove_object("pods", record.key)
+    gate_recovery_fixture(record)
+    scope = api_state()["namespaces"]["test"]
+    put_object("namespaces", put_in(scope, ["metadata", "managedFields", Access.at(0), "time"], "2026-09-29T00:00:00Z"))
+
+    assert {:ok, stopped} = Kubernetes.stop(config, created, opts)
+    assert {:compute_unknown, _} = stopped.proof
+    refute get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid"])
+  end
+
+  test "a missing authorized Pod cannot use an unreleased-Pod recovery receipt" do
+    {config, record, opts} = api_fixture()
+    {:ok, created} = Kubernetes.ensure(config, record, opts)
+    {:ok, intended} = Kubernetes.put_intent(config, created, %{desired: :running}, opts)
+    {:ok, started} = Kubernetes.start(config, intended, opts)
+    remove_object("pods", record.key)
+    gate_recovery_fixture(record)
+
+    assert {:ok, stopped} = Kubernetes.stop(config, started, opts)
+    refute match?({:quiescent, _}, stopped.proof)
+
+    refute get_in(guard_data(record), ["record", "metadata", "pod_safety", "pod-uid", "kind"]) ==
+             "admission_never_executable"
+  end
+
   test "a late committed missing Pod invalidates prior quiescence on an ordinary deletion failure" do
     {config, record, opts} = api_fixture()
     {:ok, created} = Kubernetes.ensure(config, record, opts)
@@ -3673,6 +3749,9 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
           }
         }
       },
+      "validatingadmissionpolicies" => %{},
+      "validatingadmissionpolicybindings" => %{},
+      "namespaces" => %{},
       "nodes" => if(options[:pinned_host], do: %{"worker-1" => node_object()}, else: %{}),
       "hostlossdeclarations" => %{},
       "sandboxes" => %{},
@@ -3698,6 +3777,101 @@ defmodule SymphonyElixir.KubernetesEnvironmentTest do
     Process.delete(:delayed_release)
     supervisor = start_supervised!(Supervisor.child_spec({Task.Supervisor, []}, id: make_ref()))
     {config, record, [command_fun: &api_command/3, timeout_ms: 60_000, task_supervisor: supervisor, authority: self()]}
+  end
+
+  defp gate_recovery_fixture(record) do
+    parent = api_state()["sandboxes"][record.key]
+    put_object("sandboxes", put_in(parent, ["metadata", "creationTimestamp"], "2026-09-28T00:00:00Z"))
+    operation = Enum.find(get_in(parent, ["status", "creationJournal", "operations"]), &(&1["resource"] == "pods"))
+
+    receipt = %{
+      "parentUID" => "sandbox-uid",
+      "podUID" => operation["objectUID"],
+      "operationID" => operation["id"],
+      "policyUID" => "admission-policy-uid",
+      "bindingUID" => "admission-binding-uid",
+      "namespaceUID" => "namespace-uid"
+    }
+
+    put_object("configmaps", %{
+      "metadata" => meta("symphony-gate-recovery", "receipt-uid"),
+      "immutable" => true,
+      "data" => %{"recovery.json" => Jason.encode!(receipt)}
+    })
+
+    put_object("validatingadmissionpolicies", %{
+      "metadata" =>
+        Map.merge(meta("symphony-create-drain-pod-safety", "admission-policy-uid"), %{
+          "creationTimestamp" => "2026-09-22T00:00:00Z"
+        }),
+      "spec" => %{
+        "failurePolicy" => "Fail",
+        "matchConstraints" => %{
+          "matchPolicy" => "Equivalent",
+          "resourceRules" => [
+            %{
+              "apiGroups" => [""],
+              "apiVersions" => ["*"],
+              "operations" => ["CREATE", "UPDATE", "DELETE"],
+              "resources" => ["pods", "pods/ephemeralcontainers"],
+              "scope" => "*"
+            }
+          ]
+        },
+        "validations" => [
+          %{
+            "expression" =>
+              "request.operation != 'CREATE' || has(object.spec.schedulingGates) && object.spec.schedulingGates.exists(g, g.name == 'symphony.dev/start-authorized')"
+          },
+          %{
+            "expression" =>
+              "request.operation != 'UPDATE' || !has(oldObject.spec.schedulingGates) || !oldObject.spec.schedulingGates.exists(g, g.name == 'symphony.dev/start-authorized') || (has(object.spec.schedulingGates) && object.spec.schedulingGates.exists(g, g.name == 'symphony.dev/start-authorized')) || request.userInfo.username == variables.provider"
+          }
+        ],
+        "variables" => [
+          %{
+            "name" => "provider",
+            "expression" =>
+              "has(namespaceObject.metadata.annotations) && 'symphony.dev/creation-provider' in namespaceObject.metadata.annotations ? namespaceObject.metadata.annotations['symphony.dev/creation-provider'] : ''"
+          }
+        ]
+      }
+    })
+
+    put_object("validatingadmissionpolicybindings", %{
+      "metadata" =>
+        Map.merge(meta("symphony-create-drain-pod-safety", "admission-binding-uid"), %{
+          "creationTimestamp" => "2026-09-20T00:00:00Z"
+        }),
+      "spec" => %{
+        "policyName" => "symphony-create-drain-pod-safety",
+        "validationActions" => ["Deny"],
+        "matchResources" => %{
+          "matchPolicy" => "Equivalent",
+          "namespaceSelector" => %{"matchLabels" => %{"symphony.dev/create-drain" => "symphony-create-drain-v1"}}
+        }
+      }
+    })
+
+    put_object("namespaces", %{
+      "metadata" =>
+        Map.merge(meta("test", "namespace-uid"), %{
+          "creationTimestamp" => "2026-09-20T00:00:00Z",
+          "labels" => %{"symphony.dev/create-drain" => "symphony-create-drain-v1"},
+          "annotations" => %{"symphony.dev/creation-provider" => "system:serviceaccount:symphony:symphony-provider"},
+          "managedFields" => [
+            %{
+              "time" => "2026-09-20T01:00:00Z",
+              "fieldsV1" => %{
+                "f:metadata" => %{
+                  "f:labels" => %{"f:symphony.dev/create-drain" => %{}},
+                  "f:annotations" => %{"f:symphony.dev/creation-provider" => %{}}
+                }
+              }
+            }
+          ]
+        })
+    })
   end
 
   defp api_command(executable, args, _opts) do
