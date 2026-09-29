@@ -27,12 +27,12 @@ pi has no MCP support (`usage.md`); tools come only from extensions via `pi.regi
 
 Bridge behavior:
 
-1. On load, spawn the tracker MCP server command given in env `SYMPHONY_MCP_COMMAND` / `SYMPHONY_MCP_ARGS_JSON` / `SYMPHONY_MCP_ENV_JSON` (same server Claude and omp use: `symphony --linear-mcp --workflow <path>`), with `cwd` = workspace.
+1. On load, read `SYMPHONY_BRIDGE_CONFIG` (path to a 0600 JSON file `{command,args,env,timeoutMs}`) and spawn the tracker MCP server command it describes (same server Claude and omp use: `symphony --linear-mcp --workflow <path>`), with `cwd` = workspace.
 2. Speak minimal MCP over stdio itself (newline-delimited JSON-RPC 2.0): `initialize`, `notifications/initialized`, `tools/list`, `tools/call`. No npm dependencies.
 3. Register every listed tool with `pi.registerTool()`, name prefixed `symphony_` (e.g. `symphony_linear_graphql`), forwarding the input schema and mapping the MCP result content to the pi tool result; MCP `isError` becomes a tool error.
 4. Kill the child on `session_shutdown` and on process exit; a child that dies mid-session makes subsequent tool calls return an error, not hang (per-call timeout from `codex.turn_timeout_ms`).
 
-Tracker secrets: the bridge receives them via the MCP server's env only (`SYMPHONY_MCP_ENV_JSON`, delivered through the private 0600 config, never argv); pi's own process env has them scrubbed like the other backends.
+Tracker secrets: they live only in the `SYMPHONY_BRIDGE_CONFIG` JSON file (0600, never argv) and reach the MCP server through its `env`; never in pi's own environment, which is scrubbed like the other backends.
 
 The extension is materialized by `Agent.Pi` into the private session dir at `start_session` (locally) or streamed in the SSH payload (remotely), so hosts need no Symphony checkout and the version always matches the running daemon.
 
