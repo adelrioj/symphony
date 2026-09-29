@@ -34,8 +34,37 @@ defmodule SymphonyElixirWeb.Layouts do
 
             if (!window.Phoenix || !window.LiveView) return;
 
+            // Drag handle on the console detail pane. The width lives on <html> so LiveView patches cannot reset it.
+            var DetailResize = {
+              mounted: function () {
+                var el = this.el, root = document.documentElement, key = "symphony.detailWidth";
+                var saved = localStorage.getItem(key);
+                if (saved) root.style.setProperty("--detail-w", saved);
+
+                el.addEventListener("pointerdown", function (down) {
+                  el.setPointerCapture(down.pointerId);
+                  el.classList.add("dragging");
+                  el.onpointermove = function (move) {
+                    var width = Math.min(window.innerWidth * 0.7, Math.max(320, window.innerWidth - move.clientX));
+                    root.style.setProperty("--detail-w", width + "px");
+                  };
+                  el.onpointerup = function () {
+                    el.classList.remove("dragging");
+                    el.onpointermove = el.onpointerup = null;
+                    localStorage.setItem(key, root.style.getPropertyValue("--detail-w"));
+                  };
+                });
+
+                el.addEventListener("dblclick", function () {
+                  root.style.removeProperty("--detail-w");
+                  localStorage.removeItem(key);
+                });
+              }
+            };
+
             var liveSocket = new window.LiveView.LiveSocket("/live", window.Phoenix.Socket, {
-              params: {_csrf_token: csrfToken}
+              params: {_csrf_token: csrfToken},
+              hooks: {DetailResize: DetailResize}
             });
 
             liveSocket.connect();

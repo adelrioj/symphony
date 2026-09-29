@@ -73,13 +73,23 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
       <p :if={@groups == []} class="empty-state">No tickets match.</p>
       <section :for={group <- @groups} class="console-group" data-group={group.key}>
         <h2 class="console-group-head">
-          <span class={"console-st console-st--#{group.icon}"}></span>
-          {group.label}
-          <span :if={group.category} class="console-cat">{group.category}</span>
-          <span class="console-count">{length(group.tickets)}</span>
+          <button
+            type="button"
+            class="console-group-toggle"
+            phx-click="toggle_group"
+            phx-value-group={group.key}
+            aria-expanded={to_string(group.key not in @collapsed)}
+          >
+            <span class={["console-caret", group.key in @collapsed && "console-caret--closed"]} aria-hidden="true">▾</span>
+            <span class={"console-st console-st--#{group.icon}"}></span>
+            {group.label}
+            <span :if={group.category} class="console-cat">{group.category}</span>
+            <span class="console-count">{length(group.tickets)}</span>
+          </button>
         </h2>
-        <p :if={group.tickets == []} class="console-empty">Nothing here.</p>
-        <.link
+        <div :if={group.key not in @collapsed}>
+          <p :if={group.tickets == []} class="console-empty">Nothing here.</p>
+          <.link
           :for={ticket <- group.tickets}
           patch={console_path(@nav, selected: ticket.key)}
           class="console-row"
@@ -111,7 +121,9 @@ defmodule SymphonyElixirWeb.ConsoleComponents do
             {ticket.error}{if ticket.due_at, do: " · retry in #{Console.duration(@now, ticket.due_at)}"}
           </span>
         </.link>
+        </div>
       </section>
+      <div id="console-list-fill" class="console-list-fill" phx-click="deselect"></div>
     </div>
     """
   end

@@ -396,6 +396,9 @@ defmodule SymphonyElixirWeb.ConsoleTest do
            ]
 
     assert [%{at: ^at}] = Console.activity([event.("tool", "Read: a.ex")])
+
+    assert Console.activity([event.("tool", "Using tool: Read"), event.("tool", "Read: a.ex")]) |> Enum.map(& &1.text) ==
+             ["Read: a.ex"]
   end
 
   test "handles non-binary tracker_state in grouping" do

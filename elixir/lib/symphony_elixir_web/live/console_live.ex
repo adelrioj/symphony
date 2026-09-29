@@ -15,7 +15,7 @@ defmodule SymphonyElixirWeb.ConsoleLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket), do: :ok = ObservabilityPubSub.subscribe()
-    {:ok, assign(socket, :panel, nil)}
+    {:ok, assign(socket, panel: nil, collapsed: MapSet.new(), detail_open: true)}
   end
 
   @impl true
@@ -27,7 +27,9 @@ defmodule SymphonyElixirWeb.ConsoleLive do
       selected: blank_to_nil(params["ticket"])
     }
 
-    {:noreply, socket |> assign(nav: nav, panel: nil) |> load()}
+    socket = assign(socket, nav: nav, panel: nil)
+    socket = if nav.selected, do: assign(socket, :detail_open, true), else: socket
+    {:noreply, load(socket)}
   end
 
   @impl true
@@ -59,6 +61,19 @@ defmodule SymphonyElixirWeb.ConsoleLive do
   end
 
   def handle_event("cancel", _params, socket), do: {:noreply, assign(socket, :panel, nil)}
+
+  def handle_event("toggle_detail", _params, socket),
+    do: {:noreply, update(socket, :detail_open, &(not &1))}
+
+  def handle_event("toggle_group", %{"group" => key}, socket) do
+    collapsed = socket.assigns.collapsed
+    collapsed = if MapSet.member?(collapsed, key), do: MapSet.delete(collapsed, key), else: MapSet.put(collapsed, key)
+    {:noreply, assign(socket, :collapsed, collapsed)}
+  end
+
+  def handle_event("deselect", _params, socket),
+    do: {:noreply, push_patch(socket, to: console_path(socket.assigns.nav, selected: nil))}
+
   def handle_event("stop", _params, socket), do: act(socket, "stopped", &OperatorActions.stop/2)
   def handle_event("retry_now", _params, socket), do: act(socket, "dispatched", &OperatorActions.retry_now/2)
   def handle_event("approve", _params, socket), do: act(socket, "resumed", &OperatorActions.resume(&1, &2, nil))
@@ -69,7 +84,7 @@ defmodule SymphonyElixirWeb.ConsoleLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <section class="console" id="console">
+    <section class={["console", not @detail_open && "console--closed"]} id="console">
       <aside class="console-side">
         <.lane_nav nav={@nav} entries={@entries} tickets={@tickets} now={@now} />
       </aside>
@@ -82,15 +97,27 @@ defmodule SymphonyElixirWeb.ConsoleLive do
           </div>
           <button id="poll-trackers" type="button" class="subtle-button" phx-click="poll">↻ Poll trackers</button>
         </header>
-        <.ticket_list nav={@nav} groups={@groups} now={@now} />
+        <.ticket_list nav={@nav} groups={@groups} now={@now} collapsed={@collapsed} />
       </section>
+      <button
+        id="detail-toggle"
+        type="button"
+        class="console-tab"
+        phx-click="toggle_detail"
+        aria-expanded={to_string(@detail_open)}
+        aria-controls="console-detail"
+        title={if @detail_open, do: "Hide details", else: "Show details"}
+      >
+        {if @detail_open, do: ">", else: "<"}
+      </button>
       <aside class="console-detail" id="console-detail" aria-label="Ticket detail">
+        <div id="detail-resize" class="console-resize" phx-hook="DetailResize" title="Drag to resize"></div>
         <p :if={is_nil(@ticket)} class="empty-state">Select a ticket or agent to see its run.</p>
+        <p :if={@ticket} class="console-detail-head">
+          <span class="muted">{@ticket.lane}</span> › <strong class="mono">{@ticket.identifier}</strong>
+          <a :if={@ticket.url} class="subtle-button" href={@ticket.url} target="_blank" rel="noopener noreferrer">Open in tracker</a>
+        </p>
         <div :if={@ticket} class="console-detail-body">
-          <p class="console-detail-head">
-            <span class="muted">{@ticket.lane}</span> › <strong class="mono">{@ticket.identifier}</strong>
-            <a :if={@ticket.url} class="subtle-button" href={@ticket.url} target="_blank" rel="noopener noreferrer">Open in tracker</a>
-          </p>
           <h2 class="console-detail-title">{@ticket.title || @ticket.identifier}</h2>
           <p :if={@ticket.labels != []}><span :for={label <- @ticket.labels} class="console-chip">{label}</span></p>
           <dl class="console-kv">
@@ -158,7 +185,8 @@ defmodule SymphonyElixirWeb.ConsoleLive do
               </li>
             </ol>
           </section>
-          <footer class="console-actions">
+          </div>
+          <footer :if={@ticket} class="console-actions">
             <div :if={@ticket.source == :runtime and @panel == "stop"} class="console-confirm" id="stop-confirm">
               <p>
                 <strong>Stop this run?</strong>
@@ -208,7 +236,6 @@ defmodule SymphonyElixirWeb.ConsoleLive do
               Full run log
             </a>
           </footer>
-        </div>
       </aside>
     </section>
     """
