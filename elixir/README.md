@@ -24,7 +24,8 @@ One installation serves one client with multiple DB-backed lanes. Each enabled l
 
 The default backend is Codex in
 [App Server mode](https://developers.openai.com/codex/app-server/). Symphony also has an optional
-Claude backend that runs `claude -p --output-format stream-json`.
+Claude backend that runs `claude -p --output-format stream-json` and an optional omp backend that
+runs `omp -p --mode json`.
 
 During Codex app-server sessions, the selected tracker adapter may advertise provider-native tools.
 Linear serves `linear_graphql` and `linear_fetch_attachment`, GitHub Issues serves `github_api`, Jira Cloud serves `jira_rest`,
@@ -164,6 +165,8 @@ Notes:
   clone.
 - **The `claude` backend** is not installed in the image; it ships the Codex CLI only. Add the
   `claude` CLI and its auth if you route states to it via `agent.backend_by_state`.
+- **The `omp` backend** is not installed in the image either. Add the `omp` CLI and its
+  credentials (environment API keys or an auth broker) if you route states to it.
 
 ## Burrito releases
 
@@ -994,7 +997,7 @@ introduced as UTC Unix milliseconds. Unknown issue identifiers still return not-
 
 ### Agent backends
 
-`agent.backend` selects the default backend. Supported values are `codex` and `claude`; the default
+`agent.backend` selects the default backend. Supported values are `codex`, `claude`, and `omp`; the default
 is `codex`. `agent.backend_by_state` overrides the backend for a tracker state after trimming and
 lowercasing the state key. `agent.blocked_state` is where Symphony parks a blocked backend result
 after posting the blocked comment when the selected adapter supports tracker writes.
@@ -1076,6 +1079,46 @@ The helper mode can also be run directly when debugging MCP wiring:
 This escript starts a file-backed lane context only, without SQLite or a scheduler. During normal
 execution the daemon writes a private snapshot of the attempt's workflow for MCP; changing the
 current lane version cannot switch the adapter or prompt under that running attempt.
+
+### omp backend
+
+The omp backend (`agent.backend: omp`) runs `omp -p --mode json` once per turn in the issue
+workspace. Turn 1 sends the full prompt; later turns pass `--continue` against the same private
+per-issue session with the continuation prompt. There is no approval channel: omp runs with
+`--approval-mode yolo` and a built-in tool allowlist (`omp.allowed_tools`, default `read`, `grep`,
+`find`, `edit`, `write`, `bash`). `allowed_tools` restricts built-in tools only; omp mounts the
+tracker MCP tools itself, so they are always available and must not be listed.
+
+```yaml
+agent:
+  backend: omp
+omp:
+  command: omp
+  model: openrouter/anthropic/claude-sonnet-4
+  thinking: low
+```
+
+Credentials come from the process environment: provider API keys (for example
+`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`) or omp's auth broker via `OMP_AUTH_BROKER_URL` and
+`OMP_AUTH_BROKER_TOKEN`. OAuth logins stored only in a local `agent.db` are not visible to lanes:
+Symphony uses a private agent directory, and symlinking `agent.db` into it is unsafe (SQLite would
+create a separate `-wal` file beside the shared database). Move such logins to a broker.
+
+Isolation is hermetic: a private `PI_CODING_AGENT_DIR` holds only Symphony's `mcp.json`, a config
+overlay disables project MCP config and the listed foreign discovery providers, and turns pass
+`--no-extensions --no-skills --no-rules`. Only the tracker server and `omp.extra_mcp_servers` are
+reachable.
+
+omp is not sandboxed. It runs with the daemon user's privileges: the built-in `bash`, `edit` and
+`write` tools run under `--approval-mode yolo`, and the workspace is only the working directory, not
+a confinement boundary. Tracker credentials sit in a same-user mode-0600 `mcp.json` inside the
+private agent directory, which the agent can read. On SSH and managed workers the workflow,
+`mcp.json` and overlay are removed after every turn (and on interruption); only the session
+directory persists until the session stops.
+
+On SSH and managed workers, omp must be installed and credentialed on the host (environment
+variables available to the login shell); worker-side tracker variables are not required. omp uses
+the shared `codex.turn_timeout_ms` and `codex.stall_timeout_ms` settings.
 
 ### Linear adapter profile
 

@@ -64,6 +64,14 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {"claude_linear_mcp_args", ["claude", "linear_mcp_args"], :list},
     {"claude_allowed_tools", ["claude", "allowed_tools"], :list},
     {"claude_extra_mcp_servers_json", ["claude", "extra_mcp_servers"], :json},
+    {"omp_command", ["omp", "command"], :text},
+    {"omp_model", ["omp", "model"], :text},
+    {"omp_thinking", ["omp", "thinking"], :text},
+    {"omp_args", ["omp", "args"], :list},
+    {"omp_allowed_tools", ["omp", "allowed_tools"], :list},
+    {"omp_linear_mcp_command", ["omp", "linear_mcp_command"], :text},
+    {"omp_linear_mcp_args", ["omp", "linear_mcp_args"], :list},
+    {"omp_extra_mcp_servers_json", ["omp", "extra_mcp_servers"], :json},
     {"hooks_after_create", ["hooks", "after_create"], :text},
     {"hooks_before_run", ["hooks", "before_run"], :text},
     {"hooks_after_run", ["hooks", "after_run"], :text},
@@ -271,7 +279,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
         <fieldset class="form-section" id="workflow">
           <legend>Workflow</legend>
           <label for="lane-prompt">Prompt</label><textarea id="lane-prompt" name="lane[prompt]" rows="8" phx-debounce="300">{@params["prompt"]}</textarea>
-          <label for="agent-backend">Agent backend</label><select id="agent-backend" name="lane[agent_backend]"><option value="codex" selected={@params["agent_backend"] == "codex"}>Codex</option><option value="claude" selected={@params["agent_backend"] == "claude"}>Claude</option></select>
+          <label for="agent-backend">Agent backend</label><select id="agent-backend" name="lane[agent_backend]"><option value="codex" selected={@params["agent_backend"] == "codex"}>Codex</option><option value="claude" selected={@params["agent_backend"] == "claude"}>Claude</option><option value="omp" selected={@params["agent_backend"] == "omp"}>omp</option></select>
           <label for="agent-backend-by-state">Backend overrides by state (JSON)</label><textarea id="agent-backend-by-state" name="lane[agent_backend_by_state_json]" rows="3" class="mono">{@params["agent_backend_by_state_json"]}</textarea>
           <label for="agent-blocked-state">Blocked state</label><input id="agent-blocked-state" type="text" name="lane[agent_blocked_state]" value={@params["agent_blocked_state"]} />
           <label for="agent-in-progress-state">In-progress state</label><input id="agent-in-progress-state" type="text" name="lane[agent_in_progress_state]" value={@params["agent_in_progress_state"]} />
@@ -297,6 +305,18 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
             <label for="claude-allowed-tools">Allowed tools (one per line)</label><textarea id="claude-allowed-tools" name="lane[claude_allowed_tools]" rows="3">{@params["claude_allowed_tools"]}</textarea>
             <label for="claude-extra-mcp">Additional MCP servers (JSON)</label><textarea id="claude-extra-mcp" name="lane[claude_extra_mcp_servers_json]" rows="5" class="mono">{@params["claude_extra_mcp_servers_json"]}</textarea>
             <.lane_prefix_errors errors={@errors} prefix="claude." />
+          </div>
+          <div :if={@params["agent_backend"] == "omp"} class="config-subsection">
+            <h3>omp settings</h3>
+            <label for="omp-command">Command</label><input id="omp-command" type="text" name="lane[omp_command]" value={@params["omp_command"]} />
+            <label for="omp-model">Model</label><input id="omp-model" type="text" name="lane[omp_model]" value={@params["omp_model"]} />
+            <label for="omp-thinking">Thinking level</label><input id="omp-thinking" type="text" name="lane[omp_thinking]" value={@params["omp_thinking"]} />
+            <label for="omp-args">Arguments (one per line)</label><textarea id="omp-args" name="lane[omp_args]" rows="3">{@params["omp_args"]}</textarea>
+            <label for="omp-linear-mcp-command">Linear MCP command</label><input id="omp-linear-mcp-command" type="text" name="lane[omp_linear_mcp_command]" value={@params["omp_linear_mcp_command"]} />
+            <label for="omp-linear-mcp-args">Linear MCP arguments (one per line)</label><textarea id="omp-linear-mcp-args" name="lane[omp_linear_mcp_args]" rows="3">{@params["omp_linear_mcp_args"]}</textarea>
+            <label for="omp-allowed-tools">Allowed built-in tools (one per line)</label><textarea id="omp-allowed-tools" name="lane[omp_allowed_tools]" rows="3">{@params["omp_allowed_tools"]}</textarea>
+            <label for="omp-extra-mcp">Additional MCP servers (JSON)</label><textarea id="omp-extra-mcp" name="lane[omp_extra_mcp_servers_json]" rows="5" class="mono">{@params["omp_extra_mcp_servers_json"]}</textarea>
+            <.lane_prefix_errors errors={@errors} prefix="omp." />
           </div>
           <label for="hooks-after-create">After-create setup hook</label><textarea id="hooks-after-create" name="lane[hooks_after_create]" rows="2">{@params["hooks_after_create"]}</textarea>
           <label for="hooks-before-run">Before-run hook</label><textarea id="hooks-before-run" name="lane[hooks_before_run]" rows="2">{@params["hooks_before_run"]}</textarea>

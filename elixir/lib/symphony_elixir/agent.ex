@@ -23,5 +23,6 @@ defmodule SymphonyElixir.Agent do
   @spec module_for(String.t()) :: {:ok, module()} | {:error, {:invalid_agent_backend, String.t()}}
   def module_for("codex"), do: {:ok, SymphonyElixir.Agent.Codex}
   def module_for("claude"), do: {:ok, SymphonyElixir.Agent.Claude}
+  def module_for("omp"), do: {:ok, SymphonyElixir.Agent.Omp}
   def module_for(other), do: {:error, {:invalid_agent_backend, other}}
 end

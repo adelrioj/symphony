@@ -8,6 +8,10 @@ defmodule SymphonyElixir.AgentTest do
     assert Agent.module_for("claude") == {:ok, SymphonyElixir.Agent.Claude}
   end
 
+  test "module_for/1 resolves omp" do
+    assert {:ok, SymphonyElixir.Agent.Omp} = Agent.module_for("omp")
+  end
+
   test "module_for/1 rejects unsupported backends" do
     assert Agent.module_for("gemini") == {:error, {:invalid_agent_backend, "gemini"}}
   end

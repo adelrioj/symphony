@@ -29,8 +29,6 @@ defmodule SymphonyElixir.AgentRunnerStubBackend do
       on_message.(message)
     end
 
-    if pid = opts[:test_pid], do: send(pid, {:stub_backend, :prompt, prompt})
-
     case opts[:run_result] do
       {:error, _reason} = error ->
         error

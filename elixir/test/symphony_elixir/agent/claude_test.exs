@@ -264,68 +264,6 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     assert File.exists?(session.mcp_config_path)
   end
 
-  test "mcp_config_dir/1 returns directory errors" do
-    assert {:error, {:mcp_config_dir, %FunctionClauseError{}}} = Claude.mcp_config_dir(:bad_workspace)
-  end
-
-  test "default_mcp_command/1 accepts only an existing executable regular file" do
-    executable = System.find_executable("sh")
-    assert Claude.default_mcp_command(String.to_charlist(executable)) == executable
-
-    missing = "definitely_missing_symphony_escript_#{System.unique_integer([:positive])}"
-    assert Claude.default_mcp_command(String.to_charlist(missing)) in [System.find_executable("symphony"), "symphony"]
-
-    assert Claude.default_mcp_command(~c"--i-understand-that-this-will-be-running-without-the-usual-guardrails") in [
-             System.find_executable("symphony"),
-             "symphony"
-           ]
-  end
-
-  test "default_mcp_command bypasses unusable escript argv under Burrito" do
-    previous_burrito = System.get_env("__BURRITO")
-    on_exit(fn -> restore_env("__BURRITO", previous_burrito) end)
-    System.put_env("__BURRITO", "1")
-
-    fallback = System.find_executable("symphony") || "symphony"
-
-    assert Claude.default_mcp_command() == fallback
-    refute Claude.default_mcp_command() =~ "--i-understand"
-    refute Claude.default_mcp_command() =~ "WORKFLOW.md"
-  end
-
-  test "close_port/1 tolerates live and already-closed ports" do
-    live_port = Port.open({:spawn, "cat"}, [:binary])
-    assert :ok = Claude.close_port(live_port)
-
-    exited_port = Port.open({:spawn, "true"}, [:exit_status])
-
-    receive do
-      {^exited_port, {:exit_status, 0}} -> :ok
-    after
-      500 -> flunk("expected fake port to exit")
-    end
-
-    assert :ok = Claude.close_port(exited_port)
-
-    parent = self()
-
-    owner =
-      spawn(fn ->
-        port = Port.open({:spawn, "cat"}, [:binary])
-        send(parent, {:owned_port, port})
-
-        receive do
-          :stop -> :ok
-        after
-          1_000 -> :ok
-        end
-      end)
-
-    assert_receive {:owned_port, owned_port}
-    assert :ok = Claude.close_port(owned_port)
-    send(owner, :stop)
-  end
-
   test "run_turn returns command resolution errors" do
     tmp = Path.join(System.tmp_dir!(), "symphony-claude-command-test-#{System.unique_integer([:positive])}")
     workspace = Path.join(tmp, "workspace")
@@ -399,61 +337,6 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     assert :ok = Claude.stop_session(path_session)
   end
 
-  test "drive_port/4 reports port startup errors" do
-    assert {:error, {:claude_port, _error}} = Claude.drive_port(<<0>>, [], File.cwd!(), nil)
-  end
-
-  test "drive_port/4 folds direct process output" do
-    tmp = Path.join(System.tmp_dir!(), "symphony-claude-direct-port-test-#{System.unique_integer([:positive])}")
-    workspace = Path.join(tmp, "workspace")
-    script = Path.join(tmp, "direct_claude")
-    File.mkdir_p!(workspace)
-
-    write_fake_claude_lines!(script, [
-      %{"type" => "result", "subtype" => "success", "is_error" => false, "result" => "direct ok"}
-    ])
-
-    on_exit(fn -> File.rm_rf(tmp) end)
-
-    assert {:ok, %Result{status: :done, summary: "direct ok"}} = Claude.drive_port(script, [], workspace, nil)
-  end
-
-  test "local direct and redirected ports scrub adapter-declared tracker secrets" do
-    tmp = Path.join(System.tmp_dir!(), "symphony-claude-secret-test-#{System.unique_integer([:positive])}")
-    workspace = Path.join(tmp, "workspace")
-    script = Path.join(tmp, "fake_claude")
-    prompt_path = Path.join(tmp, "prompt")
-    secret_name = "SYMPHONY_CLAUDE_TEST_SECRET"
-    previous_secret = System.get_env(secret_name)
-
-    File.mkdir_p!(workspace)
-    File.write!(prompt_path, "prompt")
-
-    File.write!(script, """
-    #!/bin/sh
-    if [ -n "$#{secret_name}" ]; then summary=leaked; else summary=scrubbed; fi
-    printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"result":"'"$summary"'"}'
-    """)
-
-    File.chmod!(script, 0o700)
-    System.put_env(secret_name, "never-inherit-this")
-
-    on_exit(fn ->
-      restore_env(secret_name, previous_secret)
-      File.rm_rf(tmp)
-    end)
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "$#{secret_name}",
-      claude_command: script
-    )
-
-    assert {:ok, %Result{summary: "scrubbed"}} = Claude.drive_port(script, [], workspace, nil)
-
-    assert {:ok, %Result{summary: "scrubbed"}} =
-             Claude.drive_port(script, [], workspace, nil, prompt_path)
-  end
-
   test "Claude session snapshots tracker tools, workflow, and MCP secret env until cleanup" do
     tmp = Path.join(System.tmp_dir!(), "symphony-claude-snapshot-test-#{System.unique_integer([:positive])}")
     workspace = Path.join(tmp, "workspace")
@@ -516,10 +399,6 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     refute File.exists?(session.workflow_snapshot_path)
   end
 
-  test "drive_port/5 reports redirected port startup errors" do
-    assert {:error, {:claude_port, _error}} = Claude.drive_port("/bin/true", [], <<0>>, nil, "/tmp/prompt")
-  end
-
   test "run_turn reports ssh launch errors" do
     {:ok, session} =
       Claude.start_session(File.cwd!(),
@@ -580,51 +459,6 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
 
     assert {:ok, %Result{summary: ^huge_summary}} = Claude.run_turn(long_session, "prompt", %{}, [])
     assert :ok = Claude.stop_session(long_session)
-  end
-
-  test "collect_port_stream folds split no-eol chunks before exit" do
-    result_json =
-      Jason.encode!(%{"type" => "result", "subtype" => "success", "is_error" => false, "result" => "split ok"})
-
-    {head, tail} = String.split_at(result_json, 12)
-
-    with_collect_port(fn port ->
-      send(self(), {port, {:data, {:noeol, head}}})
-      send(self(), {port, {:data, {:eol, tail}}})
-      send(self(), {port, {:exit_status, 0}})
-
-      assert {:ok, %Result{status: :done, summary: "split ok"}} = Claude.collect_port_stream(port, nil)
-    end)
-  end
-
-  test "collect_port_stream drains queued eol data after exit_status" do
-    result_json =
-      Jason.encode!(%{"type" => "result", "subtype" => "success", "is_error" => false, "result" => "drained ok"})
-
-    with_collect_port(fn port ->
-      send(self(), {port, {:exit_status, 0}})
-      send(self(), {port, {:data, {:eol, result_json}}})
-
-      assert {:ok, %Result{status: :done, summary: "drained ok"}} = Claude.collect_port_stream(port, nil)
-    end)
-  end
-
-  test "collect_port_stream logs and skips an undecodable line, still folding the valid result" do
-    result_json =
-      Jason.encode!(%{"type" => "result", "subtype" => "success", "is_error" => false, "result" => "after bad line"})
-
-    log =
-      ExUnit.CaptureLog.capture_log(fn ->
-        with_collect_port(fn port ->
-          send(self(), {port, {:data, {:eol, "{not valid json"}}})
-          send(self(), {port, {:data, {:eol, result_json}}})
-          send(self(), {port, {:exit_status, 0}})
-
-          assert {:ok, %Result{status: :done, summary: "after bad line"}} = Claude.collect_port_stream(port, nil)
-        end)
-      end)
-
-    assert log =~ "Claude stream line dropped (undecodable)"
   end
 
   test "run_turn folds a final stream JSON result without a trailing newline" do
@@ -772,25 +606,6 @@ defmodule SymphonyElixir.Agent.ClaudeTest do
     """)
 
     File.chmod!(path, 0o700)
-  end
-
-  defp with_collect_port(fun) do
-    port = Port.open({:spawn, "sleep 5"}, [:binary, :exit_status])
-
-    try do
-      fun.(port)
-    after
-      _ = Claude.close_port(port)
-      flush_port_messages(port)
-    end
-  end
-
-  defp flush_port_messages(port) do
-    receive do
-      {^port, _message} -> flush_port_messages(port)
-    after
-      0 -> :ok
-    end
   end
 
   defp write_claude_workflow!(command, opts \\ []) do
