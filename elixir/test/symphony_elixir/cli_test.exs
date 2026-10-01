@@ -436,6 +436,50 @@ defmodule SymphonyElixir.CLITest do
     assert response["result"]["isError"] == true
   end
 
+  # StringIO never reproduces this: only a real stdio port under a UTF-8 locale starts in
+  # :unicode mode, where binread of a non-ASCII byte used to end the server silently.
+  test "serve_linear_mcp/0 answers non-ASCII requests over real stdio", %{root: root} do
+    File.mkdir_p!(root)
+
+    requests = [
+      # 2-, 3- and 4-byte UTF-8 in a request handled without a tracker binding.
+      %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/call",
+        "params" => %{"name" => "approval_prompt", "arguments" => %{"note" => "é — “x” 😀"}}
+      },
+      # The id is echoed back, so the reply itself must carry non-ASCII byte-exact.
+      %{"jsonrpc" => "2.0", "id" => "id—é"}
+    ]
+
+    input = Enum.map_join(requests, "", &(Jason.encode!(&1) <> "\n")) <> "not json\n"
+    input_path = Path.join(root, "mcp-input")
+    stderr_path = Path.join(root, "mcp-stderr")
+    File.write!(input_path, input)
+
+    paths = for path <- :code.get_path(), String.contains?(to_string(path), "_build"), do: ["-pa", to_string(path)]
+    elixir = System.find_executable("elixir")
+
+    {output, 0} =
+      System.cmd(
+        "sh",
+        ["-c", ~s(exec "$0" "$@" < "$MCP_INPUT" 2> "$MCP_STDERR"), elixir | List.flatten(paths)] ++
+          ["-e", "SymphonyElixir.CLI.serve_linear_mcp()"],
+        env: [{"MCP_INPUT", input_path}, {"MCP_STDERR", stderr_path}, {"LANG", "C.UTF-8"}, {"LC_ALL", "C.UTF-8"}]
+      )
+
+    assert [approval, unsupported, parse_error] = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+
+    assert approval["id"] == 1
+    assert approval["result"]["isError"] == true
+    assert unsupported["id"] == "id—é"
+    assert unsupported["error"]["code"] == -32_600
+    assert parse_error["id"] == nil
+    assert parse_error["error"]["code"] == -32_700
+    assert File.read!(stderr_path) =~ "dropped a request that is not valid JSON"
+  end
+
   defp restore_default_logger_handler({:ok, config}) do
     :logger.remove_handler(:default)
     :logger.add_handler(:default, config.module, Map.drop(config, [:id, :module]))

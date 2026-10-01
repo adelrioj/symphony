@@ -416,7 +416,14 @@ defmodule SymphonyElixir.CLI do
     |> IO.iodata_to_binary()
   end
 
-  defp serve_linear_mcp do
+  @doc false
+  @spec serve_linear_mcp() :: :ok
+  def serve_linear_mcp do
+    # MCP frames are UTF-8 bytes. Under a UTF-8 locale the escript's standard_io starts in
+    # :unicode mode, where IO.binread/2 fails with {:no_translation, :unicode, :latin1} on
+    # the first non-ASCII byte -- which used to end the loop as a silent clean exit, leaving
+    # the client to wait out its tool timeout. :latin1 makes stdio a raw byte channel.
+    :ok = :io.setopts(:standard_io, encoding: :latin1)
     serve_linear_mcp_loop(:stdio, :stdio)
   end
 
@@ -436,6 +443,16 @@ defmodule SymphonyElixir.CLI do
         |> write_linear_mcp_response(output, framing)
 
         serve_linear_mcp_loop(input, output)
+
+      {:parse_error, framing} ->
+        # The request id is unreadable, so the client cannot match this to its call, but an
+        # answer on the wire and a line on stderr beat a request that silently vanishes.
+        IO.puts(:stderr, "Symphony linear MCP: dropped a request that is not valid JSON")
+
+        %{"jsonrpc" => "2.0", "id" => nil, "error" => %{"code" => -32_700, "message" => "Parse error"}}
+        |> write_linear_mcp_response(output, framing)
+
+        serve_linear_mcp_loop(input, output)
     end
   end
 
@@ -444,7 +461,8 @@ defmodule SymphonyElixir.CLI do
       :eof ->
         :eof
 
-      {:error, _reason} ->
+      {:error, reason} ->
+        IO.puts(:stderr, "Symphony linear MCP: stdin read failed: #{inspect(reason)}")
         :eof
 
       line ->
@@ -465,13 +483,13 @@ defmodule SymphonyElixir.CLI do
              {:ok, request} <- Jason.decode(body) do
           {:ok, request, :content_length}
         else
-          _ -> :skip
+          _ -> {:parse_error, :content_length}
         end
 
       true ->
         case Jason.decode(trimmed) do
           {:ok, request} -> {:ok, request, :line}
-          {:error, _reason} -> :skip
+          {:error, _reason} -> {:parse_error, :line}
         end
     end
   end
@@ -522,11 +540,11 @@ defmodule SymphonyElixir.CLI do
 
   defp write_linear_mcp_response(response, output, :content_length) do
     encoded = Jason.encode!(response)
-    IO.write(output, ["Content-Length: ", Integer.to_string(byte_size(encoded)), "\r\n\r\n", encoded])
+    IO.binwrite(output, ["Content-Length: ", Integer.to_string(byte_size(encoded)), "\r\n\r\n", encoded])
   end
 
   defp write_linear_mcp_response(response, output, :line) do
-    IO.puts(output, Jason.encode!(response))
+    IO.binwrite(output, [Jason.encode!(response), "\n"])
   end
 
   @spec wait_for_shutdown() :: no_return()
