@@ -775,7 +775,7 @@ pre,
 .console .mono { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
 .console button, .console .subtle-button { border: 1px solid var(--line-strong); border-radius: 7px; padding: 4px 10px; font-size: 12.5px; font-weight: 500; letter-spacing: 0; background: var(--card); color: var(--ink); box-shadow: none; transform: none; display: inline-flex; gap: 6px; align-items: center; }
 .console button:hover, .console .subtle-button:hover { background: var(--page-deep); border-color: var(--line-strong); color: var(--ink); transform: none; box-shadow: none; }
-.console button:not(.subtle-button):not(.danger-button) { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.console button:not(.subtle-button):not(.danger-button):not(.console-group-toggle):not(.console-tab) { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .console .danger-button { background: var(--card); border-color: var(--line-strong); color: var(--danger); }
 .console .console-confirm .danger-button { background: var(--danger); border-color: var(--danger); color: var(--card); }
 .console :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 6px; }
@@ -847,7 +847,7 @@ pre,
 .console--closed { grid-template-columns: 240px minmax(0, 1fr) 18px; }
 .console-resize { position: absolute; left: -4px; top: 0; bottom: 0; width: 7px; cursor: col-resize; z-index: 5; touch-action: none; }
 .console-resize:hover, .console-resize.dragging { background: var(--accent); opacity: 0.4; }
-.console-tab { width: 18px; padding: 0; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: var(--page); color: var(--muted); font-weight: 700; font-size: 13px; cursor: pointer; }
+.console .console-tab { width: 18px; padding: 0; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: var(--page); color: var(--muted); font-weight: 700; font-size: 13px; cursor: pointer; }
 .console .console-tab:hover { background: var(--accent-soft); color: var(--accent); border-color: var(--line); }
 .console-detail > .empty-state { padding: 40px 16px; text-align: center; color: var(--faint); }
 .console-detail-body { flex: 1; min-height: 0; overflow: auto; display: grid; gap: 18px; padding: 14px 16px; align-content: start; }
