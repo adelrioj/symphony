@@ -146,7 +146,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       if match?({:quiescent, _}, settled.proof) do
         {:ok, settled}
       else
-        mutate(config, %{settled | desired: :stopped}, :stop, opts)
+        mutate(config, %{settled | desired: stop_desired(settled)}, :stop, opts)
       end
     end
   end
@@ -205,6 +205,20 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
          {:ok, operations} <- operation_inventory(config, opts) do
       {:ok, normalize(owned, workstation, operations)}
     else
+      {:error, {:invalid, :workstations_config_changed}} -> retire_stale_config(config, record, workstation, opts)
+      {:error, failure} -> fail(record, failure)
+    end
+  end
+
+  # A retained host built from an older config can never be reused. Record the delete intent durably so the
+  # orchestrator retires it through the normal destroy path (settling pending operations), then the next
+  # attempt creates a fresh host from the current config. The failure still ends this attempt.
+  defp retire_stale_config(config, record, workstation, opts) do
+    with {:ok, owned} <- observe_owned(config, record, workstation),
+         {:ok, retiring} <- persist(config, %{owned | desired: :absent}, opts) do
+      fail(retiring, {:invalid, :workstations_config_changed})
+    else
+      {:error, _, _} = error -> error
       {:error, failure} -> fail(record, failure)
     end
   end
@@ -221,6 +235,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
         fail(record, {:unknown, :unresolved_create})
     end
   end
+
+  defp stop_desired(%{desired: :absent}), do: :absent
+  defp stop_desired(_record), do: :stopped
 
   defp destroy_owned(config, record, opts) do
     with {:ok, stopped} <- stop(config, record, opts),

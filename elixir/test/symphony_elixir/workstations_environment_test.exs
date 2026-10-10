@@ -177,7 +177,15 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     assert {:error, {:invalid, :workstations_ownership}, _} = Workstations.ensure(config(), created, opts(request))
     Agent.update(server, &put_in(&1, [:workstation, "uid"], "ws-uid"))
     Agent.update(server, &put_in(&1, [:template, "container", "image"], "changed-image"))
-    assert {:error, {:invalid, :workstations_config_changed}, _} = Workstations.ensure(config(), created, opts(request))
+
+    assert {:error, {:invalid, :workstations_config_changed}, retiring} =
+             Workstations.ensure(config(), created, opts(request))
+
+    assert retiring.desired == :absent
+    assert {:ok, destroyed} = Workstations.destroy(config(), retiring, opts(request))
+    assert destroyed.absent?
+    assert {:ok, fresh} = Workstations.ensure(config(), record(), opts(request))
+    assert fresh.metadata["config_fingerprint"] != created.metadata["config_fingerprint"]
   end
 
   test "stop LRO error never certifies cancellation" do
