@@ -1552,6 +1552,12 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     assert retiring.desired == :absent
     assert Agent.get(cloud, & &1) == before
     assert Agent.get(remote, & &1.events) == [:retire]
+
+    # The failed attempt's stop must keep the retire intent so the stopped host is destroyed, not reused.
+    Agent.update(remote, &Map.put(&1, :connection, nil))
+    assert {:ok, stopped} = Operations.run(Provider, config, %{entry | record: retiring}, :stop, options)
+    assert stopped.desired == :absent
+    assert Agent.get(remote, & &1.record.desired) == :absent
   end
 
   test "Codex invalid readiness never grants an agent connection and keeps ownership" do
