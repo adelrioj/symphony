@@ -738,7 +738,8 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
         opts
       end
 
-    intended = intent(adapter, config, record, :stopped, intent_opts)
+    # A stop must not undo a durable retire intent (desired: :absent); the idle reconciler destroys it once stopped.
+    intended = intent(adapter, config, record, if(record.desired == :absent, do: :absent, else: :stopped), intent_opts)
 
     case intended do
       {:ok, current} ->
