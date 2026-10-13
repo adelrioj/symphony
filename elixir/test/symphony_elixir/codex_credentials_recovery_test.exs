@@ -534,6 +534,52 @@ defmodule SymphonyElixir.CodexCredentialsRecoveryTest do
     assert Agent.get(c.cloud, & &1.writes) == []
   end
 
+  test "an unbound claim whose resource write was lost reseeds over the same workstation's disposed claim", c do
+    assert {:ok, _} = Recovery.reconcile(receipt_options(c, c.receipt), c.deps)
+    [committed] = Agent.get(c.remote, & &1.records)
+    %{record: released, generation: generation} = Agent.get(c.cloud, & &1)
+    owner = Map.merge(c.owned["owner"], %{"workstation_uid" => nil, "attempt_id" => "orphaned-attempt"})
+    {:ok, orphaned} = Record.transition(released, {:claim, "orphaned-claim", owner}, "orphaned-transition")
+
+    # The claim committed in the authority, but the resource metadata write that would record it was lost.
+    stranded =
+      Credentials.put(%{committed | attempt_id: "orphaned-attempt"}, %{
+        "stage" => "recovery_required",
+        "reason" => "cloud_authority"
+      })
+
+    Agent.update(c.cloud, &%{&1 | record: orphaned, generation: generation + 1, writes: []})
+    Agent.update(c.remote, &%{&1 | records: [stranded], writes: []})
+    stop = Keyword.merge(mutation(c, "reseed-stop"), expected_generation: to_string(generation + 1))
+    assert {:ok, %{authority: %{record: ^orphaned}, resources: [_]}} = Recovery.reconcile(stop, c.deps)
+    assert Agent.get(c.cloud, & &1.writes) == []
+
+    # The operator then publishes the new cache as a fresh epoch: an unbound owner has no stop proof to hand off.
+    reseeded = Record.initial("features-codex", 2, "projects/123456/secrets/features-codex/versions/2")
+    Agent.update(c.cloud, &%{&1 | record: reseeded, generation: generation + 2})
+
+    commit =
+      Keyword.merge(mutation(c, "reseed-commit"), expected_epoch: 2, expected_generation: to_string(generation + 2))
+
+    assert {:ok, %{resources: [%{disposition: %{"epoch" => 1, "resource_acknowledged" => true}}]}} =
+             Recovery.reconcile(commit, c.deps)
+
+    {:ok, workflow} = SymphonyElixir.Workflow.parse(File.read!(c.workflow))
+    {:ok, settings} = Schema.parse(workflow.config, resolve_secrets: false)
+    assert {:ok, history} = Credentials.reconcile(Config.runtime(settings), stranded, c.deps[:operation_options])
+    assert Credentials.data(history)["stage"] == "committed" and Credentials.resolved?(history)
+  end
+
+  test "an unbound claim never hides the same workstation's unresolved claim", c do
+    owner = Map.put(c.owned["owner"], "workstation_uid", nil)
+    initial = Record.initial("features-codex", 1, "projects/123456/secrets/features-codex/versions/1")
+    {:ok, orphaned} = Record.transition(initial, {:claim, "orphaned-claim", owner}, "orphaned-transition")
+    Agent.update(c.cloud, &%{&1 | record: orphaned})
+
+    assert {:error, :inventory_unaccounted} = Recovery.reconcile(mutation(c, "reseed-stop"), c.deps)
+    assert Agent.get(c.cloud, & &1.writes) == [] and Agent.get(c.remote, & &1.writes) == []
+  end
+
   test "acknowledged historical disposition survives a later epoch but unresolved claims do not", c do
     assert {:ok, _} = Recovery.reconcile(receipt_options(c, c.receipt), c.deps)
     [committed] = Agent.get(c.remote, & &1.records)

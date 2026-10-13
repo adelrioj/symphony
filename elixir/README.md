@@ -573,6 +573,13 @@ Retry against the **current** generation after either a lost disposition write o
 final acknowledgement-metadata write; do not upload another seed or invent a new owner.
 An epoch increase alone never resolves an old claim.
 
+An unbound owner (a claim whose workstation UID was never bound, so no worker received
+it) has no stop proof to hand off. The new authority then carries no `last_handoff`, and
+`reseed-commit` succeeds only when every selected resource is acknowledged history. That
+includes the owner's own workstation when its metadata still holds an older, acknowledged
+claim because the write that would have recorded the newer claim was lost. A later
+`recovery_required` label on such a resource does not undo its acknowledged disposition.
+
 Successful output is one JSON object (`ok`, plus `result` containing `action`, validated
 `authority`, allowlisted `resources`, and `admission: "maintenance"`), limited to 1 MiB.
 Failures exit nonzero with only `ok: false` and a bounded `reason` code. Output is

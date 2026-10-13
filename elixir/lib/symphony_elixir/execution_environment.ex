@@ -621,10 +621,20 @@ defmodule SymphonyElixir.ExecutionEnvironment do
       assigned = assignment(record)
       disposition = data(record)["disposition"]
 
-      is_map(disposition) and assignment_matches?(assigned, record) and data(record)["stage"] == "committed" and
+      is_map(disposition) and assignment_matches?(assigned, record) and disposed_stage?(record, disposition) and
         valid_disposition_schema?(disposition, assigned) and
         disposition_matches_assignment?(disposition, assigned) and
         (not acknowledged or disposition["resource_acknowledged"] == true) and valid_disposition_authority?(disposition)
+    end
+
+    # `failure/2` relabels the stage but keeps the disposition. Once the authority has
+    # acknowledged that handoff, a later failure about a newer claim cannot undo it.
+    defp disposed_stage?(record, disposition) do
+      case data(record)["stage"] do
+        "committed" -> true
+        "recovery_required" -> disposition["resource_acknowledged"] == true
+        _stage -> false
+      end
     end
 
     defp valid_disposition_schema?(disposition, assigned) do
