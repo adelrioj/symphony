@@ -339,9 +339,14 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
 
   defp unbound_authority?(_), do: false
 
-  defp inactive?(authority, assigned),
-    do:
-      not is_map(authority["owner"]) or authority["owner"]["workstation_name"] != assigned["owner"]["workstation_name"]
+  # An unbound owner never published its claim to a worker, so the same workstation's
+  # different, already disposed claim is history rather than a competing user.
+  defp inactive?(authority, assigned) do
+    owner = authority["owner"]
+
+    not is_map(owner) or owner["workstation_name"] != assigned["owner"]["workstation_name"] or
+      (is_nil(owner["workstation_uid"]) and authority["claim_id"] != assigned["claim_id"])
+  end
 
   defp disposition_epoch(record),
     do: Credentials.data(record)["disposition"]["resolved_epoch"] || Credentials.data(record)["disposition"]["epoch"]
@@ -486,8 +491,9 @@ defmodule SymphonyElixir.CodexCredentials.Recovery do
     handoff = authority.record["last_handoff"]
 
     cond do
-      unbound_available?(authority) and resources == [] ->
-        result("reseed-commit", authority, [])
+      # Nothing to hand off: commit only when every remaining resource is resolved history.
+      unbound_available?(authority) ->
+        with :ok <- accounted(resources, authority.record), do: result("reseed-commit", authority, resources)
 
       authority.record["state"] != "AVAILABLE" or not is_map(handoff) ->
         {:error, :handoff_mismatch}
