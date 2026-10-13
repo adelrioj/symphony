@@ -55,6 +55,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
 
     with :ok <- credential_preflight(adapter, config, opts),
          {:ok, reconciled} <- reconcile_credentials(adapter, config, record, opts),
+         {:ok, _checked} <- ensure_retained_before_claim(adapter, config, reconciled, opts),
          {:ok, claimed} <- Credentials.claim(config, reconciled, entry.purpose, opts),
          {:ok, ensured} <- mutate(adapter, :ensure, config, claimed, opts),
          ensured = %{
@@ -577,6 +578,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
       ],
       "; "
     )
+  end
+
+  # A retained host can fail `ensure` (a stale config is retired there). Checking it before the claim keeps such a
+  # failure from stranding a committed, never-bound claim. Only an existing host whose credential is resolved is
+  # checked: ensure may run without a claim only then, and with a provider_ref it never creates a host.
+  defp ensure_retained_before_claim(adapter, config, record, opts) do
+    if Credentials.enabled?(config) and not is_nil(record.provider_ref) and Credentials.resolved?(record),
+      do: mutate(adapter, :ensure, config, record, opts),
+      else: {:ok, record}
   end
 
   @doc "Reconciles current authority and persists resource disposition before acknowledging its handoff."
