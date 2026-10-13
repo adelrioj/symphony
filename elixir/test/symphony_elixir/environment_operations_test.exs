@@ -1538,6 +1538,22 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
     assert {:error, :connection_closed} = Operations.close_connection(context.connection)
   end
 
+  test "Codex stale retained config is retired before a new attempt claims the credential" do
+    {config, entry, options, cloud, remote} = codex_fixture()
+    assert {:ok, context} = Operations.run(Provider, config, entry, :prepare, options)
+    stop_entry = %{entry | context: context, record: context.environment.record}
+    assert {:ok, retained} = Operations.run(Provider, config, stop_entry, :stop, options)
+    before = Agent.get(cloud, & &1)
+    Agent.update(remote, &%{&1 | mode: :stale_config, events: []})
+
+    assert {:error, {:invalid, :workstations_config_changed}, retiring} =
+             Operations.run(Provider, config, Lifecycle.new(retained, "next-attempt", :agent), :prepare, options)
+
+    assert retiring.desired == :absent
+    assert Agent.get(cloud, & &1) == before
+    assert Agent.get(remote, & &1.events) == [:retire]
+  end
+
   test "Codex invalid readiness never grants an agent connection and keeps ownership" do
     {config, entry, options, cloud, remote} = codex_fixture()
     Agent.update(remote, &Map.put(&1, :mode, :wrong_ready))
@@ -2025,6 +2041,20 @@ defmodule SymphonyElixir.EnvironmentOperationsTest do
 
   defp codex_provider(:ensure, current, _opts, fixture) do
     assert Agent.get(fixture.cloud, & &1.record["state"]) in ["OWNED", "CHECKPOINTED", "RECOVERY_REQUIRED", "AVAILABLE"]
+
+    if Agent.get(fixture.remote, & &1.mode) == :stale_config,
+      do: codex_stale_config(current, fixture),
+      else: codex_ensured(current, fixture)
+  end
+
+  # Mirrors Workstations.retire_stale_config/4: durable delete intent, then the attempt fails.
+  defp codex_stale_config(current, fixture) do
+    retiring = %{current | desired: :absent}
+    Agent.update(fixture.remote, &%{&1 | record: retiring, events: &1.events ++ [:retire]})
+    {:error, {:invalid, :workstations_config_changed}, retiring}
+  end
+
+  defp codex_ensured(current, fixture) do
     next = %{current | provider_ref: %{name: fixture.resource, uid: "ws-uid"}, phase: :stopped}
     Agent.update(fixture.remote, &%{&1 | record: next, events: &1.events ++ [:ensure]})
     {:ok, next}
