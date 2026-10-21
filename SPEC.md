@@ -3013,6 +3013,9 @@ until stop proof and MUST NOT persist a successful hook marker.
 Compute and persistent storage absence must both be established before forgetting the environment.
 Provider delete acknowledgment, PVC/workstation disappearance, or local transport teardown alone
 is not full absence.
+A Workstations delete that the engine did not record (an operator delete or a lost result) counts
+as delete evidence only when a complete regional operation inventory shows it done without error
+as the newest dated operation on that exact resource name; backing absence is still required.
 
 ### B.4 Operator Status Contract
 
