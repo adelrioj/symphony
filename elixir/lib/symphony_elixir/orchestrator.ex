@@ -425,20 +425,20 @@ defmodule SymphonyElixir.Orchestrator do
     end)
     |> Enum.sort_by(fn {issue_id, retry} -> {retry.continuation_queued_at_ms, issue_id} end)
     |> Enum.reduce(state, fn {issue_id, retry}, state ->
-      if available_slots(state) > 0 do
-        case pop_retry_attempt_state(state, issue_id, retry.retry_token) do
-          {:ok, attempt, metadata, state} ->
-            Process.cancel_timer(retry.timer_ref)
-            {:noreply, state} = handle_retry_issue(state, issue_id, attempt, metadata)
-            state
-
-          :missing ->
-            state
-        end
-      else
-        state
-      end
+      if available_slots(state) > 0, do: dispatch_waiting_continuation(state, issue_id, retry), else: state
     end)
+  end
+
+  defp dispatch_waiting_continuation(state, issue_id, retry) do
+    case pop_retry_attempt_state(state, issue_id, retry.retry_token) do
+      {:ok, attempt, metadata, state} ->
+        Process.cancel_timer(retry.timer_ref)
+        {:noreply, state} = handle_retry_issue(state, issue_id, attempt, metadata)
+        state
+
+      :missing ->
+        state
+    end
   end
 
   defp record_turn_exhaustion(%State{} = state, issue_id, running_entry) do

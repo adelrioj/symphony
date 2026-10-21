@@ -312,17 +312,20 @@ defmodule SymphonyElixir.OrchestratorTest do
 
     ready = %Issue{waiting | id: "ready", identifier: "MT-READY", title: "Ready for tests", priority: 2}
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
-    {:ok, pid} = Orchestrator.start_link(name: Module.concat(__MODULE__, :FairYieldOrchestrator))
-    on_exit(fn -> stop_orchestrator(pid) end)
+    {:ok, pid} = start_test_orchestrator(name: Module.concat(__MODULE__, :FairYieldOrchestrator))
 
     wait_for_state(pid, fn state ->
-      state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms) and
-        state.next_poll_due_at_ms > System.monotonic_time(:millisecond)
+      state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
     end)
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting])
+
+    :sys.replace_state(pid, fn state ->
+      %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
+    end)
+
     send(pid, :run_poll_cycle)
-    wait_until(fn -> File.exists?(starts) end)
+    wait_until(fn -> File.exists?(starts) end, 5_000)
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting, ready])
     File.write!(Path.join(tmp, "release-1"), "")
 
@@ -354,13 +357,8 @@ defmodule SymphonyElixir.OrchestratorTest do
     ready_retry = state.retry_attempts[ready.id]
     Process.cancel_timer(ready_retry.timer_ref)
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "linear",
-      tracker_api_token: nil,
-      tracker_active_states: ["Implemented"],
-      max_turn_exhaustions: 0
-    )
-
+    # A retry runs on its own lane snapshot, so fail the tracker read instead of the config.
+    Tracker.Memory.fail(:fetch_issues_by_ids)
     send(pid, {:retry_issue, ready.id, ready_retry.retry_token})
     :sys.resume(pid)
 
@@ -370,7 +368,7 @@ defmodule SymphonyElixir.OrchestratorTest do
       end)
 
     failed_retry = failed.retry_attempts[ready.id]
-    write_claude_dispatch_workflow!(workspace_root, fake_claude, 0)
+    Tracker.Memory.reset()
 
     File.write!(Path.join(tmp, "release-3"), "")
     wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 4 end, 5_000)

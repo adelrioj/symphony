@@ -10,7 +10,7 @@ defmodule SymphonyElixir.Tracker.Memory do
   @calls_key {__MODULE__, :calls}
   @failures_key :memory_tracker_failures
 
-  @type operation :: :create_comment | :update_issue_state
+  @type operation :: :create_comment | :update_issue_state | :fetch_issues_by_ids
 
   @impl true
   @spec validate_config(map(), :runtime | :structure) :: :ok
@@ -34,7 +34,7 @@ defmodule SymphonyElixir.Tracker.Memory do
   # (the orchestrator makes its own tracker calls), so a test process cannot inject a failure into
   # a dictionary of its own. The env is global, so `TestSupport` calls `reset/0` after every test.
   @spec fail(operation()) :: :ok
-  def fail(operation) when operation in [:create_comment, :update_issue_state] do
+  def fail(operation) when operation in [:create_comment, :update_issue_state, :fetch_issues_by_ids] do
     Application.put_env(:symphony_elixir, @failures_key, MapSet.put(failures(), operation))
     :ok
   end
@@ -58,10 +58,14 @@ defmodule SymphonyElixir.Tracker.Memory do
   def fetch_issues_by_ids(issue_ids) do
     wanted_ids = MapSet.new(issue_ids)
 
-    {:ok,
-     Enum.filter(issue_entries(), fn %Issue{id: id} ->
-       MapSet.member?(wanted_ids, id)
-     end)}
+    if failed?(:fetch_issues_by_ids) do
+      {:error, {:memory_tracker_failed, :fetch_issues_by_ids}}
+    else
+      {:ok,
+       Enum.filter(issue_entries(), fn %Issue{id: id} ->
+         MapSet.member?(wanted_ids, id)
+       end)}
+    end
   end
 
   @impl true
