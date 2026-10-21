@@ -1346,6 +1346,30 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     refute blocked.absent?
   end
 
+  test "missing parent with a newest successful delete from another actor is absent" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+
+    delete =
+      operation("delete", true)
+      |> Map.put("name", operation_name() <> "external")
+      |> put_in(["metadata", "createTime"], DateTime.to_iso8601(DateTime.add(DateTime.utc_now(), 1)))
+
+    Agent.update(server, &%{&1 | workstation: nil, operations: &1.operations ++ [delete]})
+    assert {:ok, absent} = Workstations.inspect(config(), created, opts(request))
+    assert absent.absent?
+    assert {:quiescent, %{deleted_operation: _, backing_absent: true}} = absent.proof
+
+    later = delete |> Map.put("name", operation_name() <> "later") |> put_in(["metadata", "verb"], "create")
+    later = put_in(later, ["metadata", "createTime"], DateTime.to_iso8601(DateTime.add(DateTime.utc_now(), 2)))
+    Agent.update(server, &%{&1 | operations: &1.operations ++ [later]})
+
+    assert {:error, {:unknown, :absence_without_delete_evidence}, blocked} =
+             Workstations.inspect(config(), created, opts(request))
+
+    refute blocked.absent?
+  end
+
   test "denied backing inventory prevents qualification of a running workstation" do
     {_server, request} = provider()
     assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))

@@ -689,14 +689,17 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp inspect_absence(config, record, opts) do
     with {:ok, settled} <- settle(config, record, opts),
-         {:ok, backing} <- backing_inventory(config, opts) do
+         {:ok, backing} <- backing_inventory(config, opts),
+         {:ok, operations} <- operation_inventory(config, opts) do
       captured = capture_backing(settled, backing)
       leftovers = related_backing(record, backing)
+      external = external_delete(config, operations, resource_name(config, record))
 
       cond do
         leftovers != [] -> fail(captured, {:unknown, {:backing_resources_remaining, safe_ids(leftovers)}})
         deleted?(settled) -> absent(config, captured, %{deleted_uid: ref_uid(record), backing_absent: true}, opts)
         never_created?(settled) -> absent(config, captured, %{create_rejected: true, backing_absent: true}, opts)
+        external -> absent(config, captured, %{deleted_operation: external, backing_absent: true}, opts)
         true -> fail(captured, {:unknown, :absence_without_delete_evidence})
       end
     else
@@ -706,6 +709,30 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   end
 
   defp deleted?(record), do: Enum.any?(record.pending, &(&1.verb == :delete and &1.outcome == :succeeded))
+
+  # A delete this engine did not record (an operator, or a lost result) proves absence only as the
+  # target's newest operation; any later or undated operation on the same name fails closed.
+  defp external_delete(config, operations, target) do
+    targeted = Enum.filter(operations, &(get_in(&1, ["metadata", "target"]) == target))
+    times = Enum.map(targeted, &operation_time/1)
+
+    with false <- targeted == [] or nil in times,
+         {newest, _} <- targeted |> Enum.zip(times) |> Enum.max_by(&elem(&1, 1), DateTime),
+         %{"done" => true, "metadata" => %{"verb" => "delete"}, "name" => name} <- newest,
+         false <- Map.has_key?(newest, "error"),
+         true <- operation_name?(config, name) do
+      name
+    else
+      _ -> nil
+    end
+  end
+
+  defp operation_time(operation) do
+    case DateTime.from_iso8601(get_in(operation, ["metadata", "createTime"]) || "") do
+      {:ok, time, _} -> time
+      _ -> nil
+    end
+  end
 
   defp never_created?(record) do
     is_nil(record.provider_ref) and record.pending != [] and
