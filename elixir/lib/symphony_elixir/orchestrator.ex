@@ -394,17 +394,50 @@ defmodule SymphonyElixir.Orchestrator do
           "Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check"
         )
 
+        state =
+          state
+          |> complete_issue(issue_id)
+          |> schedule_issue_retry(issue_id, 1, %{
+            identifier: running_entry.identifier,
+            issue_url: running_entry.issue.url,
+            continuation_queued_at_ms: System.monotonic_time(:millisecond),
+            delay_type: :continuation,
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path),
+            execution_context: Map.get(running_entry, :execution_context),
+            lane_snapshot: Map.get(running_entry, :lane_snapshot)
+          })
+
+        if Config.settings!().agent.max_turn_exhaustions == 0 do
+          state
+          |> maybe_dispatch()
+          |> dispatch_waiting_continuations(issue_id)
+        else
+          state
+        end
+    end
+  end
+
+  defp dispatch_waiting_continuations(state, completed_issue_id) do
+    state.retry_attempts
+    |> Enum.filter(fn {issue_id, retry} ->
+      issue_id != completed_issue_id and is_integer(retry[:continuation_queued_at_ms])
+    end)
+    |> Enum.sort_by(fn {issue_id, retry} -> {retry.continuation_queued_at_ms, issue_id} end)
+    |> Enum.reduce(state, fn {issue_id, retry}, state ->
+      if available_slots(state) > 0, do: dispatch_waiting_continuation(state, issue_id, retry), else: state
+    end)
+  end
+
+  defp dispatch_waiting_continuation(state, issue_id, retry) do
+    case pop_retry_attempt_state(state, issue_id, retry.retry_token) do
+      {:ok, attempt, metadata, state} ->
+        Process.cancel_timer(retry.timer_ref)
+        {:noreply, state} = handle_retry_issue(state, issue_id, attempt, metadata)
         state
-        |> complete_issue(issue_id)
-        |> schedule_issue_retry(issue_id, 1, %{
-          identifier: running_entry.identifier,
-          issue_url: running_entry.issue.url,
-          delay_type: :continuation,
-          worker_host: Map.get(running_entry, :worker_host),
-          workspace_path: Map.get(running_entry, :workspace_path),
-          execution_context: Map.get(running_entry, :execution_context),
-          lane_snapshot: Map.get(running_entry, :lane_snapshot)
-        })
+
+      :missing ->
+        state
     end
   end
 
@@ -1570,6 +1603,7 @@ defmodule SymphonyElixir.Orchestrator do
             timer_ref: timer_ref,
             retry_token: retry_token,
             due_at_ms: due_at_ms,
+            continuation_queued_at_ms: metadata[:continuation_queued_at_ms],
             identifier: identifier,
             issue_url: issue_url,
             error: error,
@@ -1587,6 +1621,7 @@ defmodule SymphonyElixir.Orchestrator do
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
           issue_url: Map.get(retry_entry, :issue_url),
+          continuation_queued_at_ms: Map.get(retry_entry, :continuation_queued_at_ms),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path),
@@ -1618,7 +1653,7 @@ defmodule SymphonyElixir.Orchestrator do
            state,
            issue_id,
            attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}", continuation_queued_at_ms: nil})
          )}
     end
   end
@@ -1788,7 +1823,8 @@ defmodule SymphonyElixir.Orchestrator do
       attempt + 1,
       Map.merge(metadata, %{
         identifier: issue.identifier,
-        error: "retry dispatch refresh failed: #{inspect(reason)}"
+        error: "retry dispatch refresh failed: #{inspect(reason)}",
+        continuation_queued_at_ms: nil
       })
     )
   end
@@ -1800,7 +1836,8 @@ defmodule SymphonyElixir.Orchestrator do
       attempt + 1,
       Map.merge(metadata, %{
         identifier: issue.identifier,
-        error: "no available orchestrator slots"
+        error: "no available orchestrator slots",
+        continuation_queued_at_ms: metadata[:continuation_queued_at_ms] || System.monotonic_time(:millisecond)
       })
     )
   end

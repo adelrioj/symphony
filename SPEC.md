@@ -970,6 +970,9 @@ Important nuance:
   detected across worker runs.
 - After `agent.max_turn_exhaustions` consecutive exhaustions in the same active state, the
   orchestrator MUST park the issue as blocked instead of scheduling another continuation retry.
+- When `agent.max_turn_exhaustions` is `0`, a slot freed by a normal exit SHOULD go first to queued
+  candidates, then to pending continuations in the order they started waiting, so work items that
+  wait cannot hold every slot.
 
 ### 7.2 Run Attempt Lifecycle
 

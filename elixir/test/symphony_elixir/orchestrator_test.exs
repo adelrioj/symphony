@@ -277,6 +277,140 @@ defmodule SymphonyElixir.OrchestratorTest do
     assert_receive {:memory_tracker_state_update, "issue-claude-exhausted", "Blocked / Needs Attention"}, 5_000
   end
 
+  test "a completed waiting session gives queued work the slot before its continuation" do
+    tmp = Path.join(System.tmp_dir!(), "symphony-fair-yield-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(tmp, "workspaces")
+    fake_claude = Path.join(tmp, "fake_claude")
+    starts = Path.join(tmp, "starts")
+    File.mkdir_p!(workspace_root)
+
+    File.write!(fake_claude, """
+    #!/bin/sh
+    basename "$PWD" >> "#{starts}"
+    run=$(wc -l < "#{starts}" | tr -d ' ')
+    while [ ! -f "#{tmp}/release-$run" ]; do
+      [ -d "#{tmp}" ] || exit 1
+      sleep 0.01
+    done
+    printf '%s\\n' '{"type":"system","subtype":"init","session_id":"fair-yield"}'
+    printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":10,"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"result":"waiting"}'
+    """)
+
+    File.chmod!(fake_claude, 0o700)
+    on_exit(fn -> File.rm_rf(tmp) end)
+    write_claude_dispatch_workflow!(workspace_root, fake_claude, 0)
+
+    waiting = %Issue{
+      id: "waiting",
+      identifier: "MT-WAIT",
+      title: "Waiting for review",
+      state: "Implemented",
+      priority: 1,
+      labels: [],
+      dispatchable: true
+    }
+
+    ready = %Issue{waiting | id: "ready", identifier: "MT-READY", title: "Ready for tests", priority: 2}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    {:ok, pid} = start_test_orchestrator(name: Module.concat(__MODULE__, :FairYieldOrchestrator))
+
+    wait_for_state(pid, fn state ->
+      state.poll_check_in_progress == false and is_integer(state.next_poll_due_at_ms)
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting])
+
+    :sys.replace_state(pid, fn state ->
+      %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
+    end)
+
+    send(pid, :run_poll_cycle)
+    wait_until(fn -> File.exists?(starts) end, 5_000)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting, ready])
+    File.write!(Path.join(tmp, "release-1"), "")
+
+    wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 2 end, 5_000)
+    assert starts |> File.read!() |> String.split("\n", trim: true) |> Enum.take(2) == ["MT-WAIT", "MT-READY"]
+
+    state =
+      wait_for_state(pid, fn state ->
+        Map.has_key?(state.running, ready.id) and Map.has_key?(state.retry_attempts, waiting.id)
+      end)
+
+    retry_token = state.retry_attempts[waiting.id].retry_token
+    send(pid, {:retry_issue, waiting.id, retry_token})
+
+    wait_for_state(pid, fn state ->
+      match?(%{retry_token: token} when token != retry_token, state.retry_attempts[waiting.id])
+    end)
+
+    assert String.split(File.read!(starts), "\n", trim: true) == ["MT-WAIT", "MT-READY"]
+
+    File.write!(Path.join(tmp, "release-2"), "")
+    wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 3 end, 5_000)
+
+    assert starts |> File.read!() |> String.split("\n", trim: true) |> Enum.take(3) ==
+             ["MT-WAIT", "MT-READY", "MT-WAIT"]
+
+    :sys.suspend(pid)
+    state = :sys.get_state(pid)
+    ready_retry = state.retry_attempts[ready.id]
+    Process.cancel_timer(ready_retry.timer_ref)
+
+    # A retry runs on its own lane snapshot, so fail the tracker read instead of the config.
+    Tracker.Memory.fail(:fetch_issues_by_ids)
+    send(pid, {:retry_issue, ready.id, ready_retry.retry_token})
+    :sys.resume(pid)
+
+    failed =
+      wait_for_state(pid, fn state ->
+        match?(%{retry_token: token} when token != ready_retry.retry_token, state.retry_attempts[ready.id])
+      end)
+
+    failed_retry = failed.retry_attempts[ready.id]
+    Tracker.Memory.reset()
+
+    File.write!(Path.join(tmp, "release-3"), "")
+    wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 4 end, 5_000)
+
+    assert starts |> File.read!() |> String.split("\n", trim: true) |> Enum.take(4) ==
+             ["MT-WAIT", "MT-READY", "MT-WAIT", "MT-WAIT"]
+
+    send(pid, {:retry_issue, ready.id, failed_retry.retry_token})
+
+    wait_for_state(pid, fn state ->
+      match?(%{retry_token: token} when token != failed_retry.retry_token, state.retry_attempts[ready.id])
+    end)
+
+    File.write!(Path.join(tmp, "release-4"), "")
+    wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 5 end, 5_000)
+
+    assert starts |> File.read!() |> String.split("\n", trim: true) |> Enum.take(5) ==
+             ["MT-WAIT", "MT-READY", "MT-WAIT", "MT-WAIT", "MT-READY"]
+
+    third = %Issue{waiting | id: "third", identifier: "MT-THIRD", priority: 3}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting, ready, third])
+    File.write!(Path.join(tmp, "release-5"), "")
+    wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= 6 end, 5_000)
+
+    for issue <- [ready, waiting] do
+      retry = :sys.get_state(pid).retry_attempts[issue.id]
+      send(pid, {:retry_issue, issue.id, retry.retry_token})
+
+      wait_for_state(pid, fn state ->
+        match?(%{retry_token: token} when token != retry.retry_token, state.retry_attempts[issue.id])
+      end)
+    end
+
+    for run <- 6..8 do
+      File.write!(Path.join(tmp, "release-#{run}"), "")
+      wait_until(fn -> length(String.split(File.read!(starts), "\n", trim: true)) >= run + 1 end, 5_000)
+    end
+
+    assert starts |> File.read!() |> String.split("\n", trim: true) |> Enum.take(9) ==
+             ["MT-WAIT", "MT-READY", "MT-WAIT", "MT-WAIT", "MT-READY", "MT-THIRD", "MT-WAIT", "MT-READY", "MT-THIRD"]
+  end
+
   # Symphony moves a claimed work item itself. The prompt used to ask the agent to do it in
   # step 1, and on 2026-09-05 an agent ran for 25 minutes without ever making the move, so a
   # human reading the board saw an untouched work item. The orchestrator already knows it

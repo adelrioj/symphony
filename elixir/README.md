@@ -320,6 +320,8 @@ Notes:
   normal work includes waiting for external CI and reviews. This does not disable
   explicit blocked results, human-stop rules, turn limits or timeouts. Keep a
   positive limit for development lanes so work that makes no progress stops.
+  With `0`, a freed slot goes to queued work first, then to waiting continuations, oldest first,
+  so items that wait do not hold the lane.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
