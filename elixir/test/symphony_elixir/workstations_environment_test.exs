@@ -1370,6 +1370,82 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     refute blocked.absent?
   end
 
+  test "ensure replaces a created workstation that another actor deleted, as a new lineage" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    external_delete(server)
+
+    replacing = fn req ->
+      result = request.(req)
+      if req[:method] == :post, do: Agent.update(server, &put_in(&1, [:workstation, "uid"], "ws-uid-2"))
+      result
+    end
+
+    assert {:ok, replaced} = Workstations.ensure(config(), created, opts(replacing))
+    assert Agent.get(server, & &1.creates) == 2
+    assert %{uid: "ws-uid-2"} = replaced.provider_ref
+    assert [%{verb: :create, outcome: :succeeded}] = Enum.filter(replaced.pending, &(&1.verb in [:create, :delete]))
+    refute replaced.absent?
+    assert {:ok, _} = Workstations.inspect(config(), replaced, opts(request))
+
+    # The old delete is not in the new journal: losing the replacement without a delete stays unknown.
+    Agent.update(server, &%{&1 | workstation: nil})
+
+    assert {:error, {:unknown, :absence_without_delete_evidence}, blocked} =
+             Workstations.inspect(config(), replaced, opts(request))
+
+    refute blocked.absent?
+  end
+
+  test "ensure does not replace a created workstation that vanished without delete evidence" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    Agent.update(server, &%{&1 | workstation: nil})
+
+    assert {:error, {:unknown, :absence_without_delete_evidence}, blocked} =
+             Workstations.ensure(config(), created, opts(request))
+
+    assert Agent.get(server, & &1.creates) == 1
+    refute blocked.absent?
+  end
+
+  # Dated now: after the first create, and before any replacement create the fake provider stamps later.
+  test "ensure keeps a deleted credential-bearing workstation unresolved instead of replacing it" do
+    {server, _cloud, enabled, options} = codex_provider()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
+    assert {:ok, created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, bound} = Credentials.bind(enabled, created, :agent, options)
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    assert {:ok, running} = Workstations.start(enabled, assigned, options)
+    assert {:ok, stopped} = Workstations.stop(enabled, running, options)
+
+    receipt =
+      Map.merge(Credentials.assignment(bound), %{
+        "secret_version" => codex_references()["secret"] <> "/versions/2",
+        "sha256" => String.duplicate("b", 64),
+        "admission" => "sealed"
+      })
+
+    assert {:ok, checkpointed} = Credentials.checkpoint(enabled, stopped, receipt, options)
+    assert {:ok, released} = Credentials.release(enabled, checkpointed, options)
+    assert {:ok, committed} = Operations.reconcile_credentials(Workstations, enabled, released, options)
+    assert Credentials.resolved?(committed)
+    external_delete(server)
+
+    # The pre-claim retained check passes credential authority here; it must still never create a host.
+    assert {:error, {:unknown, :unresolved_create}, _} = Workstations.ensure(enabled, committed, options)
+    assert Agent.get(server, & &1.creates) == 1
+  end
+
+  defp external_delete(server) do
+    delete =
+      operation("delete", true)
+      |> Map.put("name", operation_name() <> "external")
+      |> put_in(["metadata", "createTime"], DateTime.to_iso8601(DateTime.utc_now()))
+
+    Agent.update(server, &%{&1 | workstation: nil, operations: &1.operations ++ [delete]})
+  end
+
   test "denied backing inventory prevents qualification of a running workstation" do
     {_server, request} = provider()
     assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
