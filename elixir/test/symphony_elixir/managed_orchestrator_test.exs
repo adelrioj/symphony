@@ -494,6 +494,66 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     assert Orchestrator.snapshot(owner, 1_000).environments != []
   end
 
+  test "a retained environment of an affirmatively archived item is retired" do
+    issues([])
+    archived(["first"])
+    {_owner, _} = scheduler()
+    discover([cleaned_record("first")])
+    {_, destroying, _} = operation(:destroy)
+    assert destroying.record.issue_id == "first"
+  end
+
+  test "a first archived observation is recorded as terminal before retirement" do
+    issues([])
+    archived(["first"])
+    {_owner, _} = scheduler()
+    discover([%{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}])
+    {_, marking, _} = operation(:metadata)
+    assert is_integer(marking.metadata_intent.terminal_observed_at)
+    refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+  end
+
+  test "archived cleanup revalidates the archived read before the before_remove hook" do
+    write_managed_workflow(hook_before_remove: "echo cleanup")
+    issues([])
+    archived(["first"])
+    {owner, tasks} = scheduler()
+    discover([%{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}, terminal_observed_at: 1}])
+    {config, cleanup, prepare} = operation(:prepare)
+    assert cleanup.purpose == :cleanup
+    ready(config, cleanup, prepare, owner, tasks)
+    {_, hook, _} = operation(:cleanup_hook)
+    assert hook.record.issue_id == "first"
+  end
+
+  test "cleanup stops instead of running the hook when the item is no longer archived" do
+    write_managed_workflow(hook_before_remove: "echo cleanup")
+    issues([])
+    archived(["first"])
+    {owner, tasks} = scheduler()
+    discover([%{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}, terminal_observed_at: 1}])
+    {config, cleanup, prepare} = operation(:prepare)
+    archived([])
+    ready(config, cleanup, prepare, owner, tasks)
+    {_, _stopping, _} = operation(:stop)
+    refute_receive {:environment_operation, :cleanup_hook, _, _, _, _}, 0
+  end
+
+  test "an archived item with no known state keeps its environment when a cleanup hook must run" do
+    write_managed_workflow(hook_before_remove: "echo cleanup")
+    issues([])
+    archived(["first"])
+    {owner, _} = scheduler()
+    stateless = %{record("first") | issue_state: nil, phase: :stopped, proof: {:quiescent, %{fixture: true}}}
+    discover([%{stateless | terminal_observed_at: 1}])
+    wait_state(owner, &Map.has_key?(&1.environment_entries, "first"))
+    poll(owner)
+    assert Process.alive?(owner)
+    refute_receive {:environment_operation, :prepare, _, _, _, _}, 0
+    refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+    assert [_] = Orchestrator.snapshot(owner, 1_000).environments
+  end
+
   test "completed cleanup marker recovered after restart does not deliberately replay the hook" do
     write_managed_workflow(hook_before_remove: "echo cleanup")
     issues([%{issue("first", 1) | state: "Done"}])
@@ -1273,6 +1333,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
   end
 
   defp issues(issues), do: GenServer.call(Process.get({__MODULE__, :inventory}), {:replace, issues})
+  defp archived(ids), do: Application.put_env(:symphony_elixir, :memory_tracker_archived_ids, ids)
 
   defp set_issue_state(id, state_name) do
     :ok = Tracker.Memory.update_issue_state(id, state_name)

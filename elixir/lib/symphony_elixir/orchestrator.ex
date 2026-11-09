@@ -2617,13 +2617,17 @@ defmodule SymphonyElixir.Orchestrator do
   defp failed_environment_entry(_state, entry, _operation), do: entry
 
   defp revalidate_cleanup_prepared(state, id) do
-    with {:ok, [issue]} <- Tracker.fetch_issues_by_ids([id]),
-         true <- terminal_issue_state?(issue.state, terminal_state_set()) do
+    with {:ok, issues} <- Tracker.fetch_issues_by_ids([id]),
+         true <- cleanup_terminal?(id, issues) do
       environment_step(state, id, {:reconcile, :cleanup_hook})
     else
       _ -> managed_stop(state, id, :release)
     end
   end
+
+  defp cleanup_terminal?(_id, [issue]), do: terminal_issue_state?(issue.state, terminal_state_set())
+  defp cleanup_terminal?(id, []), do: Tracker.fetch_archived_issue_ids([id]) == {:ok, [id]}
+  defp cleanup_terminal?(_id, _issues), do: false
 
   defp revalidate_prepared_environment(state, id) do
     entry = state.environment_entries[id]
@@ -2804,11 +2808,58 @@ defmodule SymphonyElixir.Orchestrator do
     case Tracker.fetch_issues_by_ids(ids) do
       {:ok, issues} ->
         by_id = Map.new(issues, &{&1.id, &1})
-        Enum.reduce(ids, state, fn id, current -> reconcile_environment(current, id, by_id[id]) end)
+        archived = archived_environment_ids(Enum.reject(ids, &Map.has_key?(by_id, &1)))
+
+        Enum.reduce(ids, state, &reconcile_refreshed_environment(&2, &1, by_id[&1], &1 in archived))
 
       _ ->
         Enum.reduce(ids, state, &inspect_unresolved_environment/2)
     end
+  end
+
+  defp reconcile_refreshed_environment(state, id, _issue, true), do: reconcile_archived_environment(state, id)
+  defp reconcile_refreshed_environment(state, id, issue, false), do: reconcile_environment(state, id, issue)
+
+  # An item missing from the by-ID read is never terminal evidence. Only an affirmative archived read
+  # is; a failed read keeps every missing item as missing.
+  defp archived_environment_ids([]), do: []
+
+  defp archived_environment_ids(ids) do
+    case Tracker.fetch_archived_issue_ids(ids) do
+      {:ok, archived} when is_list(archived) -> archived
+      _failed -> []
+    end
+  end
+
+  # Archived counts as terminal for retirement of an idle stopped environment only. Every other phase keeps
+  # the missing-item behaviour unchanged. The scheduler never sees the item (by-ID and candidate reads omit
+  # it), so the retained record supplies the issue context.
+  defp reconcile_archived_environment(state, id) do
+    entry = state.environment_entries[id]
+
+    if entry.phase == :stopped and entry.record.desired != :absent and not environment_job?(state, id) do
+      state = observe_terminal(state, id)
+      entry = state.environment_entries[id]
+      issue = archived_issue(entry)
+
+      # Cleanup preparation reserves capacity by issue state. Without a known state, retain the environment
+      # rather than guess a capacity bucket; it needs no capacity when no before_remove hook must run.
+      if is_nil(issue.state) and not is_nil(entry.record.terminal_observed_at) and not cleanup_hook_complete?(entry),
+        do: state,
+        else: reconcile_terminal_environment(state, entry, issue)
+    else
+      reconcile_environment(state, id, nil)
+    end
+  end
+
+  defp archived_issue(entry) do
+    cached_state = if match?(%Issue{}, entry.issue), do: entry.issue.state
+
+    %Issue{
+      id: entry.record.issue_id,
+      identifier: entry.record.issue_identifier,
+      state: entry.record.issue_state || cached_state
+    }
   end
 
   defp inspect_unresolved_environment(id, state) do
