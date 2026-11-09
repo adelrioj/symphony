@@ -3022,7 +3022,9 @@ as the newest dated operation on that exact resource name; backing absence is st
 When a later prepare finds a once-created workstation absent with that proof, it creates a
 replacement under the same key as a new lineage: a fresh operation journal, no provider reference,
 and no captured backing resources, so the old delete can never prove the replacement absent.
-Without the proof the record stays unresolved and no replacement is created.
+Without the proof the record stays unresolved and no replacement is created. A lane with Codex
+credentials, or a record that carries a credential assignment, is never replaced this way: its claim
+binds to the old host UID, so it stays unresolved for the credential recovery procedure.
 
 ### B.4 Operator Status Contract
 

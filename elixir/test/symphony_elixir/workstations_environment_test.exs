@@ -1410,6 +1410,33 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
   end
 
   # Dated now: after the first create, and before any replacement create the fake provider stamps later.
+  test "ensure keeps a deleted credential-bearing workstation unresolved instead of replacing it" do
+    {server, _cloud, enabled, options} = codex_provider()
+    assert {:ok, claimed} = Credentials.claim(enabled, %{record() | attempt_id: "original"}, :agent, options)
+    assert {:ok, created} = Workstations.ensure(enabled, claimed, options)
+    assert {:ok, bound} = Credentials.bind(enabled, created, :agent, options)
+    assert {:ok, assigned} = Workstations.put_intent(enabled, bound, %{desired: :running}, options)
+    assert {:ok, running} = Workstations.start(enabled, assigned, options)
+    assert {:ok, stopped} = Workstations.stop(enabled, running, options)
+
+    receipt =
+      Map.merge(Credentials.assignment(bound), %{
+        "secret_version" => codex_references()["secret"] <> "/versions/2",
+        "sha256" => String.duplicate("b", 64),
+        "admission" => "sealed"
+      })
+
+    assert {:ok, checkpointed} = Credentials.checkpoint(enabled, stopped, receipt, options)
+    assert {:ok, released} = Credentials.release(enabled, checkpointed, options)
+    assert {:ok, committed} = Operations.reconcile_credentials(Workstations, enabled, released, options)
+    assert Credentials.resolved?(committed)
+    external_delete(server)
+
+    # The pre-claim retained check passes credential authority here; it must still never create a host.
+    assert {:error, {:unknown, :unresolved_create}, _} = Workstations.ensure(enabled, committed, options)
+    assert Agent.get(server, & &1.creates) == 1
+  end
+
   defp external_delete(server) do
     delete =
       operation("delete", true)

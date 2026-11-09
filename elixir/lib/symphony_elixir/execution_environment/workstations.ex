@@ -231,13 +231,21 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       never_created?(record) ->
         with {:ok, absent} <- inspect_absence(config, record, opts), do: create(config, absent, opts)
 
-      true ->
+      replaceable?(config, record) ->
         # A once-created host that is gone (an operator delete, or an engine delete whose retire never finished)
-        # is replaced only after `inspect_absence/3` proves the host and its disk absent and releases the
-        # credential. Without that proof the record stays unresolved, as before.
+        # is replaced only after `inspect_absence/3` proves the host and its disk absent. Without that proof the
+        # record stays unresolved, as before.
         with {:ok, absent} <- inspect_absence(config, record, opts), do: create(config, replacement(absent), opts)
+
+      true ->
+        fail(record, {:unknown, :unresolved_create})
     end
   end
+
+  # Codex credential claims bind to the host UID, and the pre-claim retained check relies on `ensure/3` never
+  # creating a host for a record that has a provider ref. A credential-bearing lineage therefore keeps the old
+  # unresolved behaviour; only lanes and records without Codex credentials get a replacement.
+  defp replaceable?(config, record), do: not Credentials.enabled?(config) and not Credentials.tracked?(record)
 
   # The replacement is a new lineage. The old journal ends in a successful delete, and `deleted?/1` would
   # otherwise accept that delete as absence proof for the new host; the old UID would fail `observe_owned/3`.
