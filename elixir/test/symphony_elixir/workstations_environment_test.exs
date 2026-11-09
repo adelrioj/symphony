@@ -1370,6 +1370,55 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     refute blocked.absent?
   end
 
+  test "ensure replaces a created workstation that another actor deleted, as a new lineage" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    external_delete(server)
+
+    replacing = fn req ->
+      result = request.(req)
+      if req[:method] == :post, do: Agent.update(server, &put_in(&1, [:workstation, "uid"], "ws-uid-2"))
+      result
+    end
+
+    assert {:ok, replaced} = Workstations.ensure(config(), created, opts(replacing))
+    assert Agent.get(server, & &1.creates) == 2
+    assert %{uid: "ws-uid-2"} = replaced.provider_ref
+    assert [%{verb: :create, outcome: :succeeded}] = Enum.filter(replaced.pending, &(&1.verb in [:create, :delete]))
+    refute replaced.absent?
+    assert {:ok, _} = Workstations.inspect(config(), replaced, opts(request))
+
+    # The old delete is not in the new journal: losing the replacement without a delete stays unknown.
+    Agent.update(server, &%{&1 | workstation: nil})
+
+    assert {:error, {:unknown, :absence_without_delete_evidence}, blocked} =
+             Workstations.inspect(config(), replaced, opts(request))
+
+    refute blocked.absent?
+  end
+
+  test "ensure does not replace a created workstation that vanished without delete evidence" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    Agent.update(server, &%{&1 | workstation: nil})
+
+    assert {:error, {:unknown, :absence_without_delete_evidence}, blocked} =
+             Workstations.ensure(config(), created, opts(request))
+
+    assert Agent.get(server, & &1.creates) == 1
+    refute blocked.absent?
+  end
+
+  # Dated now: after the first create, and before any replacement create the fake provider stamps later.
+  defp external_delete(server) do
+    delete =
+      operation("delete", true)
+      |> Map.put("name", operation_name() <> "external")
+      |> put_in(["metadata", "createTime"], DateTime.to_iso8601(DateTime.utc_now()))
+
+    Agent.update(server, &%{&1 | workstation: nil, operations: &1.operations ++ [delete]})
+  end
+
   test "denied backing inventory prevents qualification of a running workstation" do
     {_server, request} = provider()
     assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))

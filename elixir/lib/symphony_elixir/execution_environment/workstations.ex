@@ -232,8 +232,25 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
         with {:ok, absent} <- inspect_absence(config, record, opts), do: create(config, absent, opts)
 
       true ->
-        fail(record, {:unknown, :unresolved_create})
+        # A once-created host that is gone (an operator delete, or an engine delete whose retire never finished)
+        # is replaced only after `inspect_absence/3` proves the host and its disk absent and releases the
+        # credential. Without that proof the record stays unresolved, as before.
+        with {:ok, absent} <- inspect_absence(config, record, opts), do: create(config, replacement(absent), opts)
     end
+  end
+
+  # The replacement is a new lineage. The old journal ends in a successful delete, and `deleted?/1` would
+  # otherwise accept that delete as absence proof for the new host; the old UID would fail `observe_owned/3`.
+  defp replacement(absent) do
+    %{
+      absent
+      | provider_ref: nil,
+        version: nil,
+        pending: [],
+        proof: :unknown,
+        absent?: false,
+        metadata: Map.put(absent.metadata, "backing_resources", [])
+    }
   end
 
   defp stop_desired(%{desired: :absent}), do: :absent

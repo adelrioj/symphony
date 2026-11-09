@@ -3019,6 +3019,10 @@ is not full absence.
 A Workstations delete that the engine did not record (an operator delete or a lost result) counts
 as delete evidence only when a complete regional operation inventory shows it done without error
 as the newest dated operation on that exact resource name; backing absence is still required.
+When a later prepare finds a once-created workstation absent with that proof, it creates a
+replacement under the same key as a new lineage: a fresh operation journal, no provider reference,
+and no captured backing resources, so the old delete can never prove the replacement absent.
+Without the proof the record stays unresolved and no replacement is created.
 
 ### B.4 Operator Status Contract
 
