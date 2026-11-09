@@ -27,6 +27,7 @@ defmodule SymphonyElixir.Tracker.Memory do
   def reset do
     Process.delete(@calls_key)
     Application.delete_env(:symphony_elixir, @failures_key)
+    Application.delete_env(:symphony_elixir, :memory_tracker_archived_ids)
     :ok
   end
 
@@ -66,6 +67,15 @@ defmodule SymphonyElixir.Tracker.Memory do
          MapSet.member?(wanted_ids, id)
        end)}
     end
+  end
+
+  # Archived ids are configured apart from `:memory_tracker_issues`: like Linear, an archived item is
+  # absent from `fetch_issues_by_ids/1` and visible only to this read.
+  @impl true
+  @spec fetch_archived_issue_ids([String.t()]) :: {:ok, [String.t()]}
+  def fetch_archived_issue_ids(issue_ids) do
+    archived = MapSet.new(Application.get_env(:symphony_elixir, :memory_tracker_archived_ids, []))
+    {:ok, Enum.filter(issue_ids, &MapSet.member?(archived, &1))}
   end
 
   @impl true

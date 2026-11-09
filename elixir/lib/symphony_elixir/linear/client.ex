@@ -77,6 +77,21 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  # By-ID reads omit archived issues. This read asks for them explicitly and returns only an
+  # affirmative `archivedAt`. A trashed issue also carries `archivedAt` but can still be restored, so it
+  # is not reported; neither is a missing or permanently deleted issue.
+  @query_archived_by_ids """
+  query SymphonyLinearArchivedById($filter: IssueFilter!, $first: Int!) {
+    issues(filter: $filter, first: $first, includeArchived: true) {
+      nodes {
+        id
+        archivedAt
+        trashed
+      }
+    }
+  }
+  """
+
   @viewer_query """
   query SymphonyLinearViewer {
     viewer {
@@ -105,6 +120,66 @@ defmodule SymphonyElixir.Linear.Client do
         end
     end
   end
+
+  @spec fetch_archived_issue_ids([String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def fetch_archived_issue_ids(issue_ids) when is_list(issue_ids) do
+    case Enum.uniq(issue_ids) do
+      [] ->
+        {:ok, []}
+
+      ids ->
+        with {:ok, _tracker} <- configured_tracker_for_read(), do: do_fetch_archived_issue_ids(ids, &graphql/2, [])
+    end
+  end
+
+  @doc false
+  @spec fetch_archived_issue_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def fetch_archived_issue_ids_for_test(issue_ids, graphql_fun)
+      when is_list(issue_ids) and is_function(graphql_fun, 2) do
+    do_fetch_archived_issue_ids(Enum.uniq(issue_ids), graphql_fun, [])
+  end
+
+  defp do_fetch_archived_issue_ids([], _graphql_fun, acc), do: {:ok, acc}
+
+  defp do_fetch_archived_issue_ids(ids, graphql_fun, acc) do
+    {batch, rest} = Enum.split(ids, @issue_page_size)
+
+    with {:ok, body} <- graphql_fun.(@query_archived_by_ids, %{filter: %{id: %{in: batch}}, first: length(batch)}),
+         {:ok, archived} <- decode_archived_ids(body, MapSet.new(batch)) do
+      do_fetch_archived_issue_ids(rest, graphql_fun, acc ++ archived)
+    end
+  end
+
+  defp decode_archived_ids(%{"data" => %{"issues" => %{"nodes" => nodes}}}, requested) when is_list(nodes) do
+    Enum.reduce_while(nodes, {:ok, []}, fn
+      %{"id" => id, "archivedAt" => archived_at} = node, {:ok, acc} when is_binary(id) ->
+        trashed = Map.get(node, "trashed")
+
+        cond do
+          not MapSet.member?(requested, id) or trashed not in [true, false, nil] ->
+            {:halt, {:error, :linear_unknown_payload}}
+
+          trashed == true ->
+            {:cont, {:ok, acc}}
+
+          is_binary(archived_at) and archived_at != "" ->
+            {:cont, {:ok, acc ++ [id]}}
+
+          is_nil(archived_at) ->
+            {:cont, {:ok, acc}}
+
+          true ->
+            {:halt, {:error, :linear_unknown_payload}}
+        end
+
+      _node, _acc ->
+        {:halt, {:error, :linear_unknown_payload}}
+    end)
+  end
+
+  defp decode_archived_ids(%{"errors" => errors}, _requested), do: {:error, {:linear_graphql_errors, errors}}
+  defp decode_archived_ids(_body, _requested), do: {:error, :linear_unknown_payload}
 
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def graphql(query, variables \\ %{}, opts \\ [])

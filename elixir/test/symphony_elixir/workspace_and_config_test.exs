@@ -1150,6 +1150,73 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Client.fetch_issues_by_ids_for_test(["issue-empty-title"], graphql_fun)
   end
 
+  test "linear archived read reports only affirmatively archived ids, with includeArchived" do
+    parent = self()
+
+    graphql_fun = fn query, variables ->
+      send(parent, {:archived_query, query, variables})
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{"id" => "archived", "archivedAt" => "2026-10-11T08:00:00.000Z"},
+               %{"id" => "open", "archivedAt" => nil},
+               %{"id" => "trashed", "archivedAt" => "2026-10-11T08:00:00.000Z", "trashed" => true}
+             ]
+           }
+         }
+       }}
+    end
+
+    assert {:ok, ["archived"]} =
+             Client.fetch_archived_issue_ids_for_test(
+               ["archived", "open", "trashed", "deleted", "archived"],
+               graphql_fun
+             )
+
+    assert_received {:archived_query, query,
+                     %{filter: %{id: %{in: ["archived", "open", "trashed", "deleted"]}}, first: 4}}
+
+    assert query =~ "includeArchived: true"
+    assert query =~ "trashed"
+    assert {:ok, []} = Client.fetch_archived_issue_ids_for_test([], fn _, _ -> flunk("no request for no ids") end)
+  end
+
+  test "linear archived read fails closed on a foreign id, a malformed node, or a GraphQL error" do
+    reply = fn body -> fn _query, _variables -> {:ok, body} end end
+    nodes = fn list -> %{"data" => %{"issues" => %{"nodes" => list}}} end
+
+    for {body, expected} <- [
+          {nodes.([%{"id" => "other", "archivedAt" => "2026-10-11T08:00:00.000Z"}]), {:error, :linear_unknown_payload}},
+          {nodes.([%{"id" => "issue-1", "archivedAt" => 42}]), {:error, :linear_unknown_payload}},
+          {nodes.([%{"id" => "issue-1", "archivedAt" => "2026-10-11", "trashed" => "yes"}]),
+           {:error, :linear_unknown_payload}},
+          {nodes.([%{"archivedAt" => "2026-10-11T08:00:00.000Z"}]), {:error, :linear_unknown_payload}},
+          {%{"errors" => [%{"message" => "boom"}]}, {:error, {:linear_graphql_errors, [%{"message" => "boom"}]}}},
+          {%{"data" => nil}, {:error, :linear_unknown_payload}}
+        ] do
+      assert Client.fetch_archived_issue_ids_for_test(["issue-1"], reply.(body)) == expected
+    end
+
+    assert {:error, :timeout} = Client.fetch_archived_issue_ids_for_test(["issue-1"], fn _, _ -> {:error, :timeout} end)
+  end
+
+  test "linear archived read pages requested ids in batches" do
+    ids = Enum.map(1..51, &"issue-#{&1}")
+    parent = self()
+
+    graphql_fun = fn _query, %{filter: %{id: %{in: batch}}} ->
+      send(parent, {:archived_batch, length(batch)})
+      {:ok, %{"data" => %{"issues" => %{"nodes" => Enum.map(batch, &%{"id" => &1, "archivedAt" => "2026-10-11"})}}}}
+    end
+
+    assert {:ok, ^ids} = Client.fetch_archived_issue_ids_for_test(ids, graphql_fun)
+    assert_received {:archived_batch, 50}
+    assert_received {:archived_batch, 1}
+  end
+
   test "linear client marks explicitly unassigned issues as not routed to worker" do
     raw_issue = %{
       "id" => "issue-99",

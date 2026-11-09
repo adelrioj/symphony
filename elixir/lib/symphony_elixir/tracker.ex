@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Tracker do
 
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   @callback fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  @callback fetch_archived_issue_ids([String.t()]) :: {:ok, [String.t()]} | {:error, term()}
   @callback agent_tool_specs() :: [map()]
   @callback execute_agent_tool(String.t(), term(), keyword()) :: map()
   @callback secret_environment_names(map()) :: [String.t()]
@@ -33,7 +34,8 @@ defmodule SymphonyElixir.Tracker do
   @spec kinds() :: [String.t()]
   def kinds, do: @adapters |> Map.keys() |> Enum.sort()
 
-  @optional_callbacks agent_tool_specs: 0,
+  @optional_callbacks fetch_archived_issue_ids: 1,
+                      agent_tool_specs: 0,
                       execute_agent_tool: 3,
                       validate_config: 2,
                       preflight: 1,
@@ -49,6 +51,24 @@ defmodule SymphonyElixir.Tracker do
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) do
     adapter().fetch_issues_by_ids(issue_ids)
+  end
+
+  @doc """
+  The subset of `issue_ids` that the tracker affirmatively reports as archived.
+
+  `fetch_issues_by_ids/1` omits archived items, and an omitted item is never terminal evidence.
+  Only managed-environment retirement reads this; dispatch and reconciliation never do. An adapter
+  without the callback reports none, so its missing items keep their environments.
+  """
+  @spec fetch_archived_issue_ids([String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def fetch_archived_issue_ids([]), do: {:ok, []}
+
+  def fetch_archived_issue_ids(issue_ids) when is_list(issue_ids) do
+    adapter = adapter()
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :fetch_archived_issue_ids, 1),
+      do: adapter.fetch_archived_issue_ids(Enum.uniq(issue_ids)),
+      else: {:ok, []}
   end
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}

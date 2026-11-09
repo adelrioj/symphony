@@ -3002,6 +3002,13 @@ survive restart. Retention expiry alone is insufficient: a fresh tracker observa
 affirm terminal state before destructive cleanup. Failed/missing tracker reads, missing issues,
 and nonactive nonterminal states MUST NOT authorize destruction. Zero retention makes cleanup
 eligible immediately under these same evidence requirements; it does not bypass them.
+An adapter MAY affirm that a retained issue is archived (Linear: a by-ID read with
+`includeArchived: true` that returns a non-null `archivedAt` and `trashed` not true; a trashed issue can
+still be restored and stays missing). For managed-environment retirement
+only, that affirmative archived read counts as a terminal observation, and the pre-hook
+revalidation re-reads it; other environment phases, dispatch, and running/blocked reconciliation
+are unchanged. An archived issue with no known state is retained while a before-remove hook must run. An issue that
+no read returns (deleted, or a failed read) remains missing and MUST NOT authorize destruction.
 
 A genuine reopen MUST conditionally clear the terminal timestamp and canceled cleanup intent before
 restart, unless deletion is already irreversible. It reuses the persisted workspace. A completed
