@@ -146,6 +146,12 @@ hooks:
     fi
   before_remove: |
     cd elixir && mise exec -- mix workspace.before_remove
+  # Optional before-run wait contract (unset = disabled). A before_run exit with exactly this
+  # status defers the run instead of failing it; see README.md "Configuration".
+  # before_run_wait_exit_code: 75
+  # before_run_wait_poll_ms: 60000     # in-attempt re-check interval
+  # before_run_wait_hold_ms: 0         # re-check in the same attempt/environment for this long
+  # before_run_wait_retry_ms: 300000   # wait retry delay after a deferred attempt
 agent:
   max_concurrent_agents: 10
   max_turns: 20

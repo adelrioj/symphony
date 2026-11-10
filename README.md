@@ -78,6 +78,19 @@ Symphony logs and comments its branch, last pushed commit and unpushed/uncommitt
 not push anything itself. Removing the label makes the issue eligible again. See
 [configuration](elixir/README.md#configuration).
 
+## Waiting in `before_run` without churning workers
+
+A lane can tell Symphony that its `before_run` hook means "not yet" rather than "failed" by setting
+`hooks.before_run_wait_exit_code` (for example `75`). The hook still runs in the worker, so a gate
+installed there stays out of the agent's reach. That exit starts no agent: the same attempt re-checks
+on the same workspace and environment every `hooks.before_run_wait_poll_ms` for up to
+`hooks.before_run_wait_hold_ms`, then ends `deferred` and retries after `hooks.before_run_wait_retry_ms`
+without counting a failure. A managed environment therefore starts once per hold instead of once per
+re-check, and still stops only through the normal proven stop. A holding attempt keeps its slot, so on
+a one-agent lane the hold also delays other tickets. Unset, every `before_run` failure behaves as before.
+See [configuration](elixir/README.md#configuration).
+
+
 ## Documentation
 
 - [Operation and lane lifecycle](docs/operations.md)

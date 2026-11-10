@@ -369,13 +369,51 @@ defmodule SymphonyElixir.Config.Schema do
       field(:after_run, :string)
       field(:before_remove, :string)
       field(:timeout_ms, :integer, default: 60_000)
+      # Opt-in "wait" contract for before_run: this exact exit status means the run is deferred,
+      # not failed. Unset keeps every before_run failure an ordinary failure.
+      field(:before_run_wait_exit_code, :integer)
+      field(:before_run_wait_poll_ms, :integer, default: 60_000)
+      field(:before_run_wait_hold_ms, :integer, default: 0)
+      field(:before_run_wait_retry_ms, :integer, default: 300_000)
     end
+
+    @fields [
+      :after_create,
+      :before_run,
+      :after_run,
+      :before_remove,
+      :timeout_ms,
+      :before_run_wait_exit_code,
+      :before_run_wait_poll_ms,
+      :before_run_wait_hold_ms,
+      :before_run_wait_retry_ms
+    ]
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:after_create, :before_run, :after_run, :before_remove, :timeout_ms], empty_values: [])
+      |> cast(attrs, @fields, empty_values: [])
       |> validate_number(:timeout_ms, greater_than: 0)
+      |> validate_number(:before_run_wait_poll_ms, greater_than: 0)
+      |> validate_number(:before_run_wait_hold_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:before_run_wait_retry_ms, greater_than: 0)
+      |> validate_wait_exit_code()
+    end
+
+    # 0 is success and 1/2 are the generic shell failures any broken hook returns; 64 is the
+    # workspace path guard; 126+ are "not executable", "not found", signals and SSH transport
+    # (255). None of them can mean "the predicate asked to wait".
+    defp validate_wait_exit_code(changeset) do
+      case get_field(changeset, :before_run_wait_exit_code) do
+        nil ->
+          changeset
+
+        code when is_integer(code) and code in 3..125 and code != 64 ->
+          changeset
+
+        _ ->
+          add_error(changeset, :before_run_wait_exit_code, "must be an integer in 3..125 other than 64")
+      end
     end
   end
 

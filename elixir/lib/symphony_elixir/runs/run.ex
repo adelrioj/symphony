@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Runs.Run do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @statuses ~w(running done blocked failed turns_exhausted stopped)
+  @statuses ~w(running done blocked failed turns_exhausted deferred stopped)
   @required_fields ~w(lane_id lane_version_id issue_id issue_identifier attempt_id executor status started_at)a
   @type t :: %__MODULE__{}
 

@@ -359,6 +359,7 @@ defmodule SymphonyElixir.TestSupport do
           hook_after_run: nil,
           hook_before_remove: nil,
           hook_timeout_ms: 60_000,
+          hook_before_run_wait: [],
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
@@ -410,6 +411,7 @@ defmodule SymphonyElixir.TestSupport do
     hook_after_run = Keyword.get(config, :hook_after_run)
     hook_before_remove = Keyword.get(config, :hook_before_remove)
     hook_timeout_ms = Keyword.get(config, :hook_timeout_ms)
+    hook_before_run_wait = Keyword.get(config, :hook_before_run_wait)
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
@@ -466,7 +468,8 @@ defmodule SymphonyElixir.TestSupport do
         "  command: #{yaml_value(omp_command)}",
         "pi:",
         "  command: #{yaml_value(pi_command)}",
-        hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
+        hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms) <>
+          hook_wait_yaml(hook_before_run_wait),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         "---",
         prompt
@@ -549,6 +552,10 @@ defmodule SymphonyElixir.TestSupport do
       "  render_interval_ms: #{yaml_value(render_interval_ms)}"
     ]
     |> Enum.join("\n")
+  end
+
+  defp hook_wait_yaml(settings) do
+    Enum.map_join(settings, "", fn {key, value} -> "\n  before_run_wait_#{key}: #{yaml_value(value)}" end)
   end
 
   defp hook_entry(_name, nil), do: nil
