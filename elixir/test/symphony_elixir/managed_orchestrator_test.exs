@@ -224,6 +224,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     assert cleanup.purpose == :cleanup
     ready(config, cleanup, prepare, owner, tasks)
     {_, hook, task} = operation(:cleanup_hook)
+    assert hook.discard_notice == nil
     refute_receive {:agent_started, _, _, _}, 0
     send(task, {:complete_operation, {:ok, hook.record}})
     {_, marker, task} = operation(:metadata)
@@ -236,6 +237,100 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     assert destroying.record.metadata["symphony_cleanup_hook_completed"]
     send(task, {:complete_operation, {:ok, %{destroying.record | absent?: true, pending: []}}})
     discover([])
+  end
+
+  describe "excluded label" do
+    test "stops a running managed agent, releases its claim and persists the release observation" do
+      write_managed_workflow(tracker_excluded_labels: ["human"], max_concurrent_agents: 1, poll_interval_ms: 60_000)
+      issues([issue("first", 1)])
+      {owner, tasks} = scheduler()
+      discover([])
+      {config, entry, prepare} = operation(:prepare)
+      ready(config, entry, prepare, owner, tasks)
+      assert_receive {:agent_started, "first", _, _}, 1_000
+
+      issues([%{issue("first", 1) | labels: ["human"]}])
+      poll(owner)
+      {_, stopping, stop} = operation(:stop)
+      assert is_integer(stopping.record.terminal_observed_at)
+      stopped(stop, stopping)
+
+      state = wait_state(owner, &(&1.environment_entries["first"].phase == :stopped))
+      refute Map.has_key?(state.running, "first")
+      refute MapSet.member?(state.claimed, "first")
+      refute Map.has_key?(state.retry_attempts, "first")
+      # Retention still applies exactly as for a terminal state.
+      poll(owner)
+      refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+      refute_receive {:agent_started, "first", _, _}, 0
+    end
+
+    test "persists the first exclusion observation of a retained environment before any cleanup" do
+      write_managed_workflow(tracker_excluded_labels: ["human"])
+      issues([%{issue("first", 1) | labels: ["human"]}])
+      {_owner, _} = scheduler()
+      retained = %{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}
+      discover([retained])
+      {_, observing, _} = operation(:metadata)
+      assert is_integer(observing.metadata_intent.terminal_observed_at)
+      refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+    end
+
+    test "cleans up a retained environment by the terminal path: hook with discard notice, stop, destroy" do
+      write_managed_workflow(tracker_excluded_labels: ["human"], hook_before_remove: "echo cleanup")
+      issues([%{issue("first", 1) | labels: ["human"]}])
+      {owner, tasks} = scheduler()
+      retained = %{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}, terminal_observed_at: 1}
+      discover([retained])
+      {config, cleanup, prepare} = operation(:prepare)
+      assert cleanup.purpose == :cleanup
+      ready(config, cleanup, prepare, owner, tasks)
+      {_, hook, task} = operation(:cleanup_hook)
+      assert hook.discard_notice == "human"
+      refute_receive {:agent_started, _, _, _}, 0
+      send(task, {:complete_operation, {:ok, hook.record}})
+      {_, marker, task} = operation(:metadata)
+      send(task, {:complete_operation, {:ok, marker.record}})
+      {_, stopping, task} = operation(:stop)
+      stopped(task, stopping)
+      {_, destroying, task} = operation(:destroy)
+      assert destroying.record.metadata["symphony_cleanup_hook_completed"]
+      send(task, {:complete_operation, {:ok, %{destroying.record | absent?: true, pending: []}}})
+      discover([])
+      refute_receive {:environment_operation, :prepare, _, _, _, _}, 100
+    end
+
+    test "is never inferred from a missing issue" do
+      write_managed_workflow(tracker_excluded_labels: ["human"])
+      issues([])
+      {owner, _} = scheduler()
+      retained = %{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}
+      discover([retained])
+      wait_state(owner, &Map.has_key?(&1.environment_entries, "first"))
+      poll(owner)
+      refute_receive {:environment_operation, :metadata, _, _, _, _}, 0
+      refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+    end
+
+    test "removing the label reopens a retained environment that has not started deletion" do
+      write_managed_workflow(tracker_excluded_labels: ["human"])
+      issues([issue("first", 1)])
+      {_owner, _} = scheduler()
+      discover([cleaned_record("first")])
+      {_, reopening, _} = operation(:metadata)
+      assert reopening.metadata_intent == %{terminal_observed_at: nil, desired: :stopped}
+    end
+
+    test "removing the label cannot undo a deletion that already began" do
+      write_managed_workflow(tracker_excluded_labels: ["human"])
+      issues([issue("first", 1)])
+      {_owner, _} = scheduler()
+      deleting = %{cleaned_record("first") | desired: :absent}
+      discover([deleting])
+      {_, destroying, _} = operation(:destroy)
+      assert destroying.record.desired == :absent
+      refute_receive {:environment_operation, :metadata, _, _, _, _}, 0
+    end
   end
 
   test "reopened retained environment clears marker durably before preparing again" do
@@ -1003,6 +1098,97 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
 
     wait_state(owner, &Map.has_key?(&1.retry_attempts, "first"))
     refute Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
+  end
+
+  describe "before_run wait deferral" do
+    test "a deferred run stops its environment normally, frees the slot and retries on the wait cadence" do
+      assert :ok =
+               write_managed_workflow(
+                 tracker_active_states: ["In Progress"],
+                 max_concurrent_agents: 1,
+                 poll_interval_ms: 60_000,
+                 hook_before_run_wait: [exit_code: 75, retry_ms: 600_000]
+               )
+
+      issues([issue("first", 1), issue("second", 2)])
+      {owner, tasks} = scheduler()
+      discover([])
+      {config, entry, prepare} = operation(:prepare)
+      ready(config, entry, prepare, owner, tasks)
+      assert_receive {:agent_started, "first", runner, opts}, 1_000
+      exhaustion = %{state: "in progress", count: 1, head: nil}
+      :sys.replace_state(owner, &%{&1 | turn_exhaustions: %{"first" => exhaustion}})
+      send(owner, {:agent_run_deferred, "first", opts[:attempt_id]})
+      Orchestrator.snapshot(owner, 1_000)
+      send(runner, :finish_agent)
+
+      # The deferral changes nothing about the fenced stop: capacity stays occupied until it is proven.
+      {_, stopping, stop} = operation(:stop)
+      assert Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
+      refute Map.has_key?(:sys.get_state(owner).retry_attempts, "first")
+      stopped(stop, stopping)
+
+      {_, second, _prepare} = operation(:prepare)
+      assert second.record.issue_id == "second"
+
+      state = :sys.get_state(owner)
+      retry = state.retry_attempts["first"]
+      assert retry.attempt == 1
+      assert retry.error =~ "before_run deferred"
+      assert retry.due_at_ms - System.monotonic_time(:millisecond) > 500_000
+      assert state.turn_exhaustions["first"] == exhaustion
+      refute Map.has_key?(state.blocked, "first")
+      assert SymphonyElixir.Runs.get_by_attempt(opts[:attempt_id]).status == "deferred"
+    end
+
+    test "a wait retry prepares the environment again without advancing the failure attempt" do
+      assert :ok =
+               write_managed_workflow(
+                 tracker_active_states: ["In Progress"],
+                 max_concurrent_agents: 1,
+                 poll_interval_ms: 60_000,
+                 hook_before_run_wait: [exit_code: 75, retry_ms: 20]
+               )
+
+      issues([issue("first", 1)])
+      {owner, tasks} = scheduler()
+      discover([])
+
+      for _wait <- 1..2 do
+        {config, entry, prepare} = operation(:prepare)
+        assert entry.record.issue_id == "first"
+        ready(config, entry, prepare, owner, tasks)
+        assert_receive {:agent_started, "first", runner, opts}, 1_000
+        send(owner, {:agent_run_deferred, "first", opts[:attempt_id]})
+        Orchestrator.snapshot(owner, 1_000)
+        send(runner, :finish_agent)
+        {_, stopping, stop} = operation(:stop)
+        stopped(stop, stopping)
+        wait_state(owner, &(Map.get(&1.retry_attempts, "first", %{attempt: nil}).attempt == 1 or &1.running != %{}))
+      end
+
+      {_config, entry, _prepare} = operation(:prepare)
+      assert entry.record.issue_id == "first"
+      assert entry.retry_attempt == 1
+    end
+
+    test "without the contract a deferral message is ignored by unrelated attempts" do
+      issues([issue("first", 1)])
+      {owner, tasks} = scheduler()
+      discover([])
+      {config, entry, prepare} = operation(:prepare)
+      ready(config, entry, prepare, owner, tasks)
+      assert_receive {:agent_started, "first", runner, _opts}, 1_000
+      send(owner, {:agent_run_deferred, "first", "another-attempt"})
+      Orchestrator.snapshot(owner, 1_000)
+      refute Map.has_key?(:sys.get_state(owner).running["first"], :deferred)
+      send(runner, :finish_agent)
+      {_, stopping, stop} = operation(:stop)
+      stopped(stop, stopping)
+      wait_state(owner, &Map.has_key?(&1.retry_attempts, "first"))
+      # A normal finish of the real attempt is a continuation check, never a wait retry.
+      assert :sys.get_state(owner).retry_attempts["first"].error == nil
+    end
   end
 
   defp assert_reconciliation_releases_location(next_state) do

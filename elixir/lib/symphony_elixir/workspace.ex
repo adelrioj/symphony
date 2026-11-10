@@ -447,6 +447,148 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  # Read-only, bounded and never authoritative: the workspace is agent-controlled, so its answer is
+  # reported verbatim (after shape validation) and never used to decide anything. Repository-local
+  # fsmonitor and hook configuration are disabled so reading the state cannot execute workspace code.
+  @discard_report_script """
+  git_read() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.untrackedCache=false "$@"; }
+  # Only the workspace's own checkout: never a repository found by walking up past it.
+  top=$(git_read rev-parse --show-toplevel 2>/dev/null || true)
+  if [ -z "$top" ] || [ "$(cd "$top" && pwd -P)" != "$(pwd -P)" ]; then
+    exit 3
+  fi
+  branch=$(git_read symbolic-ref --short -q HEAD 2>/dev/null || true)
+  head=$(git_read rev-parse -q --verify HEAD 2>/dev/null || true)
+  upstream=$(git_read rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+  if [ -z "$upstream" ] && [ -n "$branch" ] && git_read rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+    upstream="origin/$branch"
+  fi
+  pushed=""
+  unpushed=""
+  if [ -n "$upstream" ]; then
+    pushed=$(git_read rev-parse -q --verify "refs/remotes/$upstream" 2>/dev/null || true)
+    if [ -n "$pushed" ] && [ -n "$head" ]; then
+      unpushed=$(git_read rev-list --count "$pushed..$head" 2>/dev/null || true)
+    fi
+  fi
+  dirty=$(git_read status --porcelain 2>/dev/null | wc -l | tr -d ' ' || true)
+  printf 'symphony-discard-report/v1\nbranch=%s\nhead=%s\nupstream=%s\npushed=%s\nunpushed=%s\ndirty=%s\n' \
+    "$branch" "$head" "$upstream" "$pushed" "$unpushed" "$dirty"
+  """
+  @discard_report_timeout_ms 30_000
+  @discard_report_max_bytes 4_096
+
+  @typedoc "What a discarded workspace held, read best-effort from its Git checkout."
+  @type discard_report :: %{
+          branch: String.t() | nil,
+          head: String.t() | nil,
+          upstream: String.t() | nil,
+          pushed: String.t() | nil,
+          unpushed: non_neg_integer() | nil,
+          dirty: non_neg_integer() | nil
+        }
+
+  @doc """
+  Reads the branch, local HEAD, upstream and last pushed commit of a workspace that is about to be
+  discarded, plus counts of unpushed commits and uncommitted paths.
+
+  "Pushed" is the remote-tracking ref as the workspace last saw it (after its last fetch or push),
+  not a fresh remote read. The read is bounded, read-only and best-effort: `{:error, reason}` means
+  the state could not be read, and a managed timeout keeps its `:managed_execution_unknown` meaning
+  so callers can fence follow-on work exactly as for a hook.
+  """
+  @spec discard_report(Path.t(), ExecutionContext.t()) :: {:ok, discard_report()} | {:error, term()}
+  def discard_report(workspace, %ExecutionContext{mode: :local} = context) when is_binary(workspace) do
+    with :ok <- validate_workspace_path(workspace, context),
+         true <- File.dir?(workspace) || {:error, :workspace_missing} do
+      task =
+        Task.async(fn ->
+          System.cmd("sh", ["-c", @discard_report_script], cd: workspace, stderr_to_stdout: false)
+        end)
+
+      case Task.yield(task, @discard_report_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+        {:ok, {output, 0}} -> parse_discard_report(output)
+        {:ok, {_output, status}} -> {:error, {:discard_report_failed, status}}
+        _ -> {:error, :discard_report_timeout}
+      end
+    end
+  end
+
+  def discard_report(workspace, %ExecutionContext{} = context) when is_binary(workspace) do
+    timeout_ms = min(Config.settings!().hooks.timeout_ms, @discard_report_timeout_ms)
+    script = remote_workspace_guard(workspace, context) <> "\ncd \"$workspace\"\n" <> @discard_report_script
+
+    case run_remote_command(context, script, timeout_ms, :workspace_discard_report) do
+      {:ok, {output, 0}} -> parse_discard_report(output)
+      {:ok, {_output, status}} -> {:error, {:discard_report_failed, status}}
+      {:error, {:managed_execution_unknown, _detail}} = unknown -> unknown
+      {:error, _reason} -> {:error, :discard_report_unavailable}
+    end
+  end
+
+  def discard_report(_workspace, _context), do: {:error, :discard_report_unavailable}
+
+  @doc "Like `discard_report/2`, for the workspace a context derives from the issue identifier."
+  @spec discard_report_for_issue(map() | String.t() | nil, ExecutionContext.t()) ::
+          {:ok, discard_report()} | {:error, term()}
+  def discard_report_for_issue(issue_or_identifier, %ExecutionContext{} = context) do
+    case workspace_path_for_issue(workspace_key(issue_or_identifier), context) do
+      {:ok, workspace} -> discard_report(workspace, context)
+      {:error, _reason} -> {:error, :discard_report_unavailable}
+    end
+  end
+
+  defp parse_discard_report(output) do
+    output = IO.iodata_to_binary(output)
+
+    with true <- byte_size(output) <= @discard_report_max_bytes,
+         ["symphony-discard-report/v1" | lines] <- String.split(String.trim_trailing(output, "\n"), "\n"),
+         {:ok, fields} <- discard_fields(lines) do
+      {:ok,
+       %{
+         branch: report_value(fields["branch"], ~r/\A[A-Za-z0-9._\/+-]{1,200}\z/),
+         head: report_value(fields["head"], ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/),
+         upstream: report_value(fields["upstream"], ~r/\A[A-Za-z0-9._\/+-]{1,240}\z/),
+         pushed: report_value(fields["pushed"], ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/),
+         unpushed: report_count(fields["unpushed"]),
+         dirty: report_count(fields["dirty"])
+       }}
+    else
+      _ -> {:error, :discard_report_invalid}
+    end
+  end
+
+  defp discard_fields(lines) do
+    keys = ~w(branch head upstream pushed unpushed dirty)
+
+    fields =
+      Map.new(lines, fn line ->
+        case String.split(line, "=", parts: 2) do
+          [key, value] -> {key, value}
+          _ -> {line, nil}
+        end
+      end)
+
+    if length(lines) == length(keys) and Enum.sort(Map.keys(fields)) == Enum.sort(keys),
+      do: {:ok, fields},
+      else: :error
+  end
+
+  defp report_value(value, pattern) when is_binary(value) do
+    if Regex.match?(pattern, value), do: value
+  end
+
+  defp report_value(_value, _pattern), do: nil
+
+  defp report_count(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {count, ""} when count >= 0 -> count
+      _ -> nil
+    end
+  end
+
+  defp report_count(_value), do: nil
+
   @spec run_before_remove_hook(Path.t(), map() | String.t() | nil, ExecutionContext.t()) :: hook_result()
   def run_before_remove_hook(workspace, issue, %ExecutionContext{} = context) do
     case Config.settings!().hooks.before_remove do

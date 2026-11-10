@@ -26,6 +26,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Tracker
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Workspace
+  alias SymphonyElixir.WorkspaceDiscard
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @continuation_retry_delay_ms 1_000
@@ -300,6 +301,16 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_info({:agent_run_deferred, issue_id, attempt_id}, %{running: running} = state) when is_binary(issue_id) do
+    case Map.get(running, issue_id) do
+      %{attempt_id: ^attempt_id} = running_entry ->
+        {:noreply, %{state | running: Map.put(running, issue_id, Map.put(running_entry, :deferred, true))}}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
       case pop_retry_attempt_state(state, issue_id, retry_token) do
@@ -325,6 +336,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp run_status(_reason, %{attempt_outcome: :blocked}), do: "blocked"
+  defp run_status(:normal, %{deferred: true}), do: "deferred"
   defp run_status(:normal, %{turns_exhausted_state: name}) when is_binary(name), do: "turns_exhausted"
   defp run_status(:normal, entry), do: if(input_required_blocker?(entry), do: "blocked", else: "done")
   defp run_status(_reason, entry), do: if(input_required_blocker?(entry), do: "blocked", else: "failed")
@@ -338,10 +350,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
-    else
-      handle_agent_completion(state, issue_id, running_entry, session_id)
+    cond do
+      input_required_blocker?(running_entry) ->
+        block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
+
+      Map.get(running_entry, :deferred) == true ->
+        defer_agent_down(state, issue_id, running_entry, session_id)
+
+      true ->
+        handle_agent_completion(state, issue_id, running_entry, session_id)
     end
   end
 
@@ -374,6 +391,29 @@ defmodule SymphonyElixir.Orchestrator do
       identifier: running_entry.identifier,
       issue_url: running_entry.issue.url,
       error: "agent exited: #{inspect(reason)}",
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      execution_context: Map.get(running_entry, :execution_context),
+      lane_snapshot: Map.get(running_entry, :lane_snapshot)
+    })
+  end
+
+  # before_run asked to wait (hooks.before_run_wait_exit_code) and no agent ran. This is neither
+  # a failure nor a completion: the failure attempt is kept rather than advanced, turn-exhaustion
+  # counting is untouched, and the retry uses the lane's wait cadence. A managed environment has
+  # already been stopped through the normal fenced path before this runs.
+  defp defer_agent_down(state, issue_id, running_entry, session_id) do
+    Logger.info(
+      "Agent run deferred by before_run for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; scheduling wait retry"
+    )
+
+    attempt = max(normalize_retry_attempt(Map.get(running_entry, :retry_attempt)), 1)
+
+    schedule_issue_retry(state, issue_id, attempt, %{
+      identifier: running_entry.identifier,
+      issue_url: running_entry.issue.url,
+      error: "before_run deferred the run (wait)",
+      delay_type: :wait,
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path),
       execution_context: Map.get(running_entry, :execution_context),
@@ -762,6 +802,13 @@ defmodule SymphonyElixir.Orchestrator do
 
         state |> observe_terminal(issue.id) |> terminate_running_issue(issue.id, true)
 
+      excluded_issue?(issue) ->
+        Logger.info(
+          "Issue carries an excluded label: #{issue_context(issue)} label=#{excluded_issue_label(issue)}; stopping active agent and releasing its workspace"
+        )
+
+        state |> observe_terminal(issue.id) |> terminate_running_issue(issue.id, {:excluded, issue})
+
       !issue_routable?(issue) ->
         Logger.info(
           "Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent"
@@ -803,6 +850,16 @@ defmodule SymphonyElixir.Orchestrator do
 
         unless managed_entry?(state, issue.id),
           do: cleanup_issue_workspace(issue, Map.get(state.blocked, issue.id, %{}))
+
+        release_issue_claim(state, issue.id)
+
+      excluded_issue?(issue) ->
+        Logger.info(
+          "Blocked issue carries an excluded label: #{issue_context(issue)} label=#{excluded_issue_label(issue)}; releasing block and its workspace"
+        )
+
+        unless managed_entry?(state, issue.id),
+          do: discard_issue_workspace(issue, Map.get(state.blocked, issue.id, %{}))
 
         release_issue_claim(state, issue.id)
 
@@ -921,8 +978,10 @@ defmodule SymphonyElixir.Orchestrator do
 
         stop_running_task(pid, ref, state.task_supervisor)
 
-        if cleanup_workspace do
-          cleanup_issue_workspace(Map.get(running_entry, :issue, identifier), running_entry)
+        case cleanup_workspace do
+          {:excluded, issue} -> discard_issue_workspace(issue, running_entry)
+          true -> cleanup_issue_workspace(Map.get(running_entry, :issue, identifier), running_entry)
+          false -> :ok
         end
 
         state = release_dispatch_token(state, issue_id, Map.get(running_entry, :dispatch_token))
@@ -1256,8 +1315,19 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_routable?(%Issue{} = issue) do
     # Only the label fields: the tracker struct also carries the resolved Linear API token,
     # which a FunctionClauseError on this hot path would inspect/1 into the log file.
-    Issue.routable?(issue, Map.take(Config.settings!().tracker, [:required_labels, :any_labels]))
+    Issue.routable?(issue, Map.take(Config.settings!().tracker, Issue.label_policy_keys()))
   end
+
+  # Exclusion removes an issue from the lane completely, like a terminal state. It is only ever
+  # evaluated on an issue a tracker read just returned, so a failed or empty read never counts.
+  defp excluded_issue_label(%Issue{} = issue),
+    do: Issue.excluded_label(issue, Map.take(Config.settings!().tracker, [:excluded_labels]))
+
+  defp excluded_issue?(issue), do: not is_nil(excluded_issue_label(issue))
+
+  # Terminal state or an excluded label: both release the issue and its workspace by the same path.
+  defp release_observed?(%Issue{} = issue),
+    do: terminal_issue_state?(issue.state, terminal_state_set()) or excluded_issue?(issue)
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, normalize_issue_state(state_name))
@@ -1670,6 +1740,14 @@ defmodule SymphonyElixir.Orchestrator do
         unless managed_entry?(state, issue_id), do: cleanup_issue_workspace(issue, metadata)
         {:noreply, release_issue_claim(state, issue_id)}
 
+      excluded_issue?(issue) ->
+        Logger.info(
+          "Issue carries an excluded label: issue_id=#{issue_id} issue_identifier=#{issue.identifier} label=#{excluded_issue_label(issue)}; cancelling retry and releasing its workspace"
+        )
+
+        unless managed_entry?(state, issue_id), do: discard_issue_workspace(issue, metadata)
+        {:noreply, release_issue_claim(state, issue_id)}
+
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
 
@@ -1714,6 +1792,41 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp cleanup_issue_workspace(_issue_or_identifier, _worker_host), do: :ok
+
+  # Records what the workspace held (branch, last pushed commit, unpushed and uncommitted work)
+  # before the ordinary cleanup removes it. Never blocks the removal.
+  defp discard_issue_workspace(%Issue{} = issue, metadata) do
+    label = excluded_issue_label(issue)
+
+    with_lane_snapshot(Map.get(metadata, :lane_snapshot), fn ->
+      WorkspaceDiscard.notify(issue, label, unmanaged_discard_report(issue, metadata))
+    end)
+
+    cleanup_issue_workspace(issue, metadata)
+  end
+
+  defp unmanaged_discard_report(issue, metadata) do
+    case {Map.get(metadata, :workspace_path), Map.get(metadata, :execution_context)} do
+      {path, %ExecutionContext{} = context} when is_binary(path) and path != "" ->
+        Workspace.discard_report(path, context)
+
+      {path, nil} when is_binary(path) and path != "" ->
+        Workspace.discard_report(path, static_execution_context(Map.get(metadata, :worker_host)))
+
+      _ ->
+        unrecorded_discard_report(issue, Map.get(metadata, :worker_host))
+    end
+  end
+
+  defp unrecorded_discard_report(issue, nil) do
+    case Config.settings!().worker.ssh_hosts do
+      [] -> Workspace.discard_report_for_issue(issue, static_execution_context(nil))
+      _hosts -> {:error, :discard_report_host_unknown}
+    end
+  end
+
+  defp unrecorded_discard_report(issue, host) when is_binary(host),
+    do: Workspace.discard_report_for_issue(issue, static_execution_context(host))
 
   defp static_execution_context(host) do
     {:ok, snapshot} = LaneContext.capture()
@@ -1870,10 +1983,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
+    cond do
+      metadata[:delay_type] == :continuation and attempt == 1 -> @continuation_retry_delay_ms
+      metadata[:delay_type] == :wait -> Config.settings!().hooks.before_run_wait_retry_ms
+      true -> failure_retry_delay(attempt)
     end
   end
 
@@ -2618,16 +2731,30 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp revalidate_cleanup_prepared(state, id) do
     with {:ok, issues} <- Tracker.fetch_issues_by_ids([id]),
-         true <- cleanup_terminal?(id, issues) do
-      environment_step(state, id, {:reconcile, :cleanup_hook})
+         {:ok, notice} <- cleanup_release(id, issues) do
+      state
+      |> put_environment(%{state.environment_entries[id] | discard_notice: notice})
+      |> environment_step(id, {:reconcile, :cleanup_hook})
     else
       _ -> managed_stop(state, id, :release)
     end
   end
 
-  defp cleanup_terminal?(_id, [issue]), do: terminal_issue_state?(issue.state, terminal_state_set())
-  defp cleanup_terminal?(id, []), do: Tracker.fetch_archived_issue_ids([id]) == {:ok, [id]}
-  defp cleanup_terminal?(_id, _issues), do: false
+  # A terminal or archived issue is simply finished; only an exclusion discards work that may
+  # still matter, so only an exclusion carries a discard notice.
+  defp cleanup_release(_id, [issue]) do
+    cond do
+      terminal_issue_state?(issue.state, terminal_state_set()) -> {:ok, nil}
+      release_observed?(issue) -> {:ok, excluded_issue_label(issue)}
+      true -> :error
+    end
+  end
+
+  defp cleanup_release(id, []) do
+    if Tracker.fetch_archived_issue_ids([id]) == {:ok, [id]}, do: {:ok, nil}, else: :error
+  end
+
+  defp cleanup_release(_id, _issues), do: :error
 
   defp revalidate_prepared_environment(state, id) do
     entry = state.environment_entries[id]
@@ -2886,7 +3013,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp observe_environment_issue(state, _id, nil), do: state
 
   defp observe_environment_issue(state, id, %Issue{} = issue) do
-    state = if terminal_issue_state?(issue.state, terminal_state_set()), do: observe_terminal(state, id), else: state
+    state = if release_observed?(issue), do: observe_terminal(state, id), else: state
     entry = state.environment_entries[id]
 
     if is_nil(entry.record.issue_state) do
@@ -2957,7 +3084,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_stopped_environment(state, entry, issue) do
     cond do
-      terminal_issue_state?(issue.state, terminal_state_set()) ->
+      release_observed?(issue) ->
         reconcile_terminal_environment(state, entry, issue)
 
       not is_nil(entry.record.terminal_observed_at) or not is_nil(entry.terminal_observation) ->

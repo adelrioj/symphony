@@ -450,6 +450,16 @@ Fields:
   - An empty list imposes no constraint.
   - `required_labels` and `any_labels` are independent constraints that combine as a conjunction:
     when both are configured an issue MUST satisfy both.
+- `excluded_labels` (list of strings)
+  - Default: `[]`.
+  - An issue carrying any configured label MUST NOT dispatch or continue, and MUST be removed from
+    the lane completely (Section 8.5): its run is cancelled, it is not retried, its claim is
+    released and its workspace is released through the same path as a terminal state.
+  - Matching ignores case and surrounding whitespace. A blank configured label matches no issue.
+  - A label in `excluded_labels` MUST NOT also appear in `required_labels` or `any_labels`;
+    configuration validation MUST reject the overlap.
+  - Exclusion never changes the issue's tracker state. Removing the label makes the issue eligible
+    again under the ordinary rules.
 - `active_states` (list of strings)
   - REQUIRED unless the selected adapter profile documents a default.
   - Values are provider-native state names compared case-insensitively by the scheduler.
@@ -500,6 +510,18 @@ Fields:
   - Applies to all workspace hooks.
   - Invalid values fail configuration validation.
   - Changes SHOULD be re-applied at runtime for future hook executions.
+- `before_run_wait_exit_code` (integer, OPTIONAL, extension)
+  - Default: unset, which disables the wait contract (Section 9.4).
+  - When set, `before_run` exiting with exactly this status defers the attempt instead of failing
+    it. MUST be in `3..125` and not `64`; `0`, the generic shell failures `1`/`2`, the workspace
+    path guard `64`, and `126+` (not executable, not found, signals, SSH transport) are rejected.
+- `before_run_wait_poll_ms` (integer, OPTIONAL, extension)
+  - Default: `60000`; positive. Interval between in-attempt re-checks while holding.
+- `before_run_wait_hold_ms` (integer, OPTIONAL, extension)
+  - Default: `0`; non-negative. How long one attempt keeps re-running `before_run` on the same
+    workspace and execution environment before it ends deferred. `0` defers at once.
+- `before_run_wait_retry_ms` (integer, OPTIONAL, extension)
+  - Default: `300000`; positive. Delay of the wait retry scheduled after a deferred attempt.
 
 #### 5.3.5 `agent` (object)
 
@@ -851,6 +873,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.provider`: object, default `{}`, adapter-owned endpoint/scope/auth settings
 - `tracker.required_labels`: list of strings, default `[]`
 - `tracker.any_labels`: list of strings, default `[]`
+- `tracker.excluded_labels`: list of strings, default `[]`, disjoint from the two lists above
 - `tracker.active_states`: list of provider-native state names, adapter-defined default
 - `tracker.terminal_states`: list of provider-native state names, adapter-defined default
 - `polling.interval_ms`: integer, default `30000`
@@ -860,6 +883,10 @@ not require recognizing or validating extension fields unless that extension is 
 - `hooks.after_run`: shell script or null
 - `hooks.before_remove`: shell script or null
 - `hooks.timeout_ms`: integer, default `60000`
+- `hooks.before_run_wait_exit_code`: integer in `3..125` except `64`, or unset (default; disabled)
+- `hooks.before_run_wait_poll_ms`: integer, default `60000`
+- `hooks.before_run_wait_hold_ms`: integer, default `0`
+- `hooks.before_run_wait_retry_ms`: integer, default `300000`
 - `agent.max_concurrent_agents`: integer, default `10`
 - `agent.max_turns`: integer, default `20`
 - `agent.max_turn_exhaustions`: integer, default `3`
@@ -1007,6 +1034,11 @@ Distinct terminal reasons are important because retry logic and logs differ.
     turn loop, unless the issue has reached `agent.max_turn_exhaustions` consecutive turn-budget
     exhaustions in its current state, in which case park it as blocked.
 
+- `Worker Exit (deferred)` (OPTIONAL before-run wait contract, Section 9.4)
+  - Remove running entry and stop a managed environment through the normal path.
+  - Schedule a wait retry after `hooks.before_run_wait_retry_ms`; it is neither a failure nor a
+    continuation and does not touch turn-exhaustion counting.
+
 - `Worker Exit (abnormal)`
   - Remove running entry.
   - Update aggregate runtime totals.
@@ -1062,14 +1094,15 @@ An issue is dispatch-eligible only if all are true:
 - Its adapter-provided `dispatchable` value is `true`.
 - It contains every label in `tracker.required_labels`.
 - It carries at least one label in `tracker.any_labels`, unless that list is empty.
+- It carries no label in `tracker.excluded_labels`.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
 
 For refresh and continuation checks, `issue_routable(issue)` means only that adapter-provided
-`dispatchable` is true and that the configured label policy — `tracker.required_labels` and
-`tracker.any_labels` together — is satisfied. State, claims, and concurrency are checked separately
+`dispatchable` is true and that the configured label policy — `tracker.required_labels`,
+`tracker.any_labels` and `tracker.excluded_labels` together — is satisfied. State, claims, and concurrency are checked separately
 by the surrounding algorithm.
 
 Sorting order (stable intent):
@@ -1101,6 +1134,9 @@ Retry entry creation:
 Backoff formula:
 
 - Normal continuation retries after a clean worker exit use a short fixed delay of `1000` ms.
+- Wait retries after a deferred attempt (Section 9.4) use `hooks.before_run_wait_retry_ms`. They are
+  not failures: the retry keeps the current failure attempt number (at least `1`) instead of
+  advancing it, and turn-budget exhaustion counting is neither advanced nor reset.
 - Failure-driven retries use `delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)`.
 - Power is capped by the configured max retry backoff (default `300000` / 5m).
 
@@ -1118,6 +1154,7 @@ Retry handling behavior:
 1. Refresh the specific issue with `fetch_issues_by_ids([issue_id])`.
 2. If not found, release claim.
 3. If found in a terminal state, clean its workspace and release claim.
+   If found carrying an excluded label, do the same without dispatching (Section 8.5).
 4. If found and still active and routable:
    - Dispatch if slots are available.
    - Otherwise requeue with error `no available orchestrator slots`.
@@ -1146,10 +1183,28 @@ Part B: Tracker state refresh
 - Fetch current issue states for all running issue IDs.
 - For each running issue:
   - If tracker state is terminal: terminate worker and clean workspace.
+  - If the issue carries an excluded label: terminate worker, release the claim and any retry, and
+    clean the workspace exactly as for a terminal state, after recording the workspace state below.
   - If tracker state is still active and routable: update the in-memory issue snapshot.
   - If tracker state is active but no longer routable: terminate worker without workspace cleanup.
   - If tracker state is neither active nor terminal: terminate worker without workspace cleanup.
 - If state refresh fails, keep workers running and try again on the next tick.
+
+Exclusion is an affirmative observation: it MUST be read from an issue snapshot returned by a
+successful tracker read, never inferred from a failed read, a missing issue or an empty label list.
+Blocked (parked) issues are reconciled the same way. Merely becoming unroutable for any other
+reason keeps the existing behavior: stop without workspace cleanup.
+
+Before an excluded issue's workspace is removed, the implementation SHOULD record what it held so
+that unpushed work is never lost silently: the branch, the last pushed commit (the workspace's
+remote-tracking ref), the local HEAD, and the counts of unpushed commits and uncommitted paths.
+That read is bounded, read-only, best-effort and never authoritative, because the workspace is
+agent-controlled; it MUST NOT execute repository-configured code and MUST describe only the
+workspace's own checkout. The record goes to the log and, when the tracker adapter supports
+comments, to a comment on the issue. A failed read or comment MUST be recorded and MUST NOT hold the
+exclusion back, except that an ambiguous managed read fences follow-on hooks and deletion exactly
+like an ambiguous `before_remove` (Appendix B.3). Symphony does not push the work itself; an
+operator who wants it preserved can push it from `hooks.before_remove`, which still runs.
 
 ### 8.6 Startup Terminal Workspace Cleanup
 
@@ -1234,9 +1289,33 @@ Execution contract:
 Failure semantics:
 
 - `after_create` failure or timeout is fatal to workspace creation.
-- `before_run` failure or timeout is fatal to the current run attempt.
+- `before_run` failure or timeout is fatal to the current run attempt, except the wait status below.
 - `after_run` failure or timeout is logged and ignored.
 - `before_remove` failure or timeout is logged and ignored.
+
+Before-run wait contract (OPTIONAL extension, disabled unless `hooks.before_run_wait_exit_code` is
+set):
+
+- The hook runs exactly where `before_run` always runs (in the workspace, on the worker host or
+  managed environment). The implementation MUST NOT evaluate the wait anywhere else, so a predicate
+  installed in the worker image stays outside agent control.
+- A `before_run` exit with exactly the configured status is a *wait*, not a failure. Any other
+  non-zero status, a timeout, and an ambiguous managed outcome keep their normal semantics.
+- On a wait, no agent session starts and no prompt is built. While the elapsed hold of the current
+  attempt plus `hooks.before_run_wait_poll_ms` does not exceed `hooks.before_run_wait_hold_ms`, the
+  worker sleeps for the poll interval, refreshes the issue, and re-runs `before_run` in the same
+  attempt, workspace and execution environment. Each re-check MUST emit a worker update so stall
+  detection observes progress; configure `before_run_wait_poll_ms` below `codex.stall_timeout_ms`.
+  The holding attempt is an ordinary running attempt: it occupies its concurrency slot, and
+  reconciliation cancels it like any other run when the issue becomes terminal, non-active or
+  unroutable.
+- If the refreshed issue changed state, left the active states or became unroutable, the attempt
+  ends normally without an agent and without deferral, so the ordinary continuation check routes it.
+  A failed refresh ends the attempt deferred (it never launches an agent).
+- When the hold is spent (or is `0`), the attempt ends *deferred*: `after_run` still runs, the
+  worker reports the deferral to the orchestrator and exits normally. The orchestrator records the
+  attempt as `deferred` and schedules a wait retry (Section 8.4). A managed environment is stopped
+  through the normal fenced path first (Appendix B); the deferral grants no release shortcut.
 
 ### 9.5 Safety Invariants
 
@@ -1517,8 +1596,8 @@ An implementation MUST support these adapter operations:
      cleanup.
    - When used for candidate polling, include active scoped issues even when
      `dispatchable=false`; the scheduler owns that final filter.
-   - The orchestrator applies the configured label policy (`required_labels`, `any_labels`),
-     `dispatchable`, claims, retries, and concurrency after normalization.
+   - The orchestrator applies the configured label policy (`required_labels`, `any_labels`,
+     `excluded_labels`), `dispatchable`, claims, retries, and concurrency after normalization.
    - An empty `state_names` list MUST return an empty result without a provider request.
 
 2. `fetch_issues_by_ids(issue_ids)`
@@ -2449,7 +2528,22 @@ function run_agent_attempt(issue, attempt, orchestrator_channel, backend, snapsh
   if workspace failed:
     fail_worker("workspace error")
 
-  if run_hook("before_run", workspace.path) failed:
+  hold_started = now()
+  loop:
+    result = run_hook("before_run", workspace.path)
+    if result is not wait_status(config.hooks.before_run_wait_exit_code):
+      break
+    if elapsed(hold_started) + config.hooks.before_run_wait_poll_ms > config.hooks.before_run_wait_hold_ms:
+      report_deferred(orchestrator_channel)       # no agent session, no prompt
+      run_hook_best_effort("after_run", workspace.path)
+      exit_normal()
+    emit_update("before_run waiting")
+    sleep(config.hooks.before_run_wait_poll_ms)
+    issue = refresh(issue)
+    if issue state changed, inactive or unroutable:
+      run_hook_best_effort("after_run", workspace.path)
+      exit_normal()                               # ordinary continuation check routes it
+  if result failed:
     fail_worker("before_run hook error")
 
   session = backend.start_session(workspace=workspace.path)
@@ -2519,7 +2613,14 @@ on_worker_exit(issue_id, reason, state):
   running_entry = state.running.remove(issue_id)
   state = add_runtime_seconds_to_totals(state, running_entry)
 
-  if reason == normal:
+  if reason == normal and running_entry.deferred:
+    # before_run wait contract: neither a failure nor a completion.
+    state = schedule_retry(state, issue_id, max(running_entry.retry_attempt, 1), {
+      identifier: running_entry.identifier,
+      delay_type: wait,
+      error: "before_run deferred the run (wait)"
+    })
+  else if reason == normal:
     exhaustions = count_consecutive_turn_exhaustions(state, running_entry)
 
     attempt_config = running_entry.config_snapshot.config
@@ -2635,6 +2736,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - OPTIONAL workspace population/synchronization errors are surfaced
 - `after_create` hook runs only on new workspace creation
 - `before_run` hook runs before each attempt and failure/timeouts abort the current attempt
+- With `hooks.before_run_wait_exit_code` set, that exact status defers instead of failing: in-attempt
+  re-checks within the hold reuse the same workspace/environment, a spent hold reports `deferred`
+  and schedules a wait retry that neither advances the failure attempt nor touches exhaustion counts
 - `after_run` hook runs after each attempt and failure/timeouts are logged and ignored
 - `before_remove` hook runs on cleanup and failures/timeouts are ignored
 - Workspace path sanitization, stable original-identifier-hash collision resistance, and root
@@ -2671,8 +2775,11 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 - Dispatch sort order is priority then oldest creation time
 - `dispatchable=false` issues are not eligible
-- Label-policy filtering covers `required_labels` and `any_labels`, is case-insensitive, and
-  applies after adapter normalization
+- Label-policy filtering covers `required_labels`, `any_labels` and `excluded_labels`, is
+  case-insensitive, and applies after adapter normalization
+- An excluded label stops a running, retrying or blocked issue, releases its claim and cleans its
+  workspace after recording its branch and last pushed commit; a missing issue or failed read never
+  counts as exclusion, and removing the label restores eligibility
 - Active-state issue refresh updates running entry state
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace
@@ -2999,7 +3106,10 @@ stop/reconciliation and retry policy still apply.
 
 The first affirmative terminal observation MUST be persisted once as UTC Unix milliseconds and
 survive restart. Retention expiry alone is insufficient: a fresh tracker observation MUST still
-affirm terminal state before destructive cleanup. Failed/missing tracker reads, missing issues,
+affirm terminal state before destructive cleanup. An excluded label (Section 8.5) is treated as a
+terminal observation for retention and cleanup: its first affirmative observation is persisted in
+the same field, a fresh read MUST still show the label before destructive cleanup, and removing it
+before deletion is irreversible is a genuine reopen. Failed/missing tracker reads, missing issues,
 and nonactive nonterminal states MUST NOT authorize destruction. Zero retention makes cleanup
 eligible immediately under these same evidence requirements; it does not bypass them.
 An adapter MAY affirm that a retained issue is archived (Linear: a by-ID read with
@@ -3016,6 +3126,10 @@ before-remove marker from an earlier terminal episode MUST NOT suppress cleanup 
 
 Workspace hook semantics remain unchanged except that an ambiguous managed timeout cannot be
 treated as a normal best-effort completion. `after_create` applies only to a newly created checkout.
+A `before_run` wait (Section 9.4) held inside an attempt keeps that attempt's one execution
+generation and its capacity; it never stops and restarts the environment per re-check. A deferred
+attempt then stops the environment through the ordinary qualified stop before its wait retry is
+scheduled, so retained stopped storage, not running compute, spans the gap between attempts.
 Cleanup preparation reserves execution capacity but launches no agent or `before_run`; it runs
 `before_remove`, records confirmed/best-effort-completed execution durably, obtains qualified stop,
 then attempts provider destruction. Managed hook timeout MUST block follow-on hooks/reuse/deletion

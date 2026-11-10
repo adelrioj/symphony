@@ -83,7 +83,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_with_workspace_hooks(workspace, issue, recipient, opts, %ExecutionContext{mode: :managed} = context, on_hook) do
     outcome =
       try do
-        with :ok <- Workspace.run_before_run_hook(workspace, issue, context, on_hook) do
+        with :ok <- run_before_run(workspace, issue, recipient, opts, context, on_hook) do
           run_agent_turns(workspace, issue, recipient, opts, context)
         end
       catch
@@ -107,7 +107,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp run_with_workspace_hooks(workspace, issue, recipient, opts, context, on_hook) do
     outcome =
-      with :ok <- Workspace.run_before_run_hook(workspace, issue, context, on_hook) do
+      with :ok <- run_before_run(workspace, issue, recipient, opts, context, on_hook) do
         run_agent_turns(workspace, issue, recipient, opts, context)
       end
 
@@ -130,7 +130,94 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp handle_run_outcome({:blocked, result}, issue), do: post_blocked_state(issue, result)
+  defp handle_run_outcome({:deferred, _reason}, _issue), do: :ok
+  defp handle_run_outcome({:skipped, _reason}, _issue), do: :ok
   defp handle_run_outcome(other, _issue), do: other
+
+  # The before_run "wait" contract (hooks.before_run_wait_exit_code). The hook still runs in the
+  # worker, exactly where it always ran; only its one reserved exit status changes meaning: the
+  # run is deferred, not failed, and no agent session starts. Within hooks.before_run_wait_hold_ms
+  # the hook is re-run in this same attempt, on this same environment, every
+  # hooks.before_run_wait_poll_ms, so a managed environment keeps its one execution generation
+  # instead of being stopped and started again for every re-check. This attempt is an ordinary
+  # running attempt the whole time: it occupies its slot, reconciliation still cancels it when the
+  # ticket turns terminal or unroutable, and stall detection sees one hook event per re-check.
+  # When the hold is spent (or is 0) the attempt ends deferred: the orchestrator stops the
+  # environment through the normal path and schedules a wait retry that is not a failure.
+  defp run_before_run(workspace, issue, recipient, opts, context, on_hook) do
+    hooks = Config.settings!().hooks
+    started_at = System.monotonic_time(:millisecond)
+    wait = %{hooks: hooks, started_at: started_at, recipient: recipient, opts: opts, on_hook: on_hook}
+    before_run_until_ready(workspace, issue, context, wait, 1)
+  end
+
+  defp before_run_until_ready(workspace, issue, context, wait, check) do
+    result = Workspace.run_before_run_hook(workspace, issue, context, wait.on_hook)
+
+    if before_run_wait?(result, wait.hooks) do
+      hold_before_run(workspace, issue, context, wait, check)
+    else
+      result
+    end
+  end
+
+  defp before_run_wait?({:error, {:workspace_hook_failed, "before_run", status, _output}}, hooks),
+    do: is_integer(hooks.before_run_wait_exit_code) and status == hooks.before_run_wait_exit_code
+
+  defp before_run_wait?(_result, _hooks), do: false
+
+  defp hold_before_run(workspace, issue, context, wait, check) do
+    poll_ms = wait.hooks.before_run_wait_poll_ms
+    held_ms = System.monotonic_time(:millisecond) - wait.started_at
+
+    if held_ms + poll_ms <= wait.hooks.before_run_wait_hold_ms do
+      notify_wait(wait, issue, "before_run waiting (check #{check}); re-checking in #{poll_ms}ms")
+      Keyword.get(wait.opts, :sleep_fun, &Process.sleep/1).(poll_ms)
+      fetcher = Keyword.get(wait.opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
+
+      case continue_with_issue?(issue, fetcher) do
+        {:continue, refreshed} ->
+          before_run_until_ready(workspace, refreshed, context, wait, check + 1)
+
+        # A state or label change is the orchestrator's to route: end this attempt without an
+        # agent so its normal continuation check re-dispatches with the current snapshot.
+        {:done, refreshed} ->
+          Logger.info("Before-run wait ended by a tracker change for #{issue_context(refreshed)} checks=#{check}")
+          {:skipped, :tracker_changed}
+
+        {:error, _reason} ->
+          defer_run(wait, issue, check, held_ms)
+      end
+    else
+      defer_run(wait, issue, check, held_ms)
+    end
+  end
+
+  defp defer_run(wait, issue, check, held_ms) do
+    Logger.info(
+      "Before-run hook asked to wait for #{issue_context(issue)} checks=#{check} held_ms=#{held_ms}; deferring run"
+    )
+
+    notify_wait(wait, issue, "before_run deferred after #{check} check(s)")
+    send_run_deferred(wait.recipient, issue, wait.opts[:attempt_id])
+    {:deferred, :before_run_wait}
+  end
+
+  defp notify_wait(wait, issue, payload) do
+    send_codex_update(
+      wait.recipient,
+      issue,
+      %{event: :hook, timestamp: DateTime.utc_now(), payload: payload},
+      wait.opts[:attempt_id]
+    )
+  end
+
+  defp send_run_deferred(recipient, %Issue{id: issue_id}, attempt_id) when is_binary(issue_id) and is_pid(recipient) do
+    send(recipient, {:agent_run_deferred, issue_id, attempt_id})
+    :ok
+  end
+
+  defp send_run_deferred(_recipient, _issue, _attempt_id), do: :ok
 
   defp post_blocked_state(%Issue{} = issue, result) do
     BlockedIssue.park(issue.id, issue.identifier, blocked_detail(result), result.session_id)
@@ -324,7 +411,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp same_issue_state?(_current_state, _refreshed_state), do: false
 
   defp issue_routable?(%Issue{} = issue) do
-    Issue.routable?(issue, Map.take(Config.settings!().tracker, [:required_labels, :any_labels]))
+    Issue.routable?(issue, Map.take(Config.settings!().tracker, Issue.label_policy_keys()))
   end
 
   defp worker_host_for_log(nil), do: "local"

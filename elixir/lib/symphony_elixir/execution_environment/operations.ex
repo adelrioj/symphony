@@ -136,12 +136,15 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
   end
 
   def run(_adapter, _config, %Lifecycle.Entry{context: %ExecutionContext{} = context} = entry, :cleanup_hook, _opts) do
-    case SymphonyElixir.Workspace.run_before_remove_hook(
-           entry.record.workspace_path,
-           entry.issue || entry.record.issue_identifier,
-           context
-         ) do
-      :ok -> {:ok, entry.record}
+    with :ok <- report_discard(entry, context),
+         :ok <-
+           SymphonyElixir.Workspace.run_before_remove_hook(
+             entry.record.workspace_path,
+             entry.issue || entry.record.issue_identifier,
+             context
+           ) do
+      {:ok, entry.record}
+    else
       {:error, failure} -> {:error, failure, entry.record}
     end
   end
@@ -150,6 +153,22 @@ defmodule SymphonyElixir.ExecutionEnvironment.Operations do
     do: {:error, {:invalid, :environment_operation}, record}
 
   def run(_adapter, _config, nil, _operation, _opts), do: {:error, {:invalid, :environment_operation}}
+
+  # An excluded issue's cleanup records what its workspace held before before_remove runs. Only a
+  # managed timeout fails the operation, exactly as the hook's own would: the read may still be
+  # running in the worker. Every other failure is recorded and cleanup proceeds.
+  defp report_discard(%Lifecycle.Entry{discard_notice: label} = entry, context) when is_binary(label) do
+    case SymphonyElixir.Workspace.discard_report(entry.record.workspace_path, context) do
+      {:error, {:managed_execution_unknown, _detail}} = unknown ->
+        unknown
+
+      report ->
+        issue = entry.issue || %{id: entry.record.issue_id, identifier: entry.record.issue_identifier}
+        SymphonyElixir.WorkspaceDiscard.notify(issue, label, report)
+    end
+  end
+
+  defp report_discard(_entry, _context), do: :ok
 
   @opaque staged_paths :: {:staged_paths, pid(), reference()}
 

@@ -323,6 +323,7 @@ defmodule SymphonyElixir.TestSupport do
           tracker_assignee: nil,
           tracker_required_labels: [],
           tracker_any_labels: [],
+          tracker_excluded_labels: [],
           tracker_provider: %{},
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
@@ -358,6 +359,7 @@ defmodule SymphonyElixir.TestSupport do
           hook_after_run: nil,
           hook_before_remove: nil,
           hook_timeout_ms: 60_000,
+          hook_before_run_wait: [],
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
@@ -373,6 +375,7 @@ defmodule SymphonyElixir.TestSupport do
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_required_labels = Keyword.get(config, :tracker_required_labels)
     tracker_any_labels = Keyword.get(config, :tracker_any_labels)
+    tracker_excluded_labels = Keyword.get(config, :tracker_excluded_labels)
     tracker_provider = Keyword.get(config, :tracker_provider)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
@@ -408,6 +411,7 @@ defmodule SymphonyElixir.TestSupport do
     hook_after_run = Keyword.get(config, :hook_after_run)
     hook_before_remove = Keyword.get(config, :hook_before_remove)
     hook_timeout_ms = Keyword.get(config, :hook_timeout_ms)
+    hook_before_run_wait = Keyword.get(config, :hook_before_run_wait)
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
@@ -424,6 +428,7 @@ defmodule SymphonyElixir.TestSupport do
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  required_labels: #{yaml_value(tracker_required_labels)}",
         tracker_any_labels_yaml(tracker_any_labels),
+        tracker_excluded_labels_yaml(tracker_excluded_labels),
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
         tracker_provider_yaml(tracker_provider),
@@ -463,7 +468,8 @@ defmodule SymphonyElixir.TestSupport do
         "  command: #{yaml_value(omp_command)}",
         "pi:",
         "  command: #{yaml_value(pi_command)}",
-        hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
+        hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms) <>
+          hook_wait_yaml(hook_before_run_wait),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         "---",
         prompt
@@ -497,6 +503,9 @@ defmodule SymphonyElixir.TestSupport do
 
   defp tracker_any_labels_yaml([]), do: nil
   defp tracker_any_labels_yaml(labels), do: "  any_labels: #{yaml_value(labels)}"
+
+  defp tracker_excluded_labels_yaml(labels) when labels in [nil, []], do: nil
+  defp tracker_excluded_labels_yaml(labels), do: "  excluded_labels: #{yaml_value(labels)}"
 
   defp tracker_provider_yaml(provider) when map_size(provider) == 0, do: nil
 
@@ -543,6 +552,10 @@ defmodule SymphonyElixir.TestSupport do
       "  render_interval_ms: #{yaml_value(render_interval_ms)}"
     ]
     |> Enum.join("\n")
+  end
+
+  defp hook_wait_yaml(settings) do
+    Enum.map_join(settings, "", fn {key, value} -> "\n  before_run_wait_#{key}: #{yaml_value(value)}" end)
   end
 
   defp hook_entry(_name, nil), do: nil

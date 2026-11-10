@@ -2300,6 +2300,62 @@ defmodule SymphonyElixir.EnvironmentOperationsHookTest do
     assert Lifecycle.occupied?(Lifecycle.new(latest, "a", :cleanup))
   end
 
+  test "an excluded issue's managed cleanup records the workspace's Git state before the hook runs" do
+    {root, entry} = hook_entry()
+    workspace = entry.record.workspace_path
+    git = fn args -> {_output, 0} = System.cmd("git", args, cd: workspace, stderr_to_stdout: true) end
+    git.(["init", "-q", "-b", "wip/excluded"])
+    git.(["add", "retained"])
+    git.(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "local"])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: root,
+      hook_before_remove: "printf cleaned > marker"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    entry = %{entry | context: managed_fixture_context(root, entry), discard_notice: "human"}
+
+    log = capture_log(fn -> assert {:ok, _} = Operations.run(nil, %{}, entry, :cleanup_hook, []) end)
+
+    assert log =~ "Discarding workspace of excluded issue issue_id=ticket"
+    assert log =~ "branch=wip/excluded"
+    assert_receive {:memory_tracker_comment, "ticket", body}
+    assert body =~ "Branch: wip/excluded"
+    assert body =~ "Last pushed commit: none known"
+    assert File.read!(Path.join(workspace, "marker")) == "cleaned"
+  end
+
+  test "an ambiguous managed discard report fences the hook exactly like a hook timeout" do
+    {root, entry} = hook_entry()
+    opts = [workspace_root: root, hook_before_remove: "printf unsafe > marker", hook_timeout_ms: 10]
+    write_workflow_file!(Workflow.workflow_file_path(), opts)
+    target = %Target{executable: "/bin/sh", prefix: ["-c", "exec sleep 1"], label: "owned-transport"}
+    entry = %{entry | context: %{entry.context | mode: :managed, target: target}, discard_notice: "human"}
+
+    assert {:error, {:managed_execution_unknown, {:remote_command_timeout, :workspace_discard_report, 10}}, latest} =
+             Operations.run(nil, %{}, entry, :cleanup_hook, [])
+
+    refute File.exists?(Path.join(latest.workspace_path, "marker"))
+    assert Lifecycle.occupied?(Lifecycle.new(latest, "a", :cleanup))
+  end
+
+  defp managed_fixture_context(root, entry) do
+    realpath =
+      System.find_executable("grealpath") || System.find_executable("realpath") ||
+        flunk("managed workspace fixtures require realpath supporting -m")
+
+    bin = Path.join(root, "fixture-bin")
+    File.mkdir_p!(bin)
+    File.ln_s!(realpath, Path.join(bin, "realpath"))
+    bash_env = Path.join(root, "fixture-bash-env")
+    escaped_bin = "'" <> String.replace(bin, "'", "'\"'\"'") <> "'"
+    File.write!(bash_env, "export PATH=#{escaped_bin}:\"$PATH\"\n")
+    target = %Target{executable: "/bin/sh", prefix: ["-c"], label: "fixture", env: [{"BASH_ENV", bash_env}]}
+    %{entry.context | mode: :managed, target: target, workspace_path: entry.record.workspace_path}
+  end
+
   defp hook_entry do
     root = Path.join(System.tmp_dir!(), "symphony-operation-hook-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "ticket")

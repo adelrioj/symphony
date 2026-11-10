@@ -19,6 +19,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {"tracker_kind", ["tracker", "kind"], :text},
     {"tracker_required_labels", ["tracker", "required_labels"], :list},
     {"tracker_any_labels", ["tracker", "any_labels"], :list},
+    {"tracker_excluded_labels", ["tracker", "excluded_labels"], :list},
     {"tracker_active_states", ["tracker", "active_states"], :list},
     {"tracker_terminal_states", ["tracker", "terminal_states"], :list},
     {"tracker_provider_json", ["tracker", "provider"], :json},
@@ -84,6 +85,10 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {"hooks_after_run", ["hooks", "after_run"], :text},
     {"hooks_before_remove", ["hooks", "before_remove"], :text},
     {"hooks_timeout_ms", ["hooks", "timeout_ms"], :duration},
+    {"hooks_before_run_wait_exit_code", ["hooks", "before_run_wait_exit_code"], :integer},
+    {"hooks_before_run_wait_poll_ms", ["hooks", "before_run_wait_poll_ms"], :duration},
+    {"hooks_before_run_wait_hold_ms", ["hooks", "before_run_wait_hold_ms"], :duration},
+    {"hooks_before_run_wait_retry_ms", ["hooks", "before_run_wait_retry_ms"], :duration},
     {"observability_dashboard_enabled", ["observability", "dashboard_enabled"], :boolean},
     {"observability_refresh_ms", ["observability", "refresh_ms"], :duration},
     {"observability_render_interval_ms", ["observability", "render_interval_ms"], :duration}
@@ -266,6 +271,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
           <.lane_field_errors errors={@errors} field="tracker_provider" path="tracker.provider" />
           <label for="tracker-required-labels">Required labels (one per line)</label><textarea id="tracker-required-labels" name="lane[tracker_required_labels]" rows="3">{@params["tracker_required_labels"]}</textarea>
           <label for="tracker-any-labels">Any labels (one per line)</label><textarea id="tracker-any-labels" name="lane[tracker_any_labels]" rows="3">{@params["tracker_any_labels"]}</textarea>
+          <label for="tracker-excluded-labels">Excluded labels (one per line; removes the issue and its workspace)</label><textarea id="tracker-excluded-labels" name="lane[tracker_excluded_labels]" rows="2">{@params["tracker_excluded_labels"]}</textarea>
           <label for="tracker-active-states">Active states (one per line)</label><textarea id="tracker-active-states" name="lane[tracker_active_states]" rows="3">{@params["tracker_active_states"]}</textarea>
           <label for="tracker-terminal-states">Terminal states (one per line)</label><textarea id="tracker-terminal-states" name="lane[tracker_terminal_states]" rows="3">{@params["tracker_terminal_states"]}</textarea>
           <details><summary>Uncommon adapter settings</summary><label for="tracker-provider">Additional tracker settings (JSON)</label><textarea id="tracker-provider" name="lane[tracker_provider_json]" rows="5" class="mono">{@params["tracker_provider_json"]}</textarea></details>
@@ -342,6 +348,14 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
           <label for="hooks-before-remove">Before-remove hook</label><textarea id="hooks-before-remove" name="lane[hooks_before_remove]" rows="2">{@params["hooks_before_remove"]}</textarea>
           <label for="hooks-timeout-ms">Hook timeout (seconds)</label><input id="hooks-timeout-ms" type="text" inputmode="decimal" name="lane[hooks_timeout_ms]" value={@params["hooks_timeout_ms"]} />
           <.lane_field_errors errors={@errors} field="hooks_timeout_ms" path="hooks.timeout_ms" />
+          <label for="hooks-before-run-wait-exit-code">Before-run wait exit code (empty disables)</label><input id="hooks-before-run-wait-exit-code" type="text" inputmode="numeric" name="lane[hooks_before_run_wait_exit_code]" value={@params["hooks_before_run_wait_exit_code"]} />
+          <.lane_field_errors errors={@errors} field="hooks_before_run_wait_exit_code" path="hooks.before_run_wait_exit_code" />
+          <label for="hooks-before-run-wait-poll-ms">Before-run wait re-check interval (seconds)</label><input id="hooks-before-run-wait-poll-ms" type="text" inputmode="decimal" name="lane[hooks_before_run_wait_poll_ms]" value={@params["hooks_before_run_wait_poll_ms"]} />
+          <.lane_field_errors errors={@errors} field="hooks_before_run_wait_poll_ms" path="hooks.before_run_wait_poll_ms" />
+          <label for="hooks-before-run-wait-hold-ms">Before-run wait hold per attempt (seconds)</label><input id="hooks-before-run-wait-hold-ms" type="text" inputmode="decimal" name="lane[hooks_before_run_wait_hold_ms]" value={@params["hooks_before_run_wait_hold_ms"]} />
+          <.lane_field_errors errors={@errors} field="hooks_before_run_wait_hold_ms" path="hooks.before_run_wait_hold_ms" />
+          <label for="hooks-before-run-wait-retry-ms">Before-run wait retry delay (seconds)</label><input id="hooks-before-run-wait-retry-ms" type="text" inputmode="decimal" name="lane[hooks_before_run_wait_retry_ms]" value={@params["hooks_before_run_wait_retry_ms"]} />
+          <.lane_field_errors errors={@errors} field="hooks_before_run_wait_retry_ms" path="hooks.before_run_wait_retry_ms" />
         </fieldset>
 
         <fieldset class="form-section" id="limits">

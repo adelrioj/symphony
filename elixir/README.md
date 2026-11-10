@@ -293,7 +293,20 @@ Notes:
 - `tracker.any_labels` is optional. When set, an issue must have at least one
   configured label to dispatch or continue running. It combines with
   `required_labels` as a conjunction: an issue must satisfy both.
-- Both label lists are trimmed, lowercased, and deduplicated when the workflow is loaded, and
+- `tracker.excluded_labels` is optional. An issue carrying any of these labels is never dispatched,
+  and an issue already in the lane (running, waiting for a retry, parked as blocked, or holding a
+  retained managed environment) is removed from it completely when the label appears: its run is
+  cancelled, it is not retried, its claim is released, and its workspace is released exactly as for a
+  terminal state — for a managed environment that is `before_remove`, stop, destroy and `Complete`,
+  after `terminal_retention_ms`. The tracker state is never changed. Before the workspace goes,
+  Symphony logs its branch, last pushed commit (the workspace's remote-tracking ref), local HEAD and
+  unpushed/uncommitted counts, and posts them as a comment where the tracker supports comments
+  (Linear does); nothing is pushed for you, so push work you want to keep from `hooks.before_remove`.
+  Removing the label makes the issue eligible again (a retained environment whose deletion has not
+  started is reopened; one already being deleted finishes and the issue gets a fresh workspace). A
+  label may not be both excluded and in `required_labels`/`any_labels`. Exclusion is only ever read
+  from a successful tracker read: a failed read or a vanished issue never triggers cleanup.
+- All label lists are trimmed, lowercased, and deduplicated when the workflow is loaded, and
   matching ignores case and surrounding whitespace. A blank configured label matches no issue, and
   an empty list imposes no constraint.
 - Safer Codex defaults are used when policy fields are omitted:
@@ -328,6 +341,18 @@ Notes:
   `git clone ... .` there, along with any other setup commands you need.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
+- `hooks.before_run_wait_exit_code` (unset by default) opts a lane into the before-run *wait*
+  contract. A `before_run` exit with exactly that status (`3..125`, not `64`; `75`/`EX_TEMPFAIL` is
+  conventional) means "not yet", not failure: no agent starts. Within
+  `hooks.before_run_wait_hold_ms` (default `0`) the same attempt sleeps
+  `hooks.before_run_wait_poll_ms` (default `60000`), refreshes the issue and re-runs `before_run` on
+  the same workspace and environment. When the hold is spent the run is recorded `deferred`, a
+  managed environment is stopped through the normal fenced path, and a wait retry follows after
+  `hooks.before_run_wait_retry_ms` (default `300000`) without advancing the failure attempt or the
+  turn-exhaustion count. The hook still runs in the worker, so a predicate installed there stays out
+  of the agent's reach. A holding attempt occupies its concurrency slot: on a one-agent lane the hold
+  delays every other ticket, so size it against the lane's throughput, and keep the poll interval
+  below `codex.stall_timeout_ms`. Every other status keeps the ordinary `before_run` failure policy.
 - For the Linear adapter, `tracker.provider.api_key` reads from `LINEAR_API_KEY` when unset or
   when value is `$LINEAR_API_KEY`. The legacy flat `tracker.api_key` alias behaves the same way.
 - Do not put a literal tracker token in a repo-owned `WORKFLOW.md` if Codex can read that
@@ -620,6 +645,9 @@ does not suppress a new cleanup after a genuine reopen.
 
 `after_create` still bootstraps only a new checkout; `before_run`/`after_run` keep their existing
 failure policies. All run on the selected worker through the captured execution context.
+With the before-run wait contract enabled, each environment generation absorbs every re-check made
+within the hold: one start serves the whole hold instead of one stop/start per wait retry. A deferred
+attempt still releases capacity only through qualified stop proof, exactly like any other attempt.
 Hooks receive the caller-provided issue identifier in `SYMPHONY_ISSUE_IDENTIFIER`.
 Use this rather than the directory basename: managed checkout paths are stable resource keys,
 not issue identifiers, and remain unchanged when an issue is renamed.
