@@ -301,6 +301,16 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_info({:agent_run_deferred, issue_id, attempt_id}, %{running: running} = state) when is_binary(issue_id) do
+    case Map.get(running, issue_id) do
+      %{attempt_id: ^attempt_id} = running_entry ->
+        {:noreply, %{state | running: Map.put(running, issue_id, Map.put(running_entry, :deferred, true))}}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
       case pop_retry_attempt_state(state, issue_id, retry_token) do
@@ -326,6 +336,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp run_status(_reason, %{attempt_outcome: :blocked}), do: "blocked"
+  defp run_status(:normal, %{deferred: true}), do: "deferred"
   defp run_status(:normal, %{turns_exhausted_state: name}) when is_binary(name), do: "turns_exhausted"
   defp run_status(:normal, entry), do: if(input_required_blocker?(entry), do: "blocked", else: "done")
   defp run_status(_reason, entry), do: if(input_required_blocker?(entry), do: "blocked", else: "failed")
@@ -339,10 +350,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
-    else
-      handle_agent_completion(state, issue_id, running_entry, session_id)
+    cond do
+      input_required_blocker?(running_entry) ->
+        block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
+
+      Map.get(running_entry, :deferred) == true ->
+        defer_agent_down(state, issue_id, running_entry, session_id)
+
+      true ->
+        handle_agent_completion(state, issue_id, running_entry, session_id)
     end
   end
 
@@ -375,6 +391,29 @@ defmodule SymphonyElixir.Orchestrator do
       identifier: running_entry.identifier,
       issue_url: running_entry.issue.url,
       error: "agent exited: #{inspect(reason)}",
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      execution_context: Map.get(running_entry, :execution_context),
+      lane_snapshot: Map.get(running_entry, :lane_snapshot)
+    })
+  end
+
+  # before_run asked to wait (hooks.before_run_wait_exit_code) and no agent ran. This is neither
+  # a failure nor a completion: the failure attempt is kept rather than advanced, turn-exhaustion
+  # counting is untouched, and the retry uses the lane's wait cadence. A managed environment has
+  # already been stopped through the normal fenced path before this runs.
+  defp defer_agent_down(state, issue_id, running_entry, session_id) do
+    Logger.info(
+      "Agent run deferred by before_run for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; scheduling wait retry"
+    )
+
+    attempt = max(normalize_retry_attempt(Map.get(running_entry, :retry_attempt)), 1)
+
+    schedule_issue_retry(state, issue_id, attempt, %{
+      identifier: running_entry.identifier,
+      issue_url: running_entry.issue.url,
+      error: "before_run deferred the run (wait)",
+      delay_type: :wait,
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path),
       execution_context: Map.get(running_entry, :execution_context),
@@ -1944,10 +1983,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
+    cond do
+      metadata[:delay_type] == :continuation and attempt == 1 -> @continuation_retry_delay_ms
+      metadata[:delay_type] == :wait -> Config.settings!().hooks.before_run_wait_retry_ms
+      true -> failure_retry_delay(attempt)
     end
   end
 

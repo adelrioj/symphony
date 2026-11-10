@@ -1100,6 +1100,97 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     refute Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
   end
 
+  describe "before_run wait deferral" do
+    test "a deferred run stops its environment normally, frees the slot and retries on the wait cadence" do
+      assert :ok =
+               write_managed_workflow(
+                 tracker_active_states: ["In Progress"],
+                 max_concurrent_agents: 1,
+                 poll_interval_ms: 60_000,
+                 hook_before_run_wait: [exit_code: 75, retry_ms: 600_000]
+               )
+
+      issues([issue("first", 1), issue("second", 2)])
+      {owner, tasks} = scheduler()
+      discover([])
+      {config, entry, prepare} = operation(:prepare)
+      ready(config, entry, prepare, owner, tasks)
+      assert_receive {:agent_started, "first", runner, opts}, 1_000
+      exhaustion = %{state: "in progress", count: 1, head: nil}
+      :sys.replace_state(owner, &%{&1 | turn_exhaustions: %{"first" => exhaustion}})
+      send(owner, {:agent_run_deferred, "first", opts[:attempt_id]})
+      Orchestrator.snapshot(owner, 1_000)
+      send(runner, :finish_agent)
+
+      # The deferral changes nothing about the fenced stop: capacity stays occupied until it is proven.
+      {_, stopping, stop} = operation(:stop)
+      assert Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
+      refute Map.has_key?(:sys.get_state(owner).retry_attempts, "first")
+      stopped(stop, stopping)
+
+      {_, second, _prepare} = operation(:prepare)
+      assert second.record.issue_id == "second"
+
+      state = :sys.get_state(owner)
+      retry = state.retry_attempts["first"]
+      assert retry.attempt == 1
+      assert retry.error =~ "before_run deferred"
+      assert retry.due_at_ms - System.monotonic_time(:millisecond) > 500_000
+      assert state.turn_exhaustions["first"] == exhaustion
+      refute Map.has_key?(state.blocked, "first")
+      assert SymphonyElixir.Runs.get_by_attempt(opts[:attempt_id]).status == "deferred"
+    end
+
+    test "a wait retry prepares the environment again without advancing the failure attempt" do
+      assert :ok =
+               write_managed_workflow(
+                 tracker_active_states: ["In Progress"],
+                 max_concurrent_agents: 1,
+                 poll_interval_ms: 60_000,
+                 hook_before_run_wait: [exit_code: 75, retry_ms: 20]
+               )
+
+      issues([issue("first", 1)])
+      {owner, tasks} = scheduler()
+      discover([])
+
+      for _wait <- 1..2 do
+        {config, entry, prepare} = operation(:prepare)
+        assert entry.record.issue_id == "first"
+        ready(config, entry, prepare, owner, tasks)
+        assert_receive {:agent_started, "first", runner, opts}, 1_000
+        send(owner, {:agent_run_deferred, "first", opts[:attempt_id]})
+        Orchestrator.snapshot(owner, 1_000)
+        send(runner, :finish_agent)
+        {_, stopping, stop} = operation(:stop)
+        stopped(stop, stopping)
+        wait_state(owner, &(Map.get(&1.retry_attempts, "first", %{attempt: nil}).attempt == 1 or &1.running != %{}))
+      end
+
+      {_config, entry, _prepare} = operation(:prepare)
+      assert entry.record.issue_id == "first"
+      assert entry.retry_attempt == 1
+    end
+
+    test "without the contract a deferral message is ignored by unrelated attempts" do
+      issues([issue("first", 1)])
+      {owner, tasks} = scheduler()
+      discover([])
+      {config, entry, prepare} = operation(:prepare)
+      ready(config, entry, prepare, owner, tasks)
+      assert_receive {:agent_started, "first", runner, _opts}, 1_000
+      send(owner, {:agent_run_deferred, "first", "another-attempt"})
+      Orchestrator.snapshot(owner, 1_000)
+      refute Map.has_key?(:sys.get_state(owner).running["first"], :deferred)
+      send(runner, :finish_agent)
+      {_, stopping, stop} = operation(:stop)
+      stopped(stop, stopping)
+      wait_state(owner, &Map.has_key?(&1.retry_attempts, "first"))
+      # A normal finish of the real attempt is a continuation check, never a wait retry.
+      assert :sys.get_state(owner).retry_attempts["first"].error == nil
+    end
+  end
+
   defp assert_reconciliation_releases_location(next_state) do
     assert :ok =
              write_managed_workflow(
