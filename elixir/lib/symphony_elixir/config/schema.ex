@@ -58,6 +58,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:secret_environment_names, {:array, :string}, default: [])
       field(:required_labels, {:array, :string}, default: [])
       field(:any_labels, {:array, :string}, default: [])
+      field(:excluded_labels, {:array, :string}, default: [])
       field(:active_states, {:array, :string})
       field(:terminal_states, {:array, :string})
     end
@@ -76,6 +77,7 @@ defmodule SymphonyElixir.Config.Schema do
           :provider,
           :required_labels,
           :any_labels,
+          :excluded_labels,
           :active_states,
           :terminal_states
         ],
@@ -83,6 +85,27 @@ defmodule SymphonyElixir.Config.Schema do
       )
       |> update_change(:required_labels, &normalize_labels/1)
       |> update_change(:any_labels, &normalize_labels/1)
+      |> update_change(:excluded_labels, &normalize_labels/1)
+      |> validate_excluded_labels()
+    end
+
+    # A label that both admits and excludes an issue has no coherent meaning: refuse it instead
+    # of letting the exclusion silently win.
+    defp validate_excluded_labels(changeset) do
+      excluded = MapSet.new(get_field(changeset, :excluded_labels) || [])
+      admitted = (get_field(changeset, :required_labels) || []) ++ (get_field(changeset, :any_labels) || [])
+
+      case Enum.filter(Enum.uniq(admitted), &MapSet.member?(excluded, &1)) do
+        [] ->
+          changeset
+
+        overlap ->
+          add_error(
+            changeset,
+            :excluded_labels,
+            "must not overlap required_labels or any_labels: " <> Enum.join(overlap, ", ")
+          )
+      end
     end
 
     defp normalize_labels(labels) do

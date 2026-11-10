@@ -67,6 +67,17 @@ required when enabling and running lanes.
 [Run from source](elixir/README.md#run) ·
 [Native release builds](elixir/README.md#burrito-releases) (no published releases yet)
 
+## Taking an issue away from Symphony
+
+Configure `tracker.excluded_labels` (for example `[human]`) on a lane. An issue carrying one of
+those labels is never dispatched, and adding the label to an issue the lane already holds removes it
+completely: the run is cancelled, no retry follows, the claim is released and the workspace is
+released by the same safe path as a terminal state (for managed environments: `before_remove`,
+stop, destroy, `Complete`). The tracker state is untouched. Before the workspace is discarded,
+Symphony logs and comments its branch, last pushed commit and unpushed/uncommitted counts; it does
+not push anything itself. Removing the label makes the issue eligible again. See
+[configuration](elixir/README.md#configuration).
+
 ## Documentation
 
 - [Operation and lane lifecycle](docs/operations.md)

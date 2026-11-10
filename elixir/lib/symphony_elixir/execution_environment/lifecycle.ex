@@ -23,6 +23,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
       :metadata_intent,
       :terminal_observation,
       :cleanup_retry_at,
+      :discard_notice,
       phase: :reserved,
       operation_seq: 0
     ]
@@ -45,6 +46,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
             metadata_intent: map() | nil,
             terminal_observation: integer() | nil,
             cleanup_retry_at: integer() | nil,
+            discard_notice: String.t() | nil,
             operation_seq: non_neg_integer()
           }
   end

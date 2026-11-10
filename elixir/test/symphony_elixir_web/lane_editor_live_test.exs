@@ -815,6 +815,19 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     end
   end
 
+  test "excluded labels are edited one per line and saved as a list", %{conn: conn} do
+    profile = new_profile!()
+    config = %{"tracker" => %{"kind" => "memory"}}
+    {:ok, lane} = Lanes.create(%{slug: "excluded-labels", execution_profile_id: profile.id, config: config})
+    {:ok, view, _html} = live(conn, "/lanes/#{lane.slug}/edit")
+    assert has_element?(view, "#tracker-excluded-labels")
+
+    render_hook(view, "save", %{"lane" => %{"tracker_excluded_labels" => "human\nHold"}})
+
+    assert_redirect(view, "/lanes/#{lane.slug}")
+    assert saved_config(lane)["tracker"]["excluded_labels"] == ["human", "Hold"]
+  end
+
   test "blank and integer-valued controls remove overrides without losing redacted unchanged values", %{conn: conn} do
     profile = new_profile!()
 

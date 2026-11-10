@@ -65,7 +65,8 @@ defmodule SymphonyElixir.Linear.Scope do
         cycle_summary(current_cycle?(tracker_settings)),
         project_summary(project_slug(tracker_settings)),
         labels_summary("any labels", label_list(tracker_settings, :any_labels)),
-        labels_summary("required labels", label_list(tracker_settings, :required_labels))
+        labels_summary("required labels", label_list(tracker_settings, :required_labels)),
+        labels_summary("excluded labels", label_list(tracker_settings, :excluded_labels))
       ]
       |> Enum.reject(&is_nil/1)
 

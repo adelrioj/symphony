@@ -323,6 +323,7 @@ defmodule SymphonyElixir.TestSupport do
           tracker_assignee: nil,
           tracker_required_labels: [],
           tracker_any_labels: [],
+          tracker_excluded_labels: [],
           tracker_provider: %{},
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
@@ -373,6 +374,7 @@ defmodule SymphonyElixir.TestSupport do
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_required_labels = Keyword.get(config, :tracker_required_labels)
     tracker_any_labels = Keyword.get(config, :tracker_any_labels)
+    tracker_excluded_labels = Keyword.get(config, :tracker_excluded_labels)
     tracker_provider = Keyword.get(config, :tracker_provider)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
@@ -424,6 +426,7 @@ defmodule SymphonyElixir.TestSupport do
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  required_labels: #{yaml_value(tracker_required_labels)}",
         tracker_any_labels_yaml(tracker_any_labels),
+        tracker_excluded_labels_yaml(tracker_excluded_labels),
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
         tracker_provider_yaml(tracker_provider),
@@ -497,6 +500,9 @@ defmodule SymphonyElixir.TestSupport do
 
   defp tracker_any_labels_yaml([]), do: nil
   defp tracker_any_labels_yaml(labels), do: "  any_labels: #{yaml_value(labels)}"
+
+  defp tracker_excluded_labels_yaml(labels) when labels in [nil, []], do: nil
+  defp tracker_excluded_labels_yaml(labels), do: "  excluded_labels: #{yaml_value(labels)}"
 
   defp tracker_provider_yaml(provider) when map_size(provider) == 0, do: nil
 

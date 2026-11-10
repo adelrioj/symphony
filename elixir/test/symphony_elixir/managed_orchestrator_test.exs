@@ -224,6 +224,7 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     assert cleanup.purpose == :cleanup
     ready(config, cleanup, prepare, owner, tasks)
     {_, hook, task} = operation(:cleanup_hook)
+    assert hook.discard_notice == nil
     refute_receive {:agent_started, _, _, _}, 0
     send(task, {:complete_operation, {:ok, hook.record}})
     {_, marker, task} = operation(:metadata)
@@ -236,6 +237,100 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     assert destroying.record.metadata["symphony_cleanup_hook_completed"]
     send(task, {:complete_operation, {:ok, %{destroying.record | absent?: true, pending: []}}})
     discover([])
+  end
+
+  describe "excluded label" do
+    test "stops a running managed agent, releases its claim and persists the release observation" do
+      write_managed_workflow(tracker_excluded_labels: ["human"], max_concurrent_agents: 1, poll_interval_ms: 60_000)
+      issues([issue("first", 1)])
+      {owner, tasks} = scheduler()
+      discover([])
+      {config, entry, prepare} = operation(:prepare)
+      ready(config, entry, prepare, owner, tasks)
+      assert_receive {:agent_started, "first", _, _}, 1_000
+
+      issues([%{issue("first", 1) | labels: ["human"]}])
+      poll(owner)
+      {_, stopping, stop} = operation(:stop)
+      assert is_integer(stopping.record.terminal_observed_at)
+      stopped(stop, stopping)
+
+      state = wait_state(owner, &(&1.environment_entries["first"].phase == :stopped))
+      refute Map.has_key?(state.running, "first")
+      refute MapSet.member?(state.claimed, "first")
+      refute Map.has_key?(state.retry_attempts, "first")
+      # Retention still applies exactly as for a terminal state.
+      poll(owner)
+      refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+      refute_receive {:agent_started, "first", _, _}, 0
+    end
+
+    test "persists the first exclusion observation of a retained environment before any cleanup" do
+      write_managed_workflow(tracker_excluded_labels: ["human"])
+      issues([%{issue("first", 1) | labels: ["human"]}])
+      {_owner, _} = scheduler()
+      retained = %{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}
+      discover([retained])
+      {_, observing, _} = operation(:metadata)
+      assert is_integer(observing.metadata_intent.terminal_observed_at)
+      refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+    end
+
+    test "cleans up a retained environment by the terminal path: hook with discard notice, stop, destroy" do
+      write_managed_workflow(tracker_excluded_labels: ["human"], hook_before_remove: "echo cleanup")
+      issues([%{issue("first", 1) | labels: ["human"]}])
+      {owner, tasks} = scheduler()
+      retained = %{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}, terminal_observed_at: 1}
+      discover([retained])
+      {config, cleanup, prepare} = operation(:prepare)
+      assert cleanup.purpose == :cleanup
+      ready(config, cleanup, prepare, owner, tasks)
+      {_, hook, task} = operation(:cleanup_hook)
+      assert hook.discard_notice == "human"
+      refute_receive {:agent_started, _, _, _}, 0
+      send(task, {:complete_operation, {:ok, hook.record}})
+      {_, marker, task} = operation(:metadata)
+      send(task, {:complete_operation, {:ok, marker.record}})
+      {_, stopping, task} = operation(:stop)
+      stopped(task, stopping)
+      {_, destroying, task} = operation(:destroy)
+      assert destroying.record.metadata["symphony_cleanup_hook_completed"]
+      send(task, {:complete_operation, {:ok, %{destroying.record | absent?: true, pending: []}}})
+      discover([])
+      refute_receive {:environment_operation, :prepare, _, _, _, _}, 100
+    end
+
+    test "is never inferred from a missing issue" do
+      write_managed_workflow(tracker_excluded_labels: ["human"])
+      issues([])
+      {owner, _} = scheduler()
+      retained = %{record("first") | phase: :stopped, proof: {:quiescent, %{fixture: true}}}
+      discover([retained])
+      wait_state(owner, &Map.has_key?(&1.environment_entries, "first"))
+      poll(owner)
+      refute_receive {:environment_operation, :metadata, _, _, _, _}, 0
+      refute_receive {:environment_operation, :destroy, _, _, _, _}, 0
+    end
+
+    test "removing the label reopens a retained environment that has not started deletion" do
+      write_managed_workflow(tracker_excluded_labels: ["human"])
+      issues([issue("first", 1)])
+      {_owner, _} = scheduler()
+      discover([cleaned_record("first")])
+      {_, reopening, _} = operation(:metadata)
+      assert reopening.metadata_intent == %{terminal_observed_at: nil, desired: :stopped}
+    end
+
+    test "removing the label cannot undo a deletion that already began" do
+      write_managed_workflow(tracker_excluded_labels: ["human"])
+      issues([issue("first", 1)])
+      {_owner, _} = scheduler()
+      deleting = %{cleaned_record("first") | desired: :absent}
+      discover([deleting])
+      {_, destroying, _} = operation(:destroy)
+      assert destroying.record.desired == :absent
+      refute_receive {:environment_operation, :metadata, _, _, _, _}, 0
+    end
   end
 
   test "reopened retained environment clears marker durably before preparing again" do

@@ -293,7 +293,20 @@ Notes:
 - `tracker.any_labels` is optional. When set, an issue must have at least one
   configured label to dispatch or continue running. It combines with
   `required_labels` as a conjunction: an issue must satisfy both.
-- Both label lists are trimmed, lowercased, and deduplicated when the workflow is loaded, and
+- `tracker.excluded_labels` is optional. An issue carrying any of these labels is never dispatched,
+  and an issue already in the lane (running, waiting for a retry, parked as blocked, or holding a
+  retained managed environment) is removed from it completely when the label appears: its run is
+  cancelled, it is not retried, its claim is released, and its workspace is released exactly as for a
+  terminal state — for a managed environment that is `before_remove`, stop, destroy and `Complete`,
+  after `terminal_retention_ms`. The tracker state is never changed. Before the workspace goes,
+  Symphony logs its branch, last pushed commit (the workspace's remote-tracking ref), local HEAD and
+  unpushed/uncommitted counts, and posts them as a comment where the tracker supports comments
+  (Linear does); nothing is pushed for you, so push work you want to keep from `hooks.before_remove`.
+  Removing the label makes the issue eligible again (a retained environment whose deletion has not
+  started is reopened; one already being deleted finishes and the issue gets a fresh workspace). A
+  label may not be both excluded and in `required_labels`/`any_labels`. Exclusion is only ever read
+  from a successful tracker read: a failed read or a vanished issue never triggers cleanup.
+- All label lists are trimmed, lowercased, and deduplicated when the workflow is loaded, and
   matching ignores case and surrounding whitespace. A blank configured label matches no issue, and
   an empty list imposes no constraint.
 - Safer Codex defaults are used when policy fields are omitted:

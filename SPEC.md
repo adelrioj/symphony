@@ -450,6 +450,16 @@ Fields:
   - An empty list imposes no constraint.
   - `required_labels` and `any_labels` are independent constraints that combine as a conjunction:
     when both are configured an issue MUST satisfy both.
+- `excluded_labels` (list of strings)
+  - Default: `[]`.
+  - An issue carrying any configured label MUST NOT dispatch or continue, and MUST be removed from
+    the lane completely (Section 8.5): its run is cancelled, it is not retried, its claim is
+    released and its workspace is released through the same path as a terminal state.
+  - Matching ignores case and surrounding whitespace. A blank configured label matches no issue.
+  - A label in `excluded_labels` MUST NOT also appear in `required_labels` or `any_labels`;
+    configuration validation MUST reject the overlap.
+  - Exclusion never changes the issue's tracker state. Removing the label makes the issue eligible
+    again under the ordinary rules.
 - `active_states` (list of strings)
   - REQUIRED unless the selected adapter profile documents a default.
   - Values are provider-native state names compared case-insensitively by the scheduler.
@@ -851,6 +861,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.provider`: object, default `{}`, adapter-owned endpoint/scope/auth settings
 - `tracker.required_labels`: list of strings, default `[]`
 - `tracker.any_labels`: list of strings, default `[]`
+- `tracker.excluded_labels`: list of strings, default `[]`, disjoint from the two lists above
 - `tracker.active_states`: list of provider-native state names, adapter-defined default
 - `tracker.terminal_states`: list of provider-native state names, adapter-defined default
 - `polling.interval_ms`: integer, default `30000`
@@ -1062,14 +1073,15 @@ An issue is dispatch-eligible only if all are true:
 - Its adapter-provided `dispatchable` value is `true`.
 - It contains every label in `tracker.required_labels`.
 - It carries at least one label in `tracker.any_labels`, unless that list is empty.
+- It carries no label in `tracker.excluded_labels`.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
 
 For refresh and continuation checks, `issue_routable(issue)` means only that adapter-provided
-`dispatchable` is true and that the configured label policy — `tracker.required_labels` and
-`tracker.any_labels` together — is satisfied. State, claims, and concurrency are checked separately
+`dispatchable` is true and that the configured label policy — `tracker.required_labels`,
+`tracker.any_labels` and `tracker.excluded_labels` together — is satisfied. State, claims, and concurrency are checked separately
 by the surrounding algorithm.
 
 Sorting order (stable intent):
@@ -1118,6 +1130,7 @@ Retry handling behavior:
 1. Refresh the specific issue with `fetch_issues_by_ids([issue_id])`.
 2. If not found, release claim.
 3. If found in a terminal state, clean its workspace and release claim.
+   If found carrying an excluded label, do the same without dispatching (Section 8.5).
 4. If found and still active and routable:
    - Dispatch if slots are available.
    - Otherwise requeue with error `no available orchestrator slots`.
@@ -1146,10 +1159,28 @@ Part B: Tracker state refresh
 - Fetch current issue states for all running issue IDs.
 - For each running issue:
   - If tracker state is terminal: terminate worker and clean workspace.
+  - If the issue carries an excluded label: terminate worker, release the claim and any retry, and
+    clean the workspace exactly as for a terminal state, after recording the workspace state below.
   - If tracker state is still active and routable: update the in-memory issue snapshot.
   - If tracker state is active but no longer routable: terminate worker without workspace cleanup.
   - If tracker state is neither active nor terminal: terminate worker without workspace cleanup.
 - If state refresh fails, keep workers running and try again on the next tick.
+
+Exclusion is an affirmative observation: it MUST be read from an issue snapshot returned by a
+successful tracker read, never inferred from a failed read, a missing issue or an empty label list.
+Blocked (parked) issues are reconciled the same way. Merely becoming unroutable for any other
+reason keeps the existing behavior: stop without workspace cleanup.
+
+Before an excluded issue's workspace is removed, the implementation SHOULD record what it held so
+that unpushed work is never lost silently: the branch, the last pushed commit (the workspace's
+remote-tracking ref), the local HEAD, and the counts of unpushed commits and uncommitted paths.
+That read is bounded, read-only, best-effort and never authoritative, because the workspace is
+agent-controlled; it MUST NOT execute repository-configured code and MUST describe only the
+workspace's own checkout. The record goes to the log and, when the tracker adapter supports
+comments, to a comment on the issue. A failed read or comment MUST be recorded and MUST NOT hold the
+exclusion back, except that an ambiguous managed read fences follow-on hooks and deletion exactly
+like an ambiguous `before_remove` (Appendix B.3). Symphony does not push the work itself; an
+operator who wants it preserved can push it from `hooks.before_remove`, which still runs.
 
 ### 8.6 Startup Terminal Workspace Cleanup
 
@@ -1517,8 +1548,8 @@ An implementation MUST support these adapter operations:
      cleanup.
    - When used for candidate polling, include active scoped issues even when
      `dispatchable=false`; the scheduler owns that final filter.
-   - The orchestrator applies the configured label policy (`required_labels`, `any_labels`),
-     `dispatchable`, claims, retries, and concurrency after normalization.
+   - The orchestrator applies the configured label policy (`required_labels`, `any_labels`,
+     `excluded_labels`), `dispatchable`, claims, retries, and concurrency after normalization.
    - An empty `state_names` list MUST return an empty result without a provider request.
 
 2. `fetch_issues_by_ids(issue_ids)`
@@ -2671,8 +2702,11 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 - Dispatch sort order is priority then oldest creation time
 - `dispatchable=false` issues are not eligible
-- Label-policy filtering covers `required_labels` and `any_labels`, is case-insensitive, and
-  applies after adapter normalization
+- Label-policy filtering covers `required_labels`, `any_labels` and `excluded_labels`, is
+  case-insensitive, and applies after adapter normalization
+- An excluded label stops a running, retrying or blocked issue, releases its claim and cleans its
+  workspace after recording its branch and last pushed commit; a missing issue or failed read never
+  counts as exclusion, and removing the label restores eligibility
 - Active-state issue refresh updates running entry state
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace
@@ -2999,7 +3033,10 @@ stop/reconciliation and retry policy still apply.
 
 The first affirmative terminal observation MUST be persisted once as UTC Unix milliseconds and
 survive restart. Retention expiry alone is insufficient: a fresh tracker observation MUST still
-affirm terminal state before destructive cleanup. Failed/missing tracker reads, missing issues,
+affirm terminal state before destructive cleanup. An excluded label (Section 8.5) is treated as a
+terminal observation for retention and cleanup: its first affirmative observation is persisted in
+the same field, a fresh read MUST still show the label before destructive cleanup, and removing it
+before deletion is irreversible is a genuine reopen. Failed/missing tracker reads, missing issues,
 and nonactive nonterminal states MUST NOT authorize destruction. Zero retention makes cleanup
 eligible immediately under these same evidence requirements; it does not bypass them.
 An adapter MAY affirm that a retained issue is archived (Linear: a by-ID read with

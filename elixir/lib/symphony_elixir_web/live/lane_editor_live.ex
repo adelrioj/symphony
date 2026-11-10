@@ -19,6 +19,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     {"tracker_kind", ["tracker", "kind"], :text},
     {"tracker_required_labels", ["tracker", "required_labels"], :list},
     {"tracker_any_labels", ["tracker", "any_labels"], :list},
+    {"tracker_excluded_labels", ["tracker", "excluded_labels"], :list},
     {"tracker_active_states", ["tracker", "active_states"], :list},
     {"tracker_terminal_states", ["tracker", "terminal_states"], :list},
     {"tracker_provider_json", ["tracker", "provider"], :json},
@@ -266,6 +267,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
           <.lane_field_errors errors={@errors} field="tracker_provider" path="tracker.provider" />
           <label for="tracker-required-labels">Required labels (one per line)</label><textarea id="tracker-required-labels" name="lane[tracker_required_labels]" rows="3">{@params["tracker_required_labels"]}</textarea>
           <label for="tracker-any-labels">Any labels (one per line)</label><textarea id="tracker-any-labels" name="lane[tracker_any_labels]" rows="3">{@params["tracker_any_labels"]}</textarea>
+          <label for="tracker-excluded-labels">Excluded labels (one per line; removes the issue and its workspace)</label><textarea id="tracker-excluded-labels" name="lane[tracker_excluded_labels]" rows="2">{@params["tracker_excluded_labels"]}</textarea>
           <label for="tracker-active-states">Active states (one per line)</label><textarea id="tracker-active-states" name="lane[tracker_active_states]" rows="3">{@params["tracker_active_states"]}</textarea>
           <label for="tracker-terminal-states">Terminal states (one per line)</label><textarea id="tracker-terminal-states" name="lane[tracker_terminal_states]" rows="3">{@params["tracker_terminal_states"]}</textarea>
           <details><summary>Uncommon adapter settings</summary><label for="tracker-provider">Additional tracker settings (JSON)</label><textarea id="tracker-provider" name="lane[tracker_provider_json]" rows="5" class="mono">{@params["tracker_provider_json"]}</textarea></details>

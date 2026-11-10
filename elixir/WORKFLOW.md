@@ -24,6 +24,8 @@ tracker:
     project_slug: "symphony-0c79b11b75ea"
   required_labels: []
   # any_labels: []              # an issue must carry at least one of these, when non-empty
+  # excluded_labels: [human]     # an issue with any of these is never dispatched and is removed
+  #                              # from the lane (run cancelled, workspace released) when added
   active_states:
     - Todo
     - In Progress
