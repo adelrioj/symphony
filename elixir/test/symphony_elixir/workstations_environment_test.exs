@@ -1437,6 +1437,88 @@ defmodule SymphonyElixir.WorkstationsEnvironmentTest do
     assert Agent.get(server, & &1.creates) == 1
   end
 
+  # Incident 2026-11-17: after a config image change, the engine journaled a delete while an update operation of
+  # the same workstation was still open. Workstations refused the DELETE (400 FAILED_PRECONDITION, no operation).
+  test "an open operation defers the delete, and a refused delete is a retryable refusal, not an unknown outcome" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    assert {:ok, stopped} = Workstations.stop(config(), created, opts(request))
+    retiring = %{stopped | desired: :absent}
+
+    open = operation("update", false) |> Map.put("name", operation_name() <> "open")
+    Agent.update(server, &%{&1 | operations: &1.operations ++ [open]})
+    {:ok, deletes} = Agent.start_link(fn -> 0 end)
+
+    counting = fn req ->
+      if req[:method] == :delete, do: Agent.update(deletes, &(&1 + 1))
+      request.(req)
+    end
+
+    # While the update is open, no delete is sent; the bounded wait ends unknown without a mutation.
+    short = Keyword.put(opts(counting), :timeout_ms, 50)
+    assert {:error, {:unknown, _}, _} = Workstations.destroy(config(), retiring, short)
+    assert Agent.get(deletes, & &1) == 0
+
+    Agent.update(server, fn state ->
+      %{
+        state
+        | operations: Enum.map(state.operations, &if(&1["name"] == open["name"], do: %{&1 | "done" => true}, else: &1))
+      }
+    end)
+
+    refused = fn req ->
+      if req[:method] == :delete do
+        Agent.update(deletes, &(&1 + 1))
+        response(400, %{"error" => %{"status" => "FAILED_PRECONDITION"}})
+      else
+        request.(req)
+      end
+    end
+
+    assert {:error, {:retryable, {:refused, 400}}, rejected} = Workstations.destroy(config(), retiring, opts(refused))
+    assert %{verb: :delete, outcome: :failed} = List.last(Enum.filter(rejected.pending, &(&1.verb == :delete)))
+    refute rejected.absent?
+
+    # A refused delete changed nothing, so the earlier stop still certifies the host stopped.
+    assert {:quiescent, _} = Workstations.normalize(rejected, Agent.get(server, & &1.workstation), []).proof
+    stops = Agent.get(server, fn state -> Enum.count(state.operations, &(&1["metadata"]["verb"] == "stop")) end)
+
+    # The refusal is durable: a later destroy retries the delete instead of halting on an uncorrelated marker.
+    assert {:ok, absent} = Workstations.destroy(config(), rejected, opts(counting))
+    assert absent.absent?
+    assert Agent.get(deletes, & &1) == 2
+    assert Agent.get(server, fn state -> Enum.count(state.operations, &(&1["metadata"]["verb"] == "stop")) end) == stops
+  end
+
+  test "an expired uncorrelated delete with no operation in its window cannot block proof of an external delete" do
+    {server, request} = provider()
+    assert {:ok, created} = Workstations.ensure(config(), record(), opts(request))
+    # The window opens after the listed create operation, so listed history provably covers it.
+    now = DateTime.to_iso8601(DateTime.add(DateTime.utc_now(), 1, :millisecond))
+    marker = %{verb: :delete, id: nil, outcome: :unknown, from: now, until: now}
+    stuck = %{created | desired: :absent, pending: created.pending ++ [marker]}
+    Process.sleep(5)
+
+    # Without history older than the window, missing operations resolve nothing.
+    assert Workstations.normalize(stuck, workstation(), []).pending == stuck.pending
+    # No delete operation exists in the closed window: the call never started one, so it is a refusal.
+    assert {:ok, observed} = Workstations.inspect(config(), stuck, opts(request))
+    assert %{verb: :delete, outcome: :failed} = List.last(observed.pending)
+    external_delete(server)
+
+    assert {:ok, absent} = Workstations.inspect(config(), stuck, opts(request))
+    assert absent.absent?
+    assert {:quiescent, %{deleted_operation: _, backing_absent: true}} = absent.proof
+  end
+
+  test "an uncorrelated create marker stays unresolved after its window closes" do
+    past = DateTime.add(DateTime.utc_now(), -600)
+    window = %{from: DateTime.to_iso8601(past), until: DateTime.to_iso8601(DateTime.add(past, 60))}
+    marker = Map.merge(%{verb: :create, id: nil, outcome: :unknown}, window)
+    record = %{record() | provider_ref: %{name: name(), uid: "ws-uid"}, pending: [marker]}
+    assert Workstations.normalize(record, workstation(), []).pending == [marker]
+  end
+
   defp external_delete(server) do
     delete =
       operation("delete", true)

@@ -1191,6 +1191,99 @@ defmodule SymphonyElixir.ManagedOrchestratorTest do
     end
   end
 
+  describe "unresolved environment slot (2026-11-17 incident)" do
+    test "a destroy job that never replies times out, is inspected and frees the slot without a restart" do
+      issues([issue("second", 2)])
+      {owner, _tasks} = scheduler()
+      discover([%{record("first") | desired: :absent, phase: :unknown}])
+      {_, _, hung} = operation(:destroy)
+      {ref, _job} = Enum.find(:sys.get_state(owner).environment_jobs, fn {_, job} -> job.task.pid == hung end)
+
+      # While the job is in flight, no poll sends a second mutation or an inspect for the same resource.
+      poll(owner)
+      poll(owner)
+      refute_receive {:environment_operation, _, _, %{record: %{issue_id: "first"}}, _, _}, 0
+      refute_receive {:environment_operation, :prepare, _, _, _, _}, 0
+
+      log = capture_log(fn -> send(owner, {:environment_job_timeout, ref}) end)
+      wait_state(owner, &(&1.environment_entries["first"].phase == :unknown))
+
+      assert log =~
+               "Managed environment operation timed out issue_id=first issue_identifier=TEST-first operation=destroy"
+
+      refute Process.alive?(hung)
+
+      poll(owner)
+      {_, inspection, inspect_task} = operation(:inspect)
+      send(inspect_task, {:complete_operation, {:ok, absent(inspection.record)}})
+      discover([])
+      {_, next, _} = operation(:prepare)
+      assert next.record.issue_id == "second"
+      refute Map.has_key?(:sys.get_state(owner).environment_entries, "first")
+    end
+
+    test "an unknown destroy is retried after inspection on a bounded backoff, one job at a time" do
+      issues([issue("second", 2)])
+      {owner, _tasks} = scheduler()
+      discover([%{record("first") | desired: :absent, phase: :unknown}])
+      {_, deleting, task} = operation(:destroy)
+      send(task, {:complete_operation, {:error, {:unknown, :uncorrelated_mutation}, deleting.record}})
+      wait_state(owner, &(&1.environment_entries["first"].phase == :unknown))
+
+      poll(owner)
+      {_, inspection, inspect_task} = operation(:inspect)
+      send(inspect_task, {:complete_operation, {:ok, %{inspection.record | phase: :unknown}}})
+      {_, deleting, task} = operation(:destroy)
+      send(task, {:complete_operation, {:error, {:unknown, :uncorrelated_mutation}, deleting.record}})
+      wait_state(owner, &(&1.environment_entries["first"].phase == :unknown))
+
+      # Inside the backoff window, polls do not hammer the provider.
+      poll(owner)
+      refute_receive {:environment_operation, _, _, _, _, _}, 0
+      entry = :sys.get_state(owner).environment_entries["first"]
+      assert entry.inspect_after > System.system_time(:millisecond)
+      assert entry.inspect_after - System.system_time(:millisecond) <= 300_000
+
+      # Once it expires, and after the slot has been held past the limit, the inspect retries and warns.
+      :sys.replace_state(owner, fn state ->
+        held = %{entry | inspect_after: 0, unknown_since: System.system_time(:millisecond) - 1_000_000}
+        put_in(state.environment_entries["first"], held)
+      end)
+
+      log = capture_log(fn -> poll(owner) end)
+      assert log =~ "Managed environment holds a slot while unresolved issue_id=first issue_identifier=TEST-first"
+      assert log =~ "operation=destroy"
+      {_, inspection, inspect_task} = operation(:inspect)
+      send(inspect_task, {:complete_operation, {:ok, %{inspection.record | phase: :stopped}}})
+      {_, deleting, task} = operation(:destroy)
+      send(task, {:complete_operation, {:ok, absent(deleting.record)}})
+      discover([])
+      {_, next, _} = operation(:prepare)
+      assert next.record.issue_id == "second"
+    end
+
+    test "an external delete while the entry is unknown frees the slot without a restart" do
+      issues([issue("second", 2)])
+      {owner, _tasks} = scheduler()
+      discover([%{record("first") | desired: :absent, phase: :unknown}])
+      {_, deleting, task} = operation(:destroy)
+      send(task, {:complete_operation, {:error, {:unknown, :uncorrelated_mutation}, deleting.record}})
+      wait_state(owner, &(&1.environment_entries["first"].phase == :unknown))
+      assert Lifecycle.occupied?(:sys.get_state(owner).environment_entries["first"])
+
+      # The operator deletes the workstation; the provider inspect now proves absence (404 + delete operation).
+      poll(owner)
+      {_, inspection, inspect_task} = operation(:inspect)
+      send(inspect_task, {:complete_operation, {:ok, absent(inspection.record)}})
+      discover([])
+      {_, next, _} = operation(:prepare)
+      assert next.record.issue_id == "second"
+    end
+  end
+
+  defp absent(record),
+    do: %{record | absent?: true, phase: :stopped, pending: [], proof: {:quiescent, %{backing_absent: true}}}
+
   defp assert_reconciliation_releases_location(next_state) do
     assert :ok =
              write_managed_workflow(
