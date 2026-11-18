@@ -31,6 +31,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  # An unresolved environment is re-inspected on a bounded exponential backoff, and a provider job gets this grace
+  # beyond its own operation deadline before it is killed and treated as an unknown outcome.
+  @unknown_inspect_base_ms 15_000
+  @unknown_inspect_max_ms 300_000
+  @unknown_slot_warn_ms 900_000
+  @environment_job_grace_ms 60_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -202,6 +208,21 @@ defmodule SymphonyElixir.Orchestrator do
       when is_map_key(jobs, ref) do
     {job, jobs} = Map.pop(jobs, ref)
     {:noreply, environment_task_failed(%{state | environment_jobs: jobs}, job)}
+  end
+
+  # A job that outlives its own deadline is stuck. Killing it yields the :DOWN above: an unknown outcome that the
+  # next reconcile inspects. The kill completes before :DOWN, so no second mutation can overlap the stuck one.
+  def handle_info({:environment_job_timeout, ref}, %{environment_jobs: jobs} = state) when is_map_key(jobs, ref) do
+    job = jobs[ref]
+    entry = job.issue_id && state.environment_entries[job.issue_id]
+
+    Logger.warning(
+      "Managed environment operation timed out issue_id=#{job.issue_id} " <>
+        "issue_identifier=#{entry && entry.record.issue_identifier} operation=#{job.operation}"
+    )
+
+    Process.exit(job.task.pid, :kill)
+    {:noreply, state}
   end
 
   def handle_info(
@@ -2219,6 +2240,7 @@ defmodule SymphonyElixir.Orchestrator do
     opts = environment_options(state)
     {:ok, task, token} = Operations.discover(state.task_supervisor, adapter, state.environment_config, opts)
     job = %{issue_id: nil, operation_id: token, operation: :discover, task: task}
+    arm_environment_job_timeout(task, state.environment_config)
 
     %{
       state
@@ -2261,8 +2283,45 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp environment_job?(state, id), do: Enum.any?(state.environment_jobs, fn {_, job} -> job.issue_id == id end)
 
-  defp put_environment(state, entry),
-    do: %{state | environment_entries: Map.put(state.environment_entries, entry.record.issue_id, entry)}
+  defp put_environment(state, entry) do
+    entry = track_unknown(entry)
+    %{state | environment_entries: Map.put(state.environment_entries, entry.record.issue_id, entry)}
+  end
+
+  # Unresolved time spans the inspect/destroy retries (:unknown <-> :deleting/:stopping); only a settled phase ends it.
+  defp track_unknown(%Entry{phase: :unknown, unknown_since: nil} = entry), do: %{entry | unknown_since: utc_ms()}
+
+  defp track_unknown(%Entry{phase: phase} = entry) when phase in [:reserved, :running, :stopped, :absent],
+    do: %{entry | unknown_since: nil, inspect_after: nil, inspect_attempt: 0}
+
+  defp track_unknown(entry), do: entry
+
+  defp inspect_unknown_environment(state, id) do
+    entry = state.environment_entries[id]
+    now = utc_ms()
+
+    if is_integer(entry.inspect_after) and now < entry.inspect_after do
+      state
+    else
+      warn_unknown_slot(entry, now)
+      delay = min(@unknown_inspect_base_ms * 2 ** min(entry.inspect_attempt, 5), @unknown_inspect_max_ms)
+      entry = %{entry | inspect_after: now + delay, inspect_attempt: entry.inspect_attempt + 1}
+      state |> put_environment(entry) |> environment_step(id, {:reconcile, :inspect})
+    end
+  end
+
+  defp warn_unknown_slot(entry, now) do
+    if is_integer(entry.unknown_since) and now - entry.unknown_since >= @unknown_slot_warn_ms and
+         Lifecycle.occupied?(entry) do
+      unresolved = safe_environment_failure(entry) || %{}
+
+      Logger.warning(
+        "Managed environment holds a slot while unresolved issue_id=#{entry.record.issue_id} " <>
+          "issue_identifier=#{entry.record.issue_identifier} environment_id=#{entry.record.key} " <>
+          "held_ms=#{now - entry.unknown_since} operation=#{unresolved[:operation]} code=#{unresolved[:code]}"
+      )
+    end
+  end
 
   defp attempt_id, do: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
   defp utc_ms, do: System.system_time(:millisecond)
@@ -2401,7 +2460,13 @@ defmodule SymphonyElixir.Orchestrator do
 
     {:ok, task} = Operations.start(state.task_supervisor, adapter, config, entry, operation, opts)
     job = %{issue_id: entry.record.issue_id, operation_id: entry.operation_id, operation: operation, task: task}
+    arm_environment_job_timeout(task, config)
     %{state | environment_jobs: Map.put(state.environment_jobs, task.ref, job)}
+  end
+
+  defp arm_environment_job_timeout(task, config) do
+    deadline = max(Map.get(config, :startup_timeout_ms, 300_000), Map.get(config, :shutdown_timeout_ms, 60_000))
+    Process.send_after(self(), {:environment_job_timeout, task.ref}, deadline + @environment_job_grace_ms)
   end
 
   defp environment_result(state, %{operation: :discover, operation_id: token}, result) do
@@ -2536,7 +2601,7 @@ defmodule SymphonyElixir.Orchestrator do
       state
     else
       record = retain_absent_intent(entry.record, record)
-      state |> put_environment(%{entry | record: record}) |> environment_step(record.issue_id, {:reconcile, :inspect})
+      state |> put_environment(%{entry | record: record}) |> inspect_unknown_environment(record.issue_id)
     end
   end
 
@@ -2993,7 +3058,7 @@ defmodule SymphonyElixir.Orchestrator do
     entry = state.environment_entries[id]
 
     if entry.phase == :unknown and not environment_job?(state, id) do
-      environment_step(state, id, {:reconcile, :inspect})
+      inspect_unknown_environment(state, id)
     else
       state
     end
@@ -3063,7 +3128,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_idle_environment(state, %Entry{phase: :unknown} = entry, _issue) do
-    environment_step(state, entry.record.issue_id, {:reconcile, :inspect})
+    inspect_unknown_environment(state, entry.record.issue_id)
   end
 
   defp reconcile_idle_environment(state, %Entry{phase: :running} = entry, issue) do

@@ -24,8 +24,11 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
       :terminal_observation,
       :cleanup_retry_at,
       :discard_notice,
+      :unknown_since,
+      :inspect_after,
       phase: :reserved,
-      operation_seq: 0
+      operation_seq: 0,
+      inspect_attempt: 0
     ]
 
     @type t :: %__MODULE__{
@@ -47,6 +50,9 @@ defmodule SymphonyElixir.ExecutionEnvironment.Lifecycle do
             terminal_observation: integer() | nil,
             cleanup_retry_at: integer() | nil,
             discard_notice: String.t() | nil,
+            unknown_since: integer() | nil,
+            inspect_after: integer() | nil,
+            inspect_attempt: non_neg_integer(),
             operation_seq: non_neg_integer()
           }
   end

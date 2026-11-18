@@ -3079,6 +3079,13 @@ MUST prevent duplicate allocation.
 An authoritatively observed metadata payload MUST remain resolved across restart without requiring
 indefinite retention of its completed operation history. Missing operation history alone MUST NOT
 resolve genuinely ambiguous create, start, stop, or delete mutations.
+A mutation call the provider answers with a definite rejection that carries no operation (for
+Workstations, a 4xx other than 408/499, e.g. `FAILED_PRECONDITION` while another operation on the
+resource runs) started nothing: it is a retryable refusal, not an unknown outcome. Likewise an
+uncorrelated stop or delete whose saved window has closed, with listed history that provably reaches
+back before that window and holds no matching operation, is a refusal. A refused or failed stop or
+delete neither certifies nor revokes an earlier stop. No mutation is sent for a resource while another
+of its operations is open.
 
 The existing configurable global and per-state agent limits govern capacity; the reference deployment
 example uses `agent.max_concurrent_agents: 5`, not a separate hard-coded managed limit. Reservations,
@@ -3093,7 +3100,12 @@ timeout, a stop request, or a missing API object MUST NOT independently establis
 Newly observed possible execution MUST invalidate an older quiescence proof and occupy capacity again.
 A cleanup-only storage or ownership uncertainty MUST NOT by itself revoke qualified compute quiescence.
 A failed stop MUST NOT become successful cancellation. Provider operations and hooks run in bounded
-supervised jobs outside the scheduling callback, carrying one monotonic-millisecond deadline.
+supervised jobs outside the scheduling callback, carrying one monotonic-millisecond deadline. A job
+that outlives its deadline plus a grace period is killed and treated as an unknown outcome. An entry
+in `unknown` phase with no active job MUST be re-inspected on a bounded exponential backoff (reference:
+15 s doubling to 5 min); inspection proving absence forgets it and frees its slot, and proving a
+present resource with `desired: absent` retries the destroy. Each re-inspection of an entry that has
+held a slot unresolved for longer than a limit (reference: 15 min) logs a warning with issue context.
 Opaque attempt and operation generations MUST fence stale launch/results; stale connection leases
 must still be cleaned locally without granting stale launch authority.
 

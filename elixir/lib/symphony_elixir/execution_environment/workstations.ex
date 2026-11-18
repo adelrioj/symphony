@@ -284,8 +284,13 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
   defp unresolved?(scope, pending),
     do: Enum.any?(pending, &(&1.outcome in [:pending, :unknown] or not valid_pending_evidence?(scope, &1)))
 
+  # A refused or failed stop or delete changed no compute state, so it neither certifies nor revokes a stop.
   defp successful_stop(scope, pending) do
-    case Enum.find(Enum.reverse(pending), &(&1.verb in [:create, :start, :stop, :delete])) do
+    pending
+    |> Enum.reject(&(&1.verb in [:stop, :delete] and &1.outcome == :failed))
+    |> Enum.reverse()
+    |> Enum.find(&(&1.verb in [:create, :start, :stop, :delete]))
+    |> case do
       %{verb: :stop, outcome: :succeeded, id: id} = entry ->
         if operation_name_in_scope?(scope, id), do: entry
 
@@ -599,7 +604,7 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
       get_in(left, ["metadata", "verb"]) == get_in(right, ["metadata", "verb"])
   end
 
-  defp mutation_failure(config, record, verb, {:retryable, {:conflict, _}} = failure, opts) do
+  defp mutation_failure(config, record, verb, {:retryable, _} = failure, opts) do
     rejected = replace_last(record, verb, %{outcome: :failed})
 
     with {:ok, workstation} <- get(config, resource_name(config, record), opts),
@@ -612,6 +617,16 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
   defp mutation_failure(_config, record, verb, {:denied, _} = failure, _opts),
     do: fail(replace_last(record, verb, %{outcome: :failed}), failure)
+
+  # A 4xx answer (FAILED_PRECONDITION while another operation runs, a vanished target, a rate limit) carries no
+  # operation: the call provably started nothing. It is a refusal to retry, never an unknown outcome. 408 and 499
+  # are excluded: the request may have reached the backend before it was cut.
+  defp mutation_failure(config, record, verb, {:unknown, {:workstations_http, status}}, opts)
+       when status in 400..499 and status not in [408, 499],
+       do: mutation_failure(config, record, verb, {:retryable, {:refused, status}}, opts)
+
+  defp mutation_failure(config, record, verb, :not_found, opts),
+    do: mutation_failure(config, record, verb, {:retryable, {:refused, 404}}, opts)
 
   defp mutation_failure(_config, record, _verb, failure, _opts), do: fail(record, failure)
 
@@ -647,9 +662,31 @@ defmodule SymphonyElixir.ExecutionEnvironment.Workstations do
 
     case matches do
       [operation] -> Map.merge(entry, operation_result(operation))
+      [] -> if refused_in_closed_window?(entry, operations), do: %{entry | outcome: :failed}, else: entry
       _ -> entry
     end
   end
+
+  # An uncorrelated call whose window has closed, with no operation of its verb and target created inside that
+  # window, started nothing: the provider creates the operation when it accepts the call. This holds only when the
+  # listed history provably reaches back before the window (an older operation is still listed); missing history
+  # never resolves anything. Only stop and delete qualify: a create or start keeps its marker, so a possibly
+  # credential-bearing start is never erased. The refusal lets later settles retry instead of halting forever.
+  defp refused_in_closed_window?(%{verb: verb, id: nil, outcome: :unknown, from: from, until: until}, operations)
+       when verb in [:stop, :delete] do
+    with {:ok, first, _} <- DateTime.from_iso8601(from),
+         {:ok, last, _} <- DateTime.from_iso8601(until) do
+      DateTime.compare(DateTime.utc_now(), last) == :gt and
+        Enum.any?(operations, &older_than?(operation_time(&1), first))
+    else
+      _ -> false
+    end
+  end
+
+  defp refused_in_closed_window?(_entry, _operations), do: false
+
+  defp older_than?(%DateTime{} = time, first), do: DateTime.compare(time, first) == :lt
+  defp older_than?(nil, _first), do: false
 
   defp in_window?(operation, entry) do
     with {:ok, created, _} <- DateTime.from_iso8601(get_in(operation, ["metadata", "createTime"]) || ""),
