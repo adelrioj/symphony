@@ -1109,6 +1109,8 @@ twice, and the final invocation total reconciles live estimates. Each fresh Clau
 its usage baseline at zero while the worker and process totals continue accumulating.
 Activity shows bounded assistant text, tool names without arguments, and completion/failure
 outcomes. Live counters reset on runtime restart; durable attempt totals remain in run history.
+For managed Claude turns, run history records a completion summary only after the procedure
+gate accepts the turn. Rejected turns still count toward token usage.
 
 For SSH workers, each worker must be able to resolve `claude.command` and either
 `claude.linear_mcp_command` or `symphony` on `PATH`; worker-side tracker environment variables are
