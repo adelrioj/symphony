@@ -5,6 +5,7 @@ defmodule SymphonyElixirWeb.LanesApiTest do
   import Plug.Conn
 
   alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, Repo, Workflow}
+  alias SymphonyElixir.Lanes.InstructionMigration
 
   @endpoint SymphonyElixirWeb.Endpoint
   @config %{
@@ -101,6 +102,65 @@ defmodule SymphonyElixirWeb.LanesApiTest do
 
     assert {:ok, %{config: %{"procedures" => ^updated_sections}, prompt: "New Common"}} =
              Workflow.parse(response(get(api_conn(), route <> "/export"), 200))
+  end
+
+  @tag :tmp_dir
+  test "startup blocks enabled legacy lanes until verified procedure backfill", %{tmp_dir: root} do
+    shared = %{"qa" => "Review", "bug" => "Assess", "deliver" => "Build"}
+    legacy_prompt = "Inline legacy procedures"
+    common = "Call mcp__symphony__read_procedure for the selected section."
+    source_hash = :crypto.hash(:sha256, legacy_prompt) |> Base.encode16(case: :lower)
+
+    versions =
+      for {slug, procedures, enabled} <- [
+            {"bonbons-delivery", Map.put(shared, "error-reporting", "Report"), true},
+            {"chorus-delivery", shared, false}
+          ] do
+        {:ok, lane} = Lanes.create(Map.put(attrs(slug), :procedures, procedures))
+        version = Lanes.current_version(lane)
+        Repo.update!(Ecto.Changeset.change(version, procedures: %{}, prompt: legacy_prompt))
+        Repo.update!(Ecto.Changeset.change(lane, enabled: enabled))
+
+        %{
+          lane: slug,
+          version_id: version.id,
+          source_prompt_sha256: source_hash,
+          source: %{kind: "reviewed-inline", reference: "fixture-review"},
+          prompt: common,
+          procedures: procedures
+        }
+      end
+
+    bonbons = Lanes.get_by_slug("bonbons-delivery")
+    chorus = Lanes.get_by_slug("chorus-delivery")
+    supervisor = SymphonyElixir.Supervisor
+    on_exit(fn -> Supervisor.restart_child(supervisor, LaneStore) end)
+
+    assert :ok = Supervisor.terminate_child(supervisor, LaneStore)
+    assert {:ok, _pid} = Supervisor.restart_child(supervisor, LaneStore)
+
+    assert {:error, {:lane_invalid, "procedure_backfill_required"}} = LaneStore.reserve_dispatch(bonbons.id)
+
+    lanes = json_response(get(api_conn(), "/api/v1/lanes"), 200)["lanes"]
+
+    assert %{"enabled" => true, "running" => false, "error" => "procedure_backfill_required"} =
+             Enum.find(lanes, &(&1["id"] == bonbons.id))
+
+    assert %{"enabled" => false, "running" => false, "error" => nil} =
+             Enum.find(lanes, &(&1["id"] == chorus.id))
+
+    manifest = Path.join(root, "instructions.json")
+    File.write!(manifest, Jason.encode!(%{versions: versions}))
+    assert :ok = Supervisor.terminate_child(supervisor, LaneStore)
+    assert {:ok, 2} = InstructionMigration.migrate(manifest)
+    assert {:ok, _pid} = Supervisor.restart_child(supervisor, LaneStore)
+    assert %{"counts" => %{"blocked" => 0}} = await_snapshot(bonbons.slug, 100)
+    assert {:ok, token, entry} = LaneStore.reserve_dispatch(bonbons.id)
+    assert entry.version_id == bonbons.current_version_id
+    assert entry.procedures == Map.put(shared, "error-reporting", "Report")
+    assert :ok = LaneStore.release_dispatch(bonbons.id, token)
+    assert Lanes.get!(bonbons.id).enabled
+    refute Lanes.get!(chorus.id).enabled
   end
 
   test "lane slugs are immutable and route identity cannot be replaced" do
