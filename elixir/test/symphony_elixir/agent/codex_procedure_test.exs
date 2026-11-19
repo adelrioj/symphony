@@ -155,12 +155,95 @@ defmodule SymphonyElixir.Agent.CodexProcedureTest do
     end
   end
 
+  @tag :tmp_dir
+  test "Codex continuation rechecks a recorded read against the live route", %{tmp_dir: root} do
+    bug_issue = %Issue{
+      id: "codex-reroute-issue",
+      identifier: "TEST-3",
+      state: "In Progress",
+      dispatchable: true,
+      labels: ["groomed", "Bug"]
+    }
+
+    deliver_issue = %{bug_issue | labels: ["groomed", "feature"]}
+    run_log = Path.join(root, "model-boundary.jsonl")
+    codex = write_procedure_codex!(root, run_log, "bug")
+
+    {:ok, lane} =
+      create_lane_from_front_matter(%{
+        slug: "bonbons-delivery",
+        procedures: full = %{"qa" => "QA", "bug" => "BUG", "deliver" => "DELIVER", "error-reporting" => "ERRORS"},
+        prompt: "PINNED_COMMON",
+        front_matter: """
+        tracker:
+          kind: memory
+          active_states: ["Todo", "In Progress", "In Review"]
+        workspace:
+          root: #{Jason.encode!(Path.join(root, "workspaces"))}
+        agent: {backend: codex}
+        codex:
+          command: #{Jason.encode!(codex)}
+          turn_timeout_ms: 15000
+          stall_timeout_ms: 15000
+        """
+      })
+
+    {:ok, pinned} = LaneStore.lookup(lane.id)
+    LaneContext.install(pinned)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [bug_issue])
+    opts = [execution_context: ExecutionContext.local(pinned.settings.workspace.root), backend_module: Codex]
+
+    # Bug -> Deliver between turns, Deliver present: the stale bug read is rejected as unread.
+
+    flip_between_turns = fn [_id] ->
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [deliver_issue])
+      {:ok, [deliver_issue]}
+    end
+
+    assert_raise RuntimeError, ~r/procedure_not_read/, fn ->
+      AgentRunner.run(bug_issue, self(), opts ++ [max_turns: 2, issue_state_fetcher: flip_between_turns])
+    end
+
+    assert [%{"calls" => [_, %{"section" => "bug", "success" => true}, _]}, %{"calls" => []}] =
+             read_boundary(run_log)
+
+    # Unchanged route: the continuation passes without another read or procedure text.
+    File.rm!(run_log)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [bug_issue])
+    assert :ok = AgentRunner.run(bug_issue, self(), opts ++ [max_turns: 2])
+    [_first, continuation] = read_boundary(run_log)
+    assert continuation["calls"] == []
+    for marker <- Map.values(full), do: refute(continuation["prompt"] =~ marker)
+
+    # Bug -> Deliver mid-turn (past preflight), Deliver missing: the turn is blocked on it.
+    File.rm!(run_log)
+    File.write!(Path.join(root, "fixture-mode"), "flip")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [bug_issue])
+    version = Lanes.current_version(Lanes.get!(lane.id))
+    Repo.update!(Ecto.Changeset.change(version, procedures: Map.delete(full, "deliver")))
+    assert :ok = LaneStore.refresh(lane.id)
+    {:ok, damaged} = LaneStore.lookup(lane.id)
+    LaneContext.install(damaged)
+
+    flip = fn
+      "flip_labels", _arguments ->
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, [deliver_issue])
+        %{"success" => true, "output" => "ok"}
+    end
+
+    assert :ok = AgentRunner.run(bug_issue, self(), opts ++ [max_turns: 2, tool_executor: flip])
+    assert_received {:codex_worker_update, _, _, %{event: :attempt_blocked, payload: detail}}
+    assert detail =~ "deliver"
+    assert [{:create_comment, _}, {:update_issue_state, _, _}] = Tracker.Memory.calls()
+  end
+
   defp read_boundary(path) do
     path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
   end
 
   # A fake app-server that behaves like a Codex thread: the first turn reads Error Reporting
-  # (expecting denial), its selected section, then Error Reporting again; continuations read nothing.
+  # (expecting denial), its selected section, then Error Reporting again; continuations read nothing
+  # (in "flip" mode they call `flip_labels`, so the test can change labels mid-turn).
   defp write_procedure_codex!(root, run_log, section) do
     path = Path.join(root, "fixture-codex")
 
@@ -203,6 +286,9 @@ defmodule SymphonyElixir.Agent.CodexProcedureTest do
                       "params": {"name": "read_procedure", "arguments": {"section": wanted}}})
                 reply = recv()["result"]
                 calls.append({"section": wanted, "success": reply["success"], "text": reply["output"]})
+            if turns > 1 and mode == "flip":
+                send({"id": 99, "method": "item/tool/call", "params": {"name": "flip_labels", "arguments": {}}})
+                recv()
             with open(#{Jason.encode!(run_log)}, "a") as log:
                 log.write(json.dumps({"prompt": message["params"]["input"][0]["text"], "tools": tools, "calls": calls}) + "\\n")
             send({"method": "turn/completed", "params": {}})

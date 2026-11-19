@@ -94,33 +94,43 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
   @doc """
   Applies a locally readable outcome file to a finished turn: a recorded missing section blocks,
   a primary read accepts, and a completed turn without a read is rechecked against the live route.
+
+  With `recheck_read?: true` (Codex, whose outcome outlives a turn), a completed turn's read is
+  accepted only while it still matches the live route; otherwise the turn is handled as unread.
   """
-  @spec finish_local_turn(Path.t(), {:ok, Result.t()} | {:error, term()}) :: {:ok, Result.t()} | {:error, term()}
-  def finish_local_turn(path, result) do
-    case File.read(outcome_path(path)) do
-      {:ok, "blocked:" <> section} when section in @sections ->
+  @spec finish_local_turn(Path.t(), {:ok, Result.t()} | {:error, term()}, keyword()) ::
+          {:ok, Result.t()} | {:error, term()}
+  def finish_local_turn(path, result, opts \\ []) do
+    case {File.read(outcome_path(path)), result} do
+      {{:ok, "blocked:" <> section}, _result} when section in @sections ->
         blocked_result({:missing_procedure, section}, result)
 
-      {:ok, "read:" <> section} when section in @primary ->
+      {{:ok, "read:" <> section}, {:ok, %Result{status: :done} = completed}} when section in @primary ->
+        if Keyword.get(opts, :recheck_read?, false), do: recheck_read(path, section, completed), else: result
+
+      {{:ok, "read:" <> section}, _result} when section in @primary ->
         result
 
+      {_outcome, {:ok, %Result{status: :done} = completed}} ->
+        finish_turn({:error, {:procedure_unread, completed}}, path)
+
       _ ->
-        case result do
-          {:ok, %Result{status: :done} = completed} -> finish_turn({:error, {:procedure_unread, completed}}, path)
-          other -> other
-        end
+        result
+    end
+  end
+
+  defp recheck_read(path, section, completed) do
+    with {:ok, %{issue_id: id, procedures: procedures}} <- load(path) do
+      case live_route(id) do
+        {:selected, ^section} -> {:ok, completed}
+        route -> route |> check_route(procedures) |> apply_check(completed)
+      end
     end
   end
 
   @spec finish_turn({:ok, Result.t()} | {:error, term()}, Path.t()) :: {:ok, Result.t()} | {:error, term()}
   def finish_turn({:error, {:procedure_unread, result}}, path) do
-    with {:ok, procedure} <- load(path),
-         :ok <- check_unread(procedure) do
-      {:ok, result}
-    else
-      {:blocked, detail} -> blocked_result(detail, {:ok, result})
-      {:error, _reason} = error -> error
-    end
+    with {:ok, procedure} <- load(path), do: procedure |> check_unread() |> apply_check(result)
   end
 
   def finish_turn(result, _path), do: result
@@ -181,8 +191,10 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
   end
 
   @spec check_unread(t()) :: :ok | {:blocked, blocker()} | {:error, atom()}
-  def check_unread(%{issue_id: id, procedures: procedures}) do
-    case live_route(id) do
+  def check_unread(%{issue_id: id, procedures: procedures}), do: check_route(live_route(id), procedures)
+
+  defp check_route(route, procedures) do
+    case route do
       :no_route ->
         :ok
 
@@ -198,6 +210,10 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
         {:error, :procedure_live_issue_unverified}
     end
   end
+
+  defp apply_check(:ok, result), do: {:ok, result}
+  defp apply_check({:blocked, detail}, result), do: blocked_result(detail, {:ok, result})
+  defp apply_check({:error, _reason} = error, _result), do: error
 
   @spec read(t(), term()) :: {:ok, String.t()} | {:error, String.t()}
   def read(session, %{"section" => section} = args) when section in @sections and map_size(args) == 1 do

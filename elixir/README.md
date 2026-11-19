@@ -272,7 +272,10 @@ version saved at dispatch, so continuation turns keep that version. Both backend
 authorization rules for missing sections, stale blockers, and Error Reporting. Claude runs the tool
 in its MCP server on the worker. Codex runs it in the controller through its dynamic-tool
 callbacks. With Codex, the procedure bundle and read outcome stay on the controller, including
-for SSH workers. A Codex thread keeps the procedure it read for later continuation turns.
+for SSH workers. A Codex thread keeps the procedure it read for later continuation turns, so
+each Codex turn rechecks that read against the live route when it ends. A matching route passes
+without another read. If labels changed the route, Symphony handles the turn as unread: it rejects
+the turn when the new section exists and blocks it when that section is missing.
 
 To roll a managed lane back to Codex, save a version with `agent.backend: codex`. You can also
 restore an earlier Codex version from history. The change applies to new attempts. Running

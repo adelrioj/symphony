@@ -29,7 +29,8 @@ defmodule SymphonyElixir.Agent.Codex do
 
   # Codex calls dynamic tools back over the app-server's stdio, so the pinned bundle and its
   # outcome stay in a private controller directory even when the app-server runs over SSH.
-  # One Codex thread serves every continuation turn, so the outcome is reset once per session.
+  # One Codex thread serves every continuation turn, so the outcome is reset once per session and
+  # each turn's recorded read is rechecked against the live route when the turn ends.
   defp start_procedure_session(workspace, app_opts, payload, preflight?) do
     with {:ok, dir, monitor} <- CliHarness.create_session_dir("symphony-codex-procedures", workspace) do
       path = Path.join(dir, "procedures.json")
@@ -69,7 +70,7 @@ defmodule SymphonyElixir.Agent.Codex do
         end
 
         result = run_app_server_turn(session, prompt, issue, Keyword.put(opts, :tool_executor, executor))
-        ProcedureSession.finish_local_turn(path, result)
+        ProcedureSession.finish_local_turn(path, result, recheck_read?: true)
 
       {:blocked, detail} ->
         ProcedureSession.blocked_result(detail)
