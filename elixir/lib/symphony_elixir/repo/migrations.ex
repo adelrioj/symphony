@@ -267,6 +267,7 @@ defmodule SymphonyElixir.Repo.Migrations.AddLaneProcedures do
   @moduledoc false
   use Ecto.Migration
 
+  @spec change() :: term()
   def change do
     alter table(:lane_versions) do
       add(:procedures, :map, null: false, default: %{})

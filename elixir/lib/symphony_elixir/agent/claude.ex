@@ -149,12 +149,16 @@ defmodule SymphonyElixir.Agent.Claude do
         run_claude(session, workspace, prompt, on_message)
 
       path ->
-        with :ok <- preflight_procedure(session, path) do
-          result = run_claude(session, workspace, prompt, gate_completion(on_message))
-          finish_procedure_turn(result, path)
-        else
-          {:blocked, detail} -> ProcedureSession.blocked_result(detail)
-          {:error, _reason} = error -> error
+        case preflight_procedure(session, path) do
+          :ok ->
+            result = run_claude(session, workspace, prompt, gate_completion(on_message))
+            finish_procedure_turn(result, path)
+
+          {:blocked, detail} ->
+            ProcedureSession.blocked_result(detail)
+
+          {:error, _reason} = error ->
+            error
         end
     end
   end

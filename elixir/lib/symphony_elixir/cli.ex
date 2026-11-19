@@ -4,8 +4,8 @@ defmodule SymphonyElixir.CLI do
   """
 
   alias SymphonyElixir.CodexCredentials.Recovery
-  alias SymphonyElixir.{LogFile, Maintenance}
   alias SymphonyElixir.Lanes.InstructionMigration
+  alias SymphonyElixir.{LogFile, Maintenance}
   alias SymphonyElixir.MCP.LinearServer
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails

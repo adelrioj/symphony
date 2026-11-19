@@ -661,12 +661,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
       "advanced_json" => config |> advanced_config() |> ConfigurationFields.safe_json()
     }
 
-    procedures = (version && version.procedures) || %{}
-
-    params =
-      Enum.reduce(Lanes.procedure_keys("bonbons-delivery"), params, fn key, attrs ->
-        Map.put(attrs, "procedure_#{key}", Map.get(procedures, key, ""))
-      end)
+    params = put_procedure_fields(params, version)
 
     # Memory is the new-lane template choice, not a default for a missing required tracker kind.
     display_defaults = put_in(Schema.lane_defaults(), ["tracker", "kind"], nil)
@@ -674,6 +669,14 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
     Enum.reduce(@config_fields, params, fn {field, path, type}, acc ->
       Map.put(acc, field, field_value(display_config, path, type))
+    end)
+  end
+
+  defp put_procedure_fields(params, version) do
+    procedures = (version && version.procedures) || %{}
+
+    Enum.reduce(Lanes.procedure_keys("bonbons-delivery"), params, fn key, attrs ->
+      Map.put(attrs, "procedure_#{key}", Map.get(procedures, key, ""))
     end)
   end
 

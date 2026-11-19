@@ -18,21 +18,20 @@ defmodule SymphonyElixir.Lanes.InstructionMigration do
   def migrate(path) do
     with {:ok, entries} <- read_manifest(path),
          :ok <- ensure_schema(entries) do
-      Repo.transaction(
-        fn ->
-          versions = legacy_versions(:bundled_schema)
-
-          case validate_coverage(versions, entries) do
-            :ok -> update_versions(versions, entries)
-            {:error, reason} -> Repo.rollback(reason)
-          end
-        end,
-        log: false
-      )
+      Repo.transaction(fn -> migrate_entries(entries) end, log: false)
     end
   rescue
     # Database messages can contain instruction text; the offline command only reports a fixed code.
     _error in [DBConnection.ConnectionError, Ecto.ConstraintError, Exqlite.Error] -> {:error, :database_error}
+  end
+
+  defp migrate_entries(entries) do
+    versions = legacy_versions(:bundled_schema)
+
+    case validate_coverage(versions, entries) do
+      :ok -> update_versions(versions, entries)
+      {:error, reason} -> Repo.rollback(reason)
+    end
   end
 
   defp ensure_schema(entries) do
@@ -58,43 +57,45 @@ defmodule SymphonyElixir.Lanes.InstructionMigration do
     with {:ok, document} <- Jason.decode(json, objects: :ordered_objects),
          {:ok, %{"versions" => versions} = manifest} when is_list(versions) and map_size(manifest) == 1 <-
            json_object(document) do
-      Enum.reduce_while(versions, {:ok, %{}}, fn version, {:ok, entries} ->
-        case parse_version(version) do
-          {:ok, key, entry} when not is_map_key(entries, key) -> {:cont, {:ok, Map.put(entries, key, entry)}}
-          {:ok, _key, _entry} -> {:halt, {:error, :duplicate_version}}
-          {:error, _reason} = error -> {:halt, error}
-        end
-      end)
+      Enum.reduce_while(versions, {:ok, %{}}, &collect_version/2)
     else
       {:error, :duplicate_manifest_key} = error -> error
       _ -> {:error, :invalid_manifest}
     end
   end
 
-  defp parse_version(version) do
-    with {:ok, entry} <- json_object(version) do
-      case entry do
-        %{
-          "lane" => lane,
-          "version_id" => id,
-          "source_prompt_sha256" => hash,
-          "source" => source,
-          "prompt" => prompt,
-          "procedures" => procedures
-        }
-        when map_size(entry) == 6 and lane in @managed_slugs and is_integer(id) and id > 0 ->
-          with :ok <- validate_hash(hash),
-               {:ok, kind} <- source_kind(source),
-               :ok <- validate_prompt(prompt),
-               {:ok, procedures} <- validate_procedures(lane, procedures) do
-            {:ok, {lane, id}, %{hash: hash, kind: kind, prompt: prompt, procedures: procedures}}
-          end
-
-        _ ->
-          {:error, :invalid_version}
-      end
+  defp collect_version(version, {:ok, entries}) do
+    case parse_version(version) do
+      {:ok, key, entry} when not is_map_key(entries, key) -> {:cont, {:ok, Map.put(entries, key, entry)}}
+      {:ok, _key, _entry} -> {:halt, {:error, :duplicate_version}}
+      {:error, _reason} = error -> {:halt, error}
     end
   end
+
+  defp parse_version(version) do
+    with {:ok, entry} <- json_object(version), do: validate_version(entry)
+  end
+
+  defp validate_version(
+         %{
+           "lane" => lane,
+           "version_id" => id,
+           "source_prompt_sha256" => hash,
+           "source" => source,
+           "prompt" => prompt,
+           "procedures" => procedures
+         } = entry
+       )
+       when map_size(entry) == 6 and lane in @managed_slugs and is_integer(id) and id > 0 do
+    with :ok <- validate_hash(hash),
+         {:ok, kind} <- source_kind(source),
+         :ok <- validate_prompt(prompt),
+         {:ok, procedures} <- validate_procedures(lane, procedures) do
+      {:ok, {lane, id}, %{hash: hash, kind: kind, prompt: prompt, procedures: procedures}}
+    end
+  end
+
+  defp validate_version(_entry), do: {:error, :invalid_version}
 
   defp json_object(%Jason.OrderedObject{values: pairs}) do
     map = Map.new(pairs)
@@ -110,19 +111,20 @@ defmodule SymphonyElixir.Lanes.InstructionMigration do
   defp sha256?(hash), do: is_binary(hash) and Regex.match?(@sha256, hash)
 
   defp source_kind(value) do
-    with {:ok, source} <- json_object(value) do
-      case source do
-        %{"kind" => "image", "worker_digest" => "sha256:" <> hash} when map_size(source) == 2 ->
-          if sha256?(hash), do: {:ok, :image}, else: {:error, :invalid_source}
-
-        %{"kind" => "reviewed-inline", "reference" => reference} when map_size(source) == 2 ->
-          if nonblank?(reference), do: {:ok, :reviewed_inline}, else: {:error, :invalid_source}
-
-        _ ->
-          {:error, :invalid_source}
-      end
-    end
+    with {:ok, source} <- json_object(value), do: validate_source_kind(source)
   end
+
+  defp validate_source_kind(%{"kind" => "image", "worker_digest" => "sha256:" <> hash} = source)
+       when map_size(source) == 2 do
+    if sha256?(hash), do: {:ok, :image}, else: {:error, :invalid_source}
+  end
+
+  defp validate_source_kind(%{"kind" => "reviewed-inline", "reference" => reference} = source)
+       when map_size(source) == 2 do
+    if nonblank?(reference), do: {:ok, :reviewed_inline}, else: {:error, :invalid_source}
+  end
+
+  defp validate_source_kind(_source), do: {:error, :invalid_source}
 
   defp validate_prompt(prompt) do
     if is_binary(prompt) and Regex.match?(@procedure_tool, prompt) and not String.contains?(prompt, @image_path) and
@@ -168,22 +170,22 @@ defmodule SymphonyElixir.Lanes.InstructionMigration do
   end
 
   defp validate_coverage(versions, entries) do
-    Enum.reduce_while(versions, {:ok, entries}, fn {lane, id, prompt}, {:ok, remaining} ->
-      case Map.pop(remaining, {lane, id}) do
-        {nil, _} ->
-          {:halt, {:error, :missing_versions}}
-
-        {entry, rest} ->
-          case validate_source(prompt, entry) do
-            :ok -> {:cont, {:ok, rest}}
-            {:error, _reason} = error -> {:halt, error}
-          end
-      end
-    end)
+    versions
+    |> Enum.reduce_while({:ok, entries}, &consume_version/2)
     |> case do
       {:ok, remaining} when map_size(remaining) == 0 -> :ok
       {:ok, _remaining} -> {:error, :unexpected_version}
       {:error, _reason} = error -> error
+    end
+  end
+
+  defp consume_version({lane, id, prompt}, {:ok, remaining}) do
+    with {entry, rest} when not is_nil(entry) <- Map.pop(remaining, {lane, id}),
+         :ok <- validate_source(prompt, entry) do
+      {:cont, {:ok, rest}}
+    else
+      {nil, _} -> {:halt, {:error, :missing_versions}}
+      {:error, _reason} = error -> {:halt, error}
     end
   end
 

@@ -133,26 +133,26 @@ defmodule SymphonyElixir.Linear.Client do
   @spec fetch_issue_route(String.t(), keyword()) ::
           {:ok, {String.t(), [String.t()]} | nil} | {:error, term()}
   def fetch_issue_route(id, opts \\ []) when is_binary(id) do
-    with {:ok, body} <- graphql(@query_issue_route, %{filter: %{id: %{in: [id]}}}, opts),
-         true <- is_map(body) and Map.get(body, "errors", []) == [],
+    with {:ok, %{} = body} <- graphql(@query_issue_route, %{filter: %{id: %{in: [id]}}}, opts),
+         true <- Map.get(body, "errors", []) == [],
          %{"data" => %{"issues" => %{"nodes" => nodes}}} <- body do
-      case nodes do
-        [] ->
-          {:ok, nil}
-
-        [%{"id" => ^id, "state" => %{"name" => state}, "labels" => %{"nodes" => labels}}] when is_binary(state) ->
-          case route_labels(labels, []) do
-            {:ok, names} -> {:ok, {state, names}}
-            :invalid -> {:error, :unverified_issue_route}
-          end
-
-        _ ->
-          {:error, :unverified_issue_route}
-      end
+      decode_issue_route(nodes, id)
     else
       _ -> {:error, :unverified_issue_route}
     end
   end
+
+  defp decode_issue_route([], _id), do: {:ok, nil}
+
+  defp decode_issue_route([%{"id" => id, "state" => %{"name" => state}, "labels" => %{"nodes" => labels}}], id)
+       when is_binary(state) do
+    case route_labels(labels, []) do
+      {:ok, names} -> {:ok, {state, names}}
+      :invalid -> {:error, :unverified_issue_route}
+    end
+  end
+
+  defp decode_issue_route(_nodes, _id), do: {:error, :unverified_issue_route}
 
   defp route_labels([], names), do: {:ok, names}
   defp route_labels([%{"name" => name} | labels], names) when is_binary(name), do: route_labels(labels, [name | names])
