@@ -271,9 +271,10 @@ section that matches the live issue route. The rule does not use the section tex
 QA and Chorus cannot read Error Reporting. Bonbons versions without the field use
 revision `1`; an unsupported revision does not grant Error Reporting access.
 
-Before Symphony posts a missing-procedure comment or moves the issue to `agent.blocked_state`,
-it checks the live issue state and labels again. It skips both writes if the current route
-does not need the missing section. For example, a missing `bug` section does not block `qa`.
+Before Symphony returns procedure text or writes a blocker, it checks the live issue against the
+attempt's lane settings for required, any, and excluded labels and the Linear assignee filter.
+It skips the blocker comment and the move to `agent.blocked_state` if the current route does not
+need the missing section. For example, a missing `bug` section does not block `qa`.
 
 Minimal example:
 

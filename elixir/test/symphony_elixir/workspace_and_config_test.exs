@@ -1439,12 +1439,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "an exact procedure-route read distinguishes missing labels from an empty label set" do
-    issue = %{"id" => "bound", "state" => %{"name" => "In Review"}}
+    issue = %{"id" => "bound", "state" => %{"name" => "In Review"}, "assignee" => nil}
     envelope = fn node -> %{"data" => %{"issues" => %{"nodes" => [node]}}} end
     labeled = Map.put(issue, "labels", %{"nodes" => []})
 
     for {body, expected} <- [
-          {envelope.(labeled), {:ok, {"In Review", []}}},
+          {envelope.(labeled), {:ok, %Issue{id: "bound", state: "In Review", dispatchable: true}}},
+          {envelope.(Map.delete(labeled, "assignee")), {:error, :unverified_issue_route}},
           {envelope.(issue), {:error, :unverified_issue_route}},
           {Map.put(envelope.(labeled), "errors", [%{"message" => "partial"}]), {:error, :unverified_issue_route}}
         ] do
@@ -1454,6 +1455,42 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                  {:ok, %{status: 200, body: body}}
                end
              ) == expected
+    end
+  end
+
+  test "the exact procedure-route read uses the live assignee and resolves the configured viewer" do
+    for {configured, assignee, dispatchable} <- [
+          {"worker", %{"id" => "worker"}, true},
+          {"worker", %{"id" => "someone-else"}, false},
+          {"worker", nil, false},
+          {"me", %{"id" => "worker"}, true},
+          {"me", %{"id" => "someone-else"}, false}
+        ] do
+      issue = %{
+        "id" => "bound",
+        "state" => %{"name" => "In Review"},
+        "assignee" => assignee,
+        "labels" => %{"nodes" => [%{"name" => "groomed"}]}
+      }
+
+      request = fn
+        %{"query" => "query SymphonyLinearViewer" <> _}, _headers when configured == "me" ->
+          {:ok, %{status: 200, body: %{"data" => %{"viewer" => %{"id" => "worker"}}}}}
+
+        %{"query" => query, "variables" => %{filter: %{id: %{in: ["bound"]}}}}, _headers ->
+          assert query =~ ~r/assignee\s*\{\s*id\s*\}/
+          {:ok, %{status: 200, body: %{"data" => %{"issues" => %{"nodes" => [issue]}}}}}
+      end
+
+      assert {:ok, %Issue{state: "In Review", labels: ["groomed"], dispatchable: ^dispatchable}} =
+               Client.fetch_issue_route("bound",
+                 tracker_settings: %{
+                   api_key: "fixture-token",
+                   endpoint: "https://linear.example.test/graphql",
+                   assignee: configured
+                 },
+                 request_fun: request
+               )
     end
   end
 

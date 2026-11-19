@@ -187,6 +187,31 @@ defmodule SymphonyElixir.MCP.LinearServerTest do
     assert :skip = ProcedureSession.permit_blocked_write("bound-issue", "error-reporting", "bonbons-delivery", 1)
   end
 
+  for {rule, changed_labels} <- [
+        {:required_labels, ["groomed", "delivery"]},
+        {:any_labels, ["groomed", "ready"]},
+        {:excluded_labels, ["groomed", "ready", "delivery", " HOLD "]}
+      ] do
+    test "procedure reads stop after an issue no longer matches #{rule}", %{test: test} do
+      path = configure_procedures(test, "bonbons-delivery", %{"deliver" => "DELIVER_MARKER"})
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_required_labels: ["ready"],
+        tracker_any_labels: ["delivery", "maintenance"],
+        tracker_excluded_labels: ["hold"]
+      )
+
+      live_issue("In Progress", ["groomed", "ready", "delivery"])
+      assert %{"isError" => false, "content" => [%{"text" => "DELIVER_MARKER"}]} = read_procedure("deliver")
+
+      live_issue("In Progress", unquote(changed_labels))
+      assert %{"isError" => true, "content" => [%{"text" => detail}]} = read_procedure("deliver")
+      refute detail =~ "DELIVER_MARKER"
+      assert File.read!(path <> ".outcome") == "read:deliver"
+    end
+  end
+
   defp configure_procedures(test, slug, procedures, procedure_policy_version \\ 1) do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     path = Path.join(Path.dirname(Workflow.workflow_file_path()), "#{test}.json")
@@ -212,7 +237,7 @@ defmodule SymphonyElixir.MCP.LinearServerTest do
   defp live_issue(state, labels) do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [
       %Issue{id: "other-issue", state: "Todo", labels: ["groomed", "Bug"]},
-      %Issue{id: "bound-issue", state: state, labels: labels}
+      %Issue{id: "bound-issue", state: state, labels: labels, dispatchable: true}
     ])
   end
 
