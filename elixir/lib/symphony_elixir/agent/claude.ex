@@ -154,7 +154,7 @@ defmodule SymphonyElixir.Agent.Claude do
         case preflight_procedure(session, path) do
           :ok ->
             result = run_claude(session, workspace, prompt, gate_completion(on_message))
-            finish_procedure_turn(result, path)
+            result |> finish_procedure_turn(path) |> report_accepted_completion(on_message)
 
           {:blocked, detail} ->
             ProcedureSession.blocked_result(detail)
@@ -194,6 +194,21 @@ defmodule SymphonyElixir.Agent.Claude do
   end
 
   defp finish_procedure_turn(result, _procedure), do: result
+
+  defp report_accepted_completion({:ok, %Result{status: :done} = result} = outcome, on_message)
+       when is_function(on_message, 1) do
+    # The stream already reported final usage, including for turns the gate rejects.
+    on_message.(%{
+      event: :completed,
+      timestamp: DateTime.utc_now(),
+      session_id: result.session_id,
+      payload: "Completed: " <> String.slice(result.summary || "Claude turn", 0, 500)
+    })
+
+    outcome
+  end
+
+  defp report_accepted_completion(outcome, _on_message), do: outcome
 
   defp procedure_payload(issue_id) do
     with {:ok, %{slug: slug, version_id: version_id, procedures: procedures}} <- LaneContext.capture(),

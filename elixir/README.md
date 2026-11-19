@@ -256,6 +256,7 @@ exists.
 For managed lanes, the Markdown body is the Common prompt. The private import/export artifact
 also has a top-level YAML `procedures` map. Both `bonbons-delivery` and `chorus-delivery` require
 nonblank `qa`, `bug`, and `deliver` sections; only `bonbons-delivery` requires `error-reporting`.
+Export and re-import preserve procedure text byte for byte, including Unicode line separators.
 Keep these private artifacts out of source repositories and logs. In the lane API, send the same
 map as a top-level `procedures` property alongside `config` and `prompt`, not inside `config`.
 The editor saves all sections together as one version, and history restores them together.
@@ -1113,6 +1114,8 @@ twice, and the final invocation total reconciles live estimates. Each fresh Clau
 its usage baseline at zero while the worker and process totals continue accumulating.
 Activity shows bounded assistant text, tool names without arguments, and completion/failure
 outcomes. Live counters reset on runtime restart; durable attempt totals remain in run history.
+For managed Claude turns, run history records a completion summary only after the procedure
+gate accepts the turn. Rejected turns still count toward token usage.
 
 For SSH workers, each worker must be able to resolve `claude.command` and either
 `claude.linear_mcp_command` or `symphony` on `PATH`; worker-side tracker environment variables are

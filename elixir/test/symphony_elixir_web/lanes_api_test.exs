@@ -69,7 +69,8 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     end
   end
 
-  test "managed API versions accept and return procedures independently of runtime configuration" do
+  @tag :tmp_dir
+  test "managed API versions accept and return procedures independently of runtime configuration", %{tmp_dir: root} do
     slug = "bonbons-delivery"
     route = "/api/v1/lanes/#{slug}"
     attrs = attrs(slug)
@@ -97,7 +98,7 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     assert %{"errors" => [%{"path" => "agent.backend_by_state.In Review"}]} = json_response(rejected, 422)
     assert Lanes.get_by_slug(slug).current_version_id == first
 
-    updated_sections = %{sections | "qa" => "Review again"}
+    updated_sections = %{sections | "qa" => "  Review\u2028Build\u2029Check\u0085Ship\nCafé 🚀\r\n"}
     updated = put(api_conn(), route, Jason.encode!(%{procedures: updated_sections, prompt: "New Common"}))
     assert %{"procedures" => ^updated_sections, "current_version_id" => second} = json_response(updated, 200)
     assert first != second
@@ -114,8 +115,12 @@ defmodule SymphonyElixirWeb.LanesApiTest do
 
     refute Map.has_key?(config, "procedures")
 
-    assert {:ok, %{config: %{"procedures" => ^updated_sections}, prompt: "New Common"}} =
-             Workflow.parse(response(get(api_conn(), route <> "/export"), 200))
+    artifact = Path.join(root, "#{slug}.md")
+    File.write!(artifact, response(get(api_conn(), route <> "/export"), 200))
+
+    assert {:ok, imported, _warnings} = Lanes.import_file(artifact, slug: slug)
+    assert imported.current_version_id != second
+    assert %{procedures: ^updated_sections, prompt: "New Common"} = Lanes.current_version(imported)
   end
 
   @tag :tmp_dir
