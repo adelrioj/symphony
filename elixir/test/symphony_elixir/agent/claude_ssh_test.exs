@@ -181,6 +181,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
           tracker:
             kind: memory
             active_states: ["Todo", "In Progress", "In Review"]
+            excluded_labels: ["hold"]
           workspace:
             root: #{Jason.encode!(Path.join(root, "workspaces"))}
           codex: {turn_timeout_ms: 15000, stall_timeout_ms: 15000}
@@ -317,6 +318,13 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["human"]}])
       assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
       refute_received {:codex_worker_update, _, _, %{event: :attempt_blocked}}
+      assert read_boundary(run_log) == captures
+
+      calls = Tracker.Memory.calls()
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["hold" | issue.labels]}])
+      assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+      refute_received {:codex_worker_update, _, _, %{event: :attempt_blocked}}
+      assert Tracker.Memory.calls() == calls
       assert read_boundary(run_log) == captures
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])

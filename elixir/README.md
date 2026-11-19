@@ -260,6 +260,10 @@ Keep these private artifacts out of source repositories and logs. In the lane AP
 map as a top-level `procedures` property alongside `config` and `prompt`, not inside `config`.
 The editor saves all sections together as one version, and history restores them together.
 
+Before Symphony returns procedure text or records a blocker, it checks the live issue against the
+attempt's lane settings for required, any, and excluded labels and the Linear assignee filter.
+These checks do not replace the delivery and QA section rules.
+
 Minimal example:
 
 ```md

@@ -80,7 +80,7 @@ defmodule SymphonyElixir.Linear.Client do
   @query_issue_route """
   query SymphonyLinearIssueRoute($filter: IssueFilter!) {
     issues(filter: $filter, first: 1) {
-      nodes { id state { name } labels { nodes { name } } }
+      nodes { id state { name } labels { nodes { name } } assignee { id } }
     }
   }
   """
@@ -130,29 +130,42 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
-  @spec fetch_issue_route(String.t(), keyword()) ::
-          {:ok, {String.t(), [String.t()]} | nil} | {:error, term()}
+  @spec fetch_issue_route(String.t(), keyword()) :: {:ok, Issue.t() | nil} | {:error, term()}
   def fetch_issue_route(id, opts \\ []) when is_binary(id) do
-    with {:ok, %{} = body} <- graphql(@query_issue_route, %{filter: %{id: %{in: [id]}}}, opts),
+    tracker = Keyword.get_lazy(opts, :tracker_settings, fn -> Config.settings!().tracker end)
+    opts = Keyword.put(opts, :tracker_settings, tracker)
+
+    with {:ok, assignee_filter} <- build_assignee_filter(Map.get(tracker, :assignee), opts),
+         {:ok, %{} = body} <- graphql(@query_issue_route, %{filter: %{id: %{in: [id]}}}, opts),
          true <- Map.get(body, "errors", []) == [],
          %{"data" => %{"issues" => %{"nodes" => nodes}}} <- body do
-      decode_issue_route(nodes, id)
+      decode_issue_route(nodes, id, assignee_filter)
     else
       _ -> {:error, :unverified_issue_route}
     end
   end
 
-  defp decode_issue_route([], _id), do: {:ok, nil}
+  defp decode_issue_route([], _id, _assignee_filter), do: {:ok, nil}
 
-  defp decode_issue_route([%{"id" => id, "state" => %{"name" => state}, "labels" => %{"nodes" => labels}}], id)
+  defp decode_issue_route(
+         [%{"id" => id, "state" => %{"name" => state}, "labels" => %{"nodes" => labels}, "assignee" => assignee}],
+         id,
+         assignee_filter
+       )
        when is_binary(state) do
-    case route_labels(labels, []) do
-      {:ok, names} -> {:ok, {state, names}}
-      :invalid -> {:error, :unverified_issue_route}
+    with true <- valid_route_assignee?(assignee),
+         {:ok, names} <- route_labels(labels, []) do
+      {:ok, %Issue{id: id, state: state, labels: names, dispatchable: assigned_to_worker?(assignee, assignee_filter)}}
+    else
+      _ -> {:error, :unverified_issue_route}
     end
   end
 
-  defp decode_issue_route(_nodes, _id), do: {:error, :unverified_issue_route}
+  defp decode_issue_route(_nodes, _id, _assignee_filter), do: {:error, :unverified_issue_route}
+
+  defp valid_route_assignee?(nil), do: true
+  defp valid_route_assignee?(%{"id" => id}), do: present_string?(id)
+  defp valid_route_assignee?(_assignee), do: false
 
   defp route_labels([], names), do: {:ok, names}
   defp route_labels([%{"name" => name} | labels], names) when is_binary(name), do: route_labels(labels, [name | names])
@@ -697,21 +710,24 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp build_assignee_filter(assignee) when is_binary(assignee) do
+  defp build_assignee_filter(assignee, opts \\ [])
+  defp build_assignee_filter(nil, _opts), do: {:ok, nil}
+
+  defp build_assignee_filter(assignee, opts) when is_binary(assignee) do
     case normalize_assignee_match_value(assignee) do
       nil ->
         {:ok, nil}
 
       "me" ->
-        resolve_viewer_assignee_filter()
+        resolve_viewer_assignee_filter(opts)
 
       normalized ->
         {:ok, %{configured_assignee: assignee, match_values: MapSet.new([normalized])}}
     end
   end
 
-  defp resolve_viewer_assignee_filter do
-    case graphql(@viewer_query, %{}) do
+  defp resolve_viewer_assignee_filter(opts) do
+    case graphql(@viewer_query, %{}, opts) do
       {:ok, %{"data" => %{"viewer" => viewer}}} when is_map(viewer) ->
         case assignee_id(viewer) do
           nil ->
