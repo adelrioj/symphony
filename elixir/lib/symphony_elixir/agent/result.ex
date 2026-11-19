@@ -9,7 +9,8 @@ defmodule SymphonyElixir.Agent.Result do
             tokens: %{input: 0, output: 0, total: 0},
             seconds_running: 0,
             summary: nil,
-            blocked_action: nil
+            blocked_action: nil,
+            missing_procedure: nil
 
   @type t :: %__MODULE__{
           status: :done | :blocked,
@@ -17,7 +18,8 @@ defmodule SymphonyElixir.Agent.Result do
           tokens: %{input: non_neg_integer(), output: non_neg_integer(), total: non_neg_integer()},
           seconds_running: non_neg_integer(),
           summary: String.t() | nil,
-          blocked_action: String.t() | nil
+          blocked_action: String.t() | nil,
+          missing_procedure: String.t() | nil
         }
 
   @spec new(keyword() | map()) :: t()
@@ -31,7 +33,8 @@ defmodule SymphonyElixir.Agent.Result do
       tokens: Map.merge(%{input: 0, output: 0, total: 0}, tokens),
       seconds_running: Map.get(attrs, :seconds_running, 0),
       summary: Map.get(attrs, :summary),
-      blocked_action: Map.get(attrs, :blocked_action)
+      blocked_action: Map.get(attrs, :blocked_action),
+      missing_procedure: Map.get(attrs, :missing_procedure)
     }
   end
 

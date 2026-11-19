@@ -131,7 +131,7 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp handle_run_outcome({:blocked, result, recipient, attempt_id}, issue) do
-    case permit_blocked_write(issue) do
+    case permit_blocked_write(issue, result) do
       :ok ->
         send_blocked_update(issue, recipient, attempt_id, result)
         post_blocked_state(issue, result)
@@ -148,10 +148,10 @@ defmodule SymphonyElixir.AgentRunner do
   defp handle_run_outcome({:skipped, _reason}, _issue), do: :ok
   defp handle_run_outcome(other, _issue), do: other
 
-  defp permit_blocked_write(%Issue{id: id}) do
-    with {:ok, %{slug: slug}} <- LaneContext.capture(),
+  defp permit_blocked_write(%Issue{id: id}, %Result{missing_procedure: missing_procedure}) do
+    with {:ok, %{slug: slug, procedures: procedures}} <- LaneContext.capture(),
          true <- ProcedureSession.managed_lane?(slug) do
-      ProcedureSession.permit_blocked_write(id)
+      ProcedureSession.permit_blocked_write(id, missing_procedure, procedures)
     else
       _ -> :ok
     end

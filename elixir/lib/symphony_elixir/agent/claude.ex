@@ -56,7 +56,9 @@ defmodule SymphonyElixir.Agent.Claude do
 
     @impl true
     def finalize(acc, code) when is_map_key(@blocked, code) do
-      Stream.finalize(%{acc | blocked_action: ProcedureSession.missing_text(@blocked[code])}, code)
+      section = Map.fetch!(@blocked, code)
+      {:ok, result} = Stream.finalize(%{acc | blocked_action: ProcedureSession.missing_text(section)}, code)
+      {:ok, %{result | missing_procedure: section}}
     end
 
     def finalize(acc, @unread) do
@@ -351,7 +353,7 @@ defmodule SymphonyElixir.Agent.Claude do
   defp local_procedure_outcome(path, result) do
     case File.read(ProcedureSession.outcome_path(path)) do
       {:ok, "blocked:" <> section} when section in ~w(qa bug deliver error-reporting) ->
-        ProcedureSession.blocked_result(ProcedureSession.missing_text(section), result)
+        ProcedureSession.blocked_result({:missing_procedure, section}, result)
 
       {:ok, "read:" <> section} when section in ~w(qa bug deliver) ->
         result

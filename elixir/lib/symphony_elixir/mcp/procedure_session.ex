@@ -31,6 +31,8 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
           procedures: map()
         }
 
+  @type blocker :: String.t() | {:missing_procedure, String.t()}
+
   @spec managed_lane?(term()) :: boolean()
   def managed_lane?(slug), do: Lanes.procedure_fields(slug) != []
 
@@ -95,21 +97,21 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
 
   # Common is never started for a legacy managed bundle. For partially damaged bundles only,
   # check before launch as well as at the tool: a missing unselected section does not block.
-  @spec preflight(t()) :: :ok | {:blocked, String.t()}
+  @spec preflight(t()) :: :ok | {:blocked, blocker()}
   def preflight(%{procedures: procedures}) when map_size(procedures) == 0,
     do: {:blocked, "The managed lane's procedure bundle is missing or blank."}
 
   def preflight(%{procedures: procedures, issue_id: id}) do
     case live_route(id) do
       {:selected, section} ->
-        if present_text?(procedures[section]), do: :ok, else: {:blocked, missing_text(section)}
+        if present_text?(procedures[section]), do: :ok, else: {:blocked, {:missing_procedure, section}}
 
       _ ->
         :ok
     end
   end
 
-  @spec check_unread(t()) :: :ok | {:blocked, String.t()} | {:error, atom()}
+  @spec check_unread(t()) :: :ok | {:blocked, blocker()} | {:error, atom()}
   def check_unread(%{issue_id: id, procedures: procedures}) do
     case live_route(id) do
       :no_route ->
@@ -118,7 +120,7 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
       {:selected, section} ->
         if present_text?(procedures[section]),
           do: {:error, :procedure_not_read},
-          else: {:blocked, missing_text(section)}
+          else: {:blocked, {:missing_procedure, section}}
 
       :conflict ->
         {:error, :procedure_route_conflict}
@@ -154,9 +156,7 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
          "read:" <> previous
        )
        when section in ["bug", "deliver"] and section == previous do
-    text = Map.fetch!(procedures, section)
-
-    if String.contains?(text, "mcp__symphony__read_procedure") and Regex.match?(@error_reporting_request, text),
+    if requests_error_reporting?(procedures[section]),
       do: :ok,
       else: {:error, "The selected procedure does not request Error Reporting."}
   end
@@ -167,14 +167,23 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
   defp authorize(_route, _section, _slug, _previous),
     do: {:error, "This section is not available for the live route of this run's issue."}
 
+  defp requests_error_reporting?(text) when is_binary(text) do
+    String.contains?(text, "mcp__symphony__read_procedure") and Regex.match?(@error_reporting_request, text)
+  end
+
+  defp requests_error_reporting?(_text), do: false
+
   defp return_text(%{path: path, procedures: procedures}, section) do
     text = procedures[section]
 
     cond do
       not present_text?(text) ->
         case File.write(outcome_path(path), "blocked:" <> section) do
-          :ok -> {:error, missing_text(section) <> " Symphony will park this run; stop without writing to Linear."}
-          {:error, _reason} -> {:error, "Unable to record the missing procedure. Stop without using procedure text."}
+          :ok ->
+            {:error, missing_text(section) <> " Stop without writing to Linear; Symphony will recheck the live route."}
+
+          {:error, _reason} ->
+            {:error, "Unable to record the missing procedure. Stop without using procedure text."}
         end
 
       section == @secondary ->
@@ -213,12 +222,26 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
     end
   end
 
-  @spec permit_blocked_write(String.t()) :: :ok | :skip | {:error, atom()}
-  def permit_blocked_write(id) do
+  @spec permit_blocked_write(String.t(), String.t() | nil, map() | nil) :: :ok | :skip | {:error, atom()}
+  def permit_blocked_write(id, missing_procedure, procedures) do
     case live_route(id) do
-      :no_route -> :skip
-      :unverified -> {:error, :procedure_live_issue_unverified}
-      _ -> :ok
+      :no_route ->
+        :skip
+
+      :unverified ->
+        {:error, :procedure_live_issue_unverified}
+
+      _route when is_nil(missing_procedure) ->
+        :ok
+
+      {:selected, ^missing_procedure} ->
+        :ok
+
+      {:selected, section} when missing_procedure == @secondary and section in ["bug", "deliver"] ->
+        if requests_error_reporting?(procedures[section]), do: :ok, else: :skip
+
+      _route ->
+        :skip
     end
   end
 
@@ -248,8 +271,14 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
   @spec missing_text(String.t()) :: String.t()
   def missing_text(section), do: "The selected #{section} procedure is missing or blank in this run's lane version."
 
-  @spec blocked_result(String.t(), {:ok, Result.t()} | {:error, term()} | nil) :: {:ok, Result.t()}
-  def blocked_result(detail, result \\ nil)
+  @spec blocked_result(blocker(), {:ok, Result.t()} | {:error, term()} | nil) :: {:ok, Result.t()}
+  def blocked_result(blocker, result \\ nil)
+
+  def blocked_result({:missing_procedure, section}, result) do
+    {:ok, blocked} = blocked_result(missing_text(section), result)
+    {:ok, %{blocked | missing_procedure: section}}
+  end
+
   def blocked_result(detail, {:ok, %Result{} = result}), do: {:ok, %{result | status: :blocked, blocked_action: detail}}
   def blocked_result(detail, _result), do: {:ok, Result.new(status: :blocked, blocked_action: detail)}
 end
