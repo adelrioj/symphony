@@ -11,11 +11,20 @@ defmodule SymphonyElixir.Lanes do
   alias SymphonyElixir.Lanes.{Lane, LaneVersion}
 
   @type error :: %{path: String.t(), message: String.t()}
-  @type validated :: %{settings: Schema.t(), workflow: Workflow.loaded_workflow(), warnings: [String.t()]}
+  @type validated :: %{
+          settings: Schema.t(),
+          workflow: Workflow.loaded_workflow(),
+          procedures: %{String.t() => String.t()},
+          warnings: [String.t()]
+        }
   @lane_fields ~w(name enabled execution_profile_id workspace_subdir)
   @string_fields ~w(slug name workspace_subdir prompt front_matter)
   @path_pattern ~r/^([a-z_]+(?:\.[a-z_]+)+) (.+)$/s
   @max_sqlite_id 9_223_372_036_854_775_807
+  @shared_procedures [{"qa", "QA"}, {"bug", "Bug"}, {"deliver", "Deliver"}]
+  @bonbons_procedures @shared_procedures ++ [{"error-reporting", "Error Reporting"}]
+  @shared_procedure_keys Enum.map(@shared_procedures, &elem(&1, 0))
+  @bonbons_procedure_keys Enum.map(@bonbons_procedures, &elem(&1, 0))
 
   @spec list() :: [Lane.t()]
   def list, do: Repo.all(from(l in Lane, where: is_nil(l.deleted_at), order_by: l.id))
@@ -48,6 +57,56 @@ defmodule SymphonyElixir.Lanes do
   def current_version(%Lane{id: lane_id, current_version_id: id}),
     do: Repo.one(from(v in LaneVersion, where: v.id == ^id and v.lane_id == ^lane_id))
 
+  @doc "Required procedure section keys and display names for a managed lane."
+  @spec procedure_fields(term()) :: [{String.t(), String.t()}]
+  def procedure_fields("bonbons-delivery"), do: @bonbons_procedures
+  def procedure_fields("chorus-delivery"), do: @shared_procedures
+  def procedure_fields(_slug), do: []
+
+  @doc "Names of the required procedure sections for a managed lane."
+  @spec procedure_keys(term()) :: [String.t()]
+  def procedure_keys("bonbons-delivery"), do: @bonbons_procedure_keys
+  def procedure_keys("chorus-delivery"), do: @shared_procedure_keys
+  def procedure_keys(_slug), do: []
+
+  @doc false
+  @spec validate_procedures(term(), term()) :: :ok | {:error, [error()]}
+  def validate_procedures(slug, procedures) do
+    keys = procedure_keys(slug)
+
+    cond do
+      not valid_procedure_map?(procedures) ->
+        {:error, [%{path: "procedures", message: "must contain named, nonblank procedure sections"}]}
+
+      keys != [] and (map_size(procedures) != length(keys) or not Enum.all?(keys, &Map.has_key?(procedures, &1))) ->
+        {:error, [%{path: "procedures", message: "must contain exactly these sections: #{Enum.join(keys, ", ")}"}]}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp valid_procedure_map?(procedures) when is_map(procedures) and not is_struct(procedures) do
+    Enum.all?(procedures, fn {key, text} ->
+      key in @bonbons_procedure_keys and is_binary(text) and String.valid?(text) and String.trim(text) != ""
+    end)
+  end
+
+  defp valid_procedure_map?(_procedures), do: false
+
+  defp validate_managed_procedures(slug, procedures) do
+    if procedure_fields(slug) == [], do: :ok, else: validate_procedures(slug, procedures)
+  end
+
+  defp validate_managed_prompt(slug, prompt) do
+    cond do
+      procedure_fields(slug) == [] -> :ok
+      String.trim(prompt) == "" -> {:error, [%{path: "prompt", message: "Common prompt must not be blank"}]}
+      match?({:ok, _}, Solid.parse(prompt)) -> :ok
+      true -> {:error, [%{path: "prompt", message: "Common prompt has invalid Liquid syntax"}]}
+    end
+  end
+
   @doc false
   @spec resolve_lane(Lane.t()) :: {:ok, validated()} | {:error, [error()]}
   def resolve_lane(%Lane{} = lane), do: resolve_lane(lane, nil)
@@ -59,6 +118,7 @@ defmodule SymphonyElixir.Lanes do
          :ok <- profile_repair(profile),
          {:ok, version} <- fetch_current_version(lane),
          {:ok, config} <- lane_config(version.front_matter),
+         :ok <- reject_embedded_procedures(lane.slug, config),
          {:ok, value} <-
            Configuration.resolve(
              profile_attrs(profile),
@@ -68,7 +128,7 @@ defmodule SymphonyElixir.Lanes do
              cached_root,
              validation
            ) do
-      {:ok, value}
+      {:ok, Map.put(value, :procedures, version.procedures)}
     else
       {:error, errors} when is_list(errors) -> {:error, errors}
       {:error, reason} -> {:error, errors_for(reason)}
@@ -238,24 +298,29 @@ defmodule SymphonyElixir.Lanes do
       nil ->
         {:error, :no_version}
 
-      _version ->
-        export_current_lane(lane)
+      version ->
+        export_current_lane(lane, version)
     end
   end
 
-  defp export_current_lane(lane) do
-    case effective_lane_workflow(lane) do
+  defp export_current_lane(lane, version) do
+    case effective_lane_workflow(lane, version.id) do
       {:ok, %{workflow: %{config: config, prompt: prompt}}} ->
-        {:ok, Workflow.render(Workflow.encode_config(Configuration.redact_secrets(config)), prompt)}
+        config = Configuration.redact_secrets(config)
+
+        artifact =
+          if procedure_fields(lane.slug) == [], do: config, else: Map.put(config, "procedures", version.procedures)
+
+        {:ok, Workflow.render(Workflow.encode_config(artifact), prompt)}
 
       _ ->
         {:error, :no_version}
     end
   end
 
-  defp effective_lane_workflow(lane) do
+  defp effective_lane_workflow(lane, version_id) do
     case LaneStore.lookup(lane.id) do
-      {:ok, %{workflow: %{}}} = result -> result
+      {:ok, %{version_id: ^version_id, workflow: %{}}} = result -> result
       _ -> resolve_lane(lane, nil, if(lane.enabled, do: :runtime, else: :structure))
     end
   end
@@ -339,9 +404,11 @@ defmodule SymphonyElixir.Lanes do
     prompt = Map.get(attrs, "prompt", "")
     slug = attrs["slug"]
     subdir = Map.get(attrs, "workspace_subdir", slug)
+    procedures = Map.get(attrs, "procedures", %{})
     attrs = Map.put(attrs, "enabled", false)
 
     with :ok <- reject_legacy_fields(attrs),
+         :ok <- validate_version_content(slug, config, prompt, procedures),
          {:ok, profile} <- fetch_profile(attrs["execution_profile_id"]),
          {:ok, validated} <- validate_candidate(profile, config, subdir, prompt, nil, check, false),
          {:ok, lane} <-
@@ -355,7 +422,7 @@ defmodule SymphonyElixir.Lanes do
                })
              )
            ),
-         {:ok, lane} <- add_version(lane, Workflow.encode_config(config), prompt, attrs["note"]) do
+         {:ok, lane} <- add_version(lane, Workflow.encode_config(config), prompt, procedures, attrs["note"]) do
       _ = validated
       {:ok, lane}
     end
@@ -374,12 +441,14 @@ defmodule SymphonyElixir.Lanes do
 
     config = Map.get(attrs, "config", previous_config(current))
     prompt = Map.get(attrs, "prompt", (current && current.prompt) || "")
+    procedures = Map.get(attrs, "procedures", (current && current.procedures) || %{})
     profile_id = Map.get(attrs, "execution_profile_id", lane.execution_profile_id)
     subdir = Map.get(attrs, "workspace_subdir", lane.workspace_subdir)
-    new_version? = Map.has_key?(attrs, "config") or Map.has_key?(attrs, "prompt")
+    new_version? = Enum.any?(~w(config prompt procedures), &Map.has_key?(attrs, &1))
     validation = update_validation(current, new_version?, attrs, lane.enabled)
 
     with {:ok, profile} <- fetch_profile(profile_id),
+         :ok <- validate_new_version(new_version?, lane.slug, config, prompt, procedures),
          :ok <-
            validate_update(
              validation,
@@ -393,7 +462,7 @@ defmodule SymphonyElixir.Lanes do
            ),
          {:ok, updated} <-
            Repo.update(Lane.changeset(lane, Map.take(Map.put(attrs, "execution_profile_id", profile_id), @lane_fields))),
-         {:ok, updated} <- maybe_add_version(updated, config, prompt, attrs["note"], new_version?) do
+         {:ok, updated} <- maybe_add_version(updated, config, prompt, procedures, attrs["note"], new_version?) do
       repair_profile(updated, profile)
     end
   end
@@ -419,10 +488,30 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  defp maybe_add_version(lane, config, prompt, note, true),
-    do: add_version(lane, Workflow.encode_config(config), prompt, note)
+  defp maybe_add_version(lane, config, prompt, procedures, note, true),
+    do: add_version(lane, Workflow.encode_config(config), prompt, procedures, note)
 
-  defp maybe_add_version(lane, _config, _prompt, _note, false), do: {:ok, lane}
+  defp maybe_add_version(lane, _config, _prompt, _procedures, _note, false), do: {:ok, lane}
+
+  defp validate_new_version(false, _slug, _config, _prompt, _procedures), do: :ok
+
+  defp validate_new_version(true, slug, config, prompt, procedures),
+    do: validate_version_content(slug, config, prompt, procedures)
+
+  defp validate_version_content(slug, config, prompt, procedures) do
+    with :ok <- reject_embedded_procedures(slug, config),
+         :ok <- validate_procedures(slug, procedures) do
+      validate_managed_prompt(slug, prompt)
+    end
+  end
+
+  defp reject_embedded_procedures(slug, config) do
+    if procedure_fields(slug) != [] and Map.has_key?(config, "procedures") do
+      {:error, [%{path: "config.procedures", message: "must be supplied as top-level procedures"}]}
+    else
+      :ok
+    end
+  end
 
   defp repair_profile(lane, %Profile{repair_error: nil}), do: {:ok, lane}
 
@@ -436,7 +525,10 @@ defmodule SymphonyElixir.Lanes do
   defp activate_lane_version(id, version_id, check) do
     with {:ok, lane} <- fetch_lane(id),
          {:ok, version} <- fetch_version(id, version_id),
+         :ok <- validate_managed_procedures(lane.slug, version.procedures),
+         :ok <- validate_managed_prompt(lane.slug, version.prompt),
          {:ok, config} <- current_config(version.front_matter),
+         :ok <- reject_embedded_procedures(lane.slug, config),
          {:ok, profile} <- fetch_profile(lane.execution_profile_id),
          {:ok, _} <-
            validate_candidate(profile, config, lane.workspace_subdir, version.prompt, lane.id, check, lane.enabled) do
@@ -494,16 +586,35 @@ defmodule SymphonyElixir.Lanes do
 
     with {:ok, workflow} <- Workflow.parse_parts(front_matter, prompt),
          {profile_attrs, config} = Configuration.split(workflow.config),
+         attrs = import_version_attrs(slug, config, prompt),
          {:ok, %{lane: lane, profile_name: profile_name}} <-
-           import_mutation(slug, profile_attrs, config, prompt, opts) do
-      {:ok, lane, ["created execution profile #{profile_name}" | warnings(front_matter)]}
+           import_mutation(slug, profile_attrs, attrs, opts) do
+      {:ok, lane, ["created execution profile #{profile_name}" | config_warnings(config)]}
     else
-      {:error, errors} when is_list(errors) -> {:error, errors_for(errors)}
-      {:error, reason} -> {:error, errors_for(reason)}
+      {:error, errors} when is_list(errors) ->
+        {:error, errors_for(errors)}
+
+      {:error, {:workflow_parse_error, _} = reason} ->
+        # YAML parser diagnostics can quote private procedure or credential text.
+        if procedure_fields(slug) == [],
+          do: {:error, errors_for(reason)},
+          else: {:error, [%{path: "front_matter", message: "invalid YAML in managed workflow"}]}
+
+      {:error, reason} ->
+        {:error, errors_for(reason)}
     end
   end
 
-  defp import_mutation(slug, profile_attrs, config, prompt, opts) do
+  defp import_version_attrs(slug, config, prompt) do
+    if procedure_fields(slug) == [] do
+      %{"config" => config, "prompt" => prompt}
+    else
+      {procedures, config} = Map.pop(config, "procedures", %{})
+      %{"config" => config, "prompt" => prompt, "procedures" => procedures}
+    end
+  end
+
+  defp import_mutation(slug, profile_attrs, attrs, opts) do
     profile_name = imported_profile_name(slug)
 
     mutation = fn check ->
@@ -515,7 +626,7 @@ defmodule SymphonyElixir.Lanes do
                  "worker" => profile_attrs["worker"] || %{}
                })
              ),
-           {:ok, lane} <- import_lane(slug, config, prompt, profile.id, opts, check) do
+           {:ok, lane} <- import_lane(slug, attrs, profile.id, opts, check) do
         # A single-lane publication lets a disabled import without credentials publish as invalid.
         {:ok, lane}
       else
@@ -552,32 +663,22 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  defp import_lane(slug, config, prompt, profile_id, opts, check) do
+  defp import_lane(slug, attrs, profile_id, opts, check) do
+    attrs =
+      Map.merge(attrs, %{
+        "execution_profile_id" => profile_id,
+        "workspace_subdir" => ".",
+        "note" => Keyword.get(opts, :note, "import")
+      })
+
     case get_by_slug(slug) do
       nil ->
         create_lane(
-          %{
-            "slug" => slug,
-            "name" => Keyword.get(opts, :name, slug),
-            "enabled" => false,
-            "execution_profile_id" => profile_id,
-            "workspace_subdir" => ".",
-            "config" => config,
-            "prompt" => prompt,
-            "note" => Keyword.get(opts, :note, "import")
-          },
+          Map.merge(attrs, %{"slug" => slug, "name" => Keyword.get(opts, :name, slug), "enabled" => false}),
           check
         )
 
       lane ->
-        attrs = %{
-          "execution_profile_id" => profile_id,
-          "workspace_subdir" => ".",
-          "config" => config,
-          "prompt" => prompt,
-          "note" => Keyword.get(opts, :note, "import")
-        }
-
         attrs = if Keyword.has_key?(opts, :name), do: Map.put(attrs, "name", opts[:name]), else: attrs
         update_lane(lane.id, attrs, check)
     end
@@ -802,14 +903,16 @@ defmodule SymphonyElixir.Lanes do
     if errors == [], do: :ok, else: {:error, errors}
   end
 
-  defp add_version(lane, front_matter, prompt, note) do
+  defp add_version(lane, front_matter, prompt, procedures, note) do
     with {:ok, version} <-
            Repo.insert(
              LaneVersion.changeset(%LaneVersion{lane_id: lane.id}, %{
                front_matter: front_matter,
                prompt: prompt,
+               procedures: procedures,
                note: note
-             })
+             }),
+             log: false
            ) do
       lane |> Ecto.Changeset.change(current_version_id: version.id) |> Repo.update()
     end

@@ -9,7 +9,7 @@ defmodule SymphonyElixirWeb.LanesApiController do
   alias SymphonyElixir.Lanes.Lane
   alias SymphonyElixirWeb.ConfigurationFields
 
-  @lane_params ~w(slug name enabled execution_profile_id workspace_subdir config prompt note front_matter executor)
+  @lane_params ~w(slug name enabled execution_profile_id workspace_subdir config prompt procedures note front_matter executor)
 
   @spec index(Conn.t(), map()) :: Conn.t()
   def index(conn, _params), do: json(conn, %{lanes: Enum.map(Lanes.list(), &lane_json/1)})
@@ -100,6 +100,8 @@ defmodule SymphonyElixirWeb.LanesApiController do
   defp lane_response(conn, {:error, errors}), do: errors_response(conn, errors)
 
   defp create_lane(conn, attrs) do
+    attrs = managed_attrs(attrs["slug"], attrs)
+
     with {:ok, attrs} <- restore_config(attrs, %{}),
          {:ok, lane} <- Lanes.create(attrs) do
       conn |> put_status(201) |> json(lane_json(lane))
@@ -109,19 +111,24 @@ defmodule SymphonyElixirWeb.LanesApiController do
   end
 
   defp update_lane(conn, lane, attrs) do
-    case restore_config(attrs, lane_config(lane)) do
-      {:ok, attrs} -> lane_response(conn, Lanes.update(lane, attrs))
+    case restore_config(attrs, lane |> Lanes.current_version() |> lane_config()) do
+      {:ok, attrs} -> lane_response(conn, Lanes.update(lane, managed_attrs(lane.slug, attrs)))
       {:error, errors} -> errors_response(conn, errors)
     end
+  end
+
+  defp managed_attrs(slug, attrs) do
+    if Lanes.procedure_fields(slug) == [], do: Map.delete(attrs, "procedures"), else: attrs
   end
 
   defp errors_response(conn, errors), do: conn |> put_status(422) |> json(%{errors: errors})
 
   defp lane_json(%Lane{} = lane) do
     {:ok, entry} = LaneStore.lookup(lane.id)
-    config = lane_config(lane)
+    version = Lanes.current_version(lane)
+    config = lane_config(version)
 
-    %{
+    response = %{
       id: lane.id,
       slug: lane.slug,
       name: lane.name,
@@ -139,22 +146,22 @@ defmodule SymphonyElixirWeb.LanesApiController do
       last_crash: entry.runtime.last_crash && entry.runtime.last_crash.reason,
       warnings: entry.warnings
     }
+
+    if Lanes.procedure_fields(lane.slug) == [],
+      do: response,
+      else: Map.put(response, :procedures, (version && version.procedures) || %{})
   end
 
-  defp lane_config(%Lane{} = lane) do
-    case Lanes.current_version(lane) do
-      nil ->
+  defp lane_config(nil), do: %{}
+
+  defp lane_config(version) do
+    case Workflow.parse_parts(version.front_matter, "") do
+      {:ok, %{config: config}} ->
+        {_profile, config} = Configuration.split(config)
+        config
+
+      _ ->
         %{}
-
-      version ->
-        case Workflow.parse_parts(version.front_matter, "") do
-          {:ok, %{config: config}} ->
-            {_profile, config} = Configuration.split(config)
-            config
-
-          _ ->
-            %{}
-        end
     end
   end
 

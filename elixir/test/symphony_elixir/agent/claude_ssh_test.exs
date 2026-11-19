@@ -3,6 +3,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
 
   alias SymphonyElixir.Agent.Claude
   alias SymphonyElixir.Agent.Result
+  alias SymphonyElixir.{ExecutionContext, Repo}
 
   test "remote_command/2 never contains the prompt text" do
     prompt = ~s|"; rm -rf / ; echo $(whoami) `id`|
@@ -137,6 +138,273 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
                          usage: %{input_tokens: 2, output_tokens: 3, total_tokens: 5}
                        }}
     end
+  end
+
+  for {transport, slug, route, live_state, labels} <- [
+        {:local, "bonbons-delivery", "bug", "In Progress", ["groomed", "Bug"]},
+        {:ssh, "chorus-delivery", "qa", "In Review", ["groomed"]}
+      ] do
+    @tag :tmp_dir
+    test "#{transport} Claude uses just Common and its selected pinned procedure on every turn", %{tmp_dir: root} do
+      previous_path = System.get_env("PATH")
+      on_exit(fn -> restore_env("PATH", previous_path) end)
+      trace = Path.join(root, "ssh.trace")
+      write_fake_ssh!(root, trace)
+
+      route = unquote(route)
+
+      issue = %Issue{
+        id: "bound-test-issue",
+        identifier: "TEST-1",
+        state: unquote(live_state),
+        dispatchable: true,
+        labels: unquote(labels)
+      }
+
+      procedures = %{"qa" => "PINNED_QA", "bug" => "PINNED_BUG", "deliver" => "PINNED_DELIVER"}
+
+      procedures =
+        if unquote(slug) == "bonbons-delivery",
+          do: Map.put(procedures, "error-reporting", "PINNED_ERROR_REPORTING"),
+          else: procedures
+
+      run_log = Path.join(root, "model-boundary.jsonl")
+      claude = write_procedure_claude!(root, run_log, route)
+      mcp = write_procedure_mcp!(root, issue)
+
+      {:ok, lane} =
+        create_lane_from_front_matter(%{
+          slug: unquote(slug),
+          procedures: procedures,
+          prompt: "PINNED_COMMON",
+          front_matter: """
+          tracker:
+            kind: memory
+            active_states: ["Todo", "In Progress", "In Review"]
+          workspace:
+            root: #{Jason.encode!(Path.join(root, "workspaces"))}
+          codex: {turn_timeout_ms: 15000, stall_timeout_ms: 15000}
+          claude:
+            command: #{Jason.encode!(claude)}
+            linear_mcp_command: #{Jason.encode!(mcp)}
+            allowed_tools: ["Read"]
+          """
+        })
+
+      {:ok, pinned} = LaneStore.lookup(lane.id)
+      LaneContext.install(pinned)
+      assert pinned.version_id == lane.current_version_id
+      assert pinned.procedures == procedures
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      context =
+        case unquote(transport) do
+          :local ->
+            ExecutionContext.local(pinned.settings.workspace.root)
+
+          :ssh ->
+            target = %SymphonyElixir.SSH.Target{
+              executable: Path.join([root, "bin", "ssh"]),
+              prefix: [],
+              label: "fixture",
+              env: [{"BASH_ENV", Path.join(root, "fixture-bash-env")}]
+            }
+
+            ExecutionContext.ssh(pinned.settings.workspace.root, target)
+        end
+
+      current_procedures = Map.replace!(procedures, route, "CURRENT_REPLACEMENT")
+
+      fetch_issue = fn [id] ->
+        assert id == issue.id
+
+        if LaneStore.lookup(lane.id) == {:ok, pinned} do
+          assert {:ok, updated} = Lanes.update(lane, %{prompt: "CURRENT_COMMON", procedures: current_procedures})
+          assert updated.current_version_id != pinned.version_id
+        end
+
+        {:ok, [issue]}
+      end
+
+      opts = [execution_context: context, backend_module: Claude]
+      assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 2, issue_state_fetcher: fetch_issue])
+
+      [first, continuation] = read_boundary(run_log)
+      refute first["prompt"] =~ "Continuation guidance"
+      assert continuation["prompt"] =~ "Continuation guidance"
+
+      for capture <- [first, continuation] do
+        assert capture["prompt"] =~ "PINNED_COMMON"
+        refute capture["prompt"] =~ "CURRENT_COMMON"
+        assert capture["selected"] == Map.fetch!(procedures, route)
+        assert capture["error_reporting_denied"]
+        assert capture["tool_allowed"]
+        assert capture["private_outside_workspace"]
+        refute File.exists?(capture["procedure_path"])
+        refute File.exists?(capture["procedure_path"] <> ".outcome")
+
+        for marker <- Map.values(procedures) ++ ["CURRENT_REPLACEMENT"] do
+          refute capture["prompt"] =~ marker
+          refute capture["mcp_list"] =~ marker
+        end
+      end
+
+      if unquote(transport) == :ssh do
+        ssh_args = File.read!(trace)
+        for marker <- ["PINNED_COMMON" | Map.values(procedures)], do: refute(ssh_args =~ marker)
+      end
+
+      mode = Path.join(root, "fixture-mode")
+      File.write!(mode, "exit_81")
+
+      assert_raise RuntimeError, ~r/nonzero exit after successful result/, fn ->
+        AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+      end
+
+      File.write!(mode, "unread")
+
+      assert_raise RuntimeError, ~r/procedure_not_read/, fn ->
+        AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+      end
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["human"]}])
+      assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+      refute_received {:codex_worker_update, _, _, %{event: :attempt_blocked}}
+      File.rm!(mode)
+
+      # A different recorded run installs the newly published snapshot rather than inheriting the
+      # old run's procedures. Simulate persisted corruption and a live route change after preflight:
+      # the MCP still binds the original issue ID and the worker parks despite a successful CLI exit.
+      updated = Lanes.get!(lane.id)
+      version = Lanes.current_version(updated)
+      Repo.update!(Ecto.Changeset.change(version, procedures: Map.delete(current_procedures, route)))
+      assert :ok = LaneStore.refresh(lane.id)
+      {:ok, new_run} = LaneStore.lookup(lane.id)
+      LaneContext.install(new_run)
+      refute new_run.version_id == pinned.version_id
+
+      recheck =
+        if route == "qa",
+          do: %{issue | state: "In Progress"},
+          else: %{issue | state: "In Review"}
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [recheck])
+      assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+      assert_received {:codex_worker_update, _, _, %{event: :attempt_blocked, payload: detail}}
+      assert detail =~ route
+      assert detail =~ "missing or blank"
+      assert {:create_comment, issue.id} in Tracker.Memory.calls()
+      captures = read_boundary(run_log)
+      assert List.last(captures)["selected_error"]
+      assert List.last(captures)["prompt"] =~ "CURRENT_COMMON"
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+      assert_received {:codex_worker_update, _, _, %{event: :attempt_blocked, payload: detail}}
+      assert detail =~ route
+      assert read_boundary(run_log) == captures
+
+      version = Lanes.current_version(updated)
+      Repo.update!(Ecto.Changeset.change(version, prompt: "LEGACY_INLINE", procedures: %{}))
+      assert :ok = LaneStore.refresh(lane.id)
+      {:ok, legacy} = LaneStore.lookup(lane.id)
+      LaneContext.install(legacy)
+      assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+      assert_received {:codex_worker_update, _, _, %{event: :attempt_blocked, payload: detail}}
+      assert detail =~ "bundle is missing or blank"
+      assert read_boundary(run_log) == captures
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["human"]}])
+      assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+      refute_received {:codex_worker_update, _, _, %{event: :attempt_blocked}}
+      assert read_boundary(run_log) == captures
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      Repo.update!(Ecto.Changeset.change(version, prompt: " ", procedures: current_procedures))
+      assert :ok = LaneStore.refresh(lane.id)
+      {:ok, blank_common} = LaneStore.lookup(lane.id)
+      LaneContext.install(blank_common)
+      assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+      assert_received {:codex_worker_update, _, _, %{event: :attempt_blocked, payload: detail}}
+      assert detail =~ "Common prompt is missing or blank"
+      assert read_boundary(run_log) == captures
+    end
+  end
+
+  defp read_boundary(path) do
+    path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+  end
+
+  defp write_procedure_mcp!(root, issue) do
+    path = Path.join(root, "fixture-mcp")
+    alias SymphonyElixir.Agent.CliHarness
+
+    code = """
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [#{inspect(issue)}])
+    SymphonyElixir.CLI.main(System.argv())
+    """
+
+    beam_paths = Enum.map_join(:code.get_path(), " ", &("-pa " <> CliHarness.shell_escape(Path.expand(&1))))
+    executable = CliHarness.shell_escape(System.find_executable("elixir"))
+
+    File.write!(
+      path,
+      "#!/bin/sh\nexec #{executable} --erl '+S 2:2' #{beam_paths} -e #{CliHarness.shell_escape(code)} -- \"$@\"\n"
+    )
+
+    File.chmod!(path, 0o700)
+    path
+  end
+
+  defp write_procedure_claude!(root, run_log, section) do
+    path = Path.join(root, "fixture-claude")
+
+    File.write!(path, """
+    #!/usr/bin/env python3
+    import json, os, stat, subprocess, sys
+    from pathlib import Path
+
+    mode_file = Path(#{Jason.encode!(Path.join(root, "fixture-mode"))})
+    mode = mode_file.read_text() if mode_file.exists() else ""
+
+    prompt = sys.stdin.read()
+    index = sys.argv.index("--mcp-config") + 1
+    with open(sys.argv[index]) as stream:
+        config = json.load(stream)["mcpServers"]["symphony"]
+    environment = config["env"]
+    procedure_path = environment["SYMPHONY_CLAUDE_PROCEDURE_CONTEXT"]
+    requests = [
+        {"id": 1, "method": "tools/list"},
+        {"id": 2, "method": "tools/call", "params": {"name": "read_procedure", "arguments": {"section": "error-reporting"}}},
+        {"id": 3, "method": "tools/call", "params": {"name": "read_procedure", "arguments": {"section": #{Jason.encode!(section)}}}},
+    ]
+    if mode == "unread":
+        requests.pop()
+    result = subprocess.run(
+        [config["command"], *config["args"]], check=True, text=True, capture_output=True,
+        env=dict(os.environ, **environment), input="".join(json.dumps(m) + "\\n" for m in requests),
+    )
+    responses = [json.loads(line)["result"] for line in result.stdout.splitlines()]
+    listed, rejected = responses[:2]
+    selected = responses[2] if len(responses) > 2 else {"content": [{"text": ""}], "isError": True}
+    allowed = sys.argv[sys.argv.index("--allowedTools") + 1].split(",")
+    with open(#{Jason.encode!(run_log)}, "a") as log:
+        log.write(json.dumps({
+            "prompt": prompt, "mcp_list": json.dumps(listed),
+            "selected": selected["content"][0]["text"], "selected_error": selected["isError"],
+            "error_reporting_denied": rejected["isError"], "procedure_path": procedure_path,
+            "tool_allowed": "mcp__symphony__read_procedure" in allowed,
+            "private_outside_workspace": not os.path.realpath(procedure_path).startswith(os.getcwd() + "/")
+                and stat.S_IMODE(os.stat(procedure_path).st_mode) == 0o600,
+        }) + "\\n")
+    print('{"type":"system","subtype":"init","session_id":"managed-fixture"}')
+    print('{"type":"result","subtype":"success","is_error":false,"result":"ok"}')
+    if mode == "exit_81":
+        sys.exit(81)
+    """)
+
+    File.chmod!(path, 0o700)
+    path
   end
 
   test "managed MCP snapshot works without controller kubeconfig and still denies approval" do

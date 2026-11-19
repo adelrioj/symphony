@@ -5,7 +5,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Agent.Result
-  alias SymphonyElixir.{BlockedIssue, Config, ExecutionContext, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{BlockedIssue, Config, ExecutionContext, LaneContext, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.MCP.ProcedureSession
   alias SymphonyElixir.Tracker.Issue
 
   @doc false
@@ -129,10 +130,32 @@ defmodule SymphonyElixir.AgentRunner do
     :erlang.raise(kind, reason, stacktrace)
   end
 
-  defp handle_run_outcome({:blocked, result}, issue), do: post_blocked_state(issue, result)
+  defp handle_run_outcome({:blocked, result, recipient, attempt_id}, issue) do
+    case permit_blocked_write(issue) do
+      :ok ->
+        send_blocked_update(issue, recipient, attempt_id, result)
+        post_blocked_state(issue, result)
+
+      :skip ->
+        :ok
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
   defp handle_run_outcome({:deferred, _reason}, _issue), do: :ok
   defp handle_run_outcome({:skipped, _reason}, _issue), do: :ok
   defp handle_run_outcome(other, _issue), do: other
+
+  defp permit_blocked_write(%Issue{id: id}) do
+    with {:ok, %{slug: slug}} <- LaneContext.capture(),
+         true <- ProcedureSession.managed_lane?(slug) do
+      ProcedureSession.permit_blocked_write(id)
+    else
+      _ -> :ok
+    end
+  end
 
   # The before_run "wait" contract (hooks.before_run_wait_exit_code). The hook still runs in the
   # worker, exactly where it always ran; only its one reserved exit status changes meaning: the
@@ -268,9 +291,10 @@ defmodule SymphonyElixir.AgentRunner do
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
     backend = Keyword.get(opts, :backend_module, SymphonyElixir.Agent.Codex)
 
-    session_opts = Keyword.put(opts, :execution_context, worker_host)
+    session_opts = Keyword.merge(opts, execution_context: worker_host, issue_id: issue.id)
 
-    with {:ok, session} <- backend.start_session(workspace, session_opts) do
+    with :ok <- managed_prompt_ready(backend),
+         {:ok, session} <- backend.start_session(workspace, session_opts) do
       turn_context = %{
         backend: backend,
         session: session,
@@ -287,6 +311,35 @@ defmodule SymphonyElixir.AgentRunner do
       after
         backend.stop_session(session)
       end
+    else
+      {:blocked, detail} ->
+        {:ok, result} = ProcedureSession.blocked_result(detail)
+        {:blocked, result, codex_update_recipient, opts[:attempt_id]}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp managed_prompt_ready(backend) do
+    with {:ok, %{slug: slug, procedures: procedures, version_id: version_id, workflow: %{prompt: common}}} <-
+           LaneContext.capture(),
+         true <- ProcedureSession.managed_lane?(slug) do
+      cond do
+        is_nil(version_id) or not is_map(procedures) or map_size(procedures) == 0 ->
+          {:blocked, "The managed lane's procedure bundle is missing or blank."}
+
+        String.trim(common) == "" ->
+          {:blocked, "The managed lane's Common prompt is missing or blank."}
+
+        backend != SymphonyElixir.Agent.Claude ->
+          {:blocked, "The configured agent backend does not support managed lane procedures."}
+
+        true ->
+          :ok
+      end
+    else
+      _ -> :ok
     end
   end
 
@@ -297,7 +350,7 @@ defmodule SymphonyElixir.AgentRunner do
 
     with {:ok, %Result{} = result} <- context.backend.run_turn(context.session, prompt, issue, turn_opts) do
       Logger.info(
-        "Completed agent run for #{issue_context(issue)} session_id=#{result.session_id} workspace=#{context.workspace} turn=#{turn_number}/#{max_turns}"
+        "Agent turn ended for #{issue_context(issue)} session_id=#{result.session_id} workspace=#{context.workspace} turn=#{turn_number}/#{max_turns} status=#{result.status}"
       )
 
       handle_turn_result(context, result, turn_number)
@@ -333,6 +386,10 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp handle_turn_result(context, %Result{status: :blocked} = result, _turn_number) do
+    {:blocked, result, context.recipient, context.opts[:attempt_id]}
+  end
+
+  defp send_blocked_update(issue, recipient, attempt_id, result) do
     update = %{
       event: :attempt_blocked,
       timestamp: DateTime.utc_now(),
@@ -340,9 +397,7 @@ defmodule SymphonyElixir.AgentRunner do
       payload: blocked_detail(result)
     }
 
-    send_codex_update(context.recipient, context.issue, update, context.opts[:attempt_id])
-
-    {:blocked, result}
+    send_codex_update(recipient, issue, update, attempt_id)
   end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns, _backend), do: PromptBuilder.build_prompt(issue, opts)

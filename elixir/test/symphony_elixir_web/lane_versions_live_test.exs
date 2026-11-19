@@ -125,6 +125,47 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
     refute render(view) =~ "literal-secret"
   end
 
+  for {slug, additional} <- [
+        {"chorus-delivery", %{}},
+        {"bonbons-delivery", %{"error-reporting" => "Report an error"}}
+      ] do
+    test "#{slug} history displays and restores the complete read-only version", %{conn: conn} do
+      slug = unquote(slug)
+
+      sections =
+        Map.merge(
+          %{"qa" => "Review the result", "bug" => "Inspect the defect", "deliver" => "Build the fix"},
+          unquote(Macro.escape(additional))
+        )
+
+      {:ok, first} =
+        Lanes.create(%{
+          slug: slug,
+          execution_profile_id: new_profile!().id,
+          config: %{"tracker" => %{"kind" => "memory", "api_key" => "literal-managed-tracker-key"}},
+          prompt: "Original Common",
+          procedures: sections
+        })
+
+      replacement = Map.new(sections, fn {key, text} -> {key, "New " <> text} end)
+      assert {:ok, saved} = Lanes.update(first, %{prompt: "New Common", procedures: replacement})
+      {:ok, view, html} = live(conn, "/lanes/#{slug}/versions")
+      refute html =~ "literal-managed-tracker-key"
+
+      for {lane, prompt, procedures} <- [{first, "Original Common", sections}, {saved, "New Common", replacement}] do
+        row = "#version-#{lane.current_version_id} details"
+        assert has_element?(view, row, prompt)
+        for {_key, text} <- procedures, do: assert(has_element?(view, "#{row} section pre", text))
+        refute has_element?(view, "#{row} textarea")
+      end
+
+      view |> element("#version-#{first.current_version_id} button") |> render_click()
+      assert has_element?(view, "#version-#{first.current_version_id} .state-badge", "current")
+      assert %{prompt: "Original Common", procedures: ^sections} = first.id |> Lanes.get!() |> Lanes.current_version()
+      assert length(Lanes.versions(first)) == 2
+    end
+  end
+
   @tag :remediation
   test "invalid historical source stays stored without disclosing multiline credentials", %{conn: conn} do
     {:ok, lane} =

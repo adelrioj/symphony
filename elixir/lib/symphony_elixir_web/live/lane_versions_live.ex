@@ -103,7 +103,16 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
                   <% else %>
                     <button type="button" class="subtle-button" phx-click="activate" phx-value-id={row.version.id}>Make current</button>
                   <% end %>
-                  <details class="version-inspection"><summary>Inspect</summary><p :if={row.invalid?} class="field-error">Invalid historical front matter is retained in storage but hidden because its credentials cannot be safely redacted. Repair by saving a replacement version.</p><pre class="mono">{row.content}</pre></details>
+                  <details class="version-inspection">
+                    <summary>Inspect</summary>
+                    <p :if={row.invalid?} class="field-error">Invalid historical front matter is retained in storage but hidden because its credentials cannot be safely redacted. Repair by saving a replacement version.</p>
+                    <h3 :if={row.procedures != []}>Common</h3>
+                    <pre class="mono">{row.content}</pre>
+                    <section :for={{label, text} <- row.procedures}>
+                      <h3>{label}</h3>
+                      <pre class="mono">{text}</pre>
+                    </section>
+                  </details>
                 </td>
               </tr>
             </tbody>
@@ -114,21 +123,33 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
     """
   end
 
-  defp version_rows(lane), do: lane |> Lanes.versions() |> Enum.map(&version_row/1)
+  defp version_rows(lane) do
+    fields = Lanes.procedure_fields(lane.slug)
+    lane |> Lanes.versions() |> Enum.map(&version_row(&1, fields))
+  end
 
-  defp version_row(version) do
+  defp version_row(version, fields) do
+    procedures = procedure_rows(version.procedures, fields)
+
     case Workflow.parse_parts(version.front_matter, version.prompt) do
       {:ok, workflow} ->
         {_profile, config} = Configuration.split(workflow.config)
 
         %{
           version: version,
+          procedures: procedures,
           invalid?: false,
           content: Workflow.render(Workflow.encode_config(Configuration.redact_secrets(config)), workflow.prompt)
         }
 
       {:error, _reason} ->
-        %{version: version, invalid?: true, content: version.prompt}
+        %{version: version, procedures: procedures, invalid?: true, content: version.prompt}
     end
   end
+
+  defp procedure_rows(procedures, fields) when is_map(procedures) do
+    for {key, label} <- fields, text = Map.get(procedures, key, ""), is_binary(text), do: {label, text}
+  end
+
+  defp procedure_rows(_procedures, _fields), do: []
 end

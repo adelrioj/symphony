@@ -291,7 +291,11 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
         <fieldset class="form-section" id="workflow">
           <legend>Workflow</legend>
-          <label for="lane-prompt">Prompt</label><textarea id="lane-prompt" name="lane[prompt]" rows="8" phx-debounce="300">{@params["prompt"]}</textarea>
+          <label for="lane-prompt">{if Lanes.procedure_fields(@params["slug"]) == [], do: "Prompt", else: "Common"}</label><textarea id="lane-prompt" name="lane[prompt]" rows="8" phx-debounce="300">{@params["prompt"]}</textarea>
+          <div :for={{key, label} <- Lanes.procedure_fields(@params["slug"])}>
+            <label for={"lane-procedure-#{key}"}>{label}</label>
+            <textarea id={"lane-procedure-#{key}"} name={"lane[procedure_#{key}]"} rows="8">{@params["procedure_#{key}"]}</textarea>
+          </div>
           <label for="agent-backend">Agent backend</label><select id="agent-backend" name="lane[agent_backend]"><option value="codex" selected={@params["agent_backend"] == "codex"}>Codex</option><option value="claude" selected={@params["agent_backend"] == "claude"}>Claude</option><option value="omp" selected={@params["agent_backend"] == "omp"}>omp</option><option value="pi" selected={@params["agent_backend"] == "pi"}>pi</option></select>
           <label for="agent-backend-by-state">Backend overrides by state (JSON)</label><textarea id="agent-backend-by-state" name="lane[agent_backend_by_state_json]" rows="3" class="mono">{@params["agent_backend_by_state_json"]}</textarea>
           <label for="agent-blocked-state">Blocked state</label><input id="agent-blocked-state" type="text" name="lane[agent_blocked_state]" value={@params["agent_blocked_state"]} />
@@ -448,10 +452,12 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
       |> Ecto.Changeset.traverse_errors(&changeset_message/1)
       |> Enum.flat_map(&changeset_field_errors/1)
 
+    errors = lane_errors ++ procedure_errors(params)
+
     errors =
       case config_result do
-        {:ok, config} -> lane_errors ++ validate_against_profile(lane, params, config)
-        {:error, errors} -> lane_errors ++ errors
+        {:ok, config} -> errors ++ validate_against_profile(lane, params, config)
+        {:error, config_errors} -> errors ++ config_errors
       end
 
     warnings =
@@ -487,6 +493,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     )
   end
 
+  defp errors_for_resolution(:ok), do: []
   defp errors_for_resolution({:ok, _}), do: []
   defp errors_for_resolution({:error, errors}), do: errors
 
@@ -499,8 +506,22 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
          "execution_profile_id" => profile_id,
          "workspace_subdir" => workspace_subdir(params)
        })
+       |> put_procedures()
        |> Map.drop(["_submitted_fields", "enabled" | config_param_keys()])}
     end
+  end
+
+  defp procedure_params(params) do
+    Map.new(Lanes.procedure_keys(params["slug"]), fn key -> {key, Map.fetch!(params, "procedure_#{key}")} end)
+  end
+
+  defp procedure_errors(params),
+    do: errors_for_resolution(Lanes.validate_procedures(params["slug"], procedure_params(params)))
+
+  defp put_procedures(params) do
+    procedures = procedure_params(params)
+    attrs = Map.drop(params, Enum.map(Lanes.procedure_keys("bonbons-delivery"), &"procedure_#{&1}"))
+    if map_size(procedures) == 0, do: attrs, else: Map.put(attrs, "procedures", procedures)
   end
 
   defp config_from_params(params, original_config, original_params) do
@@ -640,12 +661,22 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
       "advanced_json" => config |> advanced_config() |> ConfigurationFields.safe_json()
     }
 
+    params = put_procedure_fields(params, version)
+
     # Memory is the new-lane template choice, not a default for a missing required tracker kind.
     display_defaults = put_in(Schema.lane_defaults(), ["tracker", "kind"], nil)
     display_config = display_defaults |> merge_display_defaults(config) |> canonical_linear_provider()
 
     Enum.reduce(@config_fields, params, fn {field, path, type}, acc ->
       Map.put(acc, field, field_value(display_config, path, type))
+    end)
+  end
+
+  defp put_procedure_fields(params, version) do
+    procedures = (version && version.procedures) || %{}
+
+    Enum.reduce(Lanes.procedure_keys("bonbons-delivery"), params, fn key, attrs ->
+      Map.put(attrs, "procedure_#{key}", Map.get(procedures, key, ""))
     end)
   end
 

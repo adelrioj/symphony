@@ -167,6 +167,57 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
     assert Lanes.get_by_slug("features").workspace_subdir == "features"
   end
 
+  for {slug, additional} <- [
+        {"chorus-delivery", %{}},
+        {"bonbons-delivery", %{"error-reporting" => "Report the error"}}
+      ] do
+    test "#{slug} accepts a draft after selecting its slug and saves all sections in one version", %{conn: conn} do
+      slug = unquote(slug)
+      profile = new_profile!()
+
+      sections =
+        Map.merge(
+          %{"qa" => "Check the result", "bug" => "Find the defect", "deliver" => "Deliver the fix"},
+          unquote(Macro.escape(additional))
+        )
+
+      {:ok, view, _html} = live(conn, "/lanes/new")
+      render_change(view, "validate", %{"lane" => %{"slug" => slug}})
+      assert has_element?(view, "#lane-procedure-qa")
+      assert has_element?(view, "#lane-procedure-error-reporting") == Map.has_key?(sections, "error-reporting")
+
+      attrs = %{
+        "slug" => slug,
+        "name" => slug,
+        "execution_profile_id" => to_string(profile.id),
+        "tracker_kind" => "memory",
+        "prompt" => "Common instructions"
+      }
+
+      render_change(view, "validate", %{"lane" => Map.put(attrs, "procedure_qa", "Check the result")})
+      assert has_element?(view, "#lane-procedure-qa", "Check the result")
+      assert has_element?(view, "#lane-errors", "procedures")
+      assert Lanes.get_by_slug(slug) == nil
+
+      form_fields = Map.merge(attrs, Map.new(sections, fn {key, text} -> {"procedure_#{key}", text} end))
+      view |> form("#lane-form", lane: form_fields) |> render_submit()
+      assert_redirect(view, "/lanes/#{slug}")
+      lane = Lanes.get_by_slug(slug)
+      assert [%{prompt: "Common instructions", procedures: ^sections}] = Lanes.versions(lane)
+
+      {:ok, editor, _html} = live(conn, "/lanes/#{slug}/edit")
+      for {key, text} <- sections, do: assert(has_element?(editor, "#lane-procedure-#{key}", text))
+
+      editor
+      |> form("#lane-form", lane: %{"prompt" => "Revised Common", "procedure_qa" => "Review again"})
+      |> render_submit()
+
+      assert_redirect(editor, "/lanes/#{slug}")
+      revised = %{sections | "qa" => "Review again"}
+      assert [%{prompt: "Revised Common", procedures: ^revised}, %{procedures: ^sections}] = Lanes.versions(lane)
+    end
+  end
+
   @tag :tmp_dir
   test "an unchanged SSH location remains editable while its host is unavailable", %{conn: conn, tmp_dir: root} do
     fake_ssh = Path.join(root, "ssh")

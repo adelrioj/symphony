@@ -4,6 +4,7 @@ defmodule SymphonyElixir.CLI do
   """
 
   alias SymphonyElixir.CodexCredentials.Recovery
+  alias SymphonyElixir.Lanes.InstructionMigration
   alias SymphonyElixir.{LogFile, Maintenance}
   alias SymphonyElixir.MCP.LinearServer
 
@@ -16,7 +17,7 @@ defmodule SymphonyElixir.CLI do
     events_retention_days: :integer
   ]
   @import_switches [slug: :string, name: :string, note: :string, data_root: :string]
-  @export_switches [data_root: :string]
+  @offline_switches [data_root: :string]
   @mcp_switches [linear_mcp: :boolean, workflow: :string]
   @credential_switches [
     data_root: :string,
@@ -38,6 +39,7 @@ defmodule SymphonyElixir.CLI do
           required(:export_lane) => (String.t() -> {:ok, String.t()} | {:error, :not_found | :no_version}),
           required(:operator_token) => (-> String.t() | nil),
           required(:write_output) => (String.t() -> :ok),
+          optional(:open_repo) => (-> :ok | {:error, term()}),
           optional(:reconcile_credentials) => (keyword() -> {:ok, map()} | {:error, atom()}),
           optional(:ensure_linear_mcp_started) => (-> ensure_started_result()),
           optional(:configure_linear_mcp_logger) => (-> :ok),
@@ -86,6 +88,10 @@ defmodule SymphonyElixir.CLI do
 
   defp evaluate_mode(["lanes", "export" | args], deps) do
     with :ok <- evaluate_export(args, deps), do: {:ok, :command}
+  end
+
+  defp evaluate_mode(["lanes", "migrate-instructions" | args], deps) do
+    with :ok <- evaluate_instruction_migration(args, deps), do: {:ok, :command}
   end
 
   defp evaluate_mode(["credentials", "reconcile" | args], deps) do
@@ -157,7 +163,7 @@ defmodule SymphonyElixir.CLI do
   defp evaluate_import(args, deps) do
     with {:ok, opts, [path]} <- parse(args, @import_switches, 1),
          {:ok, slug} <- require_option(opts, :slug),
-         :ok <- start_repo(opts, deps) do
+         :ok <- start_repo(opts, deps.start_repo) do
       case deps.import_lane.(Path.expand(path), Keyword.take(opts, [:name, :note]) |> Keyword.put(:slug, slug)) do
         {:ok, lane, warnings} ->
           lines = [
@@ -174,13 +180,26 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp evaluate_export(args, deps) do
-    with {:ok, opts, [slug]} <- parse(args, @export_switches, 1),
-         :ok <- start_repo(opts, deps) do
+    with {:ok, opts, [slug]} <- parse(args, @offline_switches, 1),
+         :ok <- start_repo(opts, deps.start_repo) do
       case deps.export_lane.(slug) do
         {:ok, content} -> deps.write_output.(content)
         {:error, :not_found} -> {:error, "no lane with slug #{slug}"}
         {:error, :no_version} -> {:error, "lane #{slug} has no version"}
       end
+    end
+  end
+
+  defp evaluate_instruction_migration(args, deps) do
+    with {:ok, [data_root: _root] = opts, [path]} <- parse(args, @offline_switches, 1),
+         :ok <- start_repo(opts, Map.get(deps, :open_repo, deps.start_repo)) do
+      case InstructionMigration.migrate(Path.expand(path)) do
+        {:ok, count} -> deps.write_output.("migrated lane instruction versions: #{count}\n")
+        {:error, reason} -> {:error, "lane instruction migration failed: #{reason}"}
+      end
+    else
+      {:ok, _opts, _paths} -> {:error, usage_message()}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -270,12 +289,12 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  defp start_repo(opts, deps) do
+  defp start_repo(opts, start) do
     with :ok <- verify_maintenance(opts, :offline),
          {:ok, root} <- prepare_data_root(opts) do
       Application.put_env(:symphony_elixir, :data_root, root)
 
-      case deps.start_repo.() do
+      case start.() do
         :ok -> :ok
         {:error, reason} -> {:error, "Failed to open the Symphony database: #{inspect(reason)}"}
       end
@@ -293,11 +312,17 @@ defmodule SymphonyElixir.CLI do
 
   # Offline commands must not boot schedulers or leak SQL/migration logs into exports.
   defp start_repo_standalone do
+    with :ok <- open_repo_standalone(), do: SymphonyElixir.Repo.migrate()
+  rescue
+    exception -> {:error, exception}
+  end
+
+  defp open_repo_standalone do
     :ok = configure_linear_mcp_logger()
 
     with {:ok, _apps} <- Application.ensure_all_started(:ecto_sqlite3),
          {:ok, _pid} <- start_repo_process() do
-      SymphonyElixir.Repo.migrate()
+      :ok
     end
   rescue
     exception -> {:error, exception}
@@ -323,6 +348,7 @@ defmodule SymphonyElixir.CLI do
     Usage: symphony serve [--data-root <dir>] [--port <port>] [--host <ip>] [--events-retention-days <n>] --i-understand-that-this-will-be-running-without-the-usual-guardrails
            symphony lanes import <WORKFLOW.md> --slug <slug> [--name <name>] [--note <text>] [--data-root <dir>]
            symphony lanes export <slug> [--data-root <dir>]
+           symphony lanes migrate-instructions <manifest.json> --data-root <dir>
            symphony credentials reconcile --data-root <dir> --workflow <path> [--action inspect|checkpoint|reseed-stop|reseed-commit] [--resource <name> --expected-epoch <n> --expected-generation <decimal>] [--receipt-file <private-json>]
            symphony --linear-mcp --workflow <path-to-WORKFLOW.md>
     The daemon no longer takes a WORKFLOW.md path: import it as a lane first.
@@ -334,6 +360,7 @@ defmodule SymphonyElixir.CLI do
     %{
       ensure_all_started: ensure_all_started,
       start_repo: &start_repo_standalone/0,
+      open_repo: &open_repo_standalone/0,
       import_lane: &SymphonyElixir.Lanes.import_file/2,
       export_lane: &export_lane/1,
       operator_token: fn -> System.get_env("SYMPHONY_OPERATOR_TOKEN") end,

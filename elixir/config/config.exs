@@ -2,6 +2,10 @@ import Config
 
 config :phoenix, :json_library, Jason
 
+config :phoenix,
+       :filter_parameters,
+       ~w(password token secret api_key credential prompt procedures procedure_ front_matter advanced_json provider_json)
+
 config :logger, :default_formatter, metadata: [:issue_id, :issue_identifier, :session_id, :attempt_id]
 
 config :symphony_elixir, ecto_repos: [SymphonyElixir.Repo]
