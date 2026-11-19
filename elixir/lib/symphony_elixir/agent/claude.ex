@@ -196,9 +196,10 @@ defmodule SymphonyElixir.Agent.Claude do
   defp finish_procedure_turn(result, _procedure), do: result
 
   defp procedure_payload(issue_id) do
-    with {:ok, %{slug: slug, version_id: version_id, procedures: procedures}} <- LaneContext.capture(),
+    with {:ok, %{slug: slug, version_id: version_id, procedures: procedures, workflow: %{config: config}}} <-
+           LaneContext.capture(),
          true <- not is_nil(version_id) and ProcedureSession.managed_lane?(slug) do
-      with {:ok, payload} <- ProcedureSession.encode(issue_id, slug, procedures) do
+      with {:ok, payload} <- ProcedureSession.encode(issue_id, slug, procedures, config["procedure_policy_version"]) do
         {:ok, payload, ProcedureSession.incomplete?(procedures)}
       end
     else

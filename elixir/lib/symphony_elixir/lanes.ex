@@ -122,7 +122,7 @@ defmodule SymphonyElixir.Lanes do
          {:ok, value} <-
            Configuration.resolve(
              profile_attrs(profile),
-             config,
+             put_default_procedure_policy(lane.slug, config),
              lane.workspace_subdir,
              version.prompt,
              cached_root,
@@ -422,7 +422,7 @@ defmodule SymphonyElixir.Lanes do
                })
              )
            ),
-         {:ok, lane} <- add_version(lane, Workflow.encode_config(config), prompt, procedures, attrs["note"]) do
+         {:ok, lane} <- add_version(lane, config, prompt, procedures, attrs["note"]) do
       _ = validated
       {:ok, lane}
     end
@@ -489,7 +489,7 @@ defmodule SymphonyElixir.Lanes do
   end
 
   defp maybe_add_version(lane, config, prompt, procedures, note, true),
-    do: add_version(lane, Workflow.encode_config(config), prompt, procedures, note)
+    do: add_version(lane, config, prompt, procedures, note)
 
   defp maybe_add_version(lane, _config, _prompt, _procedures, _note, false), do: {:ok, lane}
 
@@ -903,7 +903,13 @@ defmodule SymphonyElixir.Lanes do
     if errors == [], do: :ok, else: {:error, errors}
   end
 
-  defp add_version(lane, front_matter, prompt, procedures, note) do
+  # Versions saved before this field was added also use revision 1.
+  defp put_default_procedure_policy("bonbons-delivery", config), do: Map.put_new(config, "procedure_policy_version", 1)
+  defp put_default_procedure_policy(_slug, config), do: config
+
+  defp add_version(lane, config, prompt, procedures, note) do
+    front_matter = Workflow.encode_config(put_default_procedure_policy(lane.slug, config))
+
     with {:ok, version} <-
            Repo.insert(
              LaneVersion.changeset(%LaneVersion{lane_id: lane.id}, %{

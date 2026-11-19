@@ -260,6 +260,12 @@ Keep these private artifacts out of source repositories and logs. In the lane AP
 map as a top-level `procedures` property alongside `config` and `prompt`, not inside `config`.
 The editor saves all sections together as one version, and history restores them together.
 
+Bonbons lane versions store `procedure_policy_version` in the YAML configuration.
+Revision `1` lets a run read Error Reporting only after it reads the Bug or Deliver
+section that matches the live issue route. The rule does not use the section text.
+QA and Chorus cannot read Error Reporting. Bonbons versions without the field use
+revision `1`; an unsupported revision does not grant Error Reporting access.
+
 Before Symphony posts a missing-procedure comment or moves the issue to `agent.blocked_state`,
 it checks the live issue state and labels again. It skips both writes if the current route
 does not need the missing section. For example, a missing `bug` section does not block `qa`.
