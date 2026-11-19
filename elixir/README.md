@@ -256,9 +256,20 @@ exists.
 For managed lanes, the Markdown body is the Common prompt. The private import/export artifact
 also has a top-level YAML `procedures` map. Both `bonbons-delivery` and `chorus-delivery` require
 nonblank `qa`, `bug`, and `deliver` sections; only `bonbons-delivery` requires `error-reporting`.
+Export and re-import preserve procedure text byte for byte, including Unicode line separators.
 Keep these private artifacts out of source repositories and logs. In the lane API, send the same
 map as a top-level `procedures` property alongside `config` and `prompt`, not inside `config`.
 The editor saves all sections together as one version, and history restores them together.
+Set `agent.backend` to `claude` for both managed lanes. Each `agent.backend_by_state` override
+must also use `claude`, or you must remove it. The editor, API, import, and version activation
+reject incompatible settings. Instruction migration checks the saved backend settings of each
+version before it writes any procedure bundles.
+
+Bonbons lane versions store `procedure_policy_version` in the YAML configuration.
+Revision `1` lets a run read Error Reporting only after it reads the Bug or Deliver
+section that matches the live issue route. The rule does not use the section text.
+QA and Chorus cannot read Error Reporting. Bonbons versions without the field use
+revision `1`; an unsupported revision does not grant Error Reporting access.
 
 Before Symphony returns procedure text or writes a blocker, it checks the live issue against the
 attempt's lane settings for required, any, and excluded labels and the Linear assignee filter.
@@ -1123,6 +1134,10 @@ the workflow snapshot, MCP config, and prompt as length-prefixed SSH stdin. The 
 the workflow and config to mode-0600 temporary files, unsets the adapter-declared secret names
 before launching Claude, and trap-removes both files on exit. `claude.linear_mcp_args` is inserted
 before Symphony's required `--linear-mcp --workflow <worker-temp-WORKFLOW.md>` flags.
+
+If a Claude SSH turn with a versioned procedure times out, Symphony checks the worker's private
+outcome file before closing the connection. Only a recorded missing-procedure outcome can replace
+the timeout. Symphony blocks the issue only if its live route still requires that section.
 
 The helper mode can also be run directly when debugging MCP wiring:
 

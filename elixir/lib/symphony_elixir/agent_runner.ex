@@ -149,9 +149,9 @@ defmodule SymphonyElixir.AgentRunner do
   defp handle_run_outcome(other, _issue), do: other
 
   defp permit_blocked_write(%Issue{id: id}, %Result{missing_procedure: missing_procedure}) do
-    with {:ok, %{slug: slug, procedures: procedures}} <- LaneContext.capture(),
+    with {:ok, %{slug: slug, workflow: %{config: config}}} <- LaneContext.capture(),
          true <- ProcedureSession.managed_lane?(slug) do
-      ProcedureSession.permit_blocked_write(id, missing_procedure, procedures)
+      ProcedureSession.permit_blocked_write(id, missing_procedure, slug, config["procedure_policy_version"])
     else
       _ -> :ok
     end

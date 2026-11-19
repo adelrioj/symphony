@@ -222,6 +222,10 @@ defmodule SymphonyElixir.LanesTest do
       ---
       tracker:
         kind: memory
+      agent:
+        backend: claude
+        backend_by_state:
+          In Review: claude
       workspace:
         root: #{workspace}
       procedures: #{Jason.encode!(sections)}
@@ -243,6 +247,13 @@ defmodule SymphonyElixir.LanesTest do
       assert length(Lanes.versions(saved)) == 2
       assert %{prompt: "Common prompt", procedures: ^sections} = Lanes.current_version(saved)
 
+      {:ok, %{config: config}} = Workflow.parse(exported)
+      config = put_in(config, ["agent", "backend_by_state", "In Review"], "codex")
+      File.write!(artifact, Workflow.render(Workflow.encode_config(config), "Common prompt"))
+
+      assert {:error, [%{path: "agent.backend_by_state.In Review"}]} = Lanes.import_file(artifact, slug: slug)
+      assert Lanes.get!(lane.id).current_version_id == saved.current_version_id
+
       File.write!(artifact, Workflow.render("tracker:\n  kind: memory", "Incomplete"))
       assert {:error, [%{path: "procedures"} | _]} = Lanes.import_file(artifact, slug: slug)
       assert Lanes.get!(lane.id).current_version_id == saved.current_version_id
@@ -255,7 +266,7 @@ defmodule SymphonyElixir.LanesTest do
     assert {:ok, lane} =
              create_lane(%{
                slug: "chorus-delivery",
-               front_matter: @front_matter,
+               front_matter: @front_matter <> "\nagent:\n  backend: claude",
                prompt: "Legacy Common",
                procedures: sections
              })

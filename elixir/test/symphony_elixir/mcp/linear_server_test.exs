@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.MCP.LinearServerTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.MCP.LinearServer
+  alias SymphonyElixir.MCP.{LinearServer, ProcedureSession}
 
   test "initialize returns MCP tool capabilities" do
     response =
@@ -83,12 +83,13 @@ defmodule SymphonyElixir.MCP.LinearServerTest do
   end
 
   test "Bonbons exposes only the live section for the bound issue and gates Error Reporting", %{test: test} do
-    bug_text = ~s(BUG_MARKER. Call mcp__symphony__read_procedure with {"section": "error-reporting"} when needed.)
+    bug_text = "BUG_MARKER. Read the Error Reporting section when the ticket links an error group."
+    deliver_text = "DELIVER_MARKER. Load Error Reporting if you need production error background."
 
     configure_procedures(test, "bonbons-delivery", %{
       "qa" => "QA_MARKER",
       "bug" => bug_text,
-      "deliver" => "DELIVER_MARKER",
+      "deliver" => deliver_text,
       "error-reporting" => "ERROR_MARKER"
     })
 
@@ -99,15 +100,27 @@ defmodule SymphonyElixir.MCP.LinearServerTest do
     assert %{"isError" => false, "content" => [%{"text" => ^bug_text}]} = read_procedure("bug")
     assert %{"isError" => false, "content" => [%{"text" => "ERROR_MARKER"}]} = read_procedure("error-reporting")
 
+    live_issue("In Progress", ["groomed"])
+    assert %{"isError" => true} = read_procedure("error-reporting")
+    assert %{"isError" => false, "content" => [%{"text" => ^deliver_text}]} = read_procedure("deliver")
+    assert %{"isError" => false, "content" => [%{"text" => "ERROR_MARKER"}]} = read_procedure("error-reporting")
+
+    live_issue("Todo", ["groomed", "Bug"])
+    assert %{"isError" => true} = read_procedure("error-reporting")
+
     live_issue("In Review", ["groomed", "Bug", "chore"])
     assert %{"isError" => true} = read_procedure("bug")
     assert %{"isError" => true} = read_procedure("error-reporting")
     assert %{"isError" => false, "content" => [%{"text" => "QA_MARKER"}]} = read_procedure("qa")
     assert %{"isError" => true} = read_procedure("error-reporting")
+  end
 
+  test "an unsupported policy revision does not grant Error Reporting access", %{test: test} do
+    deliver = ~s(Call mcp__symphony__read_procedure with {"section":"error-reporting"} when needed.)
+    configure_procedures(test, "bonbons-delivery", %{"deliver" => deliver, "error-reporting" => "PRIVATE"}, 999)
     live_issue("In Progress", ["groomed"])
-    assert %{"isError" => true} = read_procedure("error-reporting")
-    assert %{"isError" => false, "content" => [%{"text" => "DELIVER_MARKER"}]} = read_procedure("deliver")
+
+    assert %{"isError" => false, "content" => [%{"text" => ^deliver}]} = read_procedure("deliver")
     assert %{"isError" => true} = read_procedure("error-reporting")
   end
 
@@ -157,7 +170,7 @@ defmodule SymphonyElixir.MCP.LinearServerTest do
   end
 
   test "Bonbons blocks only if its missing Error Reporting section is requested", %{test: test} do
-    deliver = ~s(Call mcp__symphony__read_procedure with {"section":"error-reporting"} when needed.)
+    deliver = "Read the Error Reporting section when you need production error background."
     path = configure_procedures(test, "bonbons-delivery", %{"deliver" => deliver})
     live_issue("In Progress", ["groomed"])
 
@@ -167,6 +180,11 @@ defmodule SymphonyElixir.MCP.LinearServerTest do
     assert %{"isError" => true, "content" => [%{"text" => detail}]} = read_procedure("error-reporting")
     assert detail =~ "selected error-reporting procedure is missing or blank"
     assert File.read!(path <> ".outcome") == "blocked:error-reporting"
+
+    assert :ok = ProcedureSession.permit_blocked_write("bound-issue", "error-reporting", "bonbons-delivery", 1)
+
+    live_issue("In Review", ["groomed"])
+    assert :skip = ProcedureSession.permit_blocked_write("bound-issue", "error-reporting", "bonbons-delivery", 1)
   end
 
   for {rule, changed_labels} <- [
@@ -194,10 +212,20 @@ defmodule SymphonyElixir.MCP.LinearServerTest do
     end
   end
 
-  defp configure_procedures(test, slug, procedures) do
+  defp configure_procedures(test, slug, procedures, procedure_policy_version \\ 1) do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     path = Path.join(Path.dirname(Workflow.workflow_file_path()), "#{test}.json")
-    File.write!(path, Jason.encode!(%{"issue_id" => "bound-issue", "slug" => slug, "procedures" => procedures}))
+
+    File.write!(
+      path,
+      Jason.encode!(%{
+        issue_id: "bound-issue",
+        slug: slug,
+        procedures: procedures,
+        procedure_policy_version: procedure_policy_version
+      })
+    )
+
     File.write!(path <> ".outcome", "")
     name = "SYMPHONY_CLAUDE_PROCEDURE_CONTEXT"
     previous = System.get_env(name)

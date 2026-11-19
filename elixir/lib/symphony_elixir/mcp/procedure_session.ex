@@ -12,7 +12,6 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
   @bug_labels ~w(bug bug-symphony)
   @deliver_labels ~w(feature improvement feat-symphony chore)
   @env "SYMPHONY_CLAUDE_PROCEDURE_CONTEXT"
-  @error_reporting_request ~r/\{\s*"section"\s*:\s*"error-reporting"\s*\}/
   @tool %{
     "name" => "read_procedure",
     "description" => "Read the selected procedure from this run's lane version after checking the live issue.",
@@ -28,7 +27,8 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
           path: Path.t(),
           issue_id: String.t(),
           slug: String.t(),
-          procedures: map()
+          procedures: map(),
+          procedure_policy_version: term()
         }
 
   @type blocker :: String.t() | {:missing_procedure, String.t()}
@@ -51,9 +51,9 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
   @spec outcome_path(Path.t()) :: Path.t()
   def outcome_path(path), do: path <> ".outcome"
 
-  @spec encode(String.t(), String.t(), map() | nil) :: {:ok, binary()} | {:error, atom()}
-  def encode(issue_id, slug, procedures) when is_binary(issue_id) and issue_id != "" do
-    payload = %{issue_id: issue_id, slug: slug, procedures: procedures || %{}}
+  @spec encode(String.t(), String.t(), map() | nil, term()) :: {:ok, binary()} | {:error, atom()}
+  def encode(issue_id, slug, procedures, policy_version) when is_binary(issue_id) and issue_id != "" do
+    payload = %{issue_id: issue_id, slug: slug, procedures: procedures || %{}, procedure_policy_version: policy_version}
 
     case Jason.encode(payload) do
       {:ok, encoded} -> {:ok, encoded}
@@ -61,7 +61,7 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
     end
   end
 
-  def encode(_issue_id, _slug, _procedures), do: {:error, :procedure_issue_id_required}
+  def encode(_issue_id, _slug, _procedures, _policy_version), do: {:error, :procedure_issue_id_required}
 
   @spec current() :: {:ok, t()} | {:error, atom()}
   def current do
@@ -87,9 +87,16 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
   @spec load(Path.t()) :: {:ok, t()} | {:error, atom()}
   def load(path) do
     with {:ok, contents} <- File.read(path),
-         {:ok, %{"issue_id" => id, "slug" => slug, "procedures" => procedures}} <- Jason.decode(contents),
+         {:ok, %{"issue_id" => id, "slug" => slug, "procedures" => procedures} = context} <- Jason.decode(contents),
          true <- is_binary(id) and id != "" and managed_lane?(slug) and is_map(procedures) do
-      {:ok, %{path: path, issue_id: id, slug: slug, procedures: procedures}}
+      {:ok,
+       %{
+         path: path,
+         issue_id: id,
+         slug: slug,
+         procedures: procedures,
+         procedure_policy_version: context["procedure_policy_version"]
+       }}
     else
       _ -> {:error, :procedure_context_invalid}
     end
@@ -152,26 +159,23 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
   defp authorize(
          {:selected, section},
          @secondary,
-         %{slug: "bonbons-delivery", procedures: procedures},
+         %{slug: slug, procedure_policy_version: policy_version},
          "read:" <> previous
        )
-       when section in ["bug", "deliver"] and section == previous do
-    if requests_error_reporting?(procedures[section]),
-      do: :ok,
-      else: {:error, "The selected procedure does not request Error Reporting."}
+       when section == previous do
+    if error_reporting_allowed?(slug, policy_version, section), do: :ok, else: unavailable_section()
   end
 
   defp authorize(:unverified, _section, _slug, _previous),
     do: {:error, "The live state and labels of this run's issue could not be verified."}
 
-  defp authorize(_route, _section, _slug, _previous),
+  defp authorize(_route, _section, _slug, _previous), do: unavailable_section()
+
+  defp unavailable_section,
     do: {:error, "This section is not available for the live route of this run's issue."}
 
-  defp requests_error_reporting?(text) when is_binary(text) do
-    String.contains?(text, "mcp__symphony__read_procedure") and Regex.match?(@error_reporting_request, text)
-  end
-
-  defp requests_error_reporting?(_text), do: false
+  defp error_reporting_allowed?("bonbons-delivery", 1, section), do: section in ["bug", "deliver"]
+  defp error_reporting_allowed?(_slug, _policy_version, _section), do: false
 
   defp return_text(%{path: path, procedures: procedures}, section) do
     text = procedures[section]
@@ -224,8 +228,8 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
     end
   end
 
-  @spec permit_blocked_write(String.t(), String.t() | nil, map() | nil) :: :ok | :skip | {:error, atom()}
-  def permit_blocked_write(id, missing_procedure, procedures) do
+  @spec permit_blocked_write(String.t(), String.t() | nil, String.t(), term()) :: :ok | :skip | {:error, atom()}
+  def permit_blocked_write(id, missing_procedure, slug, policy_version) do
     case live_route(id) do
       :no_route ->
         :skip
@@ -239,8 +243,8 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
       {:selected, ^missing_procedure} ->
         :ok
 
-      {:selected, section} when missing_procedure == @secondary and section in ["bug", "deliver"] ->
-        if requests_error_reporting?(procedures[section]), do: :ok, else: :skip
+      {:selected, section} when missing_procedure == @secondary ->
+        if error_reporting_allowed?(slug, policy_version, section), do: :ok, else: :skip
 
       _route ->
         :skip

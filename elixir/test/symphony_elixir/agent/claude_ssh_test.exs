@@ -184,6 +184,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
             excluded_labels: ["hold"]
           workspace:
             root: #{Jason.encode!(Path.join(root, "workspaces"))}
+          agent: {backend: claude}
           codex: {turn_timeout_ms: 15000, stall_timeout_ms: 15000}
           claude:
             command: #{Jason.encode!(claude)}
@@ -246,6 +247,13 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
         refute capture["prompt"] =~ "CURRENT_COMMON"
         assert capture["selected"] == Map.fetch!(procedures, route)
         assert capture["error_reporting_denied"]
+
+        if unquote(slug) == "bonbons-delivery" do
+          assert capture["error_reporting"] == "PINNED_ERROR_REPORTING"
+        else
+          assert capture["error_reporting"] == nil
+        end
+
         assert capture["tool_allowed"]
         assert capture["private_outside_workspace"]
         refute File.exists?(capture["procedure_path"])
@@ -306,7 +314,21 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
           else: %{issue | state: "In Review"}
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [recheck])
-      assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+
+      if unquote(transport) == :ssh do
+        LaneContext.install(put_in(new_run.settings.codex.turn_timeout_ms, 5_000))
+        File.write!(mode, "stall")
+
+        try do
+          assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+        after
+          File.rm!(mode)
+          LaneContext.install(new_run)
+        end
+      else
+        assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+      end
+
       refute_received {:codex_worker_update, _, _, %{event: :attempt_blocked}}
       assert Tracker.Memory.calls() == []
       captures = read_boundary(run_log)
@@ -389,7 +411,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
 
     File.write!(path, """
     #!/usr/bin/env python3
-    import json, os, stat, subprocess, sys
+    import json, os, stat, subprocess, sys, time
     from pathlib import Path
 
     mode_file = Path(#{Jason.encode!(Path.join(root, "fixture-mode"))})
@@ -404,10 +426,12 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     requests = [
         {"id": 1, "method": "tools/list"},
         {"id": 2, "method": "tools/call", "params": {"name": "read_procedure", "arguments": {"section": "error-reporting"}}},
-        {"id": 3, "method": "tools/call", "params": {"name": "read_procedure", "arguments": {"section": #{Jason.encode!(section)}}}},
     ]
-    if mode == "unread":
-        requests.pop()
+    if mode != "unread":
+        requests += [
+            {"id": 3, "method": "tools/call", "params": {"name": "read_procedure", "arguments": {"section": #{Jason.encode!(section)}}}},
+            {"id": 4, "method": "tools/call", "params": {"name": "read_procedure", "arguments": {"section": "error-reporting"}}},
+        ]
     result = subprocess.run(
         [config["command"], *config["args"]], check=True, text=True, capture_output=True,
         env=dict(os.environ, **environment), input="".join(json.dumps(m) + "\\n" for m in requests),
@@ -415,16 +439,23 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     responses = [json.loads(line)["result"] for line in result.stdout.splitlines()]
     listed, rejected = responses[:2]
     selected = responses[2] if len(responses) > 2 else {"content": [{"text": ""}], "isError": True}
+    secondary = responses[3] if len(responses) > 3 else {"isError": True}
     allowed = sys.argv[sys.argv.index("--allowedTools") + 1].split(",")
     with open(#{Jason.encode!(run_log)}, "a") as log:
         log.write(json.dumps({
             "prompt": prompt, "mcp_list": json.dumps(listed),
             "selected": selected["content"][0]["text"], "selected_error": selected["isError"],
-            "error_reporting_denied": rejected["isError"], "procedure_path": procedure_path,
+            "error_reporting_denied": rejected["isError"],
+            "error_reporting": None if secondary["isError"] else secondary["content"][0]["text"],
+            "procedure_path": procedure_path,
             "tool_allowed": "mcp__symphony__read_procedure" in allowed,
             "private_outside_workspace": not os.path.realpath(procedure_path).startswith(os.getcwd() + "/")
                 and stat.S_IMODE(os.stat(procedure_path).st_mode) == 0o600,
         }) + "\\n")
+    if mode == "stall":
+        deadline = time.monotonic() + 10
+        while mode_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
     print('{"type":"system","subtype":"init","session_id":"managed-fixture"}')
     print(json.dumps({
         "type": "result", "subtype": "success", "is_error": False, "result": "Fixture summary",

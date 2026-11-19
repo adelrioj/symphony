@@ -191,6 +191,8 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
         "name" => slug,
         "execution_profile_id" => to_string(profile.id),
         "tracker_kind" => "memory",
+        "agent_backend" => "claude",
+        "agent_backend_by_state_json" => "{}",
         "prompt" => "Common instructions"
       }
 
@@ -200,6 +202,16 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
       assert Lanes.get_by_slug(slug) == nil
 
       form_fields = Map.merge(attrs, Map.new(sections, fn {key, text} -> {"procedure_#{key}", text} end))
+
+      unsupported = Map.put(form_fields, "agent_backend_by_state_json", ~s({"In Review":"codex"}))
+      render_change(view, "validate", %{"lane" => unsupported})
+      assert has_element?(view, "#lane-errors", "agent.backend_by_state.In Review")
+      assert has_element?(view, "#lane-errors", "Claude")
+
+      view |> form("#lane-form", lane: unsupported) |> render_submit()
+      assert has_element?(view, "#lane-errors", "agent.backend_by_state.In Review")
+      assert Lanes.get_by_slug(slug) == nil
+
       view |> form("#lane-form", lane: form_fields) |> render_submit()
       assert_redirect(view, "/lanes/#{slug}")
       lane = Lanes.get_by_slug(slug)
