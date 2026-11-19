@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.MCP.ProcedureSession do
   @moduledoc false
 
-  alias SymphonyElixir.Agent.Result
-  alias SymphonyElixir.{Config, Lanes, Tracker}
+  alias SymphonyElixir.Agent.{CliHarness, Result}
+  alias SymphonyElixir.{Config, LaneContext, Lanes, Tracker}
   alias SymphonyElixir.Linear.Client
   alias SymphonyElixir.Tracker.Issue
 
@@ -62,6 +62,68 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
   end
 
   def encode(_issue_id, _slug, _procedures, _policy_version), do: {:error, :procedure_issue_id_required}
+
+  @doc """
+  Encodes this run's pinned procedure context, or `nil` when the lane is not managed.
+
+  The boolean says whether the bundle is incomplete and needs a preflight before each turn.
+  """
+  @spec payload(String.t() | nil) :: {:ok, binary() | nil, boolean()} | {:error, atom()}
+  def payload(issue_id) do
+    with {:ok, %{slug: slug, version_id: version_id, procedures: procedures, workflow: %{config: config}}} <-
+           LaneContext.capture(),
+         true <- not is_nil(version_id) and managed_lane?(slug) do
+      with {:ok, payload} <- encode(issue_id, slug, procedures, config["procedure_policy_version"]) do
+        {:ok, payload, incomplete?(procedures)}
+      end
+    else
+      _ -> {:ok, nil, false}
+    end
+  end
+
+  @spec reset_outcome(Path.t()) :: :ok | {:error, term()}
+  def reset_outcome(path) do
+    outcome = outcome_path(path)
+
+    case File.rm(outcome) do
+      result when result in [:ok, {:error, :enoent}] -> CliHarness.write_private_file(outcome, "")
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
+  Applies a locally readable outcome file to a finished turn: a recorded missing section blocks,
+  a primary read accepts, and a completed turn without a read is rechecked against the live route.
+  """
+  @spec finish_local_turn(Path.t(), {:ok, Result.t()} | {:error, term()}) :: {:ok, Result.t()} | {:error, term()}
+  def finish_local_turn(path, result) do
+    case File.read(outcome_path(path)) do
+      {:ok, "blocked:" <> section} when section in @sections ->
+        blocked_result({:missing_procedure, section}, result)
+
+      {:ok, "read:" <> section} when section in @primary ->
+        result
+
+      _ ->
+        case result do
+          {:ok, %Result{status: :done} = completed} -> finish_turn({:error, {:procedure_unread, completed}}, path)
+          other -> other
+        end
+    end
+  end
+
+  @spec finish_turn({:ok, Result.t()} | {:error, term()}, Path.t()) :: {:ok, Result.t()} | {:error, term()}
+  def finish_turn({:error, {:procedure_unread, result}}, path) do
+    with {:ok, procedure} <- load(path),
+         :ok <- check_unread(procedure) do
+      {:ok, result}
+    else
+      {:blocked, detail} -> blocked_result(detail, {:ok, result})
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def finish_turn(result, _path), do: result
 
   @spec current() :: {:ok, t()} | {:error, atom()}
   def current do

@@ -152,7 +152,7 @@ defmodule SymphonyElixir.LaneInstructionMigrationTest do
   test "rejects an incompatible historical override before updating any bundle", context do
     [_, historical | _] = context.entries
     version = Repo.get!(LaneVersion, historical["version_id"])
-    agent = %{"backend" => "claude", "backend_by_state" => %{"In Review" => "codex"}}
+    agent = %{"backend" => "claude", "backend_by_state" => %{"In Review" => "omp"}}
     config = %{"tracker" => %{"kind" => "memory"}, "agent" => agent}
     Repo.update!(Ecto.Changeset.change(version, front_matter: Workflow.encode_config(config)))
 

@@ -332,7 +332,7 @@ defmodule SymphonyElixir.AgentRunner do
         String.trim(common) == "" ->
           {:blocked, "The managed lane's Common prompt is missing or blank."}
 
-        backend != SymphonyElixir.Agent.Claude ->
+        backend not in [SymphonyElixir.Agent.Claude, SymphonyElixir.Agent.Codex] ->
           {:blocked, "The configured agent backend does not support managed lane procedures."}
 
         true ->

@@ -143,7 +143,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
           slug: slug,
           execution_profile_id: new_profile!().id,
           config: %{
-            "agent" => %{"backend" => "claude"},
+            "agent" => %{"backend" => "codex", "backend_by_state" => %{"In Review" => "claude"}},
             "tracker" => %{"kind" => "memory", "api_key" => "literal-managed-tracker-key"}
           },
           prompt: "Original Common",
@@ -164,7 +164,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
 
       old = Enum.find(Lanes.versions(first), &(&1.id == first.current_version_id))
       {:ok, %{config: config}} = Workflow.parse_parts(old.front_matter, old.prompt)
-      invalid_config = put_in(config, ["agent", "backend_by_state"], %{"In Review" => "codex"})
+      invalid_config = put_in(config, ["agent", "backend_by_state"], %{"In Review" => "omp"})
       invalid = Repo.update!(Ecto.Changeset.change(old, front_matter: Workflow.encode_config(invalid_config)))
 
       html = view |> element("#version-#{old.id} button") |> render_click()

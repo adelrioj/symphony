@@ -11,7 +11,7 @@ defmodule SymphonyElixir.Agent.Claude do
   alias SymphonyElixir.Agent.Claude.Stream
   alias SymphonyElixir.Agent.CliHarness
   alias SymphonyElixir.Agent.Result
-  alias SymphonyElixir.{Config, ExecutionContext, LaneContext, SSH, Tracker, Workflow, Workspace}
+  alias SymphonyElixir.{Config, ExecutionContext, SSH, Tracker, Workflow, Workspace}
   alias SymphonyElixir.MCP.ProcedureSession
 
   @approval_tool "mcp__symphony__approval_prompt"
@@ -135,7 +135,7 @@ defmodule SymphonyElixir.Agent.Claude do
          {:ok, expanded_workspace} <- workspace_cwd(workspace, context),
          {:ok, tracker_env} <- CliHarness.capture_tracker_env(secret_environment_names, env_reader),
          {:ok, workflow} <- Workflow.current(),
-         {:ok, procedure_payload, procedure_preflight?} <- procedure_payload(Keyword.get(opts, :issue_id)),
+         {:ok, procedure_payload, procedure_preflight?} <- ProcedureSession.payload(Keyword.get(opts, :issue_id)),
          {:ok, session_dir, cleanup_monitor} <- CliHarness.create_session_dir("symphony-claude-mcp", expanded_workspace) do
       # MCP needs tracker configuration, not controller-only provider files or agent runtime settings.
       workflow_snapshot = Workflow.render(Jason.encode!(Map.take(workflow.config, ["tracker"])), "")
@@ -194,7 +194,7 @@ defmodule SymphonyElixir.Agent.Claude do
         case preflight_procedure(session, path) do
           :ok ->
             result = run_claude(session, workspace, prompt, gate_completion(on_message))
-            result |> finish_procedure_turn(path) |> report_accepted_completion(on_message)
+            result |> ProcedureSession.finish_turn(path) |> report_accepted_completion(on_message)
 
           {:blocked, detail} ->
             ProcedureSession.blocked_result(detail)
@@ -223,18 +223,6 @@ defmodule SymphonyElixir.Agent.Claude do
 
   defp gate_completion(_on_message), do: nil
 
-  defp finish_procedure_turn({:error, {:procedure_unread, result}}, path) do
-    with {:ok, procedure} <- ProcedureSession.load(path),
-         :ok <- ProcedureSession.check_unread(procedure) do
-      {:ok, result}
-    else
-      {:blocked, detail} -> ProcedureSession.blocked_result(detail, {:ok, result})
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp finish_procedure_turn(result, _procedure), do: result
-
   defp report_accepted_completion({:ok, %Result{status: :done} = result} = outcome, on_message)
        when is_function(on_message, 1) do
     # The stream already reported final usage, including for turns the gate rejects.
@@ -249,18 +237,6 @@ defmodule SymphonyElixir.Agent.Claude do
   end
 
   defp report_accepted_completion(outcome, _on_message), do: outcome
-
-  defp procedure_payload(issue_id) do
-    with {:ok, %{slug: slug, version_id: version_id, procedures: procedures, workflow: %{config: config}}} <-
-           LaneContext.capture(),
-         true <- not is_nil(version_id) and ProcedureSession.managed_lane?(slug) do
-      with {:ok, payload} <- ProcedureSession.encode(issue_id, slug, procedures, config["procedure_policy_version"]) do
-        {:ok, payload, ProcedureSession.incomplete?(procedures)}
-      end
-    else
-      _ -> {:ok, nil, false}
-    end
-  end
 
   @impl true
   @spec stop_session(SymphonyElixir.Agent.session()) :: :ok
@@ -395,32 +371,11 @@ defmodule SymphonyElixir.Agent.Claude do
 
   defp reset_procedure_outcome(nil), do: :ok
 
-  defp reset_procedure_outcome(path) do
-    outcome = ProcedureSession.outcome_path(path)
-
-    case File.rm(outcome) do
-      result when result in [:ok, {:error, :enoent}] -> CliHarness.write_private_file(outcome, "")
-      {:error, _reason} = error -> error
-    end
-  end
+  defp reset_procedure_outcome(path), do: ProcedureSession.reset_outcome(path)
 
   defp local_procedure_outcome(nil, result), do: result
 
-  defp local_procedure_outcome(path, result) do
-    case File.read(ProcedureSession.outcome_path(path)) do
-      {:ok, "blocked:" <> section} when section in ~w(qa bug deliver error-reporting) ->
-        ProcedureSession.blocked_result({:missing_procedure, section}, result)
-
-      {:ok, "read:" <> section} when section in ~w(qa bug deliver) ->
-        result
-
-      _ ->
-        case result do
-          {:ok, %Result{status: :done} = completed} -> {:error, {:procedure_unread, completed}}
-          other -> other
-        end
-    end
-  end
+  defp local_procedure_outcome(path, result), do: ProcedureSession.finish_local_turn(path, result)
 
   defp argv(mcp_config_path, claude, binding) do
     allowed_tools = allowed_tools(claude, binding)

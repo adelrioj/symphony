@@ -11,17 +11,19 @@ defmodule SymphonyElixir.Codex.AppServer do
   @turn_start_id 3
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
+  # Agent.Codex attaches its own procedure keys to this map.
   @type session :: %{
-          port: port(),
-          metadata: map(),
-          approval_policy: String.t() | map(),
-          auto_approve_requests: boolean(),
-          thread_sandbox: String.t(),
-          turn_sandbox_policy: map(),
-          thread_id: String.t(),
-          workspace: Path.t(),
-          execution_context: ExecutionContext.t(),
-          dynamic_tool_binding: map()
+          required(:port) => port(),
+          required(:metadata) => map(),
+          required(:approval_policy) => String.t() | map(),
+          required(:auto_approve_requests) => boolean(),
+          required(:thread_sandbox) => String.t(),
+          required(:turn_sandbox_policy) => map(),
+          required(:thread_id) => String.t(),
+          required(:workspace) => Path.t(),
+          required(:execution_context) => ExecutionContext.t(),
+          required(:dynamic_tool_binding) => map(),
+          optional(atom()) => term()
         }
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -38,7 +40,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     context = Keyword.get(opts, :execution_context)
-    dynamic_tool_binding = DynamicTool.bind()
+    dynamic_tool_binding = Keyword.get_lazy(opts, :dynamic_tool_binding, &DynamicTool.bind/0)
 
     with :ok <- require_context(context),
          {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, context),
