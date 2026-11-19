@@ -232,13 +232,21 @@ defmodule SymphonyElixir.Agent.CliHarness do
     error -> {:error, {Keyword.fetch!(opts, :error_tag), error}}
   end
 
-  @spec collect_port_stream(port(), (map() -> any()) | nil, module(), String.t()) ::
-          {:ok, Result.t()} | {:error, term()}
-  def collect_port_stream(port, on_message, stream, label) do
+  @typep turn_result :: {:ok, Result.t()} | {:error, term()}
+  @spec collect_port_stream(
+          port(),
+          (map() -> any()) | nil,
+          module(),
+          String.t(),
+          (term(), atom() -> turn_result()) | nil
+        ) ::
+          turn_result()
+  def collect_port_stream(port, on_message, stream, label, on_timeout \\ nil) do
     settings = Config.settings!().codex
     deadline = monotonic_ms() + settings.turn_timeout_ms
 
-    collect_stream(port, on_message, stream, label, stream.new(), "", deadline, settings.stall_timeout_ms)
+    timeout = {deadline, settings.stall_timeout_ms, on_timeout}
+    collect_stream(port, on_message, stream, label, stream.new(), "", timeout)
   end
 
   @spec write_prompt_file(Path.t(), String.t()) :: {:ok, Path.t()} | {:error, term()}
@@ -346,12 +354,20 @@ defmodule SymphonyElixir.Agent.CliHarness do
     "'" <> String.replace(to_string(value), "'", "'\"'\"'") <> "'"
   end
 
-  defp collect_stream(port, on_message, stream, label, acc, pending_line, deadline, stall_timeout_ms) do
+  defp collect_stream(
+         port,
+         on_message,
+         stream,
+         label,
+         acc,
+         pending_line,
+         {deadline, stall_timeout_ms, on_timeout} = timeout
+       ) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         line = pending_line <> to_string(chunk)
         updated_acc = handle_line(line, on_message, stream, label, acc)
-        collect_stream(port, on_message, stream, label, updated_acc, "", deadline, stall_timeout_ms)
+        collect_stream(port, on_message, stream, label, updated_acc, "", timeout)
 
       {^port, {:data, {:noeol, chunk}}} ->
         collect_stream(
@@ -361,8 +377,7 @@ defmodule SymphonyElixir.Agent.CliHarness do
           label,
           acc,
           pending_line <> to_string(chunk),
-          deadline,
-          stall_timeout_ms
+          timeout
         )
 
       {^port, {:exit_status, status}} ->
@@ -370,9 +385,15 @@ defmodule SymphonyElixir.Agent.CliHarness do
         finalize_stream(drained_acc, drained_pending_line, on_message, stream, label, status)
     after
       receive_timeout(deadline, stall_timeout_ms) ->
-        close_port(port)
-        {:error, receive_timeout_reason(deadline)}
+        reason = receive_timeout_reason(deadline)
+        finish_timeout(port, on_timeout, acc, reason)
     end
+  end
+
+  defp finish_timeout(port, on_timeout, acc, reason) do
+    if on_timeout, do: on_timeout.(acc, reason), else: {:error, reason}
+  after
+    close_port(port)
   end
 
   defp drain_port_data(port, on_message, stream, label, acc, pending_line) do

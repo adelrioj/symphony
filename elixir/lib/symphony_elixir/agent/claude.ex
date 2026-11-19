@@ -47,6 +47,7 @@ defmodule SymphonyElixir.Agent.Claude do
     # The SSH wrapper reserves these codes for its private outcome file, not Claude's own exit.
     @blocked %{80 => "qa", 81 => "bug", 82 => "deliver", 83 => "error-reporting"}
     @unread 84
+    @outcome_timeout_ms 2_000
 
     @impl true
     def new, do: Stream.new()
@@ -72,13 +73,52 @@ defmodule SymphonyElixir.Agent.Claude do
 
     @spec wrap_command(String.t(), Path.t()) :: String.t()
     def wrap_command(command, path) do
-      cases = Enum.map_join(@blocked, " ", fn {code, section} -> "blocked:#{section}) exit #{code};;" end)
+      {check, cases} = outcome_check(path)
 
       "{ #{command}; symphony_claude_status=$?; " <>
         "case \"$symphony_claude_status\" in 8[0-4]) symphony_claude_status=1;; esac; " <>
-        "case \"$(cat #{CliHarness.shell_escape(path)})\" in #{cases} " <>
+        "#{check} #{cases} " <>
         "read:qa|read:bug|read:deliver) ;; *) [ \"$symphony_claude_status\" -ne 0 ] || exit #{@unread};; esac; " <>
         "exit \"$symphony_claude_status\"; }"
+    end
+
+    @spec timeout_handler(String.t() | SSH.Target.t(), Path.t() | nil) ::
+            (term(), atom() -> {:ok, Result.t()} | {:error, atom()}) | nil
+    def timeout_handler(_host, nil), do: nil
+
+    def timeout_handler(host, path) do
+      fn acc, reason ->
+        case probe_outcome(host, path) do
+          code when is_map_key(@blocked, code) -> finalize(acc, code)
+          _ -> {:error, reason}
+        end
+      end
+    end
+
+    # Check the private outcome before closing the turn port, which can trigger remote cleanup.
+    # Only the probe's exit status is used; Claude's stream cannot supply a procedure outcome.
+    defp probe_outcome(host, path) do
+      {check, cases} = outcome_check(path)
+
+      with {:ok, port} <- SSH.start_port(host, "#{check} #{cases} esac; exit 0") do
+        try do
+          receive do
+            {^port, {:exit_status, code}} -> code
+          after
+            @outcome_timeout_ms -> nil
+          end
+        after
+          CliHarness.close_port(port)
+        end
+      end
+    rescue
+      _error -> nil
+    end
+
+    defp outcome_check(path) do
+      check = "case \"$(cat #{CliHarness.shell_escape(path)} 2>/dev/null)\" in"
+      cases = Enum.map_join(@blocked, " ", fn {code, section} -> "blocked:#{section}) exit #{code};;" end)
+      {check, cases}
     end
   end
 
@@ -439,7 +479,9 @@ defmodule SymphonyElixir.Agent.Claude do
          payload = ssh_payload(workflow_snapshot, encoded_mcp_config, procedure, prompt),
          {:ok, port} <- SSH.start_port(host, command, line: @port_line_bytes),
          :ok <- SSH.write_stdin(port, payload) do
-      CliHarness.collect_port_stream(port, on_message, stream, "Claude")
+      outcome_path = if remote_procedure_path, do: ProcedureSession.outcome_path(remote_procedure_path)
+      on_timeout = RemoteProcedureStream.timeout_handler(host, outcome_path)
+      CliHarness.collect_port_stream(port, on_message, stream, "Claude", on_timeout)
     end
   rescue
     error -> {:error, {:claude_ssh_port, error}}
