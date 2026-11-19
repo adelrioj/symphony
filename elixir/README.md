@@ -1121,6 +1121,10 @@ the workflow and config to mode-0600 temporary files, unsets the adapter-declare
 before launching Claude, and trap-removes both files on exit. `claude.linear_mcp_args` is inserted
 before Symphony's required `--linear-mcp --workflow <worker-temp-WORKFLOW.md>` flags.
 
+If a Claude SSH turn with a versioned procedure times out, Symphony checks the worker's private
+outcome file before closing the connection. Only a recorded missing-procedure outcome can replace
+the timeout. Symphony blocks the issue only if its live route still requires that section.
+
 The helper mode can also be run directly when debugging MCP wiring:
 
 ```bash

@@ -288,7 +288,21 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
           else: %{issue | state: "In Review"}
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [recheck])
-      assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+
+      if unquote(transport) == :ssh do
+        LaneContext.install(put_in(new_run.settings.codex.turn_timeout_ms, 5_000))
+        File.write!(mode, "stall")
+
+        try do
+          assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+        after
+          File.rm!(mode)
+          LaneContext.install(new_run)
+        end
+      else
+        assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+      end
+
       refute_received {:codex_worker_update, _, _, %{event: :attempt_blocked}}
       assert Tracker.Memory.calls() == []
       captures = read_boundary(run_log)
@@ -364,7 +378,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
 
     File.write!(path, """
     #!/usr/bin/env python3
-    import json, os, stat, subprocess, sys
+    import json, os, stat, subprocess, sys, time
     from pathlib import Path
 
     mode_file = Path(#{Jason.encode!(Path.join(root, "fixture-mode"))})
@@ -401,6 +415,11 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
                 and stat.S_IMODE(os.stat(procedure_path).st_mode) == 0o600,
         }) + "\\n")
     print('{"type":"system","subtype":"init","session_id":"managed-fixture"}')
+    if mode == "stall":
+        sys.stdout.flush()
+        deadline = time.monotonic() + 10
+        while mode_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
     print('{"type":"result","subtype":"success","is_error":false,"result":"ok"}')
     if mode == "exit_81":
         sys.exit(81)
