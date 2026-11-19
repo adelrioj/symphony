@@ -301,7 +301,7 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     observer = Runner.observe_dispatch(ctx, owner, self(), "one", "attempt", "env-one")
     monitor = Process.monitor(observer)
     send(owner, {:observe, observer})
-    assert_receive :held
+    assert_receive :held, 5_000
     assert_receive ^update
     evidence = Jason.decode!(File.read!(ctx.input["output_path"]))
     assert evidence["model_sessions_started"] == 1
@@ -313,7 +313,7 @@ defmodule SymphonyElixir.KubernetesCandidateTest do
     refute Map.has_key?(dispatch, "ended_at")
     refute Jason.encode!(evidence) =~ "MODEL_SECRET_CANARY"
     send(owner, :release)
-    assert_receive {:DOWN, ^monitor, :process, ^observer, :normal}
+    assert_receive {:DOWN, ^monitor, :process, ^observer, :normal}, 5_000
     ended = Jason.decode!(File.read!(ctx.input["output_path"]))["dispatches"]["attempt"]
     assert ended["probe_finished_monotonic_ms"] <= ended["ended_monotonic_ms"]
   end
