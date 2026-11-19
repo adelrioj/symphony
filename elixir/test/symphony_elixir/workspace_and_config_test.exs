@@ -1438,6 +1438,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                     [{"Authorization", "bound-token"}, {"Content-Type", "application/json"}]}
   end
 
+  test "an exact procedure-route read distinguishes missing labels from an empty label set" do
+    issue = %{"id" => "bound", "state" => %{"name" => "In Review"}}
+    envelope = fn node -> %{"data" => %{"issues" => %{"nodes" => [node]}}} end
+    labeled = Map.put(issue, "labels", %{"nodes" => []})
+
+    for {body, expected} <- [
+          {envelope.(labeled), {:ok, {"In Review", []}}},
+          {envelope.(issue), {:error, :unverified_issue_route}},
+          {Map.put(envelope.(labeled), "errors", [%{"message" => "partial"}]), {:error, :unverified_issue_route}}
+        ] do
+      assert Client.fetch_issue_route("bound",
+               tracker_settings: %{api_key: "fixture-token", endpoint: "https://linear.example.test/graphql"},
+               request_fun: fn %{"variables" => %{filter: %{id: %{in: ["bound"]}}}}, _headers ->
+                 {:ok, %{status: 200, body: body}}
+               end
+             ) == expected
+    end
+  end
+
   test "orchestrator sorts dispatch by priority then oldest created_at" do
     issue_same_priority_older = %Issue{
       id: "issue-old-high",

@@ -4,6 +4,7 @@ defmodule SymphonyElixir.MCP.LinearServer do
   """
 
   alias SymphonyElixir.Codex.DynamicTool
+  alias SymphonyElixir.MCP.ProcedureSession
 
   @protocol_version "2025-06-18"
   @approval_tool %{
@@ -14,7 +15,13 @@ defmodule SymphonyElixir.MCP.LinearServer do
 
   @spec tool_specs() :: [map()]
   def tool_specs do
-    dynamic_tool_binding().tool_specs ++ [@approval_tool]
+    procedures =
+      case ProcedureSession.current() do
+        {:ok, _session} -> [ProcedureSession.tool_spec()]
+        {:error, _reason} -> []
+      end
+
+    dynamic_tool_binding().tool_specs ++ [@approval_tool | procedures]
   end
 
   @spec handle_request(map()) :: map() | nil
@@ -51,6 +58,23 @@ defmodule SymphonyElixir.MCP.LinearServer do
   def handle_request(%{
         "method" => "tools/call",
         "id" => id,
+        "params" => %{"name" => "read_procedure"} = params
+      }) do
+    case ProcedureSession.current() do
+      {:ok, session} ->
+        case ProcedureSession.read(session, params["arguments"]) do
+          {:ok, text} -> text_result(id, text, false)
+          {:error, text} -> text_result(id, text, true)
+        end
+
+      {:error, _reason} ->
+        error(id, -32_601, "Unknown tool: read_procedure")
+    end
+  end
+
+  def handle_request(%{
+        "method" => "tools/call",
+        "id" => id,
         "params" => %{"name" => name} = params
       }) do
     binding = dynamic_tool_binding()
@@ -58,12 +82,7 @@ defmodule SymphonyElixir.MCP.LinearServer do
     if Enum.any?(binding.tool_specs, &(&1["name"] == name)) do
       tool_result = DynamicTool.execute(name, Map.get(params, "arguments", %{}), binding)
 
-      result(id, %{
-        "isError" => not Map.get(tool_result, "success", false),
-        "content" => [
-          %{"type" => "text", "text" => Map.get(tool_result, "output", "")}
-        ]
-      })
+      text_result(id, Map.get(tool_result, "output", ""), not Map.get(tool_result, "success", false))
     else
       error(id, -32_601, "Unknown tool: #{name}")
     end
@@ -85,6 +104,10 @@ defmodule SymphonyElixir.MCP.LinearServer do
       binding ->
         binding
     end
+  end
+
+  defp text_result(id, text, error?) do
+    result(id, %{"isError" => error?, "content" => [%{"type" => "text", "text" => text}]})
   end
 
   defp result(id, payload), do: %{"jsonrpc" => "2.0", "id" => id, "result" => payload}

@@ -67,6 +67,42 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     end
   end
 
+  test "managed API versions accept and return procedures independently of runtime configuration" do
+    slug = "bonbons-delivery"
+    route = "/api/v1/lanes/#{slug}"
+    attrs = attrs(slug)
+    sections = %{"qa" => "Review", "bug" => "Assess", "deliver" => "Build", "error-reporting" => "Report"}
+
+    for invalid <- [nil, %{}, Map.delete(sections, "error-reporting")] do
+      rejected = post(api_conn(), "/api/v1/lanes", Jason.encode!(Map.put(attrs, :procedures, invalid)))
+      assert %{"errors" => [%{"path" => "procedures"} | _]} = json_response(rejected, 422)
+      assert Lanes.get_by_slug(slug) == nil
+    end
+
+    created = post(api_conn(), "/api/v1/lanes", Jason.encode!(Map.put(attrs, :procedures, sections)))
+    assert %{"procedures" => ^sections, "current_version_id" => first} = json_response(created, 201)
+
+    updated_sections = %{sections | "qa" => "Review again"}
+    updated = put(api_conn(), route, Jason.encode!(%{procedures: updated_sections, prompt: "New Common"}))
+    assert %{"procedures" => ^updated_sections, "current_version_id" => second} = json_response(updated, 200)
+    assert first != second
+
+    rejected = put(api_conn(), route, Jason.encode!(%{procedures: %{}}))
+    assert %{"errors" => [%{"path" => "procedures"} | _]} = json_response(rejected, 422)
+
+    embedded = %{config: Map.put(@config, "procedures", sections)}
+    rejected = put(api_conn(), route, Jason.encode!(embedded))
+    assert %{"errors" => [%{"path" => "config.procedures"} | _]} = json_response(rejected, 422)
+
+    assert %{"procedures" => ^updated_sections, "current_version_id" => ^second, "config" => config} =
+             Enum.find(json_response(get(api_conn(), "/api/v1/lanes"), 200)["lanes"], &(&1["slug"] == slug))
+
+    refute Map.has_key?(config, "procedures")
+
+    assert {:ok, %{config: %{"procedures" => ^updated_sections}, prompt: "New Common"}} =
+             Workflow.parse(response(get(api_conn(), route <> "/export"), 200))
+  end
+
   test "lane slugs are immutable and route identity cannot be replaced" do
     assert %{"slug" => "before-name"} =
              json_response(post(api_conn(), "/api/v1/lanes", Jason.encode!(attrs("before-name"))), 201)

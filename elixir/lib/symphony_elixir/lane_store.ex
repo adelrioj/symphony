@@ -31,6 +31,7 @@ defmodule SymphonyElixir.LaneStore do
       :config_identity,
       :settings,
       :workflow,
+      :procedures,
       :error,
       :generation,
       warnings: [],
@@ -736,6 +737,7 @@ defmodule SymphonyElixir.LaneStore do
            | config_identity: config_identity(base, validated),
              settings: validated.settings,
              workflow: validated.workflow,
+             procedures: validated.procedures,
              warnings: validated.warnings
          }}
 

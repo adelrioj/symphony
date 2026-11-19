@@ -77,6 +77,14 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  @query_issue_route """
+  query SymphonyLinearIssueRoute($filter: IssueFilter!) {
+    issues(filter: $filter, first: 1) {
+      nodes { id state { name } labels { nodes { name } } }
+    }
+  }
+  """
+
   # By-ID reads omit archived issues. This read asks for them explicitly and returns only an
   # affirmative `archivedAt`. A trashed issue also carries `archivedAt` but can still be restored, so it
   # is not reported; neither is a missing or permanently deleted issue.
@@ -120,6 +128,35 @@ defmodule SymphonyElixir.Linear.Client do
         end
     end
   end
+
+  @doc false
+  @spec fetch_issue_route(String.t(), keyword()) ::
+          {:ok, {String.t(), [String.t()]} | nil} | {:error, term()}
+  def fetch_issue_route(id, opts \\ []) when is_binary(id) do
+    with {:ok, body} <- graphql(@query_issue_route, %{filter: %{id: %{in: [id]}}}, opts),
+         true <- is_map(body) and Map.get(body, "errors", []) == [],
+         %{"data" => %{"issues" => %{"nodes" => nodes}}} <- body do
+      case nodes do
+        [] ->
+          {:ok, nil}
+
+        [%{"id" => ^id, "state" => %{"name" => state}, "labels" => %{"nodes" => labels}}] when is_binary(state) ->
+          case route_labels(labels, []) do
+            {:ok, names} -> {:ok, {state, names}}
+            :invalid -> {:error, :unverified_issue_route}
+          end
+
+        _ ->
+          {:error, :unverified_issue_route}
+      end
+    else
+      _ -> {:error, :unverified_issue_route}
+    end
+  end
+
+  defp route_labels([], names), do: {:ok, names}
+  defp route_labels([%{"name" => name} | labels], names) when is_binary(name), do: route_labels(labels, [name | names])
+  defp route_labels(_labels, _names), do: :invalid
 
   @spec fetch_archived_issue_ids([String.t()]) :: {:ok, [String.t()]} | {:error, term()}
   def fetch_archived_issue_ids(issue_ids) when is_list(issue_ids) do

@@ -291,8 +291,8 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
         <fieldset class="form-section" id="workflow">
           <legend>Workflow</legend>
-          <label for="lane-prompt">Prompt</label><textarea id="lane-prompt" name="lane[prompt]" rows="8" phx-debounce="300">{@params["prompt"]}</textarea>
-          <div :for={{key, label} <- procedure_fields(@params["slug"])}>
+          <label for="lane-prompt">{if Lanes.procedure_fields(@params["slug"]) == [], do: "Prompt", else: "Common"}</label><textarea id="lane-prompt" name="lane[prompt]" rows="8" phx-debounce="300">{@params["prompt"]}</textarea>
+          <div :for={{key, label} <- Lanes.procedure_fields(@params["slug"])}>
             <label for={"lane-procedure-#{key}"}>{label}</label>
             <textarea id={"lane-procedure-#{key}"} name={"lane[procedure_#{key}]"} rows="8">{@params["procedure_#{key}"]}</textarea>
           </div>
@@ -452,10 +452,12 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
       |> Ecto.Changeset.traverse_errors(&changeset_message/1)
       |> Enum.flat_map(&changeset_field_errors/1)
 
+    errors = lane_errors ++ procedure_errors(params)
+
     errors =
       case config_result do
-        {:ok, config} -> lane_errors ++ validate_against_profile(lane, params, config)
-        {:error, errors} -> lane_errors ++ errors
+        {:ok, config} -> errors ++ validate_against_profile(lane, params, config)
+        {:error, config_errors} -> errors ++ config_errors
       end
 
     warnings =
@@ -491,6 +493,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     )
   end
 
+  defp errors_for_resolution(:ok), do: []
   defp errors_for_resolution({:ok, _}), do: []
   defp errors_for_resolution({:error, errors}), do: errors
 
@@ -508,22 +511,17 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     end
   end
 
-  defp procedure_fields("bonbons-delivery"),
-    do: procedure_fields("chorus-delivery") ++ [{"error-reporting", "Error Reporting"}]
+  defp procedure_params(params) do
+    Map.new(Lanes.procedure_keys(params["slug"]), fn key -> {key, Map.fetch!(params, "procedure_#{key}")} end)
+  end
 
-  defp procedure_fields("chorus-delivery"), do: [{"qa", "QA"}, {"bug", "Bug"}, {"deliver", "Deliver"}]
-  defp procedure_fields(_slug), do: []
+  defp procedure_errors(params),
+    do: errors_for_resolution(Lanes.validate_procedures(params["slug"], procedure_params(params)))
 
   defp put_procedures(params) do
-    {params, procedures} =
-      Enum.reduce(procedure_fields(params["slug"]), {params, %{}}, fn {key, _label}, {attrs, sections} ->
-        {text, attrs} = Map.pop(attrs, "procedure_#{key}", "")
-        {attrs, if(text == "", do: sections, else: Map.put(sections, key, text))}
-      end)
-
-    if map_size(procedures) == 0 and procedure_fields(params["slug"]) == [],
-      do: params,
-      else: Map.put(params, "procedures", procedures)
+    procedures = procedure_params(params)
+    attrs = Map.drop(params, Enum.map(Lanes.procedure_keys("bonbons-delivery"), &"procedure_#{&1}"))
+    if map_size(procedures) == 0, do: attrs, else: Map.put(attrs, "procedures", procedures)
   end
 
   defp config_from_params(params, original_config, original_params) do
@@ -666,7 +664,7 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
     procedures = (version && version.procedures) || %{}
 
     params =
-      Enum.reduce(procedure_fields(lane.slug), params, fn {key, _label}, attrs ->
+      Enum.reduce(Lanes.procedure_keys("bonbons-delivery"), params, fn key, attrs ->
         Map.put(attrs, "procedure_#{key}", Map.get(procedures, key, ""))
       end)
 
