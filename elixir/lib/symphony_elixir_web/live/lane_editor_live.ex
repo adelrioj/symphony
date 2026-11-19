@@ -292,6 +292,10 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
         <fieldset class="form-section" id="workflow">
           <legend>Workflow</legend>
           <label for="lane-prompt">Prompt</label><textarea id="lane-prompt" name="lane[prompt]" rows="8" phx-debounce="300">{@params["prompt"]}</textarea>
+          <div :for={{key, label} <- procedure_fields(@params["slug"])}>
+            <label for={"lane-procedure-#{key}"}>{label}</label>
+            <textarea id={"lane-procedure-#{key}"} name={"lane[procedure_#{key}]"} rows="8">{@params["procedure_#{key}"]}</textarea>
+          </div>
           <label for="agent-backend">Agent backend</label><select id="agent-backend" name="lane[agent_backend]"><option value="codex" selected={@params["agent_backend"] == "codex"}>Codex</option><option value="claude" selected={@params["agent_backend"] == "claude"}>Claude</option><option value="omp" selected={@params["agent_backend"] == "omp"}>omp</option><option value="pi" selected={@params["agent_backend"] == "pi"}>pi</option></select>
           <label for="agent-backend-by-state">Backend overrides by state (JSON)</label><textarea id="agent-backend-by-state" name="lane[agent_backend_by_state_json]" rows="3" class="mono">{@params["agent_backend_by_state_json"]}</textarea>
           <label for="agent-blocked-state">Blocked state</label><input id="agent-blocked-state" type="text" name="lane[agent_blocked_state]" value={@params["agent_blocked_state"]} />
@@ -499,8 +503,27 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
          "execution_profile_id" => profile_id,
          "workspace_subdir" => workspace_subdir(params)
        })
+       |> put_procedures()
        |> Map.drop(["_submitted_fields", "enabled" | config_param_keys()])}
     end
+  end
+
+  defp procedure_fields("bonbons-delivery"),
+    do: procedure_fields("chorus-delivery") ++ [{"error-reporting", "Error Reporting"}]
+
+  defp procedure_fields("chorus-delivery"), do: [{"qa", "QA"}, {"bug", "Bug"}, {"deliver", "Deliver"}]
+  defp procedure_fields(_slug), do: []
+
+  defp put_procedures(params) do
+    {params, procedures} =
+      Enum.reduce(procedure_fields(params["slug"]), {params, %{}}, fn {key, _label}, {attrs, sections} ->
+        {text, attrs} = Map.pop(attrs, "procedure_#{key}", "")
+        {attrs, if(text == "", do: sections, else: Map.put(sections, key, text))}
+      end)
+
+    if map_size(procedures) == 0 and procedure_fields(params["slug"]) == [],
+      do: params,
+      else: Map.put(params, "procedures", procedures)
   end
 
   defp config_from_params(params, original_config, original_params) do
@@ -639,6 +662,13 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
       "note" => "",
       "advanced_json" => config |> advanced_config() |> ConfigurationFields.safe_json()
     }
+
+    procedures = (version && version.procedures) || %{}
+
+    params =
+      Enum.reduce(procedure_fields(lane.slug), params, fn {key, _label}, attrs ->
+        Map.put(attrs, "procedure_#{key}", Map.get(procedures, key, ""))
+      end)
 
     # Memory is the new-lane template choice, not a default for a missing required tracker kind.
     display_defaults = put_in(Schema.lane_defaults(), ["tracker", "kind"], nil)

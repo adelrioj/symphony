@@ -355,7 +355,7 @@ defmodule SymphonyElixir.Lanes do
                })
              )
            ),
-         {:ok, lane} <- add_version(lane, Workflow.encode_config(config), prompt, attrs["note"]) do
+         {:ok, lane} <- add_version(lane, Workflow.encode_config(config), prompt, attrs["procedures"] || %{}, attrs["note"]) do
       _ = validated
       {:ok, lane}
     end
@@ -374,9 +374,10 @@ defmodule SymphonyElixir.Lanes do
 
     config = Map.get(attrs, "config", previous_config(current))
     prompt = Map.get(attrs, "prompt", (current && current.prompt) || "")
+    procedures = Map.get(attrs, "procedures", (current && current.procedures) || %{})
     profile_id = Map.get(attrs, "execution_profile_id", lane.execution_profile_id)
     subdir = Map.get(attrs, "workspace_subdir", lane.workspace_subdir)
-    new_version? = Map.has_key?(attrs, "config") or Map.has_key?(attrs, "prompt")
+    new_version? = Enum.any?(~w(config prompt procedures), &Map.has_key?(attrs, &1))
     validation = update_validation(current, new_version?, attrs, lane.enabled)
 
     with {:ok, profile} <- fetch_profile(profile_id),
@@ -393,7 +394,7 @@ defmodule SymphonyElixir.Lanes do
            ),
          {:ok, updated} <-
            Repo.update(Lane.changeset(lane, Map.take(Map.put(attrs, "execution_profile_id", profile_id), @lane_fields))),
-         {:ok, updated} <- maybe_add_version(updated, config, prompt, attrs["note"], new_version?) do
+         {:ok, updated} <- maybe_add_version(updated, config, prompt, procedures, attrs["note"], new_version?) do
       repair_profile(updated, profile)
     end
   end
@@ -419,10 +420,10 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  defp maybe_add_version(lane, config, prompt, note, true),
-    do: add_version(lane, Workflow.encode_config(config), prompt, note)
+  defp maybe_add_version(lane, config, prompt, procedures, note, true),
+    do: add_version(lane, Workflow.encode_config(config), prompt, procedures, note)
 
-  defp maybe_add_version(lane, _config, _prompt, _note, false), do: {:ok, lane}
+  defp maybe_add_version(lane, _config, _prompt, _procedures, _note, false), do: {:ok, lane}
 
   defp repair_profile(lane, %Profile{repair_error: nil}), do: {:ok, lane}
 
@@ -802,12 +803,13 @@ defmodule SymphonyElixir.Lanes do
     if errors == [], do: :ok, else: {:error, errors}
   end
 
-  defp add_version(lane, front_matter, prompt, note) do
+  defp add_version(lane, front_matter, prompt, procedures, note) do
     with {:ok, version} <-
            Repo.insert(
              LaneVersion.changeset(%LaneVersion{lane_id: lane.id}, %{
                front_matter: front_matter,
                prompt: prompt,
+               procedures: procedures,
                note: note
              })
            ) do
@@ -838,6 +840,16 @@ defmodule SymphonyElixir.Lanes do
 
   defp field_type_errors({"config", value}) when not is_map(value),
     do: [%{path: "config", message: "must be an object"}]
+
+  defp field_type_errors({"procedures", value}) do
+    if is_map(value) and Enum.all?(value, fn {key, text} ->
+         key in ~w(qa bug deliver error-reporting) and is_binary(text) and String.trim(text) != ""
+       end) do
+      []
+    else
+      [%{path: "procedures", message: "must contain named, nonblank procedure sections"}]
+    end
+  end
 
   defp field_type_errors({"execution_profile_id", value}) when not is_integer(value),
     do: [%{path: "execution_profile_id", message: "must be an integer"}]

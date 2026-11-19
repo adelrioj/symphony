@@ -200,6 +200,20 @@ defmodule SymphonyElixir.LanesTest do
     assert {:error, [%{path: "version"}]} = Lanes.activate_version(first, other.current_version_id)
   end
 
+  test "saving and restoring a prompt keeps all of its sections in one version" do
+    {:ok, lane} = create_lane(%{slug: "chorus-delivery", front_matter: @front_matter})
+    sections = %{"qa" => "Review the change", "bug" => "Assess the defect", "deliver" => "Build the feature"}
+
+    assert {:ok, saved} = Lanes.update(lane, %{prompt: "First common prompt", procedures: sections})
+    assert length(Lanes.versions(saved)) == 2
+
+    assert {:ok, changed} =
+             Lanes.update(saved, %{prompt: "Second common prompt", procedures: %{sections | "qa" => "Review again"}})
+
+    assert {:ok, restored} = Lanes.activate_version(changed, saved.current_version_id)
+    assert %{prompt: "First common prompt", procedures: ^sections} = Lanes.current_version(restored)
+  end
+
   test "SQLite ID bounds reject before mutation and preserve the published runtime" do
     {:ok, lane} = create_lane(%{slug: "id-boundary", front_matter: @front_matter, prompt: "unchanged"})
     {:ok, published} = LaneStore.lookup(lane.id)

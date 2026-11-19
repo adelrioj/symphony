@@ -103,7 +103,15 @@ defmodule SymphonyElixirWeb.LaneVersionsLive do
                   <% else %>
                     <button type="button" class="subtle-button" phx-click="activate" phx-value-id={row.version.id}>Make current</button>
                   <% end %>
-                  <details class="version-inspection"><summary>Inspect</summary><p :if={row.invalid?} class="field-error">Invalid historical front matter is retained in storage but hidden because its credentials cannot be safely redacted. Repair by saving a replacement version.</p><pre class="mono">{row.content}</pre></details>
+                  <details class="version-inspection">
+                    <summary>Inspect</summary>
+                    <p :if={row.invalid?} class="field-error">Invalid historical front matter is retained in storage but hidden because its credentials cannot be safely redacted. Repair by saving a replacement version.</p>
+                    <pre class="mono">{row.content}</pre>
+                    <section :for={{key, text} <- Enum.sort(row.version.procedures)}>
+                      <h3>{key}</h3>
+                      <pre class="mono">{text}</pre>
+                    </section>
+                  </details>
                 </td>
               </tr>
             </tbody>

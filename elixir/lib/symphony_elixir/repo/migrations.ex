@@ -262,3 +262,14 @@ defmodule SymphonyElixir.Repo.Migrations.AddRunIssueUrl do
     end
   end
 end
+
+defmodule SymphonyElixir.Repo.Migrations.AddLaneProcedures do
+  @moduledoc false
+  use Ecto.Migration
+
+  def change do
+    alter table(:lane_versions) do
+      add(:procedures, :map, null: false, default: %{})
+    end
+  end
+end
