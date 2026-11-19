@@ -82,7 +82,7 @@ defmodule SymphonyElixirWeb.LanesApiTest do
       assert Lanes.get_by_slug(slug) == nil
     end
 
-    for agent <- [%{"backend" => "omp"}, %{}] do
+    for agent <- [%{"backend" => "omp"}, %{"backend" => "pi"}] do
       invalid = Map.merge(attrs, %{config: Map.put(@config, "agent", agent), procedures: sections})
       rejected = post(api_conn(), "/api/v1/lanes", Jason.encode!(invalid))
       assert %{"errors" => [%{"path" => "agent.backend"}]} = json_response(rejected, 422)
@@ -93,7 +93,7 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     created = post(api_conn(), "/api/v1/lanes", Jason.encode!(Map.put(attrs, :procedures, sections)))
     assert %{"procedures" => ^sections, "current_version_id" => first} = json_response(created, 201)
 
-    invalid = put_in(@managed_config, ["agent", "backend_by_state"], %{"In Review" => "codex"})
+    invalid = put_in(@managed_config, ["agent", "backend_by_state"], %{"In Review" => "omp"})
     rejected = put(api_conn(), route, Jason.encode!(%{config: invalid}))
     assert %{"errors" => [%{"path" => "agent.backend_by_state.In Review"}]} = json_response(rejected, 422)
     assert Lanes.get_by_slug(slug).current_version_id == first

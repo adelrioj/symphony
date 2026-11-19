@@ -86,6 +86,9 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
+  # nil is the engine default (Codex); both backends serve the run-scoped read_procedure tool.
+  @managed_backends [nil, "claude", "codex"]
+
   @doc false
   @spec validate_managed_backend(term(), map()) :: :ok | {:error, [error()]}
   def validate_managed_backend(slug, config) do
@@ -102,23 +105,24 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  defp validate_backend_config(nil), do: {:error, [backend_error("agent.backend")]}
+  defp validate_backend_config(nil), do: :ok
 
   defp validate_backend_config(_agent), do: {:error, [%{path: "agent", message: "must be an object"}]}
 
   defp backend_errors(agent, overrides) do
     errors =
-      for {state, backend} <- overrides, backend not in [nil, "claude"] do
+      for {state, backend} <- overrides, backend not in @managed_backends do
         backend_error("agent.backend_by_state.#{state}")
       end
 
     # The engine defaults to Codex when the lane does not set a backend.
     default = Map.get(agent, "backend", Map.get(agent, :backend))
-    errors = if default == "claude", do: errors, else: [backend_error("agent.backend") | errors]
+    errors = if default in @managed_backends, do: errors, else: [backend_error("agent.backend") | errors]
     if errors == [], do: :ok, else: {:error, errors}
   end
 
-  defp backend_error(path), do: %{path: path, message: "managed lane procedures require Claude (claude)"}
+  defp backend_error(path),
+    do: %{path: path, message: "managed lane procedures require Claude (claude) or Codex (codex)"}
 
   defp valid_procedure_map?(procedures) when is_map(procedures) and not is_struct(procedures) do
     Enum.all?(procedures, fn {key, text} ->

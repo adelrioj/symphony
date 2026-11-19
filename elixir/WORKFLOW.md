@@ -158,7 +158,7 @@ agent:
   max_concurrent_agents: 10
   max_turns: 20
   max_turn_exhaustions: 3
-  # Managed delivery lanes (bonbons-delivery and chorus-delivery) require claude here and in every override.
+  # Managed delivery lanes (bonbons-delivery and chorus-delivery) accept claude or codex here and in every override.
   backend: codex
   backend_by_state:
     implemented: claude

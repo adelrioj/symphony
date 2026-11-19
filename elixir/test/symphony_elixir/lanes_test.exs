@@ -248,7 +248,7 @@ defmodule SymphonyElixir.LanesTest do
       assert %{prompt: "Common prompt", procedures: ^sections} = Lanes.current_version(saved)
 
       {:ok, %{config: config}} = Workflow.parse(exported)
-      config = put_in(config, ["agent", "backend_by_state", "In Review"], "codex")
+      config = put_in(config, ["agent", "backend_by_state", "In Review"], "omp")
       File.write!(artifact, Workflow.render(Workflow.encode_config(config), "Common prompt"))
 
       assert {:error, [%{path: "agent.backend_by_state.In Review"}]} = Lanes.import_file(artifact, slug: slug)

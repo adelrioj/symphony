@@ -260,10 +260,23 @@ Export and re-import preserve procedure text byte for byte, including Unicode li
 Keep these private artifacts out of source repositories and logs. In the lane API, send the same
 map as a top-level `procedures` property alongside `config` and `prompt`, not inside `config`.
 The editor saves all sections together as one version, and history restores them together.
-Set `agent.backend` to `claude` for both managed lanes. Each `agent.backend_by_state` override
-must also use `claude`, or you must remove it. The editor, API, import, and version activation
-reject incompatible settings. Instruction migration checks the saved backend settings of each
-version before it writes any procedure bundles.
+Managed lanes support the `claude` and `codex` backends. `agent.backend` can be either one, or you
+can leave it unset to use the Codex default. Each `agent.backend_by_state` override must also use
+`claude` or `codex`. The editor, API, import, and version activation reject other backends.
+Instruction migration checks the saved backend settings of each version before it writes any
+procedure bundles.
+
+Both backends start each attempt with only the Common prompt. They expose one `read_procedure`
+tool, and its description never includes procedure text. The tool returns sections from the lane
+version saved at dispatch, so continuation turns keep that version. Both backends use the same
+authorization rules for missing sections, stale blockers, and Error Reporting. Claude runs the tool
+in its MCP server on the worker. Codex runs it in the controller through its dynamic-tool
+callbacks. With Codex, the procedure bundle and read outcome stay on the controller, including
+for SSH workers. A Codex thread keeps the procedure it read for later continuation turns.
+
+To roll a managed lane back to Codex, save a version with `agent.backend: codex`. You can also
+restore an earlier Codex version from history. The change applies to new attempts. Running
+attempts keep their backend.
 
 Bonbons lane versions store `procedure_policy_version` in the YAML configuration.
 Revision `1` lets a run read Error Reporting only after it reads the Bug or Deliver

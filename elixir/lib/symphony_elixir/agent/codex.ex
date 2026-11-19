@@ -9,19 +9,79 @@ defmodule SymphonyElixir.Agent.Codex do
 
   @behaviour SymphonyElixir.Agent
 
-  alias SymphonyElixir.Agent.Result
-  alias SymphonyElixir.Codex.AppServer
+  alias SymphonyElixir.Agent.{CliHarness, Result}
+  alias SymphonyElixir.Codex.{AppServer, DynamicTool}
+  alias SymphonyElixir.MCP.ProcedureSession
+
+  @procedure_tool "read_procedure"
 
   @impl true
   @spec start_session(Path.t(), keyword()) :: {:ok, SymphonyElixir.Agent.session()} | {:error, term()}
   def start_session(workspace, opts) do
-    AppServer.start_session(workspace, Keyword.take(opts, [:execution_context]))
+    app_opts = Keyword.take(opts, [:execution_context])
+
+    case ProcedureSession.payload(Keyword.get(opts, :issue_id)) do
+      {:ok, nil, _preflight?} -> AppServer.start_session(workspace, app_opts)
+      {:ok, payload, preflight?} -> start_procedure_session(workspace, app_opts, payload, preflight?)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # Codex calls dynamic tools back over the app-server's stdio, so the pinned bundle and its
+  # outcome stay in a private controller directory even when the app-server runs over SSH.
+  # One Codex thread serves every continuation turn, so the outcome is reset once per session.
+  defp start_procedure_session(workspace, app_opts, payload, preflight?) do
+    with {:ok, dir, monitor} <- CliHarness.create_session_dir("symphony-codex-procedures", workspace) do
+      path = Path.join(dir, "procedures.json")
+      binding = DynamicTool.bind()
+      binding = %{binding | tool_specs: binding.tool_specs ++ [ProcedureSession.tool_spec()]}
+
+      with :ok <- CliHarness.write_private_file(path, payload),
+           :ok <- ProcedureSession.reset_outcome(path),
+           {:ok, session} <- AppServer.start_session(workspace, [dynamic_tool_binding: binding] ++ app_opts) do
+        {:ok,
+         Map.merge(session, %{
+           procedure_path: path,
+           procedure_preflight?: preflight?,
+           procedure_dir: dir,
+           cleanup_monitor: monitor
+         })}
+      else
+        error ->
+          CliHarness.remove_session_dir(dir, monitor)
+          error
+      end
+    end
   end
 
   @impl true
   @spec run_turn(SymphonyElixir.Agent.session(), String.t(), map(), keyword()) ::
           {:ok, Result.t()} | {:error, term()}
-  def run_turn(session, prompt, issue, opts) do
+  def run_turn(%{procedure_path: path} = session, prompt, issue, opts) when is_binary(path) do
+    case preflight(session) do
+      :ok ->
+        fallback =
+          Keyword.get(opts, :tool_executor, &DynamicTool.execute(&1, &2, session.dynamic_tool_binding, issue: issue))
+
+        executor = fn
+          @procedure_tool, arguments -> read_procedure(path, arguments)
+          tool, arguments -> fallback.(tool, arguments)
+        end
+
+        result = run_app_server_turn(session, prompt, issue, Keyword.put(opts, :tool_executor, executor))
+        ProcedureSession.finish_local_turn(path, result)
+
+      {:blocked, detail} ->
+        ProcedureSession.blocked_result(detail)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  def run_turn(session, prompt, issue, opts), do: run_app_server_turn(session, prompt, issue, opts)
+
+  defp run_app_server_turn(session, prompt, issue, opts) do
     run_opts = Keyword.take(opts, [:on_message, :tool_executor])
 
     case AppServer.run_turn(session, prompt, issue, run_opts) do
@@ -30,10 +90,29 @@ defmodule SymphonyElixir.Agent.Codex do
     end
   end
 
+  defp preflight(%{procedure_preflight?: true, procedure_path: path}) do
+    with {:ok, procedure} <- ProcedureSession.load(path), do: ProcedureSession.preflight(procedure)
+  end
+
+  defp preflight(_session), do: :ok
+
+  defp read_procedure(path, arguments) do
+    case with({:ok, procedure} <- ProcedureSession.load(path), do: ProcedureSession.read(procedure, arguments)) do
+      {:ok, text} -> %{"success" => true, "output" => text}
+      {:error, text} when is_binary(text) -> %{"success" => false, "output" => text}
+      {:error, _reason} -> %{"success" => false, "output" => "This run's procedure context is unavailable."}
+    end
+  end
+
   @impl true
   @spec stop_session(SymphonyElixir.Agent.session()) :: :ok
   def stop_session(session) do
     AppServer.stop_session(session)
+
+    case session do
+      %{procedure_dir: dir} -> CliHarness.remove_session_dir(dir, session[:cleanup_monitor])
+      _ -> :ok
+    end
   end
 
   @doc false

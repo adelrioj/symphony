@@ -203,7 +203,7 @@ defmodule SymphonyElixirWeb.LaneEditorLiveTest do
 
       form_fields = Map.merge(attrs, Map.new(sections, fn {key, text} -> {"procedure_#{key}", text} end))
 
-      unsupported = Map.put(form_fields, "agent_backend_by_state_json", ~s({"In Review":"codex"}))
+      unsupported = Map.put(form_fields, "agent_backend_by_state_json", ~s({"In Review":"omp"}))
       render_change(view, "validate", %{"lane" => unsupported})
       assert has_element?(view, "#lane-errors", "agent.backend_by_state.In Review")
       assert has_element?(view, "#lane-errors", "Claude")
