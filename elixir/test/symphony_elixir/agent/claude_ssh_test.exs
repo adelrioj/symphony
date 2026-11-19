@@ -183,6 +183,7 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
             active_states: ["Todo", "In Progress", "In Review"]
           workspace:
             root: #{Jason.encode!(Path.join(root, "workspaces"))}
+          agent: {backend: claude}
           codex: {turn_timeout_ms: 15000, stall_timeout_ms: 15000}
           claude:
             command: #{Jason.encode!(claude)}

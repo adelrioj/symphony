@@ -86,6 +86,40 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
+  @doc false
+  @spec validate_managed_backend(term(), map()) :: :ok | {:error, [error()]}
+  def validate_managed_backend(slug, config) do
+    if procedure_keys(slug) == [],
+      do: :ok,
+      else: validate_backend_config(Map.get(config, "agent", Map.get(config, :agent)))
+  end
+
+  defp validate_backend_config(agent) when is_map(agent) do
+    case Map.get(agent, "backend_by_state", Map.get(agent, :backend_by_state)) do
+      nil -> backend_errors(agent, %{})
+      overrides when is_map(overrides) -> backend_errors(agent, overrides)
+      _ -> {:error, [%{path: "agent.backend_by_state", message: "must be an object"}]}
+    end
+  end
+
+  defp validate_backend_config(nil), do: {:error, [backend_error("agent.backend")]}
+
+  defp validate_backend_config(_agent), do: {:error, [%{path: "agent", message: "must be an object"}]}
+
+  defp backend_errors(agent, overrides) do
+    errors =
+      for {state, backend} <- overrides, backend not in [nil, "claude"] do
+        backend_error("agent.backend_by_state.#{state}")
+      end
+
+    # The engine defaults to Codex when the lane does not set a backend.
+    default = Map.get(agent, "backend", Map.get(agent, :backend))
+    errors = if default == "claude", do: errors, else: [backend_error("agent.backend") | errors]
+    if errors == [], do: :ok, else: {:error, errors}
+  end
+
+  defp backend_error(path), do: %{path: path, message: "managed lane procedures require Claude (claude)"}
+
   defp valid_procedure_map?(procedures) when is_map(procedures) and not is_struct(procedures) do
     Enum.all?(procedures, fn {key, text} ->
       key in @bonbons_procedure_keys and is_binary(text) and String.valid?(text) and String.trim(text) != ""
@@ -410,7 +444,7 @@ defmodule SymphonyElixir.Lanes do
     with :ok <- reject_legacy_fields(attrs),
          :ok <- validate_version_content(slug, config, prompt, procedures),
          {:ok, profile} <- fetch_profile(attrs["execution_profile_id"]),
-         {:ok, validated} <- validate_candidate(profile, config, subdir, prompt, nil, check, false),
+         {:ok, validated} <- validate_candidate(profile, config, subdir, prompt, %Lane{slug: slug}, check, false),
          {:ok, lane} <-
            Repo.insert(
              Lane.changeset(
@@ -456,7 +490,7 @@ defmodule SymphonyElixir.Lanes do
              config,
              subdir,
              prompt,
-             lane.id,
+             lane,
              check,
              Map.get(attrs, "enabled", lane.enabled)
            ),
@@ -531,7 +565,7 @@ defmodule SymphonyElixir.Lanes do
          :ok <- reject_embedded_procedures(lane.slug, config),
          {:ok, profile} <- fetch_profile(lane.execution_profile_id),
          {:ok, _} <-
-           validate_candidate(profile, config, lane.workspace_subdir, version.prompt, lane.id, check, lane.enabled) do
+           validate_candidate(profile, config, lane.workspace_subdir, version.prompt, lane, check, lane.enabled) do
       lane |> Ecto.Changeset.change(current_version_id: version.id) |> Repo.update()
     end
   end
@@ -774,21 +808,22 @@ defmodule SymphonyElixir.Lanes do
     end
   end
 
-  defp validate_update(:skip, _profile, _config, _subdir, _prompt, _lane_id, _check, _enabled?), do: :ok
+  defp validate_update(:skip, _profile, _config, _subdir, _prompt, _lane, _check, _enabled?), do: :ok
 
-  defp validate_update(:missing_version, _profile, _config, _subdir, _prompt, _lane_id, _check, _enabled?),
+  defp validate_update(:missing_version, _profile, _config, _subdir, _prompt, _lane, _check, _enabled?),
     do: {:error, [%{path: "version", message: "lane has no version"}]}
 
-  defp validate_update(:validate, profile, config, subdir, prompt, lane_id, check, enabled?) do
-    with {:ok, _} <- validate_candidate(profile, config, subdir, prompt, lane_id, check, enabled?), do: :ok
+  defp validate_update(:validate, profile, config, subdir, prompt, lane, check, enabled?) do
+    with {:ok, _} <- validate_candidate(profile, config, subdir, prompt, lane, check, enabled?), do: :ok
   end
 
-  defp validate_candidate(profile, config, subdir, prompt, lane_id, check, enabled?) do
+  defp validate_candidate(profile, config, subdir, prompt, lane, check, enabled?) do
     attrs = profile_attrs(profile)
-    cached_root = cached_root(lane_id, attrs, subdir)
+    cached_root = cached_root(lane.id, attrs, subdir)
     validation = if enabled?, do: :runtime, else: :structure
 
-    with :ok <- fixed_root_workspace(attrs, subdir),
+    with :ok <- validate_managed_backend(lane.slug, config),
+         :ok <- fixed_root_workspace(attrs, subdir),
          {:ok, validated} <- Configuration.resolve(attrs, config, subdir, prompt, cached_root, validation),
          :ok <- check.(validated.settings) do
       {:ok, validated}

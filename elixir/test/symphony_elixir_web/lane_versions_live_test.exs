@@ -4,7 +4,7 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, Repo}
+  alias SymphonyElixir.{ExecutionProfiles, Lanes, LaneStore, Repo, Workflow}
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -142,7 +142,10 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
         Lanes.create(%{
           slug: slug,
           execution_profile_id: new_profile!().id,
-          config: %{"tracker" => %{"kind" => "memory", "api_key" => "literal-managed-tracker-key"}},
+          config: %{
+            "agent" => %{"backend" => "claude"},
+            "tracker" => %{"kind" => "memory", "api_key" => "literal-managed-tracker-key"}
+          },
           prompt: "Original Common",
           procedures: sections
         })
@@ -158,6 +161,16 @@ defmodule SymphonyElixirWeb.LaneVersionsLiveTest do
         for {_key, text} <- procedures, do: assert(has_element?(view, "#{row} section pre", text))
         refute has_element?(view, "#{row} textarea")
       end
+
+      old = Enum.find(Lanes.versions(first), &(&1.id == first.current_version_id))
+      {:ok, %{config: config}} = Workflow.parse_parts(old.front_matter, old.prompt)
+      invalid_config = put_in(config, ["agent", "backend_by_state"], %{"In Review" => "codex"})
+      invalid = Repo.update!(Ecto.Changeset.change(old, front_matter: Workflow.encode_config(invalid_config)))
+
+      html = view |> element("#version-#{old.id} button") |> render_click()
+      assert html =~ "agent.backend_by_state.In Review"
+      assert Lanes.get!(first.id).current_version_id == saved.current_version_id
+      Repo.update!(Ecto.Changeset.change(invalid, front_matter: old.front_matter))
 
       view |> element("#version-#{first.current_version_id} button") |> render_click()
       assert has_element?(view, "#version-#{first.current_version_id} .state-badge", "current")

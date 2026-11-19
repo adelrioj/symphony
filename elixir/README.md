@@ -259,6 +259,10 @@ nonblank `qa`, `bug`, and `deliver` sections; only `bonbons-delivery` requires `
 Keep these private artifacts out of source repositories and logs. In the lane API, send the same
 map as a top-level `procedures` property alongside `config` and `prompt`, not inside `config`.
 The editor saves all sections together as one version, and history restores them together.
+Set `agent.backend` to `claude` for both managed lanes. Each `agent.backend_by_state` override
+must also use `claude`, or you must remove it. The editor, API, import, and version activation
+reject incompatible settings. Instruction migration checks the saved backend settings of each
+version before it writes any procedure bundles.
 
 Before Symphony posts a missing-procedure comment or moves the issue to `agent.blocked_state`,
 it checks the live issue state and labels again. It skips both writes if the current route
