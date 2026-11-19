@@ -414,12 +414,11 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
             "private_outside_workspace": not os.path.realpath(procedure_path).startswith(os.getcwd() + "/")
                 and stat.S_IMODE(os.stat(procedure_path).st_mode) == 0o600,
         }) + "\\n")
-    print('{"type":"system","subtype":"init","session_id":"managed-fixture"}')
     if mode == "stall":
-        sys.stdout.flush()
         deadline = time.monotonic() + 10
         while mode_file.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
+    print('{"type":"system","subtype":"init","session_id":"managed-fixture"}')
     print('{"type":"result","subtype":"success","is_error":false,"result":"ok"}')
     if mode == "exit_81":
         sys.exit(81)
