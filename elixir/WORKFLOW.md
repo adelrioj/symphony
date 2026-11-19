@@ -4,6 +4,8 @@
 # Running configuration lives in the database; edit structured lane/profile state in the UI or
 # with /api/v1/lanes/:slug and /api/v1/execution-profiles/:id. File edits do not update a running
 # installation and there is no runtime watched-file configuration.
+# Bonbons exports include procedure_policy_version. Keep it with the versioned procedures;
+# see the managed-lane import/export contract in elixir/README.md.
 # Shared profile edits apply to future runs on every linked lane. Active attempts and cleanup keep
 # their dispatch snapshot. Profile history and infrastructure provisioning are not provided.
 # Use complete $VAR credential references; dollar-prefixed literals and multiline secrets are masked.

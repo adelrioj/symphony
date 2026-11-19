@@ -245,6 +245,13 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
         refute capture["prompt"] =~ "CURRENT_COMMON"
         assert capture["selected"] == Map.fetch!(procedures, route)
         assert capture["error_reporting_denied"]
+
+        if unquote(slug) == "bonbons-delivery" do
+          assert capture["error_reporting"] == "PINNED_ERROR_REPORTING"
+        else
+          assert capture["error_reporting"] == nil
+        end
+
         assert capture["tool_allowed"]
         assert capture["private_outside_workspace"]
         refute File.exists?(capture["procedure_path"])
@@ -396,10 +403,12 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     requests = [
         {"id": 1, "method": "tools/list"},
         {"id": 2, "method": "tools/call", "params": {"name": "read_procedure", "arguments": {"section": "error-reporting"}}},
-        {"id": 3, "method": "tools/call", "params": {"name": "read_procedure", "arguments": {"section": #{Jason.encode!(section)}}}},
     ]
-    if mode == "unread":
-        requests.pop()
+    if mode != "unread":
+        requests += [
+            {"id": 3, "method": "tools/call", "params": {"name": "read_procedure", "arguments": {"section": #{Jason.encode!(section)}}}},
+            {"id": 4, "method": "tools/call", "params": {"name": "read_procedure", "arguments": {"section": "error-reporting"}}},
+        ]
     result = subprocess.run(
         [config["command"], *config["args"]], check=True, text=True, capture_output=True,
         env=dict(os.environ, **environment), input="".join(json.dumps(m) + "\\n" for m in requests),
@@ -407,12 +416,15 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
     responses = [json.loads(line)["result"] for line in result.stdout.splitlines()]
     listed, rejected = responses[:2]
     selected = responses[2] if len(responses) > 2 else {"content": [{"text": ""}], "isError": True}
+    secondary = responses[3] if len(responses) > 3 else {"isError": True}
     allowed = sys.argv[sys.argv.index("--allowedTools") + 1].split(",")
     with open(#{Jason.encode!(run_log)}, "a") as log:
         log.write(json.dumps({
             "prompt": prompt, "mcp_list": json.dumps(listed),
             "selected": selected["content"][0]["text"], "selected_error": selected["isError"],
-            "error_reporting_denied": rejected["isError"], "procedure_path": procedure_path,
+            "error_reporting_denied": rejected["isError"],
+            "error_reporting": None if secondary["isError"] else secondary["content"][0]["text"],
+            "procedure_path": procedure_path,
             "tool_allowed": "mcp__symphony__read_procedure" in allowed,
             "private_outside_workspace": not os.path.realpath(procedure_path).startswith(os.getcwd() + "/")
                 and stat.S_IMODE(os.stat(procedure_path).st_mode) == 0o600,
