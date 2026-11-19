@@ -56,7 +56,9 @@ defmodule SymphonyElixir.Agent.Claude do
 
     @impl true
     def finalize(acc, code) when is_map_key(@blocked, code) do
-      Stream.finalize(%{acc | blocked_action: ProcedureSession.missing_text(@blocked[code])}, code)
+      section = Map.fetch!(@blocked, code)
+      {:ok, result} = Stream.finalize(%{acc | blocked_action: ProcedureSession.missing_text(section)}, code)
+      {:ok, %{result | missing_procedure: section}}
     end
 
     def finalize(acc, @unread) do
@@ -152,7 +154,7 @@ defmodule SymphonyElixir.Agent.Claude do
         case preflight_procedure(session, path) do
           :ok ->
             result = run_claude(session, workspace, prompt, gate_completion(on_message))
-            finish_procedure_turn(result, path)
+            result |> finish_procedure_turn(path) |> report_accepted_completion(on_message)
 
           {:blocked, detail} ->
             ProcedureSession.blocked_result(detail)
@@ -192,6 +194,21 @@ defmodule SymphonyElixir.Agent.Claude do
   end
 
   defp finish_procedure_turn(result, _procedure), do: result
+
+  defp report_accepted_completion({:ok, %Result{status: :done} = result} = outcome, on_message)
+       when is_function(on_message, 1) do
+    # The stream already reported final usage, including for turns the gate rejects.
+    on_message.(%{
+      event: :completed,
+      timestamp: DateTime.utc_now(),
+      session_id: result.session_id,
+      payload: "Completed: " <> String.slice(result.summary || "Claude turn", 0, 500)
+    })
+
+    outcome
+  end
+
+  defp report_accepted_completion(outcome, _on_message), do: outcome
 
   defp procedure_payload(issue_id) do
     with {:ok, %{slug: slug, version_id: version_id, procedures: procedures}} <- LaneContext.capture(),
@@ -351,7 +368,7 @@ defmodule SymphonyElixir.Agent.Claude do
   defp local_procedure_outcome(path, result) do
     case File.read(ProcedureSession.outcome_path(path)) do
       {:ok, "blocked:" <> section} when section in ~w(qa bug deliver error-reporting) ->
-        ProcedureSession.blocked_result(ProcedureSession.missing_text(section), result)
+        ProcedureSession.blocked_result({:missing_procedure, section}, result)
 
       {:ok, "read:" <> section} when section in ~w(qa bug deliver) ->
         result

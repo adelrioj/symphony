@@ -260,9 +260,10 @@ Keep these private artifacts out of source repositories and logs. In the lane AP
 map as a top-level `procedures` property alongside `config` and `prompt`, not inside `config`.
 The editor saves all sections together as one version, and history restores them together.
 
-Before Symphony returns procedure text or records a blocker, it checks the live issue against the
+Before Symphony returns procedure text or writes a blocker, it checks the live issue against the
 attempt's lane settings for required, any, and excluded labels and the Linear assignee filter.
-These checks do not replace the delivery and QA section rules.
+It skips the blocker comment and the move to `agent.blocked_state` if the current route does not
+need the missing section. For example, a missing `bug` section does not block `qa`.
 
 Minimal example:
 
@@ -1109,6 +1110,8 @@ twice, and the final invocation total reconciles live estimates. Each fresh Clau
 its usage baseline at zero while the worker and process totals continue accumulating.
 Activity shows bounded assistant text, tool names without arguments, and completion/failure
 outcomes. Live counters reset on runtime restart; durable attempt totals remain in run history.
+For managed Claude turns, run history records a completion summary only after the procedure
+gate accepts the turn. Rejected turns still count toward token usage.
 
 For SSH workers, each worker must be able to resolve `claude.command` and either
 `claude.linear_mcp_command` or `symphony` on `PATH`; worker-side tracker environment variables are

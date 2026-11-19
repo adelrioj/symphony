@@ -13,6 +13,7 @@ defmodule SymphonyElixir.LaneStore do
   @max_crashes 5
   @crash_window_ms 60_000
   @restart_delay_ms 1_000
+  @procedure_backfill_required "procedure_backfill_required"
 
   defmodule Entry do
     @moduledoc "One published lane configuration and its runtime health."
@@ -615,7 +616,6 @@ defmodule SymphonyElixir.LaneStore do
 
   defp reconcile_publication({%{previous: previous}, entry}, state) do
     state = ensure_guard(state, entry)
-    state = if entry.enabled, do: state, else: forget_monitors(state, entry.lane_id)
     apply_runtime(previous, entry, state)
   end
 
@@ -627,7 +627,6 @@ defmodule SymphonyElixir.LaneStore do
     publish(entry)
     if previous && previous.slug != entry.slug, do: ObservabilityPubSub.broadcast_lane(previous.slug)
     state = ensure_guard(state, entry)
-    state = if entry.enabled, do: state, else: forget_monitors(state, entry.lane_id)
     apply_runtime(previous, entry, state)
   end
 
@@ -738,6 +737,7 @@ defmodule SymphonyElixir.LaneStore do
              settings: validated.settings,
              workflow: validated.workflow,
              procedures: validated.procedures,
+             error: procedure_error(lane, validated.procedures),
              warnings: validated.warnings
          }}
 
@@ -745,6 +745,14 @@ defmodule SymphonyElixir.LaneStore do
         {:error, error}
     end
   end
+
+  # A legacy bundle is a dispatch blocker, not a reason to change saved enablement.
+  defp procedure_error(%{enabled: true, slug: slug}, procedures) do
+    if Lanes.procedure_keys(slug) != [] and Lanes.validate_procedures(slug, procedures) != :ok,
+      do: @procedure_backfill_required
+  end
+
+  defp procedure_error(_lane, _procedures), do: nil
 
   defp invalid_entry(lane, previous, error) do
     base = %Entry{
@@ -789,7 +797,9 @@ defmodule SymphonyElixir.LaneStore do
     end
   end
 
-  defp apply_runtime(_previous, %Entry{enabled: false} = entry, state) do
+  defp apply_runtime(_previous, %Entry{enabled: enabled, error: error} = entry, state)
+       when enabled == false or error == @procedure_backfill_required do
+    state = forget_monitors(state, entry.lane_id)
     Runs.finish_lane(entry.lane_id, "stopped")
     LaneSupervisor.stop_lane(entry.lane_id)
     update_entry(entry.lane_id, &%{&1 | runtime: %{&1.runtime | started_at: nil}})

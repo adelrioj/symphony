@@ -159,6 +159,7 @@ agent:
   backend: codex
   backend_by_state:
     implemented: claude
+  # A missing managed procedure uses this state only if the live route still needs that section.
   blocked_state: "Blocked / Needs Attention"
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server

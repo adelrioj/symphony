@@ -239,7 +239,8 @@ defmodule SymphonyElixir.LaneSupervisorTest do
     assert :ok = Supervisor.stop(runtime, :normal)
     eventually(fn -> match?({:ok, %{runtime: %{started_at: nil}}}, LaneStore.lookup(lane.id)) end)
     assert {:ok, %{runtime: %{restarts: 0, last_crash: nil}}} = LaneStore.lookup(lane.id)
-    refute LaneSupervisor.running?(lane.id)
+    # Registry cleanup and the LaneStore monitor run independently.
+    eventually(fn -> not LaneSupervisor.running?(lane.id) end)
   end
 
   test "a stale successful preflight cannot start a newer generation still awaiting preflight" do

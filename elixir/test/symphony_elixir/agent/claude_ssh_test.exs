@@ -230,6 +230,13 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       opts = [execution_context: context, backend_module: Claude]
       assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 2, issue_state_fetcher: fetch_issue])
 
+      for _ <- 1..2 do
+        assert_received {:codex_worker_update, _, _,
+                         %{event: :completed, session_id: "managed-fixture", payload: "Completed: Fixture summary"}}
+      end
+
+      refute_received {:codex_worker_update, _, _, %{event: :completed}}
+
       [first, continuation] = read_boundary(run_log)
       refute first["prompt"] =~ "Continuation guidance"
       assert continuation["prompt"] =~ "Continuation guidance"
@@ -259,23 +266,32 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       File.write!(mode, "exit_81")
 
       assert_raise RuntimeError, ~r/nonzero exit after successful result/, fn ->
-        AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+        AgentRunner.run(issue, self(), opts ++ [max_turns: 1, attempt_id: "exit-81"])
       end
+
+      assert_received {:codex_worker_update, _, "exit-81",
+                       %{event: :usage_updated, usage: %{input_tokens: 9, output_tokens: 3, cached_tokens: 2}}}
+
+      refute_received {:codex_worker_update, _, "exit-81", %{event: :completed}}
 
       File.write!(mode, "unread")
 
       assert_raise RuntimeError, ~r/procedure_not_read/, fn ->
-        AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
+        AgentRunner.run(issue, self(), opts ++ [max_turns: 1, attempt_id: "unread"])
       end
+
+      assert_received {:codex_worker_update, _, "unread",
+                       %{event: :usage_updated, usage: %{input_tokens: 9, output_tokens: 3, cached_tokens: 2}}}
+
+      refute_received {:codex_worker_update, _, "unread", %{event: :completed}}
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["human"]}])
       assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
       refute_received {:codex_worker_update, _, _, %{event: :attempt_blocked}}
       File.rm!(mode)
 
-      # A different recorded run installs the newly published snapshot rather than inheriting the
-      # old run's procedures. Simulate persisted corruption and a live route change after preflight:
-      # the MCP still binds the original issue ID and the worker parks despite a successful CLI exit.
+      # The new run sees a damaged lane version. The MCP sees the original route, but
+      # preflight and the final tracker read see a route that does not need the missing section.
       updated = Lanes.get!(lane.id)
       version = Lanes.current_version(updated)
       Repo.update!(Ecto.Changeset.change(version, procedures: Map.delete(current_procedures, route)))
@@ -291,10 +307,8 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [recheck])
       assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
-      assert_received {:codex_worker_update, _, _, %{event: :attempt_blocked, payload: detail}}
-      assert detail =~ route
-      assert detail =~ "missing or blank"
-      assert {:create_comment, issue.id} in Tracker.Memory.calls()
+      refute_received {:codex_worker_update, _, _, %{event: :attempt_blocked}}
+      assert Tracker.Memory.calls() == []
       captures = read_boundary(run_log)
       assert List.last(captures)["selected_error"]
       assert List.last(captures)["prompt"] =~ "CURRENT_COMMON"
@@ -303,6 +317,12 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
       assert_received {:codex_worker_update, _, _, %{event: :attempt_blocked, payload: detail}}
       assert detail =~ route
+
+      assert Tracker.Memory.calls() == [
+               {:create_comment, issue.id},
+               {:update_issue_state, issue.id, new_run.settings.agent.blocked_state}
+             ]
+
       assert read_boundary(run_log) == captures
 
       version = Lanes.current_version(updated)
@@ -406,7 +426,10 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
                 and stat.S_IMODE(os.stat(procedure_path).st_mode) == 0o600,
         }) + "\\n")
     print('{"type":"system","subtype":"init","session_id":"managed-fixture"}')
-    print('{"type":"result","subtype":"success","is_error":false,"result":"ok"}')
+    print(json.dumps({
+        "type": "result", "subtype": "success", "is_error": False, "result": "Fixture summary",
+        "usage": {"input_tokens": 7, "output_tokens": 3, "cache_read_input_tokens": 2},
+    }))
     if mode == "exit_81":
         sys.exit(81)
     """)
