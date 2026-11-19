@@ -82,6 +82,8 @@ defmodule SymphonyElixir.Agent.Claude do
         "exit \"$symphony_claude_status\"; }"
     end
 
+    @spec timeout_handler(String.t() | SSH.Target.t(), Path.t() | nil) ::
+            (term(), atom() -> {:ok, Result.t()} | {:error, atom()}) | nil
     def timeout_handler(_host, nil), do: nil
 
     def timeout_handler(host, path) do
