@@ -256,6 +256,7 @@ exists.
 For managed lanes, the Markdown body is the Common prompt. The private import/export artifact
 also has a top-level YAML `procedures` map. Both `bonbons-delivery` and `chorus-delivery` require
 nonblank `qa`, `bug`, and `deliver` sections; only `bonbons-delivery` requires `error-reporting`.
+Export and re-import preserve procedure text byte for byte, including Unicode line separators.
 Keep these private artifacts out of source repositories and logs. In the lane API, send the same
 map as a top-level `procedures` property alongside `config` and `prompt`, not inside `config`.
 The editor saves all sections together as one version, and history restores them together.

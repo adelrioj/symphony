@@ -111,7 +111,10 @@ defmodule SymphonyElixir.Workflow do
   end
 
   @spec encode_config(map()) :: String.t()
-  def encode_config(config) when is_map(config), do: Jason.encode!(config, pretty: true)
+  def encode_config(config) when is_map(config) do
+    # Keep Unicode line breaks inside scalars out of the front-matter newline normalization.
+    Jason.encode!(config, pretty: true, escape: :unicode_safe)
+  end
 
   @spec parse_parts(String.t(), String.t()) :: {:ok, loaded_workflow()} | {:error, term()}
   def parse_parts(front_matter, prompt) when is_binary(front_matter) and is_binary(prompt) do
