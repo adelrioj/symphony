@@ -200,18 +200,7 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
   defp live_route(id) do
     tracker = Config.settings!().tracker
 
-    result =
-      if tracker.kind == "linear" do
-        Client.fetch_issue_route(id, tracker_settings: tracker)
-      else
-        case Tracker.fetch_issues_by_ids([id]) do
-          {:ok, [issue]} -> {:ok, issue}
-          {:ok, []} -> {:ok, nil}
-          other -> other
-        end
-      end
-
-    case result do
+    case fetch_route_issue(id, tracker) do
       {:ok, %Issue{id: ^id, state: state, labels: labels} = issue} when is_binary(state) and is_list(labels) ->
         if Issue.routable?(issue, Map.take(tracker, Issue.label_policy_keys())),
           do: select(state, labels),
@@ -222,6 +211,16 @@ defmodule SymphonyElixir.MCP.ProcedureSession do
 
       _ ->
         :unverified
+    end
+  end
+
+  defp fetch_route_issue(id, %{kind: "linear"} = tracker), do: Client.fetch_issue_route(id, tracker_settings: tracker)
+
+  defp fetch_route_issue(id, _tracker) do
+    case Tracker.fetch_issues_by_ids([id]) do
+      {:ok, [issue]} -> {:ok, issue}
+      {:ok, []} -> {:ok, nil}
+      other -> other
     end
   end
 
