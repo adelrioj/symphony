@@ -13,6 +13,7 @@ defmodule SymphonyElixirWeb.LanesApiTest do
     "polling" => %{"interval_ms" => 60_000},
     "codex" => %{"command" => "/bin/false"}
   }
+  @managed_config Map.put(@config, "agent", %{"backend" => "claude"})
 
   setup do
     original = Application.get_env(:symphony_elixir, @endpoint, [])
@@ -81,8 +82,21 @@ defmodule SymphonyElixirWeb.LanesApiTest do
       assert Lanes.get_by_slug(slug) == nil
     end
 
+    for agent <- [%{"backend" => "omp"}, %{}] do
+      invalid = Map.merge(attrs, %{config: Map.put(@config, "agent", agent), procedures: sections})
+      rejected = post(api_conn(), "/api/v1/lanes", Jason.encode!(invalid))
+      assert %{"errors" => [%{"path" => "agent.backend"}]} = json_response(rejected, 422)
+      assert Lanes.get_by_slug(slug) == nil
+    end
+
+    attrs = Map.put(attrs, :config, @managed_config)
     created = post(api_conn(), "/api/v1/lanes", Jason.encode!(Map.put(attrs, :procedures, sections)))
     assert %{"procedures" => ^sections, "current_version_id" => first} = json_response(created, 201)
+
+    invalid = put_in(@managed_config, ["agent", "backend_by_state"], %{"In Review" => "codex"})
+    rejected = put(api_conn(), route, Jason.encode!(%{config: invalid}))
+    assert %{"errors" => [%{"path" => "agent.backend_by_state.In Review"}]} = json_response(rejected, 422)
+    assert Lanes.get_by_slug(slug).current_version_id == first
 
     updated_sections = %{sections | "qa" => "  Review\u2028Build\u2029Check\u0085Ship\nCafé 🚀\r\n"}
     updated = put(api_conn(), route, Jason.encode!(%{procedures: updated_sections, prompt: "New Common"}))
@@ -121,7 +135,7 @@ defmodule SymphonyElixirWeb.LanesApiTest do
             {"bonbons-delivery", Map.put(shared, "error-reporting", "Report"), true},
             {"chorus-delivery", shared, false}
           ] do
-        {:ok, lane} = Lanes.create(Map.put(attrs(slug), :procedures, procedures))
+        {:ok, lane} = Lanes.create(Map.merge(attrs(slug), %{config: @managed_config, procedures: procedures}))
         version = Lanes.current_version(lane)
         Repo.update!(Ecto.Changeset.change(version, procedures: %{}, prompt: legacy_prompt))
         Repo.update!(Ecto.Changeset.change(lane, enabled: enabled))

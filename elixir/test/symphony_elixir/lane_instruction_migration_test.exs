@@ -4,7 +4,7 @@ defmodule SymphonyElixir.LaneInstructionMigrationTest do
   import ExUnit.CaptureIO
   import Ecto.Query, only: [from: 2]
 
-  alias SymphonyElixir.{CLI, Lanes, Repo}
+  alias SymphonyElixir.{CLI, Lanes, Repo, Workflow}
   alias SymphonyElixir.Lanes.{Lane, LaneVersion}
 
   @bonbons "bonbons-delivery"
@@ -149,6 +149,21 @@ defmodule SymphonyElixir.LaneInstructionMigrationTest do
     assert database_state() == before
   end
 
+  test "rejects an incompatible historical override before updating any bundle", context do
+    [_, historical | _] = context.entries
+    version = Repo.get!(LaneVersion, historical["version_id"])
+    agent = %{"backend" => "claude", "backend_by_state" => %{"In Review" => "codex"}}
+    config = %{"tracker" => %{"kind" => "memory"}, "agent" => agent}
+    Repo.update!(Ecto.Changeset.change(version, front_matter: Workflow.encode_config(config)))
+
+    before = database_state()
+
+    assert {{:error, "lane instruction migration failed: incompatible_agent_backend"}, ""} =
+             invoke(context, context.entries)
+
+    assert database_state() == before
+  end
+
   test "rolls back the entire migration if a version update fails", context do
     [first, second | _] = context.entries
 
@@ -200,7 +215,7 @@ defmodule SymphonyElixir.LaneInstructionMigrationTest do
       Repo.query!(
         "INSERT INTO lane_versions (lane_id, front_matter, prompt, note, inserted_at) " <>
           "VALUES (?, ?, ?, 'history note', CURRENT_TIMESTAMP) RETURNING id",
-        [lane.id, "tracker:\n  kind: memory\n", prompt]
+        [lane.id, "tracker:\n  kind: memory\nagent:\n  backend: claude\n", prompt]
       ).rows
 
     Repo.get!(LaneVersion, id)

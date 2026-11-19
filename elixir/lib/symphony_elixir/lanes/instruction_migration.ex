@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Lanes.InstructionMigration do
 
   import Ecto.Query, only: [from: 2]
 
-  alias SymphonyElixir.{Lanes, Repo}
+  alias SymphonyElixir.{Lanes, Repo, Workflow}
   alias SymphonyElixir.Lanes.{Lane, LaneVersion}
 
   @managed_slugs ~w(bonbons-delivery chorus-delivery)
@@ -157,7 +157,7 @@ defmodule SymphonyElixir.Lanes.InstructionMigration do
         on: lane.id == version.lane_id,
         where: lane.slug in ^@managed_slugs,
         order_by: version.id,
-        select: {lane.slug, version.id, version.prompt}
+        select: {lane.slug, version.id, version.prompt, version.front_matter}
       )
 
     query =
@@ -179,13 +179,24 @@ defmodule SymphonyElixir.Lanes.InstructionMigration do
     end
   end
 
-  defp consume_version({lane, id, prompt}, {:ok, remaining}) do
+  defp consume_version({lane, id, prompt, front_matter}, {:ok, remaining}) do
     with {entry, rest} when not is_nil(entry) <- Map.pop(remaining, {lane, id}),
-         :ok <- validate_source(prompt, entry) do
+         :ok <- validate_source(prompt, entry),
+         :ok <- validate_backend(lane, front_matter) do
       {:cont, {:ok, rest}}
     else
       {nil, _} -> {:halt, {:error, :missing_versions}}
       {:error, _reason} = error -> {:halt, error}
+    end
+  end
+
+  defp validate_backend(lane, front_matter) do
+    with {:ok, %{config: config}} <- Workflow.parse_parts(front_matter, ""),
+         :ok <- Lanes.validate_managed_backend(lane, config) do
+      :ok
+    else
+      {:error, errors} when is_list(errors) -> {:error, :incompatible_agent_backend}
+      {:error, _reason} -> {:error, :invalid_workflow_config}
     end
   end
 
@@ -201,7 +212,7 @@ defmodule SymphonyElixir.Lanes.InstructionMigration do
   end
 
   defp update_versions(versions, entries) do
-    Enum.each(versions, fn {lane, id, _source_prompt} ->
+    Enum.each(versions, fn {lane, id, _source_prompt, _front_matter} ->
       %{prompt: prompt, procedures: procedures} = Map.fetch!(entries, {lane, id})
       query = from(version in LaneVersion, where: version.id == ^id)
 

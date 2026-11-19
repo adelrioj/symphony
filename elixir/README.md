@@ -260,6 +260,10 @@ Export and re-import preserve procedure text byte for byte, including Unicode li
 Keep these private artifacts out of source repositories and logs. In the lane API, send the same
 map as a top-level `procedures` property alongside `config` and `prompt`, not inside `config`.
 The editor saves all sections together as one version, and history restores them together.
+Set `agent.backend` to `claude` for both managed lanes. Each `agent.backend_by_state` override
+must also use `claude`, or you must remove it. The editor, API, import, and version activation
+reject incompatible settings. Instruction migration checks the saved backend settings of each
+version before it writes any procedure bundles.
 
 Bonbons lane versions store `procedure_policy_version` in the YAML configuration.
 Revision `1` lets a run read Error Reporting only after it reads the Bug or Deliver

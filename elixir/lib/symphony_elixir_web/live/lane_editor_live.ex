@@ -456,8 +456,13 @@ defmodule SymphonyElixirWeb.LaneEditorLive do
 
     errors =
       case config_result do
-        {:ok, config} -> errors ++ validate_against_profile(lane, params, config)
-        {:error, config_errors} -> errors ++ config_errors
+        {:ok, config} ->
+          errors ++
+            errors_for_resolution(Lanes.validate_managed_backend(params["slug"], config)) ++
+            validate_against_profile(lane, params, config)
+
+        {:error, config_errors} ->
+          errors ++ config_errors
       end
 
     warnings =
