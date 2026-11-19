@@ -272,9 +272,8 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       refute_received {:codex_worker_update, _, _, %{event: :attempt_blocked}}
       File.rm!(mode)
 
-      # A different recorded run installs the newly published snapshot rather than inheriting the
-      # old run's procedures. Simulate persisted corruption and a live route change after preflight:
-      # the MCP still binds the original issue ID and the worker parks despite a successful CLI exit.
+      # The new run sees a damaged lane version. The MCP sees the original route, but
+      # preflight and the final tracker read see a route that does not need the missing section.
       updated = Lanes.get!(lane.id)
       version = Lanes.current_version(updated)
       Repo.update!(Ecto.Changeset.change(version, procedures: Map.delete(current_procedures, route)))
@@ -290,10 +289,8 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [recheck])
       assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
-      assert_received {:codex_worker_update, _, _, %{event: :attempt_blocked, payload: detail}}
-      assert detail =~ route
-      assert detail =~ "missing or blank"
-      assert {:create_comment, issue.id} in Tracker.Memory.calls()
+      refute_received {:codex_worker_update, _, _, %{event: :attempt_blocked}}
+      assert Tracker.Memory.calls() == []
       captures = read_boundary(run_log)
       assert List.last(captures)["selected_error"]
       assert List.last(captures)["prompt"] =~ "CURRENT_COMMON"
@@ -302,6 +299,12 @@ defmodule SymphonyElixir.Agent.ClaudeSSHTest do
       assert :ok = AgentRunner.run(issue, self(), opts ++ [max_turns: 1])
       assert_received {:codex_worker_update, _, _, %{event: :attempt_blocked, payload: detail}}
       assert detail =~ route
+
+      assert Tracker.Memory.calls() == [
+               {:create_comment, issue.id},
+               {:update_issue_state, issue.id, new_run.settings.agent.blocked_state}
+             ]
+
       assert read_boundary(run_log) == captures
 
       version = Lanes.current_version(updated)

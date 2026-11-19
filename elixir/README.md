@@ -260,6 +260,10 @@ Keep these private artifacts out of source repositories and logs. In the lane AP
 map as a top-level `procedures` property alongside `config` and `prompt`, not inside `config`.
 The editor saves all sections together as one version, and history restores them together.
 
+Before Symphony posts a missing-procedure comment or moves the issue to `agent.blocked_state`,
+it checks the live issue state and labels again. It skips both writes if the current route
+does not need the missing section. For example, a missing `bug` section does not block `qa`.
+
 Minimal example:
 
 ```md

@@ -12,6 +12,9 @@ credential references and workspace bases, so one profile can serve several lane
 
 **Trackers:** Linear, GitHub Issues, GitLab, Jira Cloud, Asana. **Agents:** Codex, Claude Code.
 
+For managed lanes, Symphony checks that the live issue route still needs a missing procedure
+before it posts a blocker or moves the issue. See [workflow configuration](elixir/README.md#configuration).
+
 ## Status
 
 > [!WARNING]
